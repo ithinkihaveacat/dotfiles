@@ -152,9 +152,13 @@ skill <command> [arguments]
   `read_file`, `search`, `edit_file`, which commits each edit) work with any
   client, and it implements the MCP Skills Extension (SEP-2640). Connect it only
   where the same skills are not installed locally, so each skill is not offered
-  twice. The server is `scripts/skill-mcp`, which `permission apply` does not
-  pre-approve; a copy or hardlink outside the skill tree must set
-  `SKILL_MCP_SKILL_DIR` to the skill root. See `skill mcp --help`.
+  twice. Every request is a record in a JSON request log (`SKILL_MCP_LOG`, else
+  `$XDG_STATE_HOME/skill/mcp.jsonl`) naming the method, tool, skill or URI,
+  outcome and an edit's commit, never file text or edits; `--requests`
+  summarises it, and over HTTP `GET /logs` shows the latest records behind the
+  same authentication as `/mcp`. The server is `scripts/skill-mcp`, which
+  `permission apply` does not pre-approve; a copy or hardlink outside the skill
+  tree must set `SKILL_MCP_SKILL_DIR` to the skill root. See `skill mcp --help`.
 
 ### Choosing Skills (Workspace vs. Session)
 

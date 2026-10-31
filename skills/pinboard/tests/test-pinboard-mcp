@@ -431,18 +431,25 @@ class PinboardMcpTests(unittest.TestCase):
         for secret in ("Secret", "Other", "a=1", TOKEN, TOKEN.partition(":")[2]):
             self.assertNotIn(secret, log)
         records = self.records()
-        add = next(r for r in records if r["tool"] == "add_bookmark")
+        add = next(r for r in records if r.get("tool") == "add_bookmark")
         self.assertEqual(
-            {k: add[k] for k in ("transport", "outcome", "host")},
-            {"transport": "stdio", "outcome": "ok", "host": "example.org"},
+            {k: add[k] for k in ("transport", "method", "outcome", "args")},
+            {
+                "transport": "stdio",
+                "method": "tools/call",
+                "outcome": "ok",
+                "args": {"host": "example.org"},
+            },
         )
         self.assertIsInstance(add["ms"], int)
-        search = next(r for r in records if r["tool"] == "search_bookmarks")
-        self.assertRegex(search["search"], r"^[0-9a-f]{16}$")
-        self.assertNotIn("host", search)
+        self.assertRegex(add["caller"], r"^[0-9a-f]{10}$")
+        self.assertEqual(add["version"], "1")
+        search = next(r for r in records if r.get("tool") == "search_bookmarks")
+        self.assertRegex(search["args"]["search"], r"^[0-9a-f]{16}$")
+        self.assertNotIn("host", search["args"])
         self.assertIn(
-            {"error": "failed", "outcome": "error"},
-            [{k: r.get(k) for k in ("error", "outcome")} for r in records],
+            {"reason": "failed", "outcome": "tool-error"},
+            [{k: r.get(k) for k in ("reason", "outcome")} for r in records],
         )
 
     async def test_sync_gate(self):
@@ -470,8 +477,9 @@ class PinboardMcpTests(unittest.TestCase):
             self.assertGreater(refused["retry_after"], 0)
             record = self.records()[-1]
             self.assertEqual(
-                (record["outcome"], record["error"]), ("refused", "rate_limited")
+                (record["outcome"], record["reason"]), ("refused", "rate_limited")
             )
+            self.assertGreater(record["retry_after"], 0)
 
     async def test_one_sync_at_a_time(self, client):
         with FAKE.lock:
@@ -569,7 +577,7 @@ class PinboardMcpTests(unittest.TestCase):
             ):
                 before = self.calls()
                 up = await http.get(base + "/up")
-                self.assertEqual((up.status_code, up.text), (200, "ok"))
+                self.assertEqual((up.status_code, up.json()["status"]), (200, "ok"))
                 now = int(time.time())
                 for name, token, status in (
                     ("missing", None, 401),
@@ -601,6 +609,24 @@ class PinboardMcpTests(unittest.TestCase):
                     self.assertEqual(len(found["bookmarks"]), 1)
                 self.assertEqual(self.calls(), before)
                 self.assertEqual(self.records()[-1]["transport"], "http")
+
+                # The log page and its records need a token too.
+                for path in ("/logs", "/logs/records"):
+                    got = await http.get(base + path)
+                    self.assertEqual(got.status_code, 401, path)
+                authed = {"cf-access-jwt-assertion": jwt(key)}
+                page = await http.get(base + "/logs", headers=authed)
+                self.assertEqual(page.status_code, 200)
+                self.assertIn("pinboard mcp requests", page.text)
+                data = (await http.get(base + "/logs/records", headers=authed)).json()
+                kept = data["records"]
+                search = next(r for r in kept if r.get("tool") == "search_bookmarks")
+                self.assertRegex(search["caller"], r"^[0-9a-f]{10}$")
+                self.assertEqual(
+                    [r["status"] for r in kept if r["outcome"] == "refused"],
+                    [401, 403, 403, 401, 401],
+                )
+                self.assertNotIn("lemon", self.log.read_text())
         finally:
             certs.shutdown()
 
@@ -630,6 +656,28 @@ class PinboardMcpTests(unittest.TestCase):
         res = run("--help")
         self.assertEqual(res.returncode, 0)
         self.assertIn("--sync-every", res.stdout)
+        res = run("--requests")
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("no request log", res.stderr)
+
+    async def test_requests_summary(self, client):
+        await self.tool(client, "list_tags")
+        await self.tool(client, "search_bookmarks", {"query": "lemon"})
+        res = await asyncio.to_thread(
+            subprocess.run,
+            [str(BIN), "mcp", "--requests", "--json"],
+            capture_output=True,
+            text=True,
+            env=self.env,
+            timeout=60,
+            check=False,
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        stats = json.loads(res.stdout)
+        self.assertEqual(
+            {row["tool"] for row in stats["tools"]}, {"list_tags", "search_bookmarks"}
+        )
+        self.assertEqual(stats["chains"], 1)
 
     def test_symlinked_entry_point(self):
         """The installed layout is a symlink: either entry point, or a link to
@@ -726,7 +774,7 @@ class PinboardMcpTests(unittest.TestCase):
         self.assertEqual(self.calls(), before)
 
         async def schedule_runs() -> list[dict[str, Any]]:
-            return [r for r in self.records() if r["transport"] == "schedule"]
+            return [r for r in self.records() if r["transport"] == "background"]
 
         async with self.http_server():
             for _ in range(100):
@@ -736,8 +784,8 @@ class PinboardMcpTests(unittest.TestCase):
             await asyncio.sleep(1.0)  # several ticks: it must not run again
         runs = await schedule_runs()
         self.assertEqual(
-            [(r["tool"], r["outcome"], r["result"]) for r in runs],
-            [("sync", "ok", "+1 ~0 -0")],
+            [(r["event"], r["tool"], r["outcome"], r["result"]) for r in runs],
+            [("sync", "sync", "ok", "+1 ~0 -0")],
         )
         with FAKE.lock:
             updates = FAKE.count("posts/update")
@@ -761,7 +809,7 @@ class PinboardMcpTests(unittest.TestCase):
                 await asyncio.sleep(0.1)
         failures = [r for r in await schedule_runs() if r["outcome"] != "ok"]
         self.assertGreaterEqual(len(failures), 2)
-        self.assertEqual(failures[0]["error"], "failed")
+        self.assertEqual(failures[0]["reason"], "failed")
 
     def fill_log(self) -> None:
         """A log one record short of rotation, and three older files."""
@@ -781,7 +829,9 @@ class PinboardMcpTests(unittest.TestCase):
         self.fill_log()
         await self.tool(client, "list_tags")
         self.assertEqual(self.rotated(), (8 * 1024 * 1024 - 9, "old 3\n", False))
-        self.assertEqual([r["tool"] for r in self.records()], ["list_tags"])
+        self.assertEqual(
+            [r.get("tool") for r in self.records() if r.get("tool")], ["list_tags"]
+        )
 
 
 if __name__ == "__main__":

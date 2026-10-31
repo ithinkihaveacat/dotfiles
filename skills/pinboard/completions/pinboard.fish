@@ -95,3 +95,6 @@ complete -f -c pinboard -n '__fish_pinboard_using_command mcp' -l access-team -x
 complete -f -c pinboard -n '__fish_pinboard_using_command mcp' -l access-aud -x -d 'Cloudflare Access audience tag'
 complete -f -c pinboard -n '__fish_pinboard_using_command mcp' -l sync-every -x -d 'Sync when the last sync is this many hours old'
 complete -c pinboard -n '__fish_pinboard_using_command mcp' -l log -r -F -d 'Request log'
+complete -f -c pinboard -n '__fish_pinboard_using_command mcp' -l requests -d 'Summarise the request log and exit'
+complete -f -c pinboard -n '__fish_pinboard_using_command mcp' -l days -x -d 'With --requests, the days to summarise'
+complete -f -c pinboard -n '__fish_pinboard_using_command mcp' -l json -d 'With --requests, print JSON'

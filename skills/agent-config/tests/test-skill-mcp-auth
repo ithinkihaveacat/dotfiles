@@ -191,6 +191,7 @@ def main() -> None:
             os.environ,
             SKILL_MCP_CONFIG=str(config),
             SKILL_MCP_ACCESS_CERTS_URL=certs,
+            SKILL_MCP_LOG=str(root / "mcp.jsonl"),
         )
         log = root / "access.log"
         port = free_port()
@@ -213,7 +214,7 @@ def main() -> None:
         base = f"http://127.0.0.1:{port}"
         try:
             wait_for(proc, port, log)
-            print(f"1..{len(cases) + 8}", flush=True)
+            print(f"1..{len(cases) + 12}", flush=True)
             for n, (name, tok, want, says) in enumerate(cases, 1):
                 got, body = request(f"{base}/mcp/profile", tok)
                 ok = got == want and says in body
@@ -224,8 +225,27 @@ def main() -> None:
 
             n = len(cases)
             checks = [
-                ("health check needs no token", "/up", "GET", None, None, 200, "ok"),
+                ("health check needs no token", "/up", "GET", None, None, 200, '"ok"'),
                 ("health check accepts HEAD", "/up", "HEAD", None, None, 200, ""),
+                ("the log page needs a token", "/logs", "GET", None, None, 401, ""),
+                (
+                    "the log page with a token",
+                    "/logs",
+                    "GET",
+                    token(key, "k1"),
+                    None,
+                    200,
+                    "skill mcp requests",
+                ),
+                (
+                    "the log records need a token",
+                    "/logs/records",
+                    "GET",
+                    "not.a.jwt",
+                    None,
+                    403,
+                    "",
+                ),
                 ("GET needs a token", "/mcp/profile", "GET", None, None, 401, ""),
                 ("an unknown path needs a token", "/nope", "POST", None, None, 401, ""),
                 (
@@ -246,6 +266,29 @@ def main() -> None:
                 print(f"{'ok' if ok else 'not ok'} {n} - {name}: {got} (want {want})")
                 if not ok:
                     print(f"# {body!r}")
+            # The records name each request's outcome and its caller by a
+            # key, never by the token or its claims.
+            n += 1
+            got, body = request(f"{base}/logs/records", token(key, "k1"), "GET")
+            records = json.loads(body)["records"] if got == 200 else []
+            # Refused before its body is read, a request has no method.
+            pings = [r for r in records if r.get("method") == "ping"]
+            refused = [r for r in records if r["outcome"] == "refused"]
+            outcomes = [r["outcome"] for r in pings]
+            callers = {r.get("caller") for r in pings}
+            text = (root / "mcp.jsonl").read_text()
+            ok = (
+                outcomes == ["ok", "ok", "refused"]
+                and len(refused) >= len(cases) - 2 + 4
+                and len(callers) == 1
+                and None not in callers
+                and "test@example.com" not in text
+                and token(key, "k1").split(".")[0] not in text
+            )
+            failed += not ok
+            print(f"{'ok' if ok else 'not ok'} {n} - records keep callers by key only")
+            if not ok:
+                print(f"# {got} {outcomes!r} {callers!r}")
         finally:
             proc.terminate()
             proc.wait()
