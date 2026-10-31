@@ -704,10 +704,11 @@ Each request is logged as a line on stderr and as a JSON record
 appended to the request log (rotated at 8 MiB, keeping 4 old
 files); a record keeps a tool call's short identifying arguments
 (project, task, path, search), never text such as titles, bodies,
-or file content. 'taskgo requests' summarises the log.
+or file content, and notes a fetch that failed behind it and a
+read served a stale head. 'taskgo requests' summarises the log.
 Over HTTP, GET /logs is a live page of the latest requests, behind
 the same check as the endpoint; GET /up is an unauthenticated
-health check.
+health check that reports the server's version and commit.
 
 Environment:
   TASKGO_MCP_ACCESS_TEAM  Default for --access-team
