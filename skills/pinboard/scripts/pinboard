@@ -47,6 +47,9 @@ DELETE_LIMIT = 10
 
 # Minimum seconds between calls: "any" applies to every endpoint.
 GATES = {"any": 3.0, "posts/recent": 60.0, "posts/all": 300.0}
+# A posts/add query string longer than this is sent as a form body instead;
+# long notes otherwise make the request line large enough for a 414.
+MAX_GET_URI = 2000
 BACKOFF_START = 6.0
 BACKOFF_ATTEMPTS = 5
 BACKOFF_TOTAL = 300.0
@@ -378,16 +381,38 @@ class Api:
         self.local.save()
 
     def _request(
-        self, endpoint: str, params: dict[str, str], timeout: float
+        self, endpoint: str, params: dict[str, str], timeout: float, method: str = "GET"
     ) -> tuple[int, bytes]:
-        query = urllib.parse.urlencode(
-            {**params, "auth_token": self.token, "format": "json"},
-            quote_via=urllib.parse.quote,
-        )
-        req = urllib.request.Request(
-            f"{self.base}{endpoint}?{query}",
-            headers={"User-Agent": "pinboard-mirror/1"},
-        )
+        common = {"auth_token": self.token, "format": "json"}
+        headers = {"User-Agent": "pinboard-mirror/1"}
+        if method == "POST":
+            # The token stays in the query string; Pinboard does not read it
+            # from a form body. posts/add also wants url and description in
+            # the query, so only the long extended field goes in the body.
+            query = urllib.parse.urlencode(
+                {**common, **{k: v for k, v in params.items() if k != "extended"}},
+                quote_via=urllib.parse.quote,
+            )
+            data = (
+                urllib.parse.urlencode(
+                    {"extended": params["extended"]}, quote_via=urllib.parse.quote
+                ).encode()
+                if "extended" in params
+                else b""
+            )
+            req = urllib.request.Request(
+                f"{self.base}{endpoint}?{query}",
+                data=data,
+                headers=headers,
+                method="POST",
+            )
+        else:
+            query = urllib.parse.urlencode(
+                {**params, **common}, quote_via=urllib.parse.quote
+            )
+            req = urllib.request.Request(
+                f"{self.base}{endpoint}?{query}", headers=headers
+            )
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return resp.status, resp.read()
@@ -406,11 +431,24 @@ class Api:
         self, endpoint: str, params: dict[str, str] | None = None, timeout: float = 30
     ) -> Any:
         self.require_online()
+        params = params or {}
+        method = "GET"
+        if endpoint == "posts/add":
+            probe = urllib.parse.urlencode(
+                {**params, "auth_token": self.token, "format": "json"},
+                quote_via=urllib.parse.quote,
+            )
+            if len(f"{self.base}{endpoint}?{probe}") > MAX_GET_URI:
+                method = "POST"
         attempts, waited = 0, 0.0
         delay = BACKOFF_START * time_scale()
         while True:
             self._gate(endpoint)
-            status, body = self._request(endpoint, params or {}, timeout)
+            status, body = self._request(endpoint, params, timeout, method)
+            if status == 414 and endpoint == "posts/add" and method == "GET":
+                self._gate(endpoint)
+                method = "POST"
+                status, body = self._request(endpoint, params, timeout, method)
             if status == 429 and endpoint in GATES:
                 # Retrying within the endpoint's own window cannot succeed.
                 raise GateError(endpoint, self.local.next_allowed(endpoint), True)
@@ -2360,8 +2398,11 @@ def cmd_audit_apply(ctx: Any, args: argparse.Namespace) -> int:
     )
     records = load_committed(repo)
     state = run.state()
+    repaired = False
     for url, row in state.items():
         if "done" in row and url in records:
+            if records[url]["tags"] != row["done"]["target"]:
+                repaired = True
             records[url]["tags"] = row["done"]["target"]
     checked = {url for url, row in state.items() if "check" in row}
     ctx.api.require_online()
@@ -2375,6 +2416,13 @@ def cmd_audit_apply(ctx: Any, args: argparse.Namespace) -> int:
                 run.journal.append(
                     "done", url=url, target=target, noop=False, recovered=True
                 )
+                if url in records:
+                    if records[url]["tags"] != target:
+                        repaired = True
+                    records[url]["tags"] = target
+                    records[url]["meta"] = live.get(
+                        "meta", records[url].get("meta", "")
+                    )
                 note(f"recovered write for {url}")
             else:
                 note(f"replaying unconfirmed write for {url}")
@@ -2389,6 +2437,8 @@ def cmd_audit_apply(ctx: Any, args: argparse.Namespace) -> int:
     if args.limit:
         pending = pending[: args.limit]
     if not pending:
+        if repaired and not args.dry_run:
+            commit_mirror(repo, records, 1, push=True)
         print("nothing to apply")
         return 0
 
@@ -2439,6 +2489,8 @@ def cmd_audit_apply(ctx: Any, args: argparse.Namespace) -> int:
             note(f"applied {applied}/{len(pending)}")
     if applied and (not args.commit_every or applied % args.commit_every):
         commit_mirror(repo, records, applied, push=True)
+    elif repaired and not args.dry_run:
+        commit_mirror(repo, records, 1, push=True)
     print(
         f"applied {applied}, skipped {skipped}" + (" (dry run)" if args.dry_run else "")
     )

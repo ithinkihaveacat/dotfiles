@@ -31,6 +31,7 @@ class Fake:
         self.rate_limit = 0
         self.rate_limit_only = ""  # an endpoint, to rate limit only that one
         self.add_mode = ""  # vanish-after (apply, no response), vanish-before
+        self.post_calls: list[str] = []
 
     def put(
         self, url, title, time_, notes="", tags="", shared="no", toread="no"
@@ -80,6 +81,29 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
+
+    def do_POST(self) -> None:
+        parts = urllib.parse.urlsplit(self.path)
+        endpoint = parts.path.removeprefix("/v1/")
+        q = {
+            k: v[0]
+            for k, v in urllib.parse.parse_qs(
+                parts.query, keep_blank_values=True
+            ).items()
+        }
+        length = int(self.headers.get("Content-Length", "0") or 0)
+        body = self.rfile.read(length).decode("utf-8")
+        q.update(
+            {
+                k: v[0]
+                for k, v in urllib.parse.parse_qs(body, keep_blank_values=True).items()
+            }
+        )
+        with FAKE.lock:
+            FAKE.post_calls.append(endpoint)
+        # Rebuild a GET path so one dispatcher serves both methods.
+        self.path = f"/v1/{endpoint}?{urllib.parse.urlencode(q)}"
+        self.do_GET()
 
     def do_GET(self) -> None:
         parts = urllib.parse.urlsplit(self.path)
