@@ -50,6 +50,7 @@ class AndonMcpTests(unittest.TestCase):
             self.env = {
                 **os.environ,
                 "ANDON_STATE_DIR": str(self.state),
+                "ANDON_MCP_LOG": str(Path(root) / "mcp.jsonl"),
                 "ANDON_LEVEL": "4",
             }
             self.stderr = self.stack.enter_context(tempfile.TemporaryFile(mode="w+"))  # noqa: SIM115 -- ExitStack owns cleanup
@@ -365,6 +366,35 @@ class AndonMcpTests(unittest.TestCase):
             len((self.state / "events.jsonl").read_text().splitlines()), 12
         )
 
+    async def test_request_log(self):
+        """Each message is a record naming the tool and the alert or filters,
+        never what an alert says."""
+        pulled = await self.call("pull", REPORT)
+        await self.call("show", {"id": pulled["id"]})
+        await self.call("list", {"color": "yellow", "limit": 5})
+        self.assertTrue((await self.client.call_tool("show", {"id": "nope"})).is_error)
+        text = await asyncio.to_thread(Path(self.env["ANDON_MCP_LOG"]).read_text)
+        for field in ("summary", "details", "resolution", "proposed_fix"):
+            self.assertNotIn(REPORT[field], text)
+        records = [json.loads(line) for line in text.splitlines()]
+        self.assertEqual(records[0]["method"], "initialize")
+        calls = [r for r in records if r["method"] == "tools/call"]
+        self.assertEqual(
+            [(r["tool"], r["outcome"]) for r in calls],
+            [("pull", "ok"), ("show", "ok"), ("list", "ok"), ("show", "tool-error")],
+        )
+        self.assertEqual(
+            calls[0]["args"], {"color": REPORT["color"], "kind": REPORT["kind"]}
+        )
+        self.assertEqual(calls[1]["args"], {"id": pulled["id"]})
+        self.assertEqual(calls[2]["args"], {"color": "yellow", "limit": "5"})
+        self.assertIn("reason", calls[3])
+        for rec in records:
+            self.assertEqual(rec["transport"], "stdio")
+            self.assertRegex(rec["caller"], r"^[0-9a-f]{10}$")
+            self.assertIsInstance(rec["ms"], int)
+        self.assertEqual(len({r["caller"] for r in records}), 1)
+
     async def test_store_failure_is_tool_error(self):
         self.state.write_text("Not a directory")
         result = await self.client.call_tool("pull", REPORT)
@@ -435,7 +465,14 @@ class AndonMcpTests(unittest.TestCase):
                     stdout, stderr = process.communicate(timeout=10)
                     self.assertEqual(process.returncode, 0, stderr)
                     self.assertEqual(stdout, b"")
-                    self.assertEqual(stderr.strip(), b"")
+                    # Only the request's log line: no traceback or noise.
+                    lines = stderr.decode().splitlines()
+                    self.assertEqual(len(lines), 1, stderr)
+                    self.assertTrue(
+                        lines[0].startswith("andon mcp: request ")
+                        and "method=initialize" in lines[0],
+                        stderr,
+                    )
                 finally:
                     if process.poll() is None:
                         process.kill()

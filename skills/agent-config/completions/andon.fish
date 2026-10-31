@@ -24,6 +24,7 @@ complete -c andon -n "not __fish_seen_subcommand_from $commands" -a level -d 'Pr
 complete -c andon -n "not __fish_seen_subcommand_from $commands" -a clear-resolved -d 'Delete resolved and dismissed alerts'
 complete -c andon -n "not __fish_seen_subcommand_from $commands" -a mcp -d 'Serve Andon tools over MCP'
 complete -c andon -n "__fish_seen_subcommand_from mcp" -l stdio -d 'Use stdin/stdout (the default)'
+complete -c andon -n "__fish_seen_subcommand_from mcp" -l log -r -F -d 'Request log'
 
 # pull
 complete -c andon -n "__fish_seen_subcommand_from pull" -l color -xa "$colors" -d Severity

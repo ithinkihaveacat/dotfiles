@@ -36,6 +36,14 @@ Without overrides it uses `${XDG_STATE_HOME:-~/.local/state}/andon` and the
 saved default level, falling back to level 3. Client-specific configuration can
 pass environment variables to choose a separate store.
 
+Each message is appended to a request log, `--log FILE`, else `ANDON_MCP_LOG`,
+else `${XDG_STATE_HOME:-~/.local/state}/andon/mcp.jsonl` (never in
+`ANDON_STATE_DIR`, so a read still writes nothing to the store), and printed to
+stderr as a `request` line. A record names the method, tool, the alert ID,
+color, kind and filters given, the outcome and duration, never an alert's text.
+The format is the repository's request log contract
+(`skills/coding-standards/references/request-logs.md`).
+
 ## Tools
 
 | Tool      | Arguments                                                                                           | Result                                                                         |

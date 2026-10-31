@@ -16,15 +16,18 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import contextvars
 import fcntl
 import hashlib
 import json
 import os
+import re
 import secrets
 import signal
 import sys
 import tempfile
 import threading
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -1008,8 +1011,205 @@ for _verb, _description in (
 MCP_TOOLS_BY_NAME = {tool.name: tool for tool in MCP_TOOLS}
 
 
+# --- MCP request log -----------------------------------------------------------
+# One JSON record per message, as skills/coding-standards/references/
+# request-logs.md has it: what was asked and how it ended, never an alert's
+# summary, details, sources or notes.
+
+MCP_LOG_ENV = "ANDON_MCP_LOG"
+MCP_LOG_ROTATE_BYTES = 8 * 1024 * 1024
+MCP_LOG_ROTATED = 4  # FILE.1 (newest) to FILE.4
+MCP_LOG_ARGS = (
+    "color",
+    "kind",
+    "level",
+    "status",
+    "id",
+    "all_matching",
+    "limit",
+    "offset",
+)
+MCP_LOG_QUOTED = re.compile(r"'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"")
+MCP_RPC_ERRORS = {
+    -32700: "parse error",
+    -32600: "invalid request",
+    -32601: "method not found",
+    -32602: "invalid params",
+    -32603: "internal error",
+}
+
+
+def mcp_log_reason(message: str) -> str:
+    """MESSAGE's first line, with quoted values elided, since those can quote
+    an alert's text; at most 200 characters."""
+    text = MCP_LOG_QUOTED.sub("'\u2026'", str(message).split("\n", 1)[0])
+    return text if len(text) <= 200 else text[:199] + "\u2026"
+
+
+@dataclass(slots=True)
+class McpEvent:
+    """What one message came to, for its record."""
+
+    method: str | None
+    caller: str
+    started: float
+    at: float
+    tool: str | None = None
+    args: dict[str, str] | None = None
+    outcome: str = "ok"
+    reason: str | None = None
+    size: int | None = None
+
+    def fail(self, outcome: str, reason: str) -> None:
+        self.outcome, self.reason = outcome, reason
+
+    def record(self) -> dict[str, Any]:
+        stamp = datetime.fromtimestamp(self.at, UTC)
+        rec = {
+            "ts": stamp.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+            "transport": "stdio",
+            "method": self.method,
+            "tool": self.tool,
+            "args": self.args or None,
+            "outcome": self.outcome,
+            "ms": int((time.monotonic() - self.started) * 1000),
+            "bytes": self.size,
+            "reason": self.reason,
+            "caller": self.caller,
+            "version": MCP_VERSION,
+        }
+        return {k: v for k, v in rec.items() if v is not None}
+
+
+MCP_EVENT: contextvars.ContextVar[McpEvent | None] = contextvars.ContextVar(
+    "MCP_EVENT", default=None
+)
+
+
+def mcp_log_value(value: Any) -> str:
+    """VALUE as a stderr field: bare when it is a plain token, otherwise quoted
+    as JSON, so client text can neither break nor forge a line."""
+    text = str(value)
+    if re.fullmatch(r"[\w./:@+-]+", text, re.ASCII):
+        return text
+    return json.dumps(text, ensure_ascii=False)
+
+
+def mcp_log_args(args: Any) -> dict[str, str]:
+    if not isinstance(args, dict):
+        return {}
+    out = {}
+    for k in MCP_LOG_ARGS:
+        v = args.get(k)
+        if isinstance(v, (str, int, bool)):
+            text = " ".join(str(v).split())
+            out[k] = text if len(text) <= 60 else text[:59] + "\u2026"
+    return out
+
+
+class McpLog:
+    """Appends each record to PATH, rotated by size under an exclusive lock
+    (several servers share one file), and prints it to stderr. Logging never
+    fails a request: a record the file cannot take is dropped, with one
+    warning."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.warned = False
+
+    def emit(self, event: McpEvent) -> None:
+        rec = event.record()
+        fields = " ".join(
+            f"{k}={mcp_log_value(v)}"
+            for k, v in rec.items()
+            if k not in ("ts", "args", "version")
+        )
+        print(f"{PROG} mcp: request {fields}", file=sys.stderr, flush=True)
+        line = json.dumps(rec, separators=(",", ":"), ensure_ascii=False) + "\n"
+        try:
+            self.append(line.encode())
+        except OSError as err:
+            if not self.warned:
+                self.warned = True
+                print(
+                    f"{PROG} mcp: cannot use the request log {self.path}: {err}; "
+                    "logging to stderr only",
+                    file=sys.stderr,
+                    flush=True,
+                )
+
+    def append(self, data: bytes) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        # Another server may rotate the file between the open and the lock;
+        # then the lock is on a rotated file, so open the new one.
+        for _ in range(3):
+            with open(self.path, "ab") as fh:
+                fcntl.flock(fh, fcntl.LOCK_EX)
+                st = os.fstat(fh.fileno())
+                try:
+                    current = os.stat(self.path).st_ino == st.st_ino
+                except FileNotFoundError:
+                    current = False
+                if not current:
+                    continue
+                if st.st_size and st.st_size + len(data) > MCP_LOG_ROTATE_BYTES:
+                    for i in range(MCP_LOG_ROTATED - 1, 0, -1):
+                        older = Path(f"{self.path}.{i}")
+                        if older.exists():
+                            os.replace(older, f"{self.path}.{i + 1}")
+                    os.replace(self.path, f"{self.path}.1")
+                    with open(self.path, "ab") as fresh:
+                        fresh.write(data)
+                else:
+                    fh.write(data)
+                return
+        raise OSError(f"{self.path} kept being rotated")
+
+
+def mcp_logging(log: McpLog) -> Any:
+    """SDK middleware that logs each message."""
+    from mcp.shared.exceptions import MCPError
+
+    # One stdio server serves one client.
+    caller = hashlib.sha256(
+        f"stdio\0{os.getpid()}\0{time.time()}".encode()
+    ).hexdigest()[:10]
+
+    async def logged(ctx: Any, call_next: Any) -> Any:
+        event = McpEvent(ctx.method, caller, time.monotonic(), time.time())
+        token = MCP_EVENT.set(event)
+        try:
+            return await call_next(ctx)
+        except MCPError as err:
+            event.fail("rpc-error", MCP_RPC_ERRORS.get(err.code, f"error {err.code}"))
+            raise
+        except Exception:
+            # The SDK reports malformed params as a pydantic ValidationError.
+            event.fail("rpc-error", MCP_RPC_ERRORS[-32602])
+            raise
+        finally:
+            MCP_EVENT.reset(token)
+            log.emit(event)
+
+    return logged
+
+
 def mcp_call_tool(name: str, arguments: Any) -> dict[str, Any]:
     """Transport-neutral dispatch. No CLI parsing or stdout capture."""
+
+    event = MCP_EVENT.get()
+    if event is not None:
+        event.tool, event.args = name, mcp_log_args(arguments)
+    result = mcp_dispatch(name, arguments)
+    if event is not None:
+        if result["isError"]:
+            event.fail("tool-error", mcp_log_reason(result["content"][0]["text"]))
+        else:
+            event.size = len(result["content"][0]["text"].encode())
+    return result
+
+
+def mcp_dispatch(name: str, arguments: Any) -> dict[str, Any]:
     import jsonschema
 
     tool = MCP_TOOLS_BY_NAME.get(name)
@@ -1059,7 +1259,7 @@ def mcp_locked(fn: Any, *args: Any) -> Any:
         return fn(*args)
 
 
-def mcp_sdk_server() -> Any:
+def mcp_sdk_server(log: McpLog) -> Any:
     """The SDK owns protocol handling; this server can later use HTTP too."""
     import anyio
     import mcp_types
@@ -1097,7 +1297,7 @@ def mcp_sdk_server() -> Any:
         )
         return mcp_types.ReadResourceResult.model_validate(result)
 
-    return Server(
+    sdk = Server(
         PROG,
         version=MCP_VERSION,
         instructions=MCP_INSTRUCTIONS,
@@ -1106,6 +1306,8 @@ def mcp_sdk_server() -> Any:
         on_list_resources=list_resources,
         on_read_resource=read_resource,
     )
+    sdk.middleware.append(mcp_logging(log))
+    return sdk
 
 
 def cmd_mcp(args: argparse.Namespace) -> int:
@@ -1130,8 +1332,14 @@ def cmd_mcp(args: argparse.Namespace) -> int:
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, stop)
 
+    # Not in ANDON_STATE_DIR: the log is not the store, and a read of the
+    # store must not write there.
+    state = os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local" / "state")
+    default = Path(state) / "andon" / "mcp.jsonl"
+    log = McpLog(Path(args.log or os.environ.get(MCP_LOG_ENV) or default).expanduser())
+
     async def serve() -> None:
-        sdk = mcp_sdk_server()
+        sdk = mcp_sdk_server(log)
         async with stdio_server() as (read, write):
             await sdk.run(read, write, sdk.create_initialization_options())
 
@@ -1279,6 +1487,12 @@ def build_parser() -> argparse.ArgumentParser:
     mcp.add_argument(
         "--stdio", action="store_true", help="use stdin/stdout (the default)"
     )
+    mcp.add_argument(
+        "--log",
+        metavar="FILE",
+        help="request log (default: $ANDON_MCP_LOG, else "
+        "${XDG_STATE_HOME:-~/.local/state}/andon/mcp.jsonl)",
+    )
     mcp.formatter_class = argparse.RawDescriptionHelpFormatter
     mcp.epilog = """\
 Examples:
@@ -1287,6 +1501,11 @@ Examples:
 
 Configure your MCP client to launch this command. Stdout carries protocol
 messages; diagnostics go to stderr. Closing stdin stops the server.
+
+Each message is appended to the request log as a JSON record (rotated at 8 MiB,
+four old files kept) and printed to stderr: its method, tool, the alert ID,
+color, kind or filters it named, outcome and duration. Never an alert's
+summary, details, sources or notes.
 """
     return parser
 
