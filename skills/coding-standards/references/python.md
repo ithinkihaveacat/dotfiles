@@ -83,6 +83,11 @@ where `~/.local` is read-only or network access is blocked. By contrast,
 `$XDG_CACHE_HOME/uv/environments-v2/` and verifies installed package metadata
 locally once synced via `uv sync --script`.
 
+For when a third-party dependency is warranted, and when to lazy-import it in
+the main script rather than split out a sibling executable, see "Script
+Self-Containment and Sibling Files" in
+[cli-tools.md](cli-tools.md#script-self-containment-and-sibling-files).
+
 This guidance applies to executable script entrypoints. It does not apply to
 ordinary Python modules, packages, libraries, or non-executable Python source
 files.

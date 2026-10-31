@@ -302,7 +302,8 @@ is copied, hardlinked, or moved.
 
 Fold a feature into the existing script when:
 
-- the helper needs no dependencies the parent does not already declare;
+- the helper needs no heavy dependency stack of its own (a single small leaf
+  package may be folded into the parent and imported lazily);
 - it is reached only through the parent's subcommand;
 - keeping it separate would require sibling-path resolution.
 
@@ -336,11 +337,22 @@ If a separate file is unavoidable:
 - Hardlinks and copies have no discoverable relationship to the original tree;
   document that they are unsupported unless the override is set.
 
-Dependencies: prefer the standard library. Add a third-party package only when
-the alternative is materially worse, pin it in the PEP 723 header, and keep it
-out of the dependency-free common path. `install.sh` pre-installing packages
-does not remove the per-script environment cost (creation, import time, CI
-surface); it only removes the download.
+Dependencies: start with the standard library. A package costs per-script
+environment creation, offline execution, upgrades, and supply-chain surface;
+`install.sh --only uv` pre-warms the cache and `UV_OFFLINE=1` checks that it
+runs without the network, but the per-script environment cost remains. Never add
+a package for CLI plumbing the standard library covers (`argparse`,
+`dataclasses`, `urllib.request`, raw SGR colour).
+
+The first dependency in a tool needs the owner's agreement and a recorded
+reason: it must replace an evolving external dataset, a complex specification,
+or substantially more bug-prone code than its footprint adds. Later dependencies
+have a lower bar: a small, maintained, pure-Python leaf with no runtime
+dependencies is fine when it saves real code. Pin exact versions (`==`) in the
+PEP 723 header. Keep a leaf package in the one file and import it lazily inside
+the subcommand that uses it; that saves import time, not installation or
+environment creation. Split into `scripts/<tool>-<role>` only for a heavy or
+multi-package stack (native extensions, servers, frameworks).
 
 A shell script cannot rely on `$0` or `dirname "$0"` alone. Resolve symlinks
 first (see `shell.md`), then derive the directory with `pwd -P`; in bash use

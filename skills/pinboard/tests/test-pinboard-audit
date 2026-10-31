@@ -78,12 +78,13 @@ def record(
     time_: str,
     tags: list[str] | None = None,
     shared: bool = False,
+    notes: str = "",
 ) -> dict:
     return {
         "url": url,
         "hash": "0" * 32,
         "title": title,
-        "notes": "",
+        "notes": notes,
         "tags": tags or [],
         "time": time_,
         "shared": shared,
@@ -162,10 +163,27 @@ class Site(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if path == "/notitle":
+            body = b"<html><body>No title here</body></html>"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if path == "/loginredirect":
+            self.send_response(302)
+            self.send_header("Location", "/login")
+            self.end_headers()
+            return
         title = {
             "same": "Same Title",
             "project": "A Project",
             "challenge": "Just a moment...",
+            "loginwall": "Log in to X",
+            "login": "Sign in",
+            "postx": "Post / X",
+            "curly": "X. It\u2019s what\u2019s happening / X",
         }.get(path.strip("/"), "Totally Different")
         body = (
             f"<html><head><title>{title}</title></head><body>x</body></html>".encode()
@@ -209,6 +227,23 @@ def test_target_tags() -> None:
         tags == ["rust", "keep", ".status:ok", ".checked:2026"],
         "strips old audit tags",
         repr(tags),
+    )
+
+
+def test_propose_title_rejects_error_pages() -> None:
+    result = {"body": b"<title>404 Not Found</title>", "content_type": "text/html"}
+    title, source = PB.propose_title("https://example.com/some-page.html", result)
+    ok(
+        title == "some page" and source == "filename",
+        "error page falls back to the filename",
+        f"{title!r} {source!r}",
+    )
+    result = {"body": b"<title>Dithering</title>", "content_type": "text/html"}
+    title, source = PB.propose_title("https://example.com/dither.html", result)
+    ok(
+        title == "Dithering" and source == "page",
+        "a real page title is kept",
+        f"{title!r} {source!r}",
     )
 
 
@@ -260,6 +295,10 @@ def test_check_classifies() -> None:
         record(f"{BASE}/wall", "Wall", "2021-01-05T00:00:00Z"),
         record(f"{BASE}/data", "Data", "2021-01-06T00:00:00Z"),
         record(f"{BASE}/challenge", "An Article", "2021-01-07T00:00:00Z"),
+        record(f"{BASE}/loginwall", "An Article", "2021-01-08T00:00:00Z"),
+        record(f"{BASE}/loginredirect", "An Article", "2021-01-09T00:00:00Z"),
+        record(f"{BASE}/postx", "A Tweet", "2021-01-10T00:00:00Z"),
+        record(f"{BASE}/curly", "A Tweet", "2021-01-11T00:00:00Z"),
     ]
     repo = make_repo(records)
     state = TMP / "p2"
@@ -300,6 +339,46 @@ def test_check_classifies() -> None:
         verdicts.get("/challenge") == "blocked",
         "a challenge page is blocked, not changed",
         str(verdicts),
+    )
+    ok(
+        verdicts.get("/loginwall") == "blocked",
+        "a login-wall title is blocked",
+        str(verdicts),
+    )
+    ok(
+        verdicts.get("/loginredirect") == "blocked",
+        "a redirect to a login path is blocked",
+        str(verdicts),
+    )
+    ok(
+        verdicts.get("/postx") == "blocked",
+        "X's Post / X placeholder is blocked",
+        str(verdicts),
+    )
+    ok(
+        verdicts.get("/curly") == "blocked",
+        "a curly-apostrophe X landing page is blocked",
+        str(verdicts),
+    )
+    before = len([e for e in journal(state / "2026") if e["op"] == "check"])
+    proc = audit(
+        repo,
+        "check",
+        "--state",
+        str(state),
+        "--pass",
+        "2026",
+        "--verdict",
+        "changed",
+        "--jobs",
+        "1",
+    )
+    ok(proc.returncode == 0, "verdict recheck exits 0", proc.stderr)
+    after = [e for e in journal(state / "2026") if e["op"] == "check"]
+    ok(
+        len(after) == before + 1 and after[-1]["verdict"] == "changed",
+        "verdict recheck repeats one changed URL",
+        f"{before} -> {len(after)}",
     )
 
 
@@ -360,6 +439,12 @@ def test_apply_recovers_intent() -> None:
         "recovery records done",
         str(last),
     )
+    proc = audit(repo, "verify", "--state", str(state), "--pass", "2026")
+    ok(
+        proc.returncode == 0,
+        "recovered write repairs the mirror",
+        proc.stdout + proc.stderr,
+    )
 
 
 def test_apply_recovers_dirty_mirror() -> None:
@@ -382,6 +467,73 @@ def test_apply_recovers_dirty_mirror() -> None:
         git("status", "--porcelain", cwd=repo) == "",
         "mirror is clean again",
         git("status", "--porcelain", cwd=repo),
+    )
+
+
+def test_apply_long_notes_uses_post() -> None:
+    reset_api()
+    url = "https://example.com/long"
+    notes = "x" * 6000
+    FAKE.put(url, "Long", "2021-05-01T00:00:00Z", notes=notes)
+    repo = make_repo([record(url, "Long", "2021-05-01T00:00:00Z", notes=notes)])
+    state = TMP / "p8"
+    audit(repo, "plan", "--state", str(state), "--pass", "2026")
+    (state / "2026" / "journal.jsonl").write_text(
+        json.dumps({"seq": 1, "op": "check", "url": url, "verdict": "ok"}) + "\n"
+    )
+    proc = audit(repo, "apply", "--state", str(state), "--pass", "2026")
+    ok(proc.returncode == 0, "long notes apply exits 0", proc.stderr)
+    ok("posts/add" in FAKE.post_calls, "long notes use POST", str(FAKE.post_calls))
+    ok(FAKE.posts[url]["extended"] == notes, "long notes are preserved")
+    ok(".status:ok" in FAKE.posts[url]["tags"], "tags are applied")
+
+
+def test_titles_pass() -> None:
+    reset_api()
+    url = f"{BASE}/notitle"
+    FAKE.put(url, "", "2021-05-01T00:00:00Z")
+    repo = make_repo([record(url, "", "2021-05-01T00:00:00Z")])
+    state = TMP / "p9"
+    audit(repo, "plan", "--state", str(state), "--pass", "2026")
+    (state / "2026" / "journal.jsonl").write_text(
+        json.dumps({"seq": 1, "op": "check", "url": url, "verdict": "ok"}) + "\n"
+    )
+    proc = audit(repo, "titles", "--state", str(state), "--pass", "2026")
+    ok(proc.returncode == 0, "titles dry run exits 0", proc.stderr)
+    ok("notitle" in proc.stdout, "dry run proposes a filename title", proc.stdout)
+    ok(FAKE.count("posts/add") == 0, "dry run writes nothing", str(FAKE.calls))
+    proc = audit(repo, "titles", "--state", str(state), "--pass", "2026", "--apply")
+    ok(proc.returncode == 0, "titles apply exits 0", proc.stderr)
+    ok(
+        FAKE.posts[url]["description"] == "notitle",
+        "title is written",
+        str(FAKE.posts[url]),
+    )
+    ok(
+        ".status:ok" in FAKE.posts[url]["tags"],
+        "pass title also tags",
+        FAKE.posts[url]["tags"],
+    )
+    proc = audit(repo, "verify", "--state", str(state), "--pass", "2026")
+    ok(proc.returncode == 0, "verify passes after titles", proc.stdout + proc.stderr)
+
+
+def test_titles_all() -> None:
+    reset_api()
+    url = f"{BASE}/notitle"
+    FAKE.put(url, "", "2021-05-01T00:00:00Z")
+    repo = make_repo([record(url, "", "2021-05-01T00:00:00Z")])
+    proc = audit(repo, "titles", "--all", "--apply")
+    ok(proc.returncode == 0, "titles --all exits 0", proc.stderr)
+    ok(
+        FAKE.posts[url]["description"] == "notitle",
+        "title is written",
+        str(FAKE.posts[url]),
+    )
+    ok(
+        not any(tag.startswith(".status:") for tag in FAKE.posts[url]["tags"]),
+        "title-only does not tag",
+        FAKE.posts[url]["tags"],
     )
 
 

@@ -433,6 +433,7 @@ Arguments:
     status    Show pass progress.
     verify    Check the mirror agrees with the journal.
     bump      Move a cohort tag after a complete pass.
+    titles    Fill empty bookmark titles before tagging.
 
 Options:
   -h, --help  Display this help message and exit

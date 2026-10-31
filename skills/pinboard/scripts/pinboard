@@ -47,6 +47,9 @@ DELETE_LIMIT = 10
 
 # Minimum seconds between calls: "any" applies to every endpoint.
 GATES = {"any": 3.0, "posts/recent": 60.0, "posts/all": 300.0}
+# A posts/add query string longer than this is sent as a form body instead;
+# long notes otherwise make the request line large enough for a 414.
+MAX_GET_URI = 2000
 BACKOFF_START = 6.0
 BACKOFF_ATTEMPTS = 5
 BACKOFF_TOTAL = 300.0
@@ -378,16 +381,38 @@ class Api:
         self.local.save()
 
     def _request(
-        self, endpoint: str, params: dict[str, str], timeout: float
+        self, endpoint: str, params: dict[str, str], timeout: float, method: str = "GET"
     ) -> tuple[int, bytes]:
-        query = urllib.parse.urlencode(
-            {**params, "auth_token": self.token, "format": "json"},
-            quote_via=urllib.parse.quote,
-        )
-        req = urllib.request.Request(
-            f"{self.base}{endpoint}?{query}",
-            headers={"User-Agent": "pinboard-mirror/1"},
-        )
+        common = {"auth_token": self.token, "format": "json"}
+        headers = {"User-Agent": "pinboard-mirror/1"}
+        if method == "POST":
+            # The token stays in the query string; Pinboard does not read it
+            # from a form body. posts/add also wants url and description in
+            # the query, so only the long extended field goes in the body.
+            query = urllib.parse.urlencode(
+                {**common, **{k: v for k, v in params.items() if k != "extended"}},
+                quote_via=urllib.parse.quote,
+            )
+            data = (
+                urllib.parse.urlencode(
+                    {"extended": params["extended"]}, quote_via=urllib.parse.quote
+                ).encode()
+                if "extended" in params
+                else b""
+            )
+            req = urllib.request.Request(
+                f"{self.base}{endpoint}?{query}",
+                data=data,
+                headers=headers,
+                method="POST",
+            )
+        else:
+            query = urllib.parse.urlencode(
+                {**params, **common}, quote_via=urllib.parse.quote
+            )
+            req = urllib.request.Request(
+                f"{self.base}{endpoint}?{query}", headers=headers
+            )
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return resp.status, resp.read()
@@ -406,11 +431,24 @@ class Api:
         self, endpoint: str, params: dict[str, str] | None = None, timeout: float = 30
     ) -> Any:
         self.require_online()
+        params = params or {}
+        method = "GET"
+        if endpoint == "posts/add":
+            probe = urllib.parse.urlencode(
+                {**params, "auth_token": self.token, "format": "json"},
+                quote_via=urllib.parse.quote,
+            )
+            if len(f"{self.base}{endpoint}?{probe}") > MAX_GET_URI:
+                method = "POST"
         attempts, waited = 0, 0.0
         delay = BACKOFF_START * time_scale()
         while True:
             self._gate(endpoint)
-            status, body = self._request(endpoint, params or {}, timeout)
+            status, body = self._request(endpoint, params, timeout, method)
+            if status == 414 and endpoint == "posts/add" and method == "GET":
+                self._gate(endpoint)
+                method = "POST"
+                status, body = self._request(endpoint, params, timeout, method)
             if status == 429 and endpoint in GATES:
                 # Retrying within the endpoint's own window cannot succeed.
                 raise GateError(endpoint, self.local.next_allowed(endpoint), True)
@@ -1906,6 +1944,13 @@ TITLE_MATCH = 0.5
 # A 200 with one of these titles is a bot wall or a challenge, not the article.
 BLOCKED_TITLES = {
     "reddit",
+    "twitter",
+    "x",
+    "facebook",
+    "log in",
+    "sign in",
+    "log into facebook",
+    "post / x",
     "just a moment...",
     "just a moment",
     "attention required! | cloudflare",
@@ -1916,6 +1961,24 @@ BLOCKED_TITLES = {
     "enable javascript and cookies to continue",
     "verify you are human",
 }
+LOGIN_TITLE_MARKERS = (
+    "log in to",
+    "sign in to",
+    "log into",
+    "see what's happening",
+    "it's what's happening",
+    "create your account",
+    "continue to x",
+)
+LOGIN_SEGMENTS = {"login", "signin", "checkpoint", "consent"}
+
+
+def is_login_url(url: str) -> bool:
+    parts = urllib.parse.urlsplit(url)
+    host = (parts.hostname or "").casefold()
+    if host == "accounts.google.com" or host.startswith("login."):
+        return True
+    return bool(LOGIN_SEGMENTS & set(parts.path.casefold().split("/")))
 
 
 # --- State files -------------------------------------------------------------
@@ -2039,6 +2102,90 @@ def similarity(saved: str, seen: str) -> float:
         return 0.0
     shared = len(left & right)
     return max(shared / len(left | right), shared / min(len(left), len(right)))
+
+
+def clean_title(text: str) -> str:
+    return re.sub(r"\s+", " ", html.unescape(text)).strip()
+
+
+def clamp_title(text: str) -> str:
+    text = clean_title(text) or "Untitled"
+    return text[:252] + "..." if len(text) > 255 else text
+
+
+BAD_TITLE_MARKERS = (
+    "404",
+    "403",
+    "401",
+    "not found",
+    "access denied",
+    "forbidden",
+    "site is not available",
+    "security checkpoint",
+    "just a moment",
+    "captcha",
+    "challenge",
+    "fehler",
+    "service unavailable",
+    "bad gateway",
+)
+GENERIC_NAMES = {
+    "raw",
+    "index",
+    "content",
+    "download",
+    "file",
+    "default",
+    "home",
+    "page",
+    "post",
+    "article",
+    "view",
+    "detail",
+    "explanation",
+    "message",
+    "forum",
+}
+
+
+def is_bad_title(text: str) -> bool:
+    low = text.casefold()
+    return any(marker in low for marker in BAD_TITLE_MARKERS)
+
+
+def segment_title(segment: str) -> str:
+    name = urllib.parse.unquote(segment)
+    name = re.sub(
+        r"(\.(pdf|html?|txt|js|json|xml|php|aspx?|zip|gz))+$",
+        "",
+        name,
+        flags=re.IGNORECASE,
+    )
+    return clean_title(name.replace(".", " ").replace("_", " ").replace("-", " "))
+
+
+def filename_title(url: str) -> str:
+    parts = [part for part in urllib.parse.urlsplit(url).path.split("/") if part]
+    if not parts:
+        return ""
+    name = segment_title(parts[-1])
+    if name.casefold() in GENERIC_NAMES:
+        parent = segment_title(parts[-2]) if len(parts) >= 2 else ""
+        if parent and parent.casefold() not in GENERIC_NAMES:
+            name = f"{parent} {name}" if len(parent) <= 20 else parent
+        else:
+            name = ""
+    return "" if name.casefold() in GENERIC_NAMES else name
+
+
+def propose_title(url: str, result: dict[str, Any]) -> tuple[str, str]:
+    title = clean_title(title_of(result["body"], result["content_type"]))
+    if title and not is_bad_title(title):
+        return clamp_title(title), "page"
+    name = filename_title(url)
+    if name:
+        return clamp_title(name), "filename"
+    return clamp_title(urllib.parse.urlsplit(url).hostname or url), "host"
 
 
 def title_of(body: bytes, content_type: str) -> str:
@@ -2165,7 +2312,12 @@ def classify(saved_title: str, result: dict[str, Any]) -> str:
     if any(marker in text for marker in PARKED):
         return "changed"
     seen = title_of(result["body"], result["content_type"])
-    if seen.casefold().strip() in BLOCKED_TITLES:
+    low = seen.casefold().strip().replace("\u2019", "'").replace("\u2018", "'")
+    if (
+        is_login_url(result["final"])
+        or low in BLOCKED_TITLES
+        or any(marker in low for marker in LOGIN_TITLE_MARKERS)
+    ):
         return "blocked"
     if not saved_title.strip() or not seen:
         return "ok"
@@ -2200,6 +2352,111 @@ def add_common(parser: argparse.ArgumentParser) -> None:
 
 def pass_id(args: argparse.Namespace) -> str:
     return args.pass_id or time.strftime("%Y", time.gmtime())
+
+
+def cmd_audit_titles(ctx: Any, args: argparse.Namespace) -> int:
+    repo = ctx.require_clone()
+    if args.all and args.pass_id:
+        raise Error("choose --all or --pass, not both")
+    if not args.all and not args.pass_id:
+        raise Error("choose --pass or --all")
+    records = load_committed(repo)
+    root = Path(args.state).expanduser() if args.state else default_root()
+    run = None
+    state: dict[str, dict[str, Any]] = {}
+    if args.all:
+        urls = sorted(
+            url for url, record in records.items() if not record["title"].strip()
+        )
+    else:
+        run = Pass(root, pass_id(args))
+        state = run.state()
+        urls = [
+            item["url"]
+            for item in run.plan
+            if item["url"] in records
+            and not records[item["url"]]["title"].strip()
+            and "check" in state.get(item["url"], {})
+        ]
+    if args.limit:
+        urls = urls[: args.limit]
+    if not urls:
+        print("nothing to title")
+        return 0
+
+    if not args.apply:
+
+        def work(url: str) -> tuple[str, dict[str, Any]]:
+            return url, fetch(url, args.timeout)
+
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=max(1, args.jobs)
+        ) as pool:
+            results = list(pool.map(work, urls))
+        for url, result in results:
+            title, source = propose_title(url, result)
+            print(f"{url}\n  {title}  ({source})")
+        print(f"{len(results)} proposals (dry run)")
+        return 0
+
+    ctx.api.require_online()
+    applied = skipped = 0
+    repaired = False
+    for url in urls:
+        record = records[url]
+        live = ctx.api.get(url)
+        if live is None:
+            skipped += 1
+            continue
+        target = None
+        if run is not None:
+            target = target_tags(
+                record["tags"], state[url]["check"]["verdict"], run.cohort
+            )
+        title = clean_title(live["title"])
+        source = "existing"
+        if not title:
+            result = fetch(url, args.timeout)
+            title, source = propose_title(url, result)
+        if record["title"] != title:
+            record["title"] = title
+            repaired = True
+        if target is not None and live["tags"] == target and title:
+            if run is not None and "done" not in state.get(url, {}):
+                run.journal.append(
+                    "title", url=url, old=live["title"], new=title, source=source
+                )
+                run.journal.append("done", url=url, target=target, noop=False)
+            skipped += 1
+            continue
+        if target is None and title == live["title"]:
+            skipped += 1
+            continue
+        wanted = {**record, "title": title}
+        if target is not None:
+            wanted["tags"] = target
+        try:
+            code = ctx.api.add(post_params(wanted, replace=True, keep_time=True))
+        except NetworkError as error:
+            note(f"{url}: {error}")
+            skipped += 1
+            continue
+        if code != "done":
+            raise Error(f"posts/add for {url}: {code}")
+        if target is not None:
+            record["tags"] = target
+            if run is not None:
+                run.journal.append(
+                    "title", url=url, old=live["title"], new=title, source=source
+                )
+                run.journal.append("done", url=url, target=target, noop=False)
+        applied += 1
+        if applied % 20 == 0:
+            commit_mirror(repo, records, applied)
+    if applied or repaired:
+        commit_mirror(repo, records, applied or 1, push=True)
+    print(f"titled {applied}, skipped {skipped}")
+    return 0
 
 
 def cmd_audit_plan(ctx: Any, args: argparse.Namespace) -> int:
@@ -2253,12 +2510,22 @@ def cmd_audit_check(ctx: Any, args: argparse.Namespace) -> int:
     root = Path(args.state).expanduser() if args.state else default_root()
     run = Pass(root, pass_id(args))
     state = run.state()
-    pending = [
-        item
-        for item in run.plan
-        if "check" not in state.get(item["url"], {})
-        and "done" not in state.get(item["url"], {})
-    ]
+    if args.verdict:
+        pending = [
+            item
+            for item in run.plan
+            if state.get(item["url"], {}).get("check", {}).get("verdict")
+            == args.verdict
+        ]
+    elif args.recheck:
+        pending = list(run.plan)
+    else:
+        pending = [
+            item
+            for item in run.plan
+            if "check" not in state.get(item["url"], {})
+            and "done" not in state.get(item["url"], {})
+        ]
     if args.limit:
         pending = pending[: args.limit]
     if args.dry_run:
@@ -2343,6 +2610,10 @@ def commit_mirror(
     write_mirror(repo.path, records)
     repo.run("add", "-A")
     if repo.run("diff", "--cached", "--quiet", check=False).returncode == 0:
+        if push and repo.remote_url() is not None:
+            ok, message = repo.push()
+            if not ok:
+                note(f"mirror committed but not pushed: {message}")
         return
     repo.run("commit", "-q", "--no-gpg-sign", "-m", f"audit: apply {count} verdicts")
     if push and repo.remote_url() is not None:
@@ -2360,8 +2631,11 @@ def cmd_audit_apply(ctx: Any, args: argparse.Namespace) -> int:
     )
     records = load_committed(repo)
     state = run.state()
+    repaired = False
     for url, row in state.items():
         if "done" in row and url in records:
+            if records[url]["tags"] != row["done"]["target"]:
+                repaired = True
             records[url]["tags"] = row["done"]["target"]
     checked = {url for url, row in state.items() if "check" in row}
     ctx.api.require_online()
@@ -2375,6 +2649,13 @@ def cmd_audit_apply(ctx: Any, args: argparse.Namespace) -> int:
                 run.journal.append(
                     "done", url=url, target=target, noop=False, recovered=True
                 )
+                if url in records:
+                    if records[url]["tags"] != target:
+                        repaired = True
+                    records[url]["tags"] = target
+                    records[url]["meta"] = live.get(
+                        "meta", records[url].get("meta", "")
+                    )
                 note(f"recovered write for {url}")
             else:
                 note(f"replaying unconfirmed write for {url}")
@@ -2389,6 +2670,8 @@ def cmd_audit_apply(ctx: Any, args: argparse.Namespace) -> int:
     if args.limit:
         pending = pending[: args.limit]
     if not pending:
+        if repaired and not args.dry_run:
+            commit_mirror(repo, records, 1, push=True)
         print("nothing to apply")
         return 0
 
@@ -2437,8 +2720,8 @@ def cmd_audit_apply(ctx: Any, args: argparse.Namespace) -> int:
             commit_mirror(repo, records, applied)
         if applied % 100 == 0:
             note(f"applied {applied}/{len(pending)}")
-    if applied and (not args.commit_every or applied % args.commit_every):
-        commit_mirror(repo, records, applied, push=True)
+    if (applied or repaired) and not args.dry_run:
+        commit_mirror(repo, records, applied or 1, push=True)
     print(
         f"applied {applied}, skipped {skipped}" + (" (dry run)" if args.dry_run else "")
     )
@@ -2851,6 +3134,16 @@ def add_audit_commands(sub: Any) -> None:
         help="Per-request timeout (default 15)",
     )
     q.add_argument("--verbose", action="store_true")
+    q.add_argument(
+        "--recheck",
+        action="store_true",
+        help="Recheck URLs that already have a verdict",
+    )
+    q.add_argument(
+        "--verdict",
+        choices=VERDICTS,
+        help="Recheck only URLs with this verdict",
+    )
     q.add_argument("--dry-run", action="store_true")
     q.set_defaults(func=cmd_audit_check)
 
@@ -2881,6 +3174,26 @@ def add_audit_commands(sub: Any) -> None:
     )
     q.add_argument("--dry-run", action="store_true")
     q.set_defaults(func=cmd_audit_bump)
+
+    q = audit_command("titles", "Fill empty bookmark titles before tagging.")
+    q.add_argument(
+        "--all", action="store_true", help="Every empty-title bookmark in the mirror"
+    )
+    q.add_argument(
+        "--apply", action="store_true", help="Write the proposals (default: dry run)"
+    )
+    q.add_argument("--limit", type=int, metavar="N")
+    q.add_argument(
+        "--jobs", type=int, default=8, metavar="N", help="Concurrent probes (default 8)"
+    )
+    q.add_argument(
+        "--timeout",
+        type=float,
+        default=15,
+        metavar="SEC",
+        help="Per-request timeout (default 15)",
+    )
+    q.set_defaults(func=cmd_audit_titles)
 
 
 def mcp_args(argv: list[str]) -> list[str] | None:
