@@ -2486,12 +2486,15 @@ def cmd_audit_verify(ctx: Any, args: argparse.Namespace) -> int:
     )
     records = load_committed(repo)
     state = run.state()
+    applied = [item for item in run.plan if "done" in state.get(item["url"], {})]
+    done_urls = {item["url"] for item in applied}
+    skipped_urls = {
+        url for url, row in state.items() if "skip" in row and url not in done_urls
+    }
+    remaining = len(run.plan) - len(done_urls) - len(skipped_urls)
     problems = []
-    for item in run.plan:
-        row = state.get(item["url"], {})
-        if "done" not in row:
-            problems.append({"url": item["url"], "problem": "not applied"})
-            continue
+    for item in applied:
+        row = state[item["url"]]
         record = records.get(item["url"])
         if record is None:
             problems.append({"url": item["url"], "problem": "not in mirror"})
@@ -2510,7 +2513,9 @@ def cmd_audit_verify(ctx: Any, args: argparse.Namespace) -> int:
             json.dumps(
                 {
                     "pass": run.manifest["pass"],
-                    "checked": len(run.plan),
+                    "planned": len(run.plan),
+                    "applied": len(applied),
+                    "remaining": remaining,
                     "problems": problems,
                 },
                 indent=2,
@@ -2518,10 +2523,14 @@ def cmd_audit_verify(ctx: Any, args: argparse.Namespace) -> int:
             )
         )
     else:
-        print(f"{len(run.plan) - len(problems)}/{len(run.plan)} verified")
+        print(
+            f"{len(applied) - len(problems)}/{len(applied)} applied verified; {remaining} remaining"
+        )
         for problem in problems[:20]:
             print(f"  {problem['url']}: {problem['problem']}")
-    return 1 if problems else 0
+        if remaining and args.require_complete:
+            print(f"  {remaining} planned bookmarks are not applied")
+    return 1 if problems or (remaining and args.require_complete) else 0
 
 
 def cmd_audit_bump(ctx: Any, args: argparse.Namespace) -> int:
@@ -2842,6 +2851,11 @@ def add_audit_commands(sub: Any) -> None:
 
     q = audit_command("verify", "Check the mirror agrees with the journal.")
     q.add_argument("--json", action="store_true")
+    q.add_argument(
+        "--require-complete",
+        action="store_true",
+        help="Fail if any planned URL is not applied",
+    )
     q.set_defaults(func=cmd_audit_verify)
 
     q = audit_command("bump", "Move a cohort tag after a complete pass.")
@@ -2867,10 +2881,37 @@ def mcp_args(argv: list[str]) -> list[str] | None:
     return repo + rest[1:]
 
 
+def skill_root() -> Path | None:
+    """The directory holding this skill's SKILL.md, found by sentinel rather
+    than depth so that a symlink or a move within the tree still works.
+    PINBOARD_SKILL_DIR names it when the script has been copied elsewhere."""
+    override = os.environ.get("PINBOARD_SKILL_DIR")
+    if override:
+        return Path(override).expanduser().resolve()
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "SKILL.md").is_file():
+            return parent
+    return None
+
+
 def exec_mcp(args: list[str]) -> int:
     """Hands over to the MCP server, which carries its own dependencies so that
     every other command stays free of them."""
-    server = Path(__file__).resolve().parent.parent / "libexec" / "pinboard-mcp"
+    root = skill_root()
+    if root is None:
+        print(
+            f"{PROG} mcp: cannot find SKILL.md above this script; "
+            "set PINBOARD_SKILL_DIR",
+            file=sys.stderr,
+        )
+        return 1
+    server = root / "scripts" / "pinboard-mcp"
+    if not server.is_file():
+        print(
+            f"{PROG} mcp: {server} not found; set PINBOARD_SKILL_DIR",
+            file=sys.stderr,
+        )
+        return 1
     uv = shutil.which("uv")
     if uv is None:
         print(f"{PROG} mcp: uv not found", file=sys.stderr)
