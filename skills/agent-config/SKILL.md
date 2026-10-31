@@ -152,7 +152,9 @@ skill <command> [arguments]
   `read_file`, `search`, `edit_file`, which commits each edit) work with any
   client, and it implements the MCP Skills Extension (SEP-2640). Connect it only
   where the same skills are not installed locally, so each skill is not offered
-  twice. See `skill mcp --help`.
+  twice. The server is `scripts/skill-mcp`, which `permission apply` does not
+  pre-approve; a copy or hardlink outside the skill tree must set
+  `SKILL_MCP_SKILL_DIR` to the skill root. See `skill mcp --help`.
 
 ### Choosing Skills (Workspace vs. Session)
 

@@ -161,6 +161,9 @@ pinboard mcp --http                          # loopback only, no authentication
 - Each call is logged to `~/.local/state/pinboard/mcp.jsonl` (or `--log`),
   rotated at 8 MiB: the tool, outcome and duration, the host of a written URL
   and a hash of search text, never titles, notes or the token.
+- The server is `scripts/pinboard-mcp`, which `permission apply` does not
+  pre-approve; a copy or hardlink outside the skill tree must set
+  `PINBOARD_SKILL_DIR` to the skill root.
 
 ## Reference
 
