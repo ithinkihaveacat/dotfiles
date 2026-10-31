@@ -18,7 +18,9 @@ content.
 claims. Keep an allowlist of the arguments that name what a call is about (a
 project, a task ID, a path, a URI) and shorten each one; hash anything that is
 user text but useful for grouping (a search). A failure's reason is its first
-line, with quoted values elided, since those can quote content.
+line, with quoted values elided, since those can quote content; where an error
+can echo a value unquoted (a regex or JSON Schema error), record a fixed reason
+instead.
 
 Logging never fails a request. A record the file cannot take is dropped there,
 with one warning on stderr; the stderr line remains.
@@ -69,7 +71,8 @@ Outcomes:
 
 - `ok`: the request was answered as asked.
 - `tool-error`: a tool call ran and failed (`isError` in its result).
-- `rpc-error`: a JSON-RPC error reply (unknown method, invalid params).
+- `rpc-error`: a JSON-RPC error reply (unknown method, invalid params, or a body
+  that is not JSON-RPC at all, which the SDK answers with HTTP 400).
 - `refused`: declined before it ran: an HTTP refusal (no token, wrong method,
   too large), or a tool's "not now" (rate limited, a sync already running).
 - `error`: the server could not answer (an exception, a client gone).
@@ -86,15 +89,15 @@ ID, and start time. It groups a caller's requests without naming them.
   `{"status":"ok","version":"...","commit":"..."}`, where `commit` is the
   server's own source commit when it runs from a Git checkout.
 - **`/logs`** is a static page, behind the same authentication as the MCP
-  endpoint, that shows the latest records and counts per client and tool. Its
-  script is pinned by hash in a strict Content-Security-Policy, and every value
-  is inserted as text. It polls rather than streams, since a buffering proxy
-  (kamal-proxy) holds a stream back.
+  endpoint, that shows the latest records, newest first. Its script is pinned by
+  hash in a strict Content-Security-Policy, and every value is inserted as text.
+  It polls rather than streams, since a buffering proxy (kamal-proxy) holds a
+  stream back.
 - **`/logs/records?after=N&server=ID`** returns
-  `{"server", "version", "next", "records", "stats"}`: the records after cursor
-  `N` from an in-memory ring of the latest 500, and statistics over the ring. A
-  different `server` (the process's random ID) means the server restarted, so
-  the cursor starts over. Polls are not logged; refusals are.
+  `{"server", "version", "next", "records"}`: the records after cursor `N` from
+  an in-memory ring of the latest 500 (empty after a restart). A different
+  `server` (the process's random ID) means the server restarted, so the cursor
+  starts over. Polls are not logged; refusals are.
 - Run uvicorn with `access_log=False`: the request log replaces its access log,
   which would otherwise log every poll.
 
@@ -103,10 +106,11 @@ ID, and start time. It groups a caller's requests without naming them.
 Each tool summarises its log from the command line (`taskgo requests`,
 `skill mcp --requests`, `pinboard mcp --requests`) with `--days N` (default 7)
 and `--json`: requests and outcomes, then requests, failures, and p50/p95
-latency per client and per tool, then the commonest runs of two or three tool
-calls by one caller (calls 120 seconds apart or less). Since every log has one
-format, any of them reads another's file with `--log FILE`; `andon mcp`, which
-serves only stdio, has no summary of its own.
+latency per client and per tool. `taskgo requests` also finds the commonest runs
+of two or three tool calls by one caller (calls 120 seconds apart or less;
+records without a caller key form no runs). Since every log has one format, any
+of them reads another's file with `--log FILE`; `andon mcp`, which serves only
+stdio, has no summary of its own.
 
 ## Implementation
 
