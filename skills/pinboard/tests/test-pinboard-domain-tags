@@ -1,0 +1,393 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["publicsuffixlist==1.1.2.20261023"]
+# ///
+# TAP tests for 'pinboard domain-tags'. The fake Pinboard API runs in this
+# process; no network access. Small by design: a handful of URLs per pass.
+
+from __future__ import annotations
+
+import importlib.util
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import time
+from importlib.machinery import SourceFileLoader
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE / "fixtures"))
+from fake_pinboard import API, FAKE, TOKEN  # noqa: E402
+
+BIN = HERE.parent / "scripts" / "pinboard"
+TMP = Path(tempfile.mkdtemp())
+ENV = {
+    k: v
+    for k, v in os.environ.items()
+    if not k.startswith(("PINBOARD_", "GIT_"))
+    and k not in ("AGENT_OFFLINE", "NO_COLOR", "FORCE_COLOR")
+}
+ENV.update(
+    PINBOARD_API_URL=API,
+    PINBOARD_API_TOKEN=TOKEN,
+    PINBOARD_TIME_SCALE="0.0001",
+    XDG_STATE_HOME=str(TMP / "state"),
+    GIT_CONFIG_GLOBAL=str(TMP / "gitconfig"),
+    GIT_CONFIG_NOSYSTEM="1",
+    GIT_AUTHOR_NAME="Pinboard Test",
+    GIT_AUTHOR_EMAIL="pinboard@example.com",
+    GIT_COMMITTER_NAME="Pinboard Test",
+    GIT_COMMITTER_EMAIL="pinboard@example.com",
+    NO_PROXY="*",
+    no_proxy="*",
+)
+(TMP / "gitconfig").write_text("[init]\n\tdefaultBranch = main\n")
+
+n = 0
+failed = 0
+
+
+def ok(condition: bool, description: str, diag: str = "") -> None:
+    global n, failed
+    n += 1
+    print(f"{'ok' if condition else 'not ok'} {n} - {description}")
+    if not condition:
+        failed += 1
+        for line in diag.splitlines()[-12:]:
+            print(f"# {line}")
+
+
+def load_pinboard():
+    loader = SourceFileLoader("pb_domain_tags", str(BIN))
+    spec = importlib.util.spec_from_loader("pb_domain_tags", loader)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["pb_domain_tags"] = module
+    loader.exec_module(module)
+    return module
+
+
+PB = load_pinboard()
+
+
+def reset_api() -> None:
+    with FAKE.lock:
+        FAKE.posts.clear()
+        FAKE.calls.clear()
+        FAKE.tick = 0
+        FAKE.update_time = ""
+        FAKE.reset_knobs()
+
+
+def git(*args: str, cwd: Path) -> str:
+    proc = subprocess.run(
+        ["git", *args], capture_output=True, text=True, env=ENV, cwd=cwd, check=False
+    )
+    if proc.returncode:
+        raise RuntimeError(proc.stderr)
+    return proc.stdout.strip()
+
+
+def record(
+    url: str,
+    title: str,
+    time_: str,
+    tags: list[str] | None = None,
+) -> dict:
+    return {
+        "url": url,
+        "hash": "0" * 32,
+        "title": title,
+        "notes": "",
+        "tags": tags or [],
+        "time": time_,
+        "shared": False,
+        "toread": False,
+        "meta": "",
+    }
+
+
+def make_repo(records: list[dict]) -> Path:
+    repo = TMP / f"repo-{time.time_ns()}"
+    (repo / "bookmarks").mkdir(parents=True)
+    by_year: dict[str, list[dict]] = {}
+    for item in records:
+        by_year.setdefault(item["time"][:4], []).append(item)
+    for year, items in by_year.items():
+        items.sort(key=lambda r: (r["time"], r["url"]))
+        (repo / "bookmarks" / f"{year}.jsonl").write_text(
+            "".join(json.dumps(item, ensure_ascii=False) + "\n" for item in items)
+        )
+    (repo / "state.json").write_text('{"format": 1, "update_time": ""}\n')
+    (repo / "README.md").write_text("# Pinboard mirror\n")
+    (repo / ".gitattributes").write_text("*.jsonl text eol=lf\n")
+    git("init", "-b", "main", cwd=repo)
+    git("add", "-A", cwd=repo)
+    git("commit", "-q", "-m", "fixture", cwd=repo)
+    return repo
+
+
+def tags_tool(
+    repo: Path, *args: str, state: Path | None = None
+) -> subprocess.CompletedProcess[str]:
+    cmd = [str(BIN), "--repo", str(repo), "domain-tags", *args]
+    if state is not None:
+        cmd += ["--state", str(state)]
+    return subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        env=ENV,
+        check=False,
+    )
+
+
+def plan_json(proc: subprocess.CompletedProcess[str]) -> dict:
+    return json.loads(proc.stdout)
+
+
+def fixture() -> tuple[Path, list[dict]]:
+    """Two colliding bbc domains (five URLs each), one tagged nytimes URL,
+    four below the threshold, and six GitHub Pages hosts that must be ignored."""
+    records = []
+    for i in range(5):
+        records.append(
+            record(
+                f"https://www.bbc.co.uk/news/{i}",
+                f"BBC UK {i}",
+                f"2020-01-0{i + 1}T00:00:00Z",
+            )
+        )
+        records.append(
+            record(
+                f"https://www.bbc.com/news/{i}",
+                f"BBC US {i}",
+                f"2020-01-0{i + 1}T00:00:00Z",
+            )
+        )
+    for i in range(5):
+        records.append(
+            record(
+                f"https://www.nytimes.com/2020/{i}",
+                f"Times {i}",
+                f"2020-02-0{i + 1}T00:00:00Z",
+                ["reading", "nytimes"] if i == 0 else ["reading"],
+            )
+        )
+    for i in range(4):
+        records.append(
+            record(
+                f"https://example.com/{i}",
+                f"Example {i}",
+                f"2020-03-0{i + 1}T00:00:00Z",
+            )
+        )
+    for i in range(6):
+        records.append(
+            record(
+                f"https://alice.github.io/post/{i}",
+                f"Pages {i}",
+                f"2020-04-0{i + 1}T00:00:00Z",
+            )
+        )
+    for item in records:
+        FAKE.put(
+            item["url"],
+            item["title"],
+            item["time"],
+            tags=" ".join(item["tags"]),
+        )
+    return make_repo(records), records
+
+
+def test_domain_rules() -> None:
+    cases = {
+        "https://www.nytimes.com/2020/a": "nytimes.com",
+        "https://bar.co.uk/x": "bar.co.uk",
+        "https://www.com.au/x": "www.com.au",
+        "https://alice.blogspot.com/x": "alice.blogspot.com",
+        "http://User:Pw@WWW.Example.COM:8080/x": "example.com",
+        "https://example.com./x": "example.com",
+        "https://github.com/x": "github.com",
+        "https://alice.github.io/x": None,
+        "https://github.io/x": None,
+        "https://127.0.0.1/x": None,
+        "https://[::1]/x": None,
+        "mailto:someone@example.com": None,
+        "ftp://example.com/x": None,
+        "https://www.gov.uk/x": "www.gov.uk",
+        "https://www.nhs.uk/x": "www.nhs.uk",
+    }
+    for url, expected in cases.items():
+        got = PB.registrable_domain(url)
+        ok(got == expected, f"registrable domain of {url}", f"{got!r} != {expected!r}")
+    ok(PB.domain_tag("nytimes.com") == "nytimes", "first label is the tag")
+    ok(PB.domain_tag("bar.co.uk") == "bar", "multi-label suffix uses the first label")
+    ok(PB.domain_tag("www.gov.uk") == "govuk", "www.gov.uk becomes govuk")
+    ok(PB.domain_tag("www.nhs.uk") == "nhsuk", "www.nhs.uk becomes nhsuk")
+    ok(PB.has_tag(["NYTimes"], "nytimes"), "tags compare case-insensitively")
+    ok(
+        PB.domain_variants(
+            ["nytimes.com", "www.nytimes.com", "nytimes"], "nytimes.com", "nytimes"
+        )
+        == ["nytimes.com", "www.nytimes.com"],
+        "domain-form tags are reported as variants",
+    )
+
+
+def test_plan_reports_domains_and_collisions() -> None:
+    reset_api()
+    repo, _ = fixture()
+    state = TMP / "plan-state"
+    proc = tags_tool(repo, "plan", "--dry-run", "--json", state=state)
+    ok(proc.returncode == 0, "plan --dry-run succeeds", proc.stderr)
+    payload = plan_json(proc)
+    ok(payload["groups"] == 3, "three domains reach five URLs", payload)
+    ok(payload["urls"] == 15, "fifteen bookmarks are planned", payload)
+    ok(
+        payload["have"] == 1 and payload["missing"] == 14,
+        "have/missing counts",
+        payload,
+    )
+    ok(
+        payload["collisions"] == {"bbc": ["bbc.co.uk", "bbc.com"]},
+        "bbc collision is reported",
+        payload["collisions"],
+    )
+    by_domain = {row["domain"]: row for row in payload["domains"]}
+    ok("example.com" not in by_domain, "four-URL domain is below the threshold")
+    ok(
+        not any("github.io" in row["domain"] for row in payload["domains"]),
+        "github.io hosts are excluded",
+    )
+    ok(
+        not (state / "domains" / "plan.jsonl").exists(),
+        "dry run writes no plan",
+    )
+    proc = tags_tool(repo, "plan", state=state)
+    ok(proc.returncode == 0, "plan writes a pass", proc.stderr)
+    plan = [
+        json.loads(line)
+        for line in (state / "domains" / "plan.jsonl").read_text().splitlines()
+    ]
+    ok(len(plan) == 15, "plan file has every qualifying URL")
+    proc = tags_tool(repo, "plan", state=state)
+    ok(
+        proc.returncode != 0,
+        "plan refuses to replace a pass without --force",
+        proc.stderr,
+    )
+
+
+def test_apply_resumes_and_preserves_tags() -> None:
+    reset_api()
+    repo, _records = fixture()
+    state = TMP / "apply-state"
+    tags_tool(repo, "plan", state=state)
+
+    proc = tags_tool(repo, "verify", state=state)
+    ok(proc.returncode == 1, "verify fails before apply", proc.stdout)
+
+    proc = tags_tool(repo, "apply", "--dry-run", state=state)
+    ok(proc.returncode == 0, "apply --dry-run succeeds", proc.stderr)
+    ok(FAKE.count("posts/add") == 0, "dry run writes nothing")
+    ok("(dry run)" in proc.stdout, "dry run says so", proc.stdout)
+
+    proc = tags_tool(repo, "apply", "--limit", "3", state=state)
+    ok(proc.returncode == 0, "limited apply succeeds", proc.stderr)
+    ok(FAKE.count("posts/add") == 3, "limited apply makes three writes", proc.stdout)
+    status = plan_json(tags_tool(repo, "status", "--json", state=state))
+    ok(
+        status["applied"] == 3 and status["remaining"] == 12,
+        "status tracks the batch",
+        json.dumps(status),
+    )
+    ok(status["noop"] == 0, "dry run left no no-op journal entry", json.dumps(status))
+
+    proc = tags_tool(repo, "apply", state=state)
+    ok(proc.returncode == 0, "remaining apply succeeds", proc.stderr)
+    ok(FAKE.count("posts/add") == 14, "one write per missing tag", proc.stdout)
+
+    tagged = FAKE.posts["https://www.nytimes.com/2020/0"]["tags"].split()
+    ok(tagged == ["reading", "nytimes"], "existing tags are preserved", tagged)
+    tagged = FAKE.posts["https://www.nytimes.com/2020/1"]["tags"].split()
+    ok(tagged == ["reading", "nytimes"], "the missing tag is appended", tagged)
+    ok(
+        "bbc" in FAKE.posts["https://www.bbc.co.uk/news/0"]["tags"].split(),
+        "bbc.co.uk gets the bbc tag",
+    )
+    ok(
+        "bbc" in FAKE.posts["https://www.bbc.com/news/0"]["tags"].split(),
+        "bbc.com shares the bbc tag",
+    )
+
+    status = plan_json(tags_tool(repo, "status", "--json", state=state))
+    ok(
+        status["applied"] == 15 and status["noop"] == 1 and status["writes"] == 14,
+        "final status counts the no-op",
+        json.dumps(status),
+    )
+    proc = tags_tool(repo, "verify", "--require-complete", state=state)
+    ok(proc.returncode == 0, "verify passes after apply", proc.stdout + proc.stderr)
+    ok("15/15 planned" in proc.stdout, "verify reports full coverage", proc.stdout)
+
+
+def test_apply_recovers_lost_response() -> None:
+    reset_api()
+    repo, _records = fixture()
+    state = TMP / "recover-state"
+    tags_tool(repo, "plan", state=state)
+    FAKE.add_mode = "vanish-after"
+    proc = tags_tool(repo, "apply", "--limit", "1", state=state)
+    ok(proc.returncode == 0, "a lost response is recovered", proc.stdout + proc.stderr)
+    status = plan_json(tags_tool(repo, "status", "--json", state=state))
+    ok(
+        status["applied"] == 1 and status["remaining"] == 14,
+        "the recovered write is done",
+        json.dumps(status),
+    )
+    ok(FAKE.count("posts/add") == 1, "the write is not repeated", proc.stdout)
+
+
+def test_apply_resumes_after_lost_request() -> None:
+    reset_api()
+    repo, _records = fixture()
+    state = TMP / "retry-state"
+    tags_tool(repo, "plan", state=state)
+    FAKE.add_mode = "vanish-before"
+    proc = tags_tool(repo, "apply", "--limit", "1", state=state)
+    ok(proc.returncode != 0, "a lost request aborts the batch", proc.stdout)
+    status = plan_json(tags_tool(repo, "status", "--json", state=state))
+    ok(
+        status["applied"] == 0 and status["ambiguous"] == 1,
+        "the intent stays ambiguous",
+        json.dumps(status),
+    )
+    proc = tags_tool(repo, "apply", state=state)
+    ok(proc.returncode == 0, "the next run replays the request", proc.stderr)
+    status = plan_json(tags_tool(repo, "status", "--json", state=state))
+    ok(
+        status["applied"] == 15 and status["writes"] == 14,
+        "the pass completes after replay",
+        json.dumps(status),
+    )
+    proc = tags_tool(repo, "verify", "--require-complete", state=state)
+    ok(proc.returncode == 0, "verify passes after replay", proc.stdout + proc.stderr)
+
+
+def main() -> int:
+    for name, fn in sorted(globals().items()):
+        if name.startswith("test_") and callable(fn):
+            try:
+                fn()
+            except Exception as error:
+                ok(False, f"{name} raised {type(error).__name__}: {error}")
+    print(f"1..{n}")
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

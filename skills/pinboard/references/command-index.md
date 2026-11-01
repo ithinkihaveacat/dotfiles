@@ -15,6 +15,8 @@
 - [history](#history)
 - [suggest](#suggest)
 - [doctor](#doctor)
+- [audit](#audit)
+- [domain-tags](#domain-tags)
 - [mcp](#mcp)
 
 ## Help
@@ -43,6 +45,7 @@ Commands:
   suggest URL       Ask Pinboard for tag suggestions
   doctor            Check the token, the clone and the mirror (read-only)
   audit             Check links for rot and tag the verdicts (resumable)
+  domain-tags       Add one canonical tag per frequent domain (resumable)
   mcp               Serve the mirror to agents over MCP
 
 Options:
@@ -422,6 +425,31 @@ Arguments:
     verify    Check the mirror agrees with the journal.
     bump      Move a cohort tag after a complete pass.
     titles    Fill empty bookmark titles before tagging.
+
+Options:
+  -h, --help  Display this help message and exit
+```
+
+<!-- /generated -->
+
+## domain-tags
+
+<!-- generated: ../scripts/pinboard domain-tags --help -->
+
+```text
+Usage: pinboard domain-tags [-h] COMMAND ...
+
+Add canonical domain tags to bookmarks, one per registrable
+domain with at least five URLs. Analysis is offline from the mirror and a
+pinned Public Suffix List. State lives under
+~/.local/state/pinboard/domain-tags/<pass>/.
+
+Arguments:
+  COMMAND
+    plan      Freeze a work list and report every domain.
+    apply     Add missing domain tags through the API.
+    status    Show pass progress.
+    verify    Check the mirror has every planned domain tag.
 
 Options:
   -h, --help  Display this help message and exit

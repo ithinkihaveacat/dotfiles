@@ -30,6 +30,9 @@ Run it as `pinboard` when `bin/` is on `PATH`, otherwise as
 - `pinboard doctor` checks the token, the clone, the files and freshness without
   calling the API. It asks `origin` for its branch head, without fetching, to
   report commits this clone lacks.
+- `publicsuffixlist` is pinned in the script's PEP 723 header and imported only
+  by `domain-tags`; other commands do not load it. `uv` fetches it once, then
+  uses its cache.
 
 ## Reading
 
@@ -117,6 +120,37 @@ pinboard audit verify                  # the mirror agrees with the journal
 - `check` uses a title-similarity heuristic and parking-page markers, not the
   original page bytes; `changed` and `blocked` are deliberately conservative.
   Review the first small pass before running the full account.
+
+## Domain Tags
+
+`pinboard domain-tags` gives every frequent site one consistent tag, derived
+offline from the mirror and a pinned Public Suffix List. It is resumable: state
+lives under `~/.local/state/pinboard/domain-tags/<pass>/`.
+
+```bash
+pinboard domain-tags plan --dry-run     # report every qualifying domain
+pinboard domain-tags plan               # freeze that work list
+pinboard domain-tags apply --limit 50   # write missing tags through the API
+pinboard domain-tags status             # progress
+pinboard domain-tags verify             # the mirror has every planned tag
+```
+
+- A registrable domain needs at least five bookmarks. Its tag is the first
+  label, lowercased: `nytimes.com` becomes `nytimes`, `bar.co.uk` becomes `bar`.
+  Multi-label and private suffixes come from the Public Suffix List, so
+  `alice.blogspot.com` gets `alice` and `alice.github.io` is ignored entirely.
+  `www.gov.uk` and `www.nhs.uk` are special-cased to `govuk` and `nhsuk`,
+  because the first label would be the useless `www`.
+- `plan` reports every domain with its URL count, proposed tag, how many already
+  have it, how many are missing, and label collisions such as `bbc.co.uk` and
+  `bbc.com` both becoming `bbc`. Variant tags (`nytimes.com` instead of
+  `nytimes`) are reported but not changed; normalising them would be a second
+  pass.
+- `apply` adds the tag only where it is missing, preserves every existing tag,
+  makes one API call per changed bookmark, and journals `intent` then `done`
+  with fsync. An interrupted batch resumes without repeating completed writes.
+- `verify` compares the mirror against the frozen plan; `--require-complete`
+  also fails while any planned bookmark is unapplied.
 
 ## Rate Limits and Failures
 
