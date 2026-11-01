@@ -2213,10 +2213,7 @@ def parse_date_field(fm: dict[str, Any], key: str) -> str | None:
 
 def normalize_wait_for_args(raw_list: list[str]) -> list[str]:
     """Normalizes CLI --wait-for values into deduplicated gates."""
-    gates: list[str] = []
-    for entry in raw_list:
-        gates.extend(split_gate_values(str(entry)))
-    return list(dict.fromkeys(gates))
+    return split_field_values(raw_list, TASK_SCHEMA.field("wait_for"))
 
 
 # Record schema. One declarative description per controlled record kind:
@@ -2233,6 +2230,9 @@ GATE_PATTERN = (
     r"|gh:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#\d+|@[A-Za-z0-9_.-]+|https?://\S+)$"
 )
 TYPED_GATE_PREFIXES = ("gh:", "b/", "cl/", "@", "http:", "https:")
+# Gates taskgo check resolves (dates) or polls (bugs, CLs, GitHub issues).
+CHECKED_GATE_PREFIXES = ("gh:", "b/", "cl/")
+DATE_SHAPE_RE = re.compile(r"^\d{4}-\d{1,2}-\d{1,2}$")
 
 
 @dataclass(slots=True, frozen=True)
@@ -2254,25 +2254,41 @@ def is_typed_gate(value: Any) -> bool:
 def gate_error(value: Any) -> str | None:
     """Why VALUE is not a wait_for gate, or None when it is one.
 
-    A gate is a typed gate or one line of free text. Free text whose first
-    word looks like a typed gate but is malformed is refused, so a typo in a
-    typed gate is caught instead of holding its task for ever.
+    A gate is a typed gate or one line of free text. Free text is refused
+    when any word in it is a task ID, a gate taskgo check resolves (a date,
+    b/N, cl/N, gh:owner/repo#N), which would stop being checked, or looks
+    like a typed gate but is malformed, so a typo is caught instead of
+    holding its task for ever. A handle or URL inside free text is kept:
+    check does not poll those either way.
     """
     text = str(value).strip()
     if not text or "\n" in text:
         return "a gate is one non-empty line"
     if is_typed_gate(text):
         return None
-    first = re.split(r"[,\s]+", text)[0]
-    if ID_PATTERN.match(first.upper()):
-        return f"{first} is a task; put it in blocked_by"
-    if (
-        first.lower().startswith(TYPED_GATE_PREFIXES) or re.match(r"\d{4}-\d", first)
-    ) and not is_typed_gate(first):
-        return (
-            f"'{first}' looks like a typed gate but is malformed; typed gates are "
-            "YYYY-MM-DD, b/N, cl/N, gh:owner/repo#N, @handle, and http(s) URLs"
+    words = [w.lstrip("([{\"'").rstrip(")]}.;!?\"'") for w in re.split(r"[,\s]+", text)]
+    words = [w for w in words if w]
+    # Typos first, so one message names what to correct.
+    for word in words:
+        if ID_PATTERN.match(word.upper()):
+            return f"{word} is a task; put it in blocked_by"
+        looks_typed = word.lower().startswith(TYPED_GATE_PREFIXES) or bool(
+            DATE_SHAPE_RE.match(word)
         )
+        if looks_typed and not is_typed_gate(word):
+            return (
+                f"'{word}' looks like a typed gate but is malformed; typed gates are "
+                "YYYY-MM-DD, b/N, cl/N, gh:owner/repo#N, @handle, and http(s) URLs"
+            )
+    for word in words:
+        checked = ISO_DATE_RE.match(word) or word.lower().startswith(
+            CHECKED_GATE_PREFIXES
+        )
+        if checked and is_typed_gate(word):
+            return (
+                f"'{word}' is a gate taskgo check resolves; give it as its own "
+                "gate, and the rest as free text if still needed"
+            )
     return None
 
 
@@ -2282,13 +2298,17 @@ def _is_gate(value: Any) -> bool:
 
 def split_gate_values(entry: str) -> list[str]:
     """Splits ENTRY into gates: a list of typed gates separated by commas or
-    spaces gives each, and anything else is one free-text gate."""
+    spaces gives each, and anything else is one free-text gate. A blank
+    ENTRY gives one empty gate, which validation refuses."""
     tokens = [t.strip("'\"") for t in re.split(r"[,\s]+", entry.strip())]
     tokens = [t for t in tokens if t]
     if tokens and all(is_typed_gate(t) for t in tokens):
         return tokens
-    text = entry.strip().strip("'\"").strip()
-    return [text] if text else []
+    text = entry.strip()
+    # Unwrap one matching pair of quotes, as a quoted YAML scalar would be.
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "'\"":
+        text = text[1:-1].strip()
+    return [text]
 
 
 VALUE_TYPES: dict[str, ValueType] = {
@@ -2501,7 +2521,7 @@ def invalid_reason(spec: FieldSpec, value: str) -> str:
 
 def describe_invalid(spec: FieldSpec, value: str) -> str:
     if spec.value == "gate":
-        return f"invalid {spec.name} '{value}': {invalid_reason(spec, value)}"
+        return f"invalid {spec.name} '{value}' ({invalid_reason(spec, value)})"
     if spec.value == "date":
         return f"invalid ISO date in {spec.name} '{value}' (expected YYYY-MM-DD)"
     if spec.value == "conversation":
@@ -2708,8 +2728,8 @@ def unresolved_wait_for(row: TaskRow, today: date) -> list[str]:
     """Returns wait_for entries still holding ROW back as of TODAY.
 
     ISO dates (YYYY-MM-DD) hold a task back only while date > today.
-    External/human gates (b/..., cl/..., gh:..., @handle) remain unresolved
-    while present in frontmatter.
+    Every other gate (b/..., cl/..., gh:..., @handle, a URL, free text)
+    remains unresolved while present in frontmatter.
     """
     out: list[str] = []
     for item in row.wait_for:
