@@ -469,7 +469,7 @@ PACKAGE_STAMP="$XDG_CACHE_HOME/dotfiles/last_package_update"
 # 24 hours (1 day), and --force was not specified.
 function is_fresh {
   local stamp=$1
-  [ "$FORCE" -ne 1 ] && [ -f "$stamp" ] && find "$stamp" -maxdepth 0 -mtime -1 2>/dev/null | grep -q .
+  [ "$FORCE" -ne 1 ] && [ -f "$stamp" ] && [[ -n "$(find "$stamp" -maxdepth 0 -mtime -1 2>/dev/null)" ]]
 }
 
 function touch_stamp {
@@ -1030,7 +1030,7 @@ function feature_fish_completions {
   if exists fish; then
     # shellcheck disable=SC2016 # Variable expands in fish shell, not bash
     fish_completions_dir=$(fish -c 'echo $__fish_cache_dir/generated_completions' 2>/dev/null)
-    if [[ -n "$fish_completions_dir" ]] && ! find "$fish_completions_dir" -maxdepth 0 -mtime -7 2>/dev/null | grep -q .; then
+    if [[ -n "$fish_completions_dir" ]] && [[ -z "$(find "$fish_completions_dir" -maxdepth 0 -mtime -7 2>/dev/null)" ]]; then
       echo "Updating fish completions..."
       fish -c fish_update_completions
     fi
@@ -1104,7 +1104,7 @@ function packages_brew {
   fi
 
   # The non-HEAD version is years old...
-  if [[ " $features " == *" base "* ]] && ! echo "$installed_formulae" | grep -qx "jed"; then
+  if [[ " $features " == *" base "* ]] && ! grep -qx "jed" <<<"$installed_formulae"; then
     x brew install jed --HEAD
   fi
 
@@ -1114,14 +1114,14 @@ function packages_brew {
   fi
 
   # Special handling for imagemagick-full (needs manual linking due to conflicts)
-  if echo "$installed_formulae $to_install" | grep -qw "imagemagick-full"; then
-    if ! brew link --dry-run imagemagick-full 2>&1 | grep -q "Already linked"; then
+  if grep -qw "imagemagick-full" <<<"$installed_formulae $to_install"; then
+    if [[ "$(brew link --dry-run imagemagick-full 2>&1)" != *"Already linked"* ]]; then
       x brew link --overwrite imagemagick-full
     fi
   fi
 
   for cask in $(packages_for cask "$features"); do
-    if ! echo "$installed_casks" | grep -qx "$cask"; then
+    if ! grep -qx "$cask" <<<"$installed_casks"; then
       x brew install --cask "$cask"
     fi
   done

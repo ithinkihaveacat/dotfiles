@@ -115,7 +115,20 @@ printf '%s\n' "$output" | grep -q "expected text"
 # Robust, in-process, and faster
 [[ "$output" == *"expected text"* ]]
 [[ "$output" =~ expected\ +pattern ]]
+
+# Where grep's own matching is needed (BRE, -i, -x, line anchors)
+grep -qx 'expected line' <<<"$output"
 ```
+
+Never pipe output into `grep -q` (or `--quiet`), whether from `echo`, `printf`,
+or any other command. `grep -q` exits at its first match; if the writer is still
+writing, it gets `EPIPE`, and `pipefail` turns that into a failed check even
+though the text was found. The writer is only still writing once its output
+exceeds the pipe buffer (64 KiB on Linux), and then only if grep wins the race,
+so the failure is intermittent: it passes locally and fails in CI. Some runners
+ignore `SIGPIPE`, so the writer also prints `write error: Broken pipe` to
+stderr. Capture the output first (a variable, or `$(...)` inside `[[ ]]`), then
+match it with `[[ ]]` or a here-string, as above.
 
 ## Script Documentation Guidelines
 
