@@ -21,6 +21,7 @@ pick their own. Prints TAP.
 """
 
 import concurrent.futures
+import http.client
 import importlib.machinery
 import importlib.util
 import json
@@ -273,6 +274,26 @@ class Http:
                 return resp.status, json.load(resp)
         except urllib.error.HTTPError as e:
             return e.code, e.read().decode()
+
+    def declare(self, length: int) -> tuple[int, str]:
+        """The reply to a POST that declares a body of LENGTH bytes and sends
+        none of it. A server that refuses an oversize request on its declared
+        length answers at once; sending the body as well races that answer,
+        which closes the connection mid-upload (a broken pipe or a reset). A
+        server that would accept the body waits for it, and this times out."""
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        try:
+            conn.putrequest("POST", "/mcp")
+            conn.putheader("content-type", "application/json")
+            conn.putheader("accept", "application/json, text/event-stream")
+            conn.putheader("content-length", str(length))
+            conn.endheaders()
+            resp = conn.getresponse()
+            return resp.status, resp.read().decode()
+        except OSError as e:
+            return 0, f"{type(e).__name__}: {e}"
+        finally:
+            conn.close()
 
     def call(self, tool: str, args: dict) -> tuple[bool, dict | str]:
         msg = {
@@ -585,13 +606,12 @@ def http_checks(tap: Tap, tracker: Tracker, http: Http) -> None:
     # 9. Malformed and refused requests change nothing.
     before = tracker.head()
     bad = []
-    for name, body, want in (
-        ("not JSON", b"{not json", 400),
-        ("oversize request", b" " * (1024 * 1024 + 1), 413),
-    ):
-        got = http.post(body)
-        if got[0] != want:
-            bad.append((name, got))
+    got = http.post(b"{not json")
+    if got[0] != 400:
+        bad.append(("not JSON", got))
+    got = http.declare(1024 * 1024 + 1)
+    if got[0] != 413:
+        bad.append(("oversize request", got))
     refusals = [
         (
             "changes not a list",
