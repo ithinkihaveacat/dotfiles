@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import base64
 import contextlib
 import contextvars
 import datetime
@@ -106,10 +105,12 @@ def log_line(msg: str) -> None:
 
 
 # --- Request log ---------------------------------------------------------------
-# The request log of this repository's MCP servers. skill-mcp and pinboard-mcp
-# carry this block verbatim (a test compares them); taskgo and andon write the
-# same records with code of their own. Change all of them together. Each file
-# defines PROG, VERSION, LOG_ARGS and LOG_HASHED outside the block.
+# The request log writer of this repository's MCP servers. skill-mcp and
+# pinboard-mcp carry this block; taskgo and andon write the same records with
+# code of their own. `mcp logs` reads them all, and its format reference
+# (skills/agent-config/references/mcp-logs.md) is the specification; each
+# server's tests check its records against it. Each file defines PROG, VERSION,
+# LOG_ARGS and LOG_HASHED outside the block.
 #
 # One JSON line per message, and per job the server starts itself, in --log,
 # else <TOOL>_MCP_LOG, else $XDG_STATE_HOME/<tool>/mcp.jsonl; rotated at 8 MiB
@@ -132,14 +133,10 @@ def log_line(msg: str) -> None:
 #   commit     a Git commit the call made or read
 #   version    the server's
 # plus a tool's own fields (pinboard: result, retry_after; skill: scope). Over
-# HTTP, GET /up is open and unlogged and reports version and source commit;
-# /logs and /logs/records show the latest records behind the endpoint's auth.
+# HTTP, GET /up is open and unlogged and reports version and source commit.
 
 LOG_ROTATE_BYTES = 8 * 1024 * 1024
 LOG_ROTATED = 4  # FILE.1 (newest) to FILE.4
-LOG_RING = 500  # records an HTTP server keeps for its log page
-LOGS_PATH = "/logs"
-LOGS_DATA_PATH = "/logs/records"
 MAX_REQUEST_BYTES = 1024 * 1024
 CALLER_CLAIMS = ("sub", "email", "client_id", "azp")
 LOG_QUOTED = re.compile(r"'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"")
@@ -245,42 +242,14 @@ EVENT: contextvars.ContextVar[Event | None] = contextvars.ContextVar(
 )
 
 
-def log_files(path: Path) -> list[Path]:
-    """PATH and its rotated files that exist, oldest first."""
-    rotated = [Path(f"{path}.{i}") for i in range(LOG_ROTATED, 0, -1)]
-    return [f for f in [*rotated, path] if f.is_file()]
-
-
-def log_records(f: Path, since: float = 0) -> list[dict[str, Any]]:
-    """The records in F from SINCE on, skipping lines that are not records
-    (a write cut short leaves a partial line)."""
-    records = []
-    with open(f, encoding="utf-8", errors="replace") as fh:
-        for raw in fh:
-            try:
-                rec = json.loads(raw)
-                at = datetime.datetime.fromisoformat(rec["ts"]).timestamp()
-            except (ValueError, TypeError, KeyError):
-                continue
-            if at >= since:
-                records.append(rec)
-    return records
-
-
 class RequestLog:
-    """Each record goes to stderr, the log file and, for the log page, the
-    latest KEEP in memory. Logging never fails a request: a record the file
-    cannot take is dropped there, with one warning. Servers may share the
-    file; each append and rotation holds an exclusive lock on it."""
+    """Each record goes to stderr and the log file. Logging never fails a
+    request: a record the file cannot take is dropped there, with one
+    warning. Servers may share the file; each append and rotation holds an
+    exclusive lock on it."""
 
-    def __init__(self, path: Path | None, keep: int = 0):
-        import collections
-        import secrets
-
+    def __init__(self, path: Path | None):
         self.path = path
-        self.recent: collections.deque[dict[str, Any]] = collections.deque(maxlen=keep)
-        self.seq = 0  # records emitted; the page's cursor
-        self.instance = secrets.token_hex(4)  # this process's run of records
         self.warned = False
         self.lock = threading.Lock()
 
@@ -292,11 +261,9 @@ class RequestLog:
             if k not in ("ts", "args", "version")
         )
         print(f"{PROG}: request {line}", file=sys.stderr, flush=True)
+        if self.path is None:
+            return
         with self.lock:
-            self.seq += 1
-            self.recent.append(rec)
-            if self.path is None:
-                return
             try:
                 self.append(json.dumps(rec, ensure_ascii=False) + "\n")
             except OSError as e:
@@ -332,69 +299,6 @@ class RequestLog:
                     fh.write(line)
                 return
         raise OSError(f"{self.path} kept being rotated")
-
-    def since(self, cursor: int) -> list[dict[str, Any]]:
-        with self.lock:
-            kept = list(self.recent)
-            return kept[max(0, len(kept) - (self.seq - cursor)) :]
-
-
-def percentile(values: list[int], pct: int) -> int | None:
-    ordered = sorted(values)
-    return ordered[max(0, -(-len(ordered) * pct // 100) - 1)] if ordered else None
-
-
-def print_requests(path: Path, days: float, as_json: bool) -> int:
-    """Prints requests and failures, with latency, per client and per tool."""
-    if not days > 0:
-        print(f"{PROG}: --days must be more than 0, not {days:g}", file=sys.stderr)
-        return 1
-    if not log_files(path):
-        print(f"{PROG}: no request log at {path}", file=sys.stderr)
-        return 1
-    since = time.time() - days * 86400
-    try:
-        records = [rec for f in log_files(path) for rec in log_records(f, since)]
-    except OSError as e:
-        print(f"{PROG}: cannot read {path}: {e}", file=sys.stderr)
-        return 1
-    outcomes: dict[str, int] = {}
-    for rec in records:
-        outcomes[rec.get("outcome", "")] = outcomes.get(rec.get("outcome", ""), 0) + 1
-    groups: dict[str, list[dict[str, Any]]] = {}
-    for key in ("agent", "tool"):
-        rows: dict[str, list[dict[str, Any]]] = {}
-        for rec in records:
-            name = rec.get(key) or (rec["transport"] if key == "agent" else None)
-            if name:
-                rows.setdefault(str(name), []).append(rec)
-        groups[key] = [
-            {
-                key: name,
-                "requests": len(recs),
-                "failed": sum(r.get("outcome") != "ok" for r in recs),
-                "p50_ms": percentile([r.get("ms", 0) for r in recs], 50),
-                "p95_ms": percentile([r.get("ms", 0) for r in recs], 95),
-            }
-            for name, recs in sorted(rows.items(), key=lambda kv: -len(kv[1]))
-        ]
-    if as_json:
-        stats = {"log": str(path), "days": days, "requests": len(records)}
-        stats |= {"outcomes": outcomes, "agents": groups["agent"]}
-        print(json.dumps(stats | {"tools": groups["tool"]}, indent=2))
-        return 0
-    print(f"Log: {path} (last {days:g} days)\nRequests: {len(records)}")
-    print("Outcomes: " + (", ".join(f"{k} {v}" for k, v in outcomes.items()) or "-"))
-    for key, title in (("agent", "Client"), ("tool", "Tool")):
-        if groups[key]:
-            width = max(len(title), *(len(log_text(r[key], 30)) for r in groups[key]))
-            print(f"\n{title:<{width}}  Requests  Failed  p50 ms  p95 ms")
-            for r in groups[key]:
-                print(
-                    f"{log_text(r[key], 30):<{width}}  {r['requests']:>8}  "
-                    f"{r['failed']:>6}  {r['p50_ms']:>6}  {r['p95_ms']:>6}"
-                )
-    return 0
 
 
 def source_commit() -> str | None:
@@ -445,77 +349,6 @@ def request_logging(log: RequestLog) -> Any:
     return logged
 
 
-# The log page: static, with every value inserted as text, polling
-# LOGS_DATA_PATH (a buffering proxy holds a stream back). The script is pinned
-# by its hash in the page's CSP.
-LOGS_SCRIPT = """
-const KEYS = ["method", "tool", "outcome", "status", "ms", "reason"];
-const state = { server: "", next: 0 };
-const rows = document.getElementById("rows");
-const status = document.getElementById("status");
-
-function row(rec) {
-  const tr = document.createElement("tr");
-  if (rec.outcome !== "ok") tr.className = "fail";
-  const rest = { ...rec.args };
-  for (const [k, v] of Object.entries(rec))
-    if (![...KEYS, "ts", "args", "transport", "agent", "http", "version"].includes(k)) rest[k] = v;
-  const cells = [new Date(rec.ts).toLocaleTimeString([], { hour12: false }),
-    (rec.agent || rec.transport).slice(0, 24), rec.method || rec.event, rec.tool,
-    Object.entries(rest).map(([k, v]) => `${k}=${v}`).join(" "),
-    rec.outcome, rec.status, rec.ms, rec.reason];
-  for (const c of cells) tr.insertCell().textContent = c == null ? "" : String(c);
-  return tr;
-}
-
-async function poll() {
-  let delay = 1000;
-  try {
-    const q = `?after=${state.next}&server=${encodeURIComponent(state.server)}`;
-    const reply = await fetch("@DATA@" + q, { cache: "no-store" });
-    if (!reply.ok) throw new Error(`HTTP ${reply.status}`);
-    const data = await reply.json();
-    if (data.server !== state.server) rows.replaceChildren();
-    Object.assign(state, { server: data.server, next: data.next });
-    for (const rec of data.records) rows.prepend(row(rec));
-    while (rows.children.length > @RING@) rows.lastElementChild.remove();
-    status.textContent = `live \\u00b7 server ${data.version}`;
-  } catch (e) {
-    status.textContent = `disconnected (${e.message}); reload to sign in again`;
-    delay = 5000;
-  }
-  setTimeout(poll, delay);
-}
-
-poll();
-""".replace("@DATA@", LOGS_DATA_PATH).replace("@RING@", str(LOG_RING))
-LOGS_CSP = (
-    "default-src 'none'; style-src 'unsafe-inline'; img-src data:; "
-    "connect-src 'self'; script-src 'sha256-"
-    + base64.b64encode(hashlib.sha256(LOGS_SCRIPT.encode()).digest()).decode()
-    + "'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
-)
-LOGS_PAGE = f"""<!doctype html>
-<html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{PROG} requests</title><link rel="icon" href="data:,">
-<style>
-:root {{ color-scheme: light dark; --line: #8884; --fail: #d334; }}
-body {{ margin: 0; padding: 16px; font: 14px/1.4 system-ui, sans-serif; }}
-h1 {{ font-size: 18px; margin: 0 0 12px; }} #status {{ font-weight: normal; opacity: .7; }}
-div {{ overflow-x: auto; }}
-table {{ border-collapse: collapse; width: 100%; font: 12px/1.4 ui-monospace, monospace; }}
-td {{ padding: 3px 8px 3px 0; border-bottom: 1px solid var(--line); vertical-align: top; }}
-thead td {{ font-weight: 600; }} tr.fail td {{ background: var(--fail); }}
-</style></head><body>
-<h1>{PROG} requests <span id="status">connecting</span></h1>
-<div><table><thead><tr><td>Time</td><td>Client</td><td>Method</td><td>Tool</td>
-<td>Arguments</td><td>Outcome</td><td>Status</td><td>ms</td><td>Reason</td></tr></thead>
-<tbody id="rows"></tbody></table></div>
-<script>{LOGS_SCRIPT}</script></body></html>
-"""
-
-
 async def http_reply(
     send: Any, status: int, text: str, ctype: str = "text/plain", extra: Any = ()
 ) -> None:
@@ -528,13 +361,11 @@ async def http_reply(
 
 
 class LoggingGate:
-    """ASGI, in front of the SDK's app: the health check, the log page, the
-    Access check, and one record for each request but the page's polls."""
+    """ASGI, in front of the SDK's app: the health check, the Access check,
+    and one record for each request, refusals included."""
 
-    def __init__(self, app: Any, verifier: Any, log: RequestLog, hosts: list[str]):
+    def __init__(self, app: Any, verifier: Any, log: RequestLog):
         self.app, self.verifier, self.log = app, verifier, log
-        names = [h.lower().rsplit(":", 1)[0] if "]" not in h else h for h in hosts]
-        self.hosts = {"127.0.0.1", "localhost", "[::1]", *names}
         health = {"status": "ok", "version": VERSION, "commit": source_commit()}
         self.health = json.dumps(health)
 
@@ -554,14 +385,9 @@ class LoggingGate:
         event = Event("http", http=method, agent=headers.get("user-agent"))
         token = EVENT.set(event)
         refusal = self.refusal(headers, event)
-        page = path in (LOGS_PATH, LOGS_DATA_PATH)
-        if refusal is None and method != ("GET" if page else "POST"):
+        if refusal is None and method != "POST":
             # No server-initiated stream (GET), and no sessions to delete.
             refusal = 405, "method not allowed", ()
-        if refusal is None and page:
-            await self.logs(scope, send)
-            EVENT.reset(token)
-            return
 
         async def sending(message: dict[str, Any]) -> None:
             if message["type"] == "http.response.start":
@@ -592,11 +418,8 @@ class LoggingGate:
         """(status, reason, headers) if the request may not proceed. A token
         gives the request its caller key, from its claims."""
         if self.verifier is None:
-            # The SDK checks the Host header of MCP requests; check the log
-            # page's here, against DNS rebinding.
-            host = headers.get("host", "").lower()
-            name = host if host.endswith("]") else host.rsplit(":", 1)[0]
-            return None if name in self.hosts else (421, "host not allowed", ())
+            # Loopback only; the SDK checks the Host header against rebinding.
+            return None
         token = headers.get("cf-access-jwt-assertion")
         if not token:
             bearer = (("www-authenticate", "Bearer"),)
@@ -607,23 +430,6 @@ class LoggingGate:
             return 403, str(e), ()
         event.caller = caller_key(*(claims.get(k) for k in CALLER_CLAIMS))
         return None
-
-    async def logs(self, scope: dict[str, Any], send: Any) -> None:
-        """The page, or the records after the page's cursor; not logged."""
-        from urllib.parse import parse_qs
-
-        private = (("cache-control", "no-store"), ("x-content-type-options", "nosniff"))
-        if scope["path"] == LOGS_PATH:
-            csp = (("content-security-policy", LOGS_CSP),)
-            await http_reply(send, 200, LOGS_PAGE, "text/html", (*private, *csp))
-            return
-        query = parse_qs(scope.get("query_string", b"").decode("latin-1"))
-        after = query.get("after", ["0"])[0]
-        same = query.get("server", [""])[0] == self.log.instance
-        cursor = int(after) if after.isdigit() and same else 0
-        payload = {"server": self.log.instance, "version": VERSION}
-        payload |= {"next": self.log.seq, "records": self.log.since(cursor)}
-        await http_reply(send, 200, json.dumps(payload), "application/json", private)
 
 
 # --- End of request log --------------------------------------------------------
@@ -1399,11 +1205,11 @@ def serve_http(
     auth = f"Access {verifier.team}" if verifier else "no authentication"
     log_line(
         f"serving {MCP_PATH} on http://{host}:{port} ({auth}); "
-        f"request log {svc.log.path}, page {LOGS_PATH}"
+        f"request log {svc.log.path}"
     )
     app = Starlette(routes=mcp_app.routes, lifespan=lifespan)
     uvicorn.run(
-        LoggingGate(app, verifier, svc.log, allow_hosts),
+        LoggingGate(app, verifier, svc.log),
         host=host,
         port=port,
         log_level="warning",
@@ -1437,7 +1243,7 @@ Examples:
   pinboard mcp --http
   pinboard mcp --http --host 0.0.0.0 --allow-host pinboard.example.com \\
     --access-team example.cloudflareaccess.com --access-aud AUD
-  pinboard mcp --requests --days 1
+  mcp logs --server pinboard --since 1d
 
 Over stdio the server never syncs on its own; call the sync tool, or run
 'pinboard sync'. Over HTTP (at {MCP_PATH}) it also syncs whenever the last sync
@@ -1448,8 +1254,7 @@ Every request and scheduled sync is appended to the request log as a JSON
 record (rotated at 8 MiB, four old files kept) and printed to stderr: its
 method, tool, outcome and duration; for a write, only its URL's host; for a
 search, a hash of its text; for a sync, its counts. Never titles, notes, URLs,
-or the token. --requests summarises the log; over HTTP, GET {LOGS_PATH} shows the
-latest records, behind the same authentication as {MCP_PATH}.
+or the token. 'mcp logs' reads and summarises the log.
 
 The HTTP server serves GET /up without a token for a proxy's health check,
 answering with its version and source commit.
@@ -1541,29 +1346,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--log", metavar="FILE", help=f"Request log (default: ${LOG_ENV})"
     )
-    parser.add_argument(
-        "--requests", action="store_true", help="Summarise the request log and exit"
-    )
-    parser.add_argument(
-        "--days",
-        type=float,
-        default=7,
-        metavar="N",
-        help="With --requests, the days to summarise (default: 7)",
-    )
-    parser.add_argument(
-        "--json", action="store_true", help="With --requests, print JSON"
-    )
     return parser
 
 
 def main() -> int:
     args = build_parser().parse_args()
     log_path = Path(args.log or os.environ.get(LOG_ENV) or default_log()).expanduser()
-    if args.requests:
-        return print_requests(log_path, args.days, args.json)
-    if args.json or args.days != 7:
-        die("--days and --json apply only to --requests")
     team = args.access_team or os.environ.get("PINBOARD_MCP_ACCESS_TEAM")
     audience = args.access_aud or os.environ.get("PINBOARD_MCP_ACCESS_AUD")
     if bool(team) != bool(audience):
@@ -1597,7 +1385,7 @@ def main() -> int:
         log_line(
             f"{pb.TOKEN_ENV} is not set; reads work, but writes and sync will fail"
         )
-    log = RequestLog(log_path, LOG_RING if args.http else 0)
+    log = RequestLog(log_path)
     svc = Service(args.repo, log, hours if args.http else 0)
     if args.http:
         serve_http(svc, args.host, args.port, args.allow_host, verifier)

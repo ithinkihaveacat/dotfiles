@@ -26,6 +26,7 @@ import contextlib
 import inspect
 import json
 import os
+import re
 import shutil
 import signal
 import socket
@@ -52,9 +53,25 @@ sys.path.insert(0, str(HERE / "fixtures"))
 from fake_pinboard import API, FAKE, TOKEN  # noqa: E402
 
 BIN = HERE.parent / "scripts" / "pinboard"
+LOG_FORMAT = HERE.parents[1] / "agent-config" / "references" / "mcp-logs.md"
 TEAM, AUD = "test.invalid", "test-aud"
 OLD = "2020-03-04T05:06:07Z"
 STALE = time.time() - 3 * 86400
+
+
+def log_format() -> tuple[set[str], set[str]]:
+    """The fields and outcomes the request log reference lists, from the first
+    column of its Field and Outcome tables."""
+    tables: dict[str, set[str]] = {"Field": set(), "Outcome": set()}
+    current = None
+    for line in LOG_FORMAT.read_text().splitlines():
+        if m := re.match(r"\| (Field|Outcome) ", line):
+            current = tables[m[1]]
+        elif m := re.match(r"\| `([\w-]+)` ", line):
+            current.add(m[1])
+        elif not line.startswith("|"):
+            current = None
+    return tables["Field"], tables["Outcome"]
 
 
 def bypass_proxy_for_loopback() -> None:
@@ -451,6 +468,7 @@ class PinboardMcpTests(unittest.TestCase):
             {"reason": "failed", "outcome": "tool-error"},
             [{k: r.get(k) for k in ("reason", "outcome")} for r in records],
         )
+        self.assert_log_format(records)
 
     async def test_sync_gate(self):
         env = {"PINBOARD_TIME_SCALE": "0.01"}  # posts/all once every 3 s
@@ -610,22 +628,25 @@ class PinboardMcpTests(unittest.TestCase):
                 self.assertEqual(self.calls(), before)
                 self.assertEqual(self.records()[-1]["transport"], "http")
 
-                # The log page and its records need a token too.
+                # There is no log page: GET needs a token, then is refused.
                 for path in ("/logs", "/logs/records"):
                     got = await http.get(base + path)
                     self.assertEqual(got.status_code, 401, path)
                 authed = {"cf-access-jwt-assertion": jwt(key)}
                 page = await http.get(base + "/logs", headers=authed)
-                self.assertEqual(page.status_code, 200)
-                self.assertIn("pinboard mcp requests", page.text)
-                data = (await http.get(base + "/logs/records", headers=authed)).json()
-                kept = data["records"]
+                self.assertEqual(page.status_code, 405)
+                for _ in range(50):
+                    kept = [r for r in self.records() if r["transport"] == "http"]
+                    if kept and kept[-1].get("status") == 405:
+                        break
+                    await asyncio.sleep(0.1)
                 search = next(r for r in kept if r.get("tool") == "search_bookmarks")
                 self.assertRegex(search["caller"], r"^[0-9a-f]{10}$")
                 self.assertEqual(
                     [r["status"] for r in kept if r["outcome"] == "refused"],
-                    [401, 403, 403, 401, 401],
+                    [401, 403, 403, 401, 401, 405],
                 )
+                self.assert_log_format(kept)
                 self.assertNotIn("lemon", self.log.read_text())
         finally:
             certs.shutdown()
@@ -656,27 +677,20 @@ class PinboardMcpTests(unittest.TestCase):
         res = run("--help")
         self.assertEqual(res.returncode, 0)
         self.assertIn("--sync-every", res.stdout)
-        res = run("--requests")
-        self.assertEqual(res.returncode, 1)
-        self.assertIn("no request log", res.stderr)
 
-    async def test_requests_summary(self, client):
-        await self.tool(client, "list_tags")
-        await self.tool(client, "search_bookmarks", {"query": "lemon"})
-        res = await asyncio.to_thread(
-            subprocess.run,
-            [str(BIN), "mcp", "--requests", "--json"],
-            capture_output=True,
-            text=True,
-            env=self.env,
-            timeout=60,
-            check=False,
-        )
-        self.assertEqual(res.returncode, 0, res.stderr)
-        stats = json.loads(res.stdout)
-        self.assertEqual(
-            {row["tool"] for row in stats["tools"]}, {"list_tags", "search_bookmarks"}
-        )
+    def assert_log_format(self, records: list[dict[str, Any]]) -> None:
+        """Each record has only the fields, and an outcome, that the request
+        log reference (agent-config's references/mcp-logs.md) lists, so
+        'mcp logs' can read it."""
+        fields, outcomes = log_format()
+        self.assertIn("retry_after", fields)
+        self.assertIn("refused", outcomes)
+        self.assertTrue(records)
+        for rec in records:
+            self.assertLessEqual(set(rec), fields, rec)
+            self.assertLessEqual({"ts", "transport", "outcome", "ms"}, set(rec))
+            self.assertIn(rec["outcome"], outcomes)
+            self.assertRegex(rec["ts"], r"^\d{4}-\d\d-\d\dT[\d:.]+Z$")
 
     def test_symlinked_entry_point(self):
         """The installed layout is a symlink: either entry point, or a link to
@@ -786,6 +800,7 @@ class PinboardMcpTests(unittest.TestCase):
             [(r["event"], r["tool"], r["outcome"], r["result"]) for r in runs],
             [("sync", "sync", "ok", "+1 ~0 -0")],
         )
+        self.assert_log_format(runs)
         with FAKE.lock:
             updates = FAKE.count("posts/update")
 

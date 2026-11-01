@@ -154,11 +154,10 @@ skill <command> [arguments]
   where the same skills are not installed locally, so each skill is not offered
   twice. Every request is a record in a JSON request log (`SKILL_MCP_LOG`, else
   `$XDG_STATE_HOME/skill/mcp.jsonl`) naming the method, tool, skill or URI,
-  outcome and an edit's commit, never file text or edits; `--requests`
-  summarises it, and over HTTP `GET /logs` shows the latest records behind the
-  same authentication as `/mcp`. The server is `scripts/skill-mcp`, which
-  `permission apply` does not pre-approve; a copy or hardlink outside the skill
-  tree must set `SKILL_MCP_SKILL_DIR` to the skill root. See `skill mcp --help`.
+  outcome and an edit's commit, never file text or edits; `mcp logs` reads it.
+  The server is `scripts/skill-mcp`, which `permission apply` does not
+  pre-approve; a copy or hardlink outside the skill tree must set
+  `SKILL_MCP_SKILL_DIR` to the skill root. See `skill mcp --help`.
 
 ### Choosing Skills (Workspace vs. Session)
 
@@ -570,3 +569,5 @@ permission clean
   OpenCode adapters share the `andon` store.
 - **[The agent-config model](references/model.md)** — Scopes, link provenance,
   who seeds the defaults, and what `doctor` checks.
+- **[MCP request logs](references/mcp-logs.md)** — The record format every MCP
+  server writes and `mcp logs` reads.

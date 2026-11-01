@@ -195,9 +195,7 @@ pinboard mcp --http                          # loopback only, no authentication
 - Each request and scheduled sync is a record in
   `~/.local/state/pinboard/mcp.jsonl` (or `--log`), rotated at 8 MiB: the
   method, tool, outcome and duration, the host of a written URL and a hash of
-  search text, never titles, notes or the token. `pinboard mcp --requests`
-  summarises it, and over HTTP `GET /logs` shows the latest records behind the
-  same authentication as `/mcp`.
+  search text, never titles, notes or the token. `mcp logs` reads it.
 - The server is `scripts/pinboard-mcp`, which `permission apply` does not
   pre-approve; a copy or hardlink outside the skill tree must set
   `PINBOARD_SKILL_DIR` to the skill root.

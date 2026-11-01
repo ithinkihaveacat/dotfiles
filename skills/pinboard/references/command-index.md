@@ -346,7 +346,6 @@ Examples:
 Usage: pinboard mcp [-h] [--repo DIR] [--http] [--host HOST] [--port PORT]
                     [--allow-host HOST] [--access-team HOST]
                     [--access-aud AUD] [--sync-every HOURS] [--log FILE]
-                    [--requests] [--days N] [--json]
 
 Serve the Pinboard mirror to agents over MCP: search it, and add
 or update bookmarks through the API.
@@ -367,9 +366,6 @@ Options:
   --sync-every HOURS  With --http, sync when the last sync is this old
                       (default: 24; 0 never syncs on its own)
   --log FILE          Request log (default: $PINBOARD_MCP_LOG)
-  --requests          Summarise the request log and exit
-  --days N            With --requests, the days to summarise (default: 7)
-  --json              With --requests, print JSON
 
 Tools:
   search_bookmarks, get_bookmark, list_tags   read the mirror; never the API
@@ -393,7 +389,7 @@ Examples:
   pinboard mcp --http
   pinboard mcp --http --host 0.0.0.0 --allow-host pinboard.example.com \
     --access-team example.cloudflareaccess.com --access-aud AUD
-  pinboard mcp --requests --days 1
+  mcp logs --server pinboard --since 1d
 
 Over stdio the server never syncs on its own; call the sync tool, or run
 'pinboard sync'. Over HTTP (at /mcp) it also syncs whenever the last sync
@@ -404,8 +400,7 @@ Every request and scheduled sync is appended to the request log as a JSON
 record (rotated at 8 MiB, four old files kept) and printed to stderr: its
 method, tool, outcome and duration; for a write, only its URL's host; for a
 search, a hash of its text; for a sync, its counts. Never titles, notes, URLs,
-or the token. --requests summarises the log; over HTTP, GET /logs shows the
-latest records, behind the same authentication as /mcp.
+or the token. 'mcp logs' reads and summarises the log.
 
 The HTTP server serves GET /up without a token for a proxy's health check,
 answering with its version and source commit.

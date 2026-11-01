@@ -87,10 +87,10 @@ network: caching under `$XDG_CACHE_HOME`, strict offline mode enforcement via
 
 ### Long-Running Servers
 
-Servers log one content-free record per request, bounded on disk and readable
-where they run, and servers of one kind (this repository's MCP servers) match
-each other, taking the existing ones as their specification. See
-**[references/servers.md](references/servers.md)**.
+Servers log one content-free record per request, bounded on disk, and leave
+reading the logs to one separate reader; servers of one kind (this repository's
+MCP servers) match each other, taking the existing ones as their specification.
+See **[references/servers.md](references/servers.md)**.
 
 ### Git Operations & Commit Messages
 

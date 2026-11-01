@@ -19,6 +19,7 @@ import hashlib
 import inspect
 import json
 import os
+import re
 import shutil
 import signal
 import socket
@@ -40,6 +41,7 @@ from mcp.shared.exceptions import MCPError
 from pydantic import TypeAdapter
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "skill"
+LOG_FORMAT = SCRIPT.parents[1] / "references" / "mcp-logs.md"
 ANY = TypeAdapter(dict)
 # A request whose params pass through as written: the extension's methods
 # have no model in mcp_types.
@@ -59,6 +61,21 @@ def git(cwd, *args):
     subprocess.run(
         ["git", "-C", str(cwd), *args], check=True, capture_output=True, text=True
     )
+
+
+def log_format() -> tuple[set[str], set[str]]:
+    """The fields and outcomes the request log reference lists, from the first
+    column of its Field and Outcome tables."""
+    tables: dict[str, set[str]] = {"Field": set(), "Outcome": set()}
+    current = None
+    for line in LOG_FORMAT.read_text().splitlines():
+        if m := re.match(r"\| (Field|Outcome) ", line):
+            current = tables[m[1]]
+        elif m := re.match(r"\| `([\w-]+)` ", line):
+            current.add(m[1])
+        elif not line.startswith("|"):
+            current = None
+    return tables["Field"], tables["Outcome"]
 
 
 def blob(data: bytes) -> str:
@@ -377,32 +394,30 @@ class SkillMcpTests(unittest.TestCase):
                         )
                         return reply.status_code
 
-                    records = await http.get(base + "/logs/records")
-                    self.assertEqual(records.status_code, 200)
-                    data = records.json()
-                    tools = [r.get("tool") for r in data["records"]]
+                    # The servers keep no log page: GET is refused, and recorded.
+                    for path in ("/logs", "/logs/records", "/mcp/all"):
+                        reply = await http.get(base + path)
+                        self.assertEqual(reply.status_code, 405, path)
+                    log = self.tmp / "log" / "mcp.jsonl"
+                    for _ in range(50):
+                        records = [
+                            json.loads(line) for line in log.read_text().splitlines()
+                        ]
+                        if sum(r.get("http") == "GET" for r in records) == 3:
+                            break
+                        await asyncio.sleep(0.1)
+                    tools = [r.get("tool") for r in records]
                     self.assertEqual(tools.count("load_skill"), 2)
                     self.assertEqual(
-                        {r["scope"] for r in data["records"] if r.get("tool")},
+                        {r["scope"] for r in records if r.get("tool")},
                         {"one", "all"},
                     )
-                    again = await http.get(
-                        base + "/logs/records",
-                        params={"after": data["next"], "server": data["server"]},
+                    refused = [r for r in records if r.get("http") == "GET"]
+                    self.assertEqual(
+                        {(r["outcome"], r["status"]) for r in refused},
+                        {("refused", 405)},
                     )
-                    self.assertEqual(again.json()["records"], [])
-                    page = await http.get(base + "/logs")
-                    self.assertIn(
-                        "script-src 'sha256-", page.headers["content-security-policy"]
-                    )
-                    rebound = await http.get(
-                        base + "/logs", headers={"host": "evil.example"}
-                    )
-                    self.assertEqual(rebound.status_code, 421)
-                    allowed = await http.get(
-                        base + "/logs", headers={"host": "skills.test"}
-                    )
-                    self.assertEqual(allowed.status_code, 200)
+                    self.assert_log_format(records)
                     self.assertEqual(await status("/mcp/nope"), 404)
                     self.assertEqual(await status("/mcp/all", "evil.example"), 421)
                     self.assertNotEqual(await status("/mcp/all", "skills.test"), 421)
@@ -613,14 +628,7 @@ class SkillMcpTests(unittest.TestCase):
         read = [r for r in records if r.get("method") == "resources/read"]
         self.assertEqual(read[0]["args"], {"uri": "skill://alpha/references/notes.md"})
 
-        out = await asyncio.to_thread(self.cli, "--requests")
-        self.assertEqual(out.returncode, 0, out.stderr)
-        self.assertIn("Outcomes: ok", out.stdout)
-        self.assertIn("edit_file", out.stdout)
-        out = await asyncio.to_thread(self.cli, "--requests", "--json")
-        stats = json.loads(out.stdout)
-        tools = {row["tool"]: row for row in stats["tools"]}
-        self.assertEqual(tools["read_file"]["failed"], 1)
+        self.assert_log_format(records)
 
         # An invalid pattern's error quotes it; its record does not.
         await self.tool(client, "search", {"pattern": "[z-a]"}, error=True)
@@ -628,29 +636,19 @@ class SkillMcpTests(unittest.TestCase):
         self.assertEqual(last["reason"], "invalid pattern")
         self.assertNotIn("z-a", log.read_text())
 
-    def test_request_log_block_matches_pinboard(self):
-        """skill-mcp and pinboard-mcp carry one request log block, verbatim,
-        so that a fix to one reaches the other."""
-
-        def block(path: Path) -> str:
-            text = path.read_text()
-            start = text.index("# --- Request log ---")
-            return text[start : text.index("# --- End of request log ---", start)]
-
-        scripts = SCRIPT.parents[2]
-        self.assertEqual(
-            block(scripts / "agent-config/scripts/skill-mcp"),
-            block(scripts / "pinboard/scripts/pinboard-mcp"),
-            "the request log blocks differ; copy the changed one over the other",
-        )
-
-    def test_requests_without_log(self):
-        out = self.cli("--requests")
-        self.assertEqual(out.returncode, 1)
-        self.assertIn("no request log", out.stderr)
-        out = self.cli("--json")
-        self.assertEqual(out.returncode, 1)
-        self.assertIn("apply only to --requests", out.stderr)
+    def assert_log_format(self, records):
+        """Each record has only the fields, and an outcome, that the request
+        log reference (references/mcp-logs.md) lists, so 'mcp logs' can read
+        it."""
+        fields, outcomes = log_format()
+        self.assertIn("caller", fields)
+        self.assertIn("refused", outcomes)
+        self.assertTrue(records)
+        for rec in records:
+            self.assertLessEqual(set(rec), fields, rec)
+            self.assertLessEqual({"ts", "transport", "outcome", "ms"}, set(rec))
+            self.assertIn(rec["outcome"], outcomes)
+            self.assertRegex(rec["ts"], r"^\d{4}-\d\d-\d\dT[\d:.]+Z$")
 
     async def test_edit_keeps_mode(self, client):
         path = self.repo / "skills/alpha/scripts/run"

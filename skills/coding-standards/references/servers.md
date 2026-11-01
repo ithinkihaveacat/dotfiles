@@ -25,10 +25,10 @@ what clients did without attaching a debugger or reading its code.
   appends if several processes share the file. The default location is
   `${XDG_STATE_HOME:-~/.local/state}/<tool>/`, overridable by flag and by a
   `<TOOL>_*` variable.
-- **Readable where the server runs.** A server reached over the network serves
-  its recent records on a page behind the same authentication as its endpoint,
-  and the command line can summarise the file. Replace the HTTP framework's
-  access log rather than keeping both.
+- **Servers write; one reader reads.** A server only appends records. Viewing,
+  filtering, statistics and any web page belong to a separate reader that takes
+  any number of logs, so the servers stay small and one view covers them all.
+  Replace the HTTP framework's access log rather than keeping both.
 - **An unauthenticated health check** that reads nothing private and is not
   logged, so a proxy can poll it.
 
@@ -43,14 +43,14 @@ preference.
 - **The existing servers are the specification.** Before writing or changing
   one, read the others and match them; do not design a new format. Where they
   have drifted, bring them back together rather than adding a third variant.
-- **Share by copying, and test the copies.** Shared code between self-contained
-  scripts is copied, not imported across tools (see "Script Self-Containment" in
-  `cli-tools.md`). Mark the copied region and add a test that fails when the
-  copies differ, so a fix to one reaches the others.
-- **Document the format where it is defined**, at the head of the copied region,
-  rather than in a separate document that can drift from it.
+- **Share by copying.** Shared code between self-contained scripts is copied,
+  not imported across tools (see "Script Self-Containment" in `cli-tools.md`).
+  Mark the copied region, and keep it small enough that the copies are easy to
+  keep in step.
+- **Document the format beside its reader**, in one place, and test each
+  writer's output against it, so that a server that drifts fails its own tests.
 
 In this repository the MCP servers (`taskgo mcp`, `skill mcp`, `pinboard mcp`,
-`andon mcp`) are such a family. The request log block in
-`skills/agent-config/scripts/skill-mcp` (copied verbatim into `pinboard-mcp`) is
-the reference: its header describes the record format.
+`andon mcp`) are such a family. Each writes a request log; `mcp logs` reads
+them, and `skills/agent-config/references/mcp-logs.md` is the record format that
+every server's tests check against.

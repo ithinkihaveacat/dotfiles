@@ -98,9 +98,6 @@ complete -c skill -n '__fish_seen_subcommand_from mcp' -l config -r -F -d 'Confi
 complete -c skill -f -n '__fish_seen_subcommand_from mcp' -l push -d 'Push after each edit commit'
 complete -c skill -f -n '__fish_seen_subcommand_from mcp' -l list -d "Print each scope's skills and exit"
 complete -c skill -n '__fish_seen_subcommand_from mcp' -l log -r -F -d 'Request log'
-complete -c skill -f -n '__fish_seen_subcommand_from mcp' -l requests -d 'Summarise the request log and exit'
-complete -c skill -f -n '__fish_seen_subcommand_from mcp' -l days -x -d 'With --requests, the days to summarise'
-complete -c skill -f -n '__fish_seen_subcommand_from mcp' -l json -d 'With --requests, print JSON'
 
 # Complete flags
 complete -c skill -f -s h -l help -d 'Display help message and exit'
