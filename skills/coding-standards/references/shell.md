@@ -115,7 +115,29 @@ printf '%s\n' "$output" | grep -q "expected text"
 # Robust, in-process, and faster
 [[ "$output" == *"expected text"* ]]
 [[ "$output" =~ expected\ +pattern ]]
+
+# Where grep's own matching is needed (BRE, -i, -x, line anchors)
+grep -qx 'expected line' <<<"$output"
 ```
+
+Never pipe output into `grep -q` (or `--quiet`), whether from `echo`, `printf`,
+or any other command. `grep -q` exits at its first match; if the writer is still
+writing, it gets `EPIPE`, and `pipefail` turns that into a failed check even
+though the text was found. The writer is only still writing once its output
+exceeds the pipe buffer (64 KiB on Linux), and then only if grep wins the race,
+so the failure is intermittent: it passes locally and fails in CI. Some runners
+ignore `SIGPIPE`, so the writer also prints `write error: Broken pipe` to
+stderr. Capture the output in a variable first (`out=$(cmd) && ...`, which also
+keeps the command's exit status), then match it with `[[ ]]` or a here-string,
+as above. A here-string is safe because the shell writes all of it before grep
+starts, to a temporary file or, when it fits, a pipe, so grep stopping early
+cuts nothing off.
+
+In `[[ "$out" == *"$text"* ]]`, quote the expansion on the right: unquoted, any
+`*`, `?` or `[...]` in it is a glob, so `a[1].md` would match `a1.md`. Quoted,
+it matches literally. A here-string adds a trailing newline, so with `grep -v`
+empty output still has one empty line that matches; check `[[ -n "$out" ]]`
+first, or write the condition with `[[ ]]`.
 
 ## Script Documentation Guidelines
 
