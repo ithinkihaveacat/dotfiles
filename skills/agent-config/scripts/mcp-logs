@@ -22,6 +22,10 @@ PROG = "mcp logs"
 LOG_NAME = "mcp.jsonl"
 LOG_ROTATED = 4  # FILE.1 (newest) to FILE.4, as the servers rotate them
 DEFAULT_TAIL = 10
+# Tool calls by one caller this many seconds apart or less form one chain.
+DEFAULT_GAP = 120.0
+SUMMARY_TOP = 10  # commonest call sequences a summary lists
+CLIENT_MAX = 20  # longest client name a summary's columns show
 FOLLOW_POLL = 0.5  # seconds between looks at the files with --follow
 SINCE_RE = re.compile(r"^(\d+(?:\.\d+)?)([smhdw])$")
 SINCE_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 7 * 86400}
@@ -193,6 +197,155 @@ def output(rec: dict[str, Any], as_json: bool, width: int) -> str:
     return line(rec, width)
 
 
+def percentile(values: list[int], pct: int) -> int | None:
+    """The nearest-rank PCT percentile of VALUES."""
+    if not values:
+        return None
+    ordered = sorted(values)
+    return ordered[max(0, -(-len(ordered) * pct // 100) - 1)]
+
+
+def client(rec: dict[str, Any]) -> str:
+    """The client a record came from: its User-Agent, else its transport."""
+    return str(rec.get("agent") or rec.get("transport") or "-")
+
+
+def group(records: list[dict[str, Any]], *keys: str) -> list[dict[str, Any]]:
+    """Requests, failures, latency and result size per value of KEYS, most
+    requests first. A record without a value for the last key is left out."""
+    rows: dict[tuple[str, ...], list[dict[str, Any]]] = {}
+    for rec in records:
+        name = tuple(client(rec) if k == "agent" else rec.get(k) for k in keys)
+        if name[-1] is not None:
+            rows.setdefault(tuple(str(n) for n in name), []).append(rec)
+    out = []
+    for name, recs in rows.items():
+        ms = [r["ms"] for r in recs if isinstance(r.get("ms"), int)]
+        sizes = [r["bytes"] for r in recs if isinstance(r.get("bytes"), int)]
+        out.append(
+            dict(zip(keys, name, strict=True))
+            | {
+                "requests": len(recs),
+                "failed": sum(r.get("outcome") != "ok" for r in recs),
+                "p50_ms": percentile(ms, 50),
+                "p95_ms": percentile(ms, 95),
+                "p50_bytes": percentile(sizes, 50),
+            }
+        )
+    return sorted(out, key=lambda row: (-row["requests"], *(row[k] for k in keys)))
+
+
+def sequences(
+    records: list[dict[str, Any]], gap: float, top: int
+) -> tuple[int, list[dict[str, Any]]]:
+    """The number of chains in RECORDS, and the commonest runs of two or three
+    tool calls within them, by server and client. A chain is one caller's tool
+    calls to one server, each GAP seconds or less after the one before."""
+    chains: list[tuple[str, str, list[str]]] = []
+    open_chains: dict[tuple[Any, ...], tuple[float, list[str]]] = {}
+    for rec in records:
+        # Without a caller key (HTTP with no authentication), calls from
+        # different clients cannot be told apart, so they form no chain.
+        if (
+            rec.get("method") != "tools/call"
+            or rec.get("tool") is None
+            or rec.get("caller") is None
+        ):
+            continue
+        key = (rec["server"], rec.get("transport"), rec["caller"], rec.get("agent"))
+        last = open_chains.get(key)
+        if last is None or rec["at"] - last[0] > gap:
+            calls: list[str] = []
+            chains.append((rec["server"], client(rec), calls))
+        else:
+            calls = last[1]
+        calls.append(str(rec["tool"]))
+        open_chains[key] = (rec["at"], calls)
+    runs: dict[tuple[str, str, tuple[str, ...]], int] = {}
+    for server, agent, calls in chains:
+        for size in (2, 3):
+            for i in range(len(calls) - size + 1):
+                run = (server, agent, tuple(calls[i : i + size]))
+                runs[run] = runs.get(run, 0) + 1
+    common = [
+        {"server": server, "agent": agent, "calls": list(calls), "count": count}
+        for (server, agent, calls), count in sorted(
+            runs.items(), key=lambda kv: (-kv[1], -len(kv[0][2]), kv[0])
+        )
+        if count > 1
+    ]
+    return len(chains), common[:top]
+
+
+def summary(records: list[dict[str, Any]], gap: float) -> dict[str, Any]:
+    """Descriptive statistics over RECORDS, oldest first."""
+    outcomes: dict[str, int] = {}
+    for rec in records:
+        outcome = str(rec.get("outcome"))
+        outcomes[outcome] = outcomes.get(outcome, 0) + 1
+    chains, common = sequences(records, gap, SUMMARY_TOP)
+    return {
+        "requests": len(records),
+        "first": records[0]["ts"] if records else None,
+        "last": records[-1]["ts"] if records else None,
+        "outcomes": dict(sorted(outcomes.items(), key=lambda kv: (-kv[1], kv[0]))),
+        "servers": group(records, "server"),
+        "agents": group(records, "agent"),
+        "tools": group(records, "server", "tool"),
+        "gap": gap,
+        "chains": chains,
+        "sequences": common,
+    }
+
+
+def clip(text: str, limit: int = CLIENT_MAX) -> str:
+    """TEXT cut for its column; --json has all of it."""
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def print_table(rows: list[dict[str, Any]], keys: list[tuple[str, str]]) -> None:
+    """ROWS from group() as a table, with KEYS (field, title) first."""
+    if not rows:
+        return
+    cells = [[clip(str(r[k])) for k, _ in keys] for r in rows]
+    widths = [
+        max(len(title), *(len(c[i]) for c in cells))
+        for i, (_, title) in enumerate(keys)
+    ]
+    head = "  ".join(f"{t:<{w}}" for (_, t), w in zip(keys, widths, strict=True))
+    print(f"\n{head}  Requests  Failed  p50 ms  p95 ms  p50 bytes")
+    for row, cell in zip(rows, cells, strict=True):
+        names = "  ".join(f"{c:<{w}}" for c, w in zip(cell, widths, strict=True))
+        nums = [row["p50_ms"], row["p95_ms"], row["p50_bytes"]]
+        nums = ["-" if n is None else str(n) for n in nums]
+        print(
+            f"{names}  {row['requests']:>8}  {row['failed']:>6}  "
+            f"{nums[0]:>6}  {nums[1]:>6}  {nums[2]:>9}"
+        )
+
+
+def print_summary(stats: dict[str, Any]) -> None:
+    if not stats["requests"]:
+        print("Requests: none")
+        return
+    print(f"Requests: {stats['requests']}, {stats['first']} to {stats['last']}")
+    print("Outcomes: " + ", ".join(f"{k} {v}" for k, v in stats["outcomes"].items()))
+    print_table(stats["servers"], [("server", "Server")])
+    print_table(stats["agents"], [("agent", "Client")])
+    print_table(stats["tools"], [("server", "Server"), ("tool", "Tool")])
+    print(f"\nChains: {stats['chains']} (tool calls {stats['gap']:g} s apart or less)")
+    common = stats["sequences"]
+    if common:
+        sw = max(len("Server"), *(len(q["server"]) for q in common))
+        cw = max(len("Client"), *(len(clip(q["agent"])) for q in common))
+        print(f"\nCount  {'Server':<{sw}}  {'Client':<{cw}}  Sequence")
+        for q in common:
+            print(
+                f"{q['count']:>5}  {q['server']:<{sw}}  {clip(q['agent']):<{cw}}  "
+                + " > ".join(q["calls"])
+            )
+
+
 @dataclass
 class Cursor:
     """Where --follow has read a log file to: its inode and offset, so that
@@ -286,6 +439,10 @@ Examples:
   # Watch requests arrive, from servers whose logs share a volume
   mcp logs -f /srv/mcp-logs
 
+  # A week's statistics, and taskgo's commonest call sequences
+  mcp logs --summary --since 7d
+  mcp logs --summary --json --server taskgo | jq '.sequences[:3]'
+
   # Requests per tool since a date
   mcp logs -n all --since 2026-11-01 --json | jq -r .tool | sort | uniq -c
 
@@ -300,7 +457,16 @@ A line gives the record's time (UTC), server, method (or a background job's
 name), tool, outcome and duration, then its arguments and other fields as
 KEY=VALUE. --json prints each record as the server wrote it, with "server"
 added. Records never hold content; see agent-config's references/mcp-logs.md
-for the format."""
+for the format.
+
+--summary describes the records instead of printing them: requests and
+outcomes; requests, failures, p50 and p95 latency and median result size per
+server, per client (User-Agent, else transport) and per tool; and the
+commonest runs of two or three tool calls in one caller's chains, by server
+and client. A chain is one caller's tool calls to one server, each no more
+than --gap seconds after the one before; records with no caller key (HTTP
+without authentication) form no chains. It reads every record unless --tail
+or --since limits them."""
 
 
 class Parser(argparse.ArgumentParser):
@@ -345,7 +511,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--tail",
         metavar="N",
         help=f"Print the last N records, or 'all' (default: {DEFAULT_TAIL}; "
-        "all with --since)",
+        "all with --since or --summary)",
     )
     parser.add_argument(
         "--since",
@@ -367,7 +533,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Keep printing records as they are written, across rotations",
     )
     parser.add_argument(
-        "--json", action="store_true", help="Print each record as a JSON line"
+        "--json",
+        action="store_true",
+        help="Print each record as a JSON line, or the summary as JSON",
+    )
+    parser.add_argument(
+        "--summary",
+        action="store_true",
+        help="Print statistics over the records instead of the records",
+    )
+    parser.add_argument(
+        "--gap",
+        type=float,
+        metavar="SECS",
+        help=f"With --summary, the longest pause within a chain "
+        f"(default: {DEFAULT_GAP:g})",
     )
     return parser
 
@@ -377,13 +557,27 @@ def main() -> int:
     now = time.time()
     since = parse_since(args.since, now) if args.since else 0.0
     tail = parse_tail(args.tail) if args.tail else None
-    if args.tail is None and not args.since:
+    if args.tail is None and not args.since and not args.summary:
         tail = DEFAULT_TAIL
+    if args.summary and args.follow:
+        die("--summary and --follow cannot be combined")
+    if args.gap is not None and not args.summary:
+        die("--gap applies only to --summary")
+    gap = DEFAULT_GAP if args.gap is None else args.gap
+    if not gap >= 0:
+        die(f"--gap must be 0 or more seconds, not {gap:g}")
     logs = find_logs(args.paths, args.server)
     cursors: dict[Path, Cursor] = {}
     records = read_records(logs, since, cursors)
     if tail is not None:
         records = records[len(records) - tail :] if tail else []
+    if args.summary:
+        stats = summary(records, gap)
+        if args.json:
+            print(json.dumps(stats, indent=2))
+        else:
+            print_summary(stats)
+        return 0
     width = max(len(log.server) for log in logs)
     for rec in records:
         print(output(rec, args.json, width))

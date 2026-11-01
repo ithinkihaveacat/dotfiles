@@ -240,12 +240,15 @@ Arguments:
 Options:
   -h, --help     Display this help message and exit
   -n, --tail N   Print the last N records, or 'all' (default: 10; all with
-                 --since)
+                 --since or --summary)
   --since WHEN   Only records from WHEN on: an age (30m, 1h, 2d, 1w) or a date
                  or time (2026-11-01, 2026-11-01T09:00)
   --server NAME  Only this server's records (taskgo, skill, ...); repeatable
   -f, --follow   Keep printing records as they are written, across rotations
-  --json         Print each record as a JSON line
+  --json         Print each record as a JSON line, or the summary as JSON
+  --summary      Print statistics over the records instead of the records
+  --gap SECS     With --summary, the longest pause within a chain (default:
+                 120)
 
 Examples:
   # The last ten requests to any server on this machine
@@ -256,6 +259,10 @@ Examples:
 
   # Watch requests arrive, from servers whose logs share a volume
   mcp logs -f /srv/mcp-logs
+
+  # A week's statistics, and taskgo's commonest call sequences
+  mcp logs --summary --since 7d
+  mcp logs --summary --json --server taskgo | jq '.sequences[:3]'
 
   # Requests per tool since a date
   mcp logs -n all --since 2026-11-01 --json | jq -r .tool | sort | uniq -c
@@ -272,6 +279,15 @@ name), tool, outcome and duration, then its arguments and other fields as
 KEY=VALUE. --json prints each record as the server wrote it, with "server"
 added. Records never hold content; see agent-config's references/mcp-logs.md
 for the format.
+
+--summary describes the records instead of printing them: requests and
+outcomes; requests, failures, p50 and p95 latency and median result size per
+server, per client (User-Agent, else transport) and per tool; and the
+commonest runs of two or three tool calls in one caller's chains, by server
+and client. A chain is one caller's tool calls to one server, each no more
+than --gap seconds after the one before; records with no caller key (HTTP
+without authentication) form no chains. It reads every record unless --tail
+or --since limits them.
 ```
 
 <!-- /generated -->

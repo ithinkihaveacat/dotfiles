@@ -39,3 +39,5 @@ complete -c mcp -n "__fish_seen_subcommand_from logs" -l since -xa '15m 1h 1d 1w
 complete -c mcp -n "__fish_seen_subcommand_from logs" -l server -xa '(__fish_mcp_log_servers)' -d "Only this server's records"
 complete -c mcp -n "__fish_seen_subcommand_from logs" -s f -l follow -d 'Keep printing records as they are written'
 complete -c mcp -n "__fish_seen_subcommand_from logs" -l json -d 'Print each record as a JSON line'
+complete -c mcp -n "__fish_seen_subcommand_from logs" -l summary -d 'Print statistics over the records'
+complete -c mcp -n "__fish_seen_subcommand_from logs" -l gap -x -d 'With --summary, the longest pause within a chain'

@@ -346,8 +346,11 @@ mcp <command> [options] [arguments]
   oldest first from every `$XDG_STATE_HOME/*/mcp.jsonl` (with rotated files), or
   from the files and directories named. `-n/--tail N|all` (default 10),
   `--since 1h|2d|TIME`, `--server NAME` (repeatable), `-f/--follow` (survives
-  rotation) and `--json` (one record per line, with `server` added). It runs
-  `scripts/mcp-logs`; the record format is in
+  rotation) and `--json` (one record per line, with `server` added). `--summary`
+  prints statistics instead: outcomes; requests, failures and p50/p95 latency
+  per server, client and tool; and the commonest two- and three-call sequences
+  in each caller's chains (`--gap SECS`, default 120; `--json` for JSON). It
+  runs `scripts/mcp-logs`; the record format is in
   [MCP request logs](references/mcp-logs.md).
 
 Scopes (`--scope`; `add` and `remove` default to `user`, `list` and `doctor`

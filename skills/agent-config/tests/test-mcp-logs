@@ -278,6 +278,116 @@ class McpLogsTests(unittest.TestCase):
         self.assertEqual(out.stderr, "")
         self.assertEqual(len(out.stdout.splitlines()), 1)
 
+    def write_chains(self) -> None:
+        """Three chains of taskgo calls by one caller, two minutes or more
+        apart, and calls by a second caller and by one with no key."""
+        calls, at = [], 0
+        for _ in range(3):
+            for tool in ("handoff", "get_task", "apply_changes"):
+                at += 5
+                calls.append(
+                    record(
+                        f"2026-10-31T10:{at // 60:02}:{at % 60:02}.000Z",
+                        transport="http",
+                        method="tools/call",
+                        tool=tool,
+                        ms=at,
+                        bytes=100,
+                        caller="aaaaaaaaaa",
+                        agent="claude-code/2.1.0 (a long user agent string)",
+                    )
+                )
+            at += 300
+        calls.append(
+            record(
+                "2026-10-31T10:00:06.000Z",
+                transport="http",
+                method="tools/call",
+                tool="get_task",
+                caller="bbbbbbbbbb",
+                agent="codex",
+            )
+        )
+        for second in (7, 8):  # no caller key: no chain
+            calls.append(
+                record(
+                    f"2026-10-31T10:00:{second:02}.000Z",
+                    transport="http",
+                    method="tools/call",
+                    tool="handoff",
+                )
+            )
+        write(self.state / "taskgo" / "mcp.jsonl", *calls)
+
+    def test_summary(self):
+        self.write_chains()
+        out = self.run_reader("--summary", "--json")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        stats = json.loads(out.stdout)
+        self.assertEqual(stats["requests"], 16)
+        self.assertEqual(stats["first"], "2026-10-31T10:00:05.000Z")
+        self.assertEqual(stats["outcomes"], {"ok": 14, "refused": 1, "tool-error": 1})
+        servers = {r["server"]: r for r in stats["servers"]}
+        self.assertEqual(servers["taskgo"]["requests"], 12)
+        self.assertEqual(servers["pinboard"]["failed"], 1)
+        tools = {(r["server"], r["tool"]): r for r in stats["tools"]}
+        handoff = tools[("taskgo", "handoff")]
+        self.assertEqual(handoff["requests"], 5)
+        # Nearest rank over 1, 1, 5, 320, 635.
+        self.assertEqual((handoff["p50_ms"], handoff["p95_ms"]), (5, 635))
+        self.assertEqual(handoff["p50_bytes"], 100)
+        self.assertNotIn(("skill", None), tools)
+        agents = {r["agent"]: r["requests"] for r in stats["agents"]}
+        self.assertEqual((agents["stdio"], agents["background"]), (2, 1))
+        self.assertEqual(agents["codex"], 1)
+        # Three chains for one caller, one for the other; none without a key.
+        self.assertEqual(stats["chains"], 4)
+        self.assertEqual(
+            [(q["calls"], q["count"]) for q in stats["sequences"]],
+            [
+                (["handoff", "get_task", "apply_changes"], 3),
+                (["get_task", "apply_changes"], 3),
+                (["handoff", "get_task"], 3),
+            ],
+        )
+        self.assertEqual(stats["sequences"][0]["server"], "taskgo")
+
+        text = self.lines("--summary")
+        self.assertEqual(text[0][:13], "Requests: 16,")
+        self.assertIn("Outcomes: ok 14, refused 1, tool-error 1", text)
+        self.assertIn("Chains: 4 (tool calls 120 s apart or less)", text)
+        sequence = next(
+            x for x in text if x.endswith("handoff > get_task > apply_changes")
+        )
+        self.assertIn("claude-code/2.1.0 (\u2026", sequence)
+
+    def test_summary_limits(self):
+        self.write_chains()
+        # A gap shorter than the calls' spacing breaks every chain.
+        stats = json.loads(self.run_reader("--summary", "--json", "--gap", "1").stdout)
+        self.assertEqual(stats["chains"], 10)
+        self.assertEqual(stats["sequences"], [])
+        stats = json.loads(
+            self.run_reader("--summary", "--json", "--server", "skill").stdout
+        )
+        self.assertEqual(stats["requests"], 2)
+        stats = json.loads(self.run_reader("--summary", "--json", "-n", "3").stdout)
+        self.assertEqual(stats["requests"], 3)
+        stats = json.loads(
+            self.run_reader("--summary", "--json", "--since", "1h").stdout
+        )
+        self.assertEqual(stats["requests"], 0)
+        self.assertEqual(self.lines("--summary", "--since", "1h"), ["Requests: none"])
+        for args, says in (
+            (["--summary", "-f"], "cannot be combined"),
+            (["--gap", "5"], "applies only to --summary"),
+            (["--summary", "--gap", "-1"], "0 or more seconds"),
+        ):
+            with self.subTest(args=args):
+                out = self.run_reader(*args)
+                self.assertEqual(out.returncode, 1)
+                self.assertIn(says, out.stderr)
+
     def test_mcp_hands_off(self):
         out = self.run_reader("logs", "-n", "1", "--server", "skill", script=MCP)
         self.assertEqual(out.returncode, 0, out.stderr)
