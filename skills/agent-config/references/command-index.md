@@ -162,7 +162,8 @@ The block below is `scripts/mcp --help`, kept in sync by `command-index-format`.
 Usage: mcp <command> [options] [arguments]
 
 Manage the MCP servers configured for each installed agent: Claude Code
-(claude), Codex (codex) and OpenCode (opencode).
+(claude), Codex (codex) and OpenCode (opencode), and read the request logs of
+this repository's own MCP servers.
 
 Commands:
   list [--json]              List configured servers per agent and scope
@@ -173,6 +174,8 @@ Commands:
   remove NAME...             Remove servers from the scope (alias: rm)
   doctor                     Check that each agent's MCP configuration is
                              usable (read-only)
+  logs [PATH...]             Print this repository's MCP servers' request
+                             records (see 'mcp logs --help')
 
 Options:
   --agent NAME               Operate on one agent (claude, codex or opencode);
@@ -214,6 +217,61 @@ server (codex mcp add cannot set headers). add does not log in to a remote
 server that uses OAuth; use the agent's own login (claude: /mcp, codex: codex
 mcp login NAME, opencode: opencode mcp auth NAME). --env and --header values
 are written as given; list shows only their names.
+```
+
+<!-- /generated -->
+
+### mcp logs
+
+`mcp logs` runs `scripts/mcp-logs`; the record format is in
+[MCP request logs](mcp-logs.md).
+
+<!-- generated: ../scripts/mcp-logs --help -->
+
+```text
+Usage: mcp logs [OPTIONS] [PATH...]
+
+Print the request records of this repository's MCP servers, merged from any
+number of logs, oldest first.
+
+Arguments:
+  PATH           A log file, or a directory of logs (default: $XDG_STATE_HOME)
+
+Options:
+  -h, --help     Display this help message and exit
+  -n, --tail N   Print the last N records, or 'all' (default: 10; all with
+                 --since)
+  --since WHEN   Only records from WHEN on: an age (30m, 1h, 2d, 1w) or a date
+                 or time (2026-11-01, 2026-11-01T09:00)
+  --server NAME  Only this server's records (taskgo, skill, ...); repeatable
+  -f, --follow   Keep printing records as they are written, across rotations
+  --json         Print each record as a JSON line
+
+Examples:
+  # The last ten requests to any server on this machine
+  mcp logs
+
+  # Every pinboard request of the last day, as JSON, failures only
+  mcp logs --server pinboard --since 1d --json | jq 'select(.outcome != "ok")'
+
+  # Watch requests arrive, from servers whose logs share a volume
+  mcp logs -f /srv/mcp-logs
+
+  # Requests per tool since a date
+  mcp logs -n all --since 2026-11-01 --json | jq -r .tool | sort | uniq -c
+
+Each server writes its own log (taskgo mcp, skill mcp, pinboard mcp, andon
+mcp): $XDG_STATE_HOME/<server>/mcp.jsonl by default, rotated to mcp.jsonl.1
+to .4. With no PATH, every such log in $XDG_STATE_HOME (else
+~/.local/state) is read. A PATH may be a log file, a directory holding
+mcp.jsonl, or a directory of server directories. A server is named by its
+log's directory.
+
+A line gives the record's time (UTC), server, method (or a background job's
+name), tool, outcome and duration, then its arguments and other fields as
+KEY=VALUE. --json prints each record as the server wrote it, with "server"
+added. Records never hold content; see agent-config's references/mcp-logs.md
+for the format.
 ```
 
 <!-- /generated -->

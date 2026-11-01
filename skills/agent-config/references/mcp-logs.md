@@ -17,7 +17,9 @@ does not parse as JSON, or has no `ts`, is not a record (a write cut short
 leaves a partial line); readers skip it.
 
 The server's name is the directory the file is in (`taskgo`, `skill`,
-`pinboard`, `andon`), not a field of the record.
+`pinboard`, `andon`), not a field of the record; `mcp logs --json` adds it to
+each record it prints, as `server`. The parser is `parse_record()` in
+`scripts/mcp-logs`.
 
 ## Records
 

@@ -35,7 +35,8 @@ they see, what they may do, and what they are told. It consists of:
    declared by installed skills.
 1. **`mcp`**: The MCP server manager. Lists, adds, removes and checks the MCP
    servers each installed agent (Claude Code, Codex, OpenCode) is configured
-   with, user-wide or for the workspace, through each agent's own CLI.
+   with, user-wide or for the workspace, through each agent's own CLI, and reads
+   the request logs of this repository's own MCP servers (`mcp logs`).
 1. **`andon`**: The Andon cord. Records and triages defects agents report in
    their own instructions, skills, rules and tools, through harness plugins for
    Claude Code, OpenCode and local Codex (`plugins/andon`).
@@ -340,6 +341,14 @@ mcp <command> [options] [arguments]
 - **`doctor`**: Check that each config file parses, each stdio command resolves,
   each URL is an absolute http(s) URL, and each agent's CLI is on `PATH`
   (read-only; exits non-zero on problems).
+- **`logs [PATH...]`**: Print the request records of this repository's MCP
+  servers (`taskgo mcp`, `skill mcp`, `pinboard mcp`, `andon mcp`), merged
+  oldest first from every `$XDG_STATE_HOME/*/mcp.jsonl` (with rotated files), or
+  from the files and directories named. `-n/--tail N|all` (default 10),
+  `--since 1h|2d|TIME`, `--server NAME` (repeatable), `-f/--follow` (survives
+  rotation) and `--json` (one record per line, with `server` added). It runs
+  `scripts/mcp-logs`; the record format is in
+  [MCP request logs](references/mcp-logs.md).
 
 Scopes (`--scope`; `add` and `remove` default to `user`, `list` and `doctor`
 read both):
@@ -358,7 +367,8 @@ OpenCode has no remove command, so `mcp remove` edits its config file and keeps
 the file's comments. `add` does not log in to servers that use OAuth; finish
 with the agent's own login (`/mcp` in Claude Code, `codex mcp login NAME`,
 `opencode mcp auth NAME`). `add` and `remove` are declared in
-`permissions/unsafe`, since they change which tools an agent has.
+`permissions/unsafe`, since they change which tools an agent has; `logs` only
+reads.
 
 See the [Command Index](references/command-index.md) for full help details.
 

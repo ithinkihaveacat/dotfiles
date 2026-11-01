@@ -1,0 +1,316 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# ///
+"""Exercise 'mcp logs' against request logs written as the servers write them."""
+# unittest supplies the assertion API.
+# ruff: noqa: PT009
+
+import json
+import os
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+import traceback
+import unittest
+from pathlib import Path
+
+SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
+READER = SCRIPTS / "mcp-logs"
+MCP = SCRIPTS / "mcp"
+
+
+def record(ts: str, **fields) -> dict:
+    return {"ts": ts, "transport": "stdio", "outcome": "ok", "ms": 1, **fields}
+
+
+def write(path: Path, *records, raw: str = "") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.writelines(json.dumps(rec) + "\n" for rec in records)
+        fh.write(raw)
+
+
+class McpLogsTests(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.state = Path(self.tmpdir.name) / "state"
+        self.env = dict(os.environ, XDG_STATE_HOME=str(self.state))
+        self.env.pop("NO_COLOR", None)
+        skill = self.state / "skill" / "mcp.jsonl"
+        pinboard = self.state / "pinboard" / "mcp.jsonl"
+        write(
+            Path(f"{pinboard}.1"),
+            record(
+                "2026-11-01T09:00:00.000Z",
+                transport="background",
+                event="sync",
+                tool="sync",
+                result="+1 ~0 -0",
+            ),
+        )
+        write(
+            skill,
+            record(
+                "2026-11-01T10:00:00.000Z",
+                method="tools/call",
+                tool="load_skill",
+                args={"name": "alpha"},
+                scope="all",
+            ),
+            record(
+                "2026-11-01T10:00:02.000Z",
+                transport="http",
+                http="GET",
+                outcome="refused",
+                status=405,
+                reason="method not allowed",
+            ),
+        )
+        write(
+            pinboard,
+            record(
+                "2026-11-01T10:00:01.000Z",
+                method="tools/call",
+                tool="search_bookmarks",
+                outcome="tool-error",
+                reason="failed",
+            ),
+            raw='{"ts": "2026-11-01T10:00:03.000Z", "transpo',  # cut short
+        )
+        # Not a log: no mcp.jsonl.
+        (self.state / "other").mkdir()
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def run_reader(self, *args, env=None, script=READER):
+        return subprocess.run(
+            [str(script), *args],
+            capture_output=True,
+            text=True,
+            env=env or self.env,
+            timeout=60,
+            check=False,
+        )
+
+    def lines(self, *args) -> list[str]:
+        out = self.run_reader(*args)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        return out.stdout.splitlines()
+
+    def json_records(self, *args) -> list[dict]:
+        return [json.loads(x) for x in self.lines("--json", *args)]
+
+    def test_merges_every_log_oldest_first(self):
+        lines = self.lines()
+        self.assertEqual(len(lines), 4)
+        self.assertEqual(
+            [x.split()[1] for x in lines], ["pinboard", "skill", "pinboard", "skill"]
+        )
+        self.assertEqual(
+            lines[1],
+            "2026-11-01T10:00:00.000Z skill    tools/call load_skill ok 1ms "
+            "name=alpha transport=stdio scope=all",
+        )
+        self.assertIn("refused 1ms", lines[3])
+        self.assertIn('reason="method not allowed"', lines[3])
+        self.assertIn("status=405", lines[3])
+        self.assertTrue(lines[0].startswith("2026-11-01T09:00:00.000Z pinboard sync"))
+
+    def test_json(self):
+        records = self.json_records()
+        self.assertEqual(
+            [r["server"] for r in records], ["pinboard", "skill", "pinboard", "skill"]
+        )
+        self.assertEqual(list(records[1])[:2], ["server", "ts"])
+        self.assertEqual(records[1]["args"], {"name": "alpha"})
+        self.assertNotIn("at", records[1])
+
+    def test_tail(self):
+        write(
+            self.state / "andon" / "mcp.jsonl",
+            *(record(f"2026-11-02T00:00:{i:02}.000Z", n=i) for i in range(12)),
+        )
+        self.assertEqual(len(self.lines()), 10)
+        self.assertEqual([r.get("n") for r in self.json_records("-n", "2")], [10, 11])
+        self.assertEqual(len(self.lines("--tail", "all")), 16)
+        self.assertEqual(self.lines("-n", "0"), [])
+        out = self.run_reader("-n", "-1")
+        self.assertEqual(out.returncode, 1)
+        self.assertIn("--tail: expected a number or 'all'", out.stderr)
+
+    def test_since(self):
+        records = self.json_records("--since", "2026-11-01T10:00:01Z")
+        self.assertEqual([r["ts"][11:19] for r in records], ["10:00:01", "10:00:02"])
+        self.assertEqual(self.lines("--since", "1h"), [])
+        recent = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
+        write(self.state / "skill" / "mcp.jsonl", record(recent, n=1))
+        self.assertEqual([r["n"] for r in self.json_records("--since", "90s")], [1])
+        # With --since, every record from then on, not the last ten.
+        self.assertEqual(len(self.lines("--since", "2026-11-01")), 5)
+        out = self.run_reader("--since", "yesterday")
+        self.assertEqual(out.returncode, 1)
+        self.assertIn("--since: expected an age", out.stderr)
+
+    def test_server(self):
+        self.assertEqual(
+            {r["server"] for r in self.json_records("--server", "skill")}, {"skill"}
+        )
+        both = self.json_records("--server", "skill", "--server", "pinboard")
+        self.assertEqual(len(both), 4)
+        out = self.run_reader("--server", "nope")
+        self.assertEqual(out.returncode, 1)
+        self.assertIn("no request log for server nope", out.stderr)
+        self.assertIn("pinboard, skill", out.stderr)
+
+    def test_paths(self):
+        skill = self.state / "skill"
+        for arg in (skill / "mcp.jsonl", skill):
+            with self.subTest(arg=arg):
+                records = self.json_records(str(arg))
+                self.assertEqual({r["server"] for r in records}, {"skill"})
+        # A volume of server directories, as a reader host mounts them.
+        self.assertEqual(len(self.lines(str(self.state))), 4)
+        # A rotated file alone still names a log.
+        only_rotated = self.state / "pinboard" / "mcp.jsonl"
+        only_rotated.unlink()
+        self.assertEqual(len(self.json_records(str(only_rotated))), 1)
+        out = self.run_reader(str(self.state / "missing.jsonl"))
+        self.assertEqual(out.returncode, 1)
+        self.assertIn("no such file or directory", out.stderr)
+        out = self.run_reader(str(self.state / "other"))
+        self.assertEqual(out.returncode, 1)
+        self.assertIn("no mcp.jsonl in", out.stderr)
+        empty = dict(self.env, XDG_STATE_HOME=str(self.state / "other"))
+        out = self.run_reader(env=empty)
+        self.assertEqual(out.returncode, 1)
+        self.assertIn("no request logs in", out.stderr)
+
+    def test_line_cannot_be_forged(self):
+        write(
+            self.state / "skill" / "mcp.jsonl",
+            record(
+                "2026-11-03T00:00:00.000Z",
+                agent="evil\n2026-11-03T00:00:00.000Z skill ping - ok 1ms",
+            ),
+        )
+        last = self.lines("-n", "1")
+        self.assertEqual(len(last), 1)
+        self.assertIn('agent="evil\\n2026', last[0])
+
+    def test_follow(self):
+        """Records written later are printed as they arrive: a line written in
+        two parts once, a rotated file to its end, a new server's log from its
+        start. SIGINT stops it with 130."""
+        skill = self.state / "skill" / "mcp.jsonl"
+        out = Path(self.tmpdir.name) / "follow.out"
+        with open(out, "w") as fh:
+            proc = subprocess.Popen(
+                [str(READER), "-f", "-n", "1"],
+                stdout=fh,
+                stderr=subprocess.PIPE,
+                env=self.env,
+            )
+        try:
+            self.wait_for(out, 1)
+            write(skill, record("2026-11-04T00:00:01.000Z", n=1))
+            write(skill, raw='{"ts": "2026-11-04T00:00:02.000Z", "n": ')
+            self.wait_for(out, 2)
+            write(skill, raw='2, "outcome": "ok"}\n')
+            write(skill, record("2026-11-04T00:00:03.000Z", n=3))
+            self.wait_for(out, 4)
+            skill.rename(f"{skill}.1")
+            write(Path(f"{skill}.1"), record("2026-11-04T00:00:04.000Z", n=4))
+            write(skill, record("2026-11-04T00:00:05.000Z", n=5))
+            write(
+                self.state / "andon" / "mcp.jsonl",
+                record("2026-11-04T00:00:06.000Z", n=6),
+            )
+            self.wait_for(out, 7)
+        finally:
+            proc.send_signal(signal.SIGINT)
+            _, err = proc.communicate(timeout=10)
+        lines = out.read_text().splitlines()
+        self.assertEqual(
+            [x.split("n=")[-1] for x in lines[1:]], ["1", "2", "3", "4", "5", "6"]
+        )
+        self.assertEqual(lines[-1].split()[1], "andon")
+        self.assertEqual(proc.returncode, 130)
+        self.assertEqual(err, b"\n")
+
+    def test_sigterm(self):
+        proc = subprocess.Popen(
+            [str(READER), "-f"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            env=self.env,
+        )
+        time.sleep(1.5)
+        proc.terminate()
+        _, err = proc.communicate(timeout=10)
+        self.assertEqual(proc.returncode, 130)
+        self.assertEqual(err, b"\n")
+
+    def wait_for(self, path: Path, count: int) -> None:
+        for _ in range(100):
+            if len(path.read_text().splitlines()) >= count:
+                return
+            time.sleep(0.1)
+        self.fail(f"{count} lines never arrived: {path.read_text()!r}")
+
+    def test_broken_pipe(self):
+        write(
+            self.state / "andon" / "mcp.jsonl",
+            *(record("2026-11-05T00:00:00.000Z", n=i) for i in range(5000)),
+        )
+        out = subprocess.run(
+            f"'{READER}' -n all | head -n 1",
+            shell=True,
+            capture_output=True,
+            text=True,
+            env=self.env,
+            timeout=60,
+            check=False,
+        )
+        self.assertEqual(out.stderr, "")
+        self.assertEqual(len(out.stdout.splitlines()), 1)
+
+    def test_mcp_hands_off(self):
+        out = self.run_reader("logs", "-n", "1", "--server", "skill", script=MCP)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("refused", out.stdout)
+        for args in (["logs", "--help"], ["help", "logs"]):
+            with self.subTest(args=args):
+                out = self.run_reader(*args, script=MCP)
+                self.assertEqual(out.returncode, 0)
+                self.assertTrue(out.stdout.startswith("Usage: mcp logs"))
+        out = self.run_reader("--help", script=MCP)
+        self.assertIn("logs [PATH...]", out.stdout)
+        out = self.run_reader("logs", "--bogus", script=MCP)
+        self.assertEqual(out.returncode, 1)
+        self.assertIn("Try 'mcp logs --help'", out.stderr)
+
+
+if __name__ == "__main__":
+    names = sorted(name for name in dir(McpLogsTests) if name.startswith("test_"))
+    print(f"1..{len(names)}", flush=True)
+    failures = 0
+    for number, name in enumerate(names, 1):
+        case = McpLogsTests(name)
+        try:
+            case.setUp()
+            try:
+                getattr(case, name)()
+            finally:
+                case.tearDown()
+        except Exception:
+            failures += 1
+            print(f"not ok {number} - {name}", flush=True)
+            for line in traceback.format_exc().splitlines():
+                print(f"# {line}")
+        else:
+            print(f"ok {number} - {name}", flush=True)
+    sys.exit(1 if failures else 0)

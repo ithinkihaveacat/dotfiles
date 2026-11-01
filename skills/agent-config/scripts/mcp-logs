@@ -1,0 +1,416 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# ///
+# Tests: skills/agent-config/tests/test-mcp-logs
+"""The 'mcp logs' reader, run by 'mcp logs'. The record format it reads is
+skills/agent-config/references/mcp-logs.md."""
+
+import argparse
+import datetime
+import json
+import os
+import re
+import signal
+import sys
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, NoReturn
+
+PROG = "mcp logs"
+LOG_NAME = "mcp.jsonl"
+LOG_ROTATED = 4  # FILE.1 (newest) to FILE.4, as the servers rotate them
+DEFAULT_TAIL = 10
+FOLLOW_POLL = 0.5  # seconds between looks at the files with --follow
+SINCE_RE = re.compile(r"^(\d+(?:\.\d+)?)([smhdw])$")
+SINCE_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 7 * 86400}
+# Shown in their own columns, or not at all, in a plain line.
+LINE_OWN = ("ts", "method", "event", "tool", "outcome", "ms", "args", "version")
+
+
+def die(msg: str, code: int = 1) -> NoReturn:
+    print(f"{PROG}: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def state_dir() -> Path:
+    state = os.environ.get("XDG_STATE_HOME") or "~/.local/state"
+    return Path(state).expanduser()
+
+
+@dataclass
+class Log:
+    """One server's log: FILE and its rotated files. The server is named by
+    the directory the file is in."""
+
+    server: str
+    path: Path
+
+    def files(self) -> list[Path]:
+        """The file and its rotated files that exist, oldest first."""
+        rotated = [Path(f"{self.path}.{i}") for i in range(LOG_ROTATED, 0, -1)]
+        return [f for f in [*rotated, self.path] if f.is_file()]
+
+
+def logs_in(directory: Path) -> list[Log]:
+    """The logs under DIRECTORY: its own mcp.jsonl, else each subdirectory's
+    (a state directory, or a volume holding several servers' directories)."""
+    own = directory / LOG_NAME
+    if own.exists() or Path(f"{own}.1").exists():
+        return [Log(directory.resolve().name, own)]
+    found = []
+    for sub in sorted(p for p in directory.iterdir() if p.is_dir()):
+        log = sub / LOG_NAME
+        if log.exists() or Path(f"{log}.1").exists():
+            found.append(Log(sub.name, log))
+    return found
+
+
+def find_logs(paths: list[str], servers: list[str]) -> list[Log]:
+    """The logs PATHS name (files or directories), by default every one in
+    the state directory, kept to SERVERS if any are given."""
+    logs: list[Log] = []
+    for arg in paths or [str(state_dir())]:
+        path = Path(arg).expanduser()
+        if path.is_dir():
+            found = logs_in(path)
+            if paths and not found:
+                die(f"no {LOG_NAME} in {path} or its subdirectories")
+            logs += found
+        elif path.is_file() or Path(f"{path}.1").is_file():
+            logs.append(Log(path.resolve().parent.name, path))
+        else:
+            die(f"{path}: no such file or directory")
+    if servers:
+        unknown = sorted(set(servers) - {log.server for log in logs})
+        if unknown:
+            known = ", ".join(sorted({log.server for log in logs})) or "none"
+            die(f"no request log for server {', '.join(unknown)} (found: {known})")
+        logs = [log for log in logs if log.server in servers]
+    if not logs:
+        die(f"no request logs in {state_dir()}; name a file or directory")
+    return logs
+
+
+def parse_record(raw: str, server: str) -> dict[str, Any] | None:
+    """The record on line RAW, with its server first and its time as 'at';
+    None for a line that is not a record (a write cut short leaves a partial
+    line)."""
+    try:
+        rec = json.loads(raw)
+        at = datetime.datetime.fromisoformat(rec["ts"]).timestamp()
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return None
+    if not isinstance(rec, dict):
+        return None
+    return {"server": server, **rec, "at": at}
+
+
+def read_records(
+    logs: list[Log], since: float, cursors: dict[Path, "Cursor"]
+) -> list[dict[str, Any]]:
+    """Every record in LOGS from SINCE on, oldest first, noting in CURSORS
+    where each current file was read to. Records with the same time keep
+    their order within a file."""
+    records = []
+    for log in logs:
+        for f in log.files():
+            try:
+                with open(f, "rb") as fh:
+                    st = os.fstat(fh.fileno())
+                    data = fh.read()
+            except OSError as e:
+                die(f"cannot read {f}: {e.strerror or e}")
+            whole = data[: data.rfind(b"\n") + 1]
+            if f == log.path:
+                cursors[f] = Cursor(st.st_ino, len(whole))
+            for raw in whole.decode("utf-8", errors="replace").splitlines():
+                rec = parse_record(raw, log.server)
+                if rec is not None and rec["at"] >= since:
+                    records.append(rec)
+    records.sort(key=lambda r: r["at"])
+    return records
+
+
+def parse_since(text: str, now: float) -> float:
+    """The time SINCE names: an age such as 90s, 30m, 1h, 2d or 1w, or an ISO
+    8601 date or time (local time unless it gives a zone)."""
+    m = SINCE_RE.match(text)
+    if m:
+        return now - float(m[1]) * SINCE_UNITS[m[2]]
+    try:
+        when = datetime.datetime.fromisoformat(text)
+    except ValueError:
+        die(f"--since: expected an age (30m, 1h, 2d) or a time, not '{text}'")
+    if when.tzinfo is None:
+        when = when.astimezone()
+    return when.timestamp()
+
+
+def parse_tail(text: str) -> int | None:
+    """None for all, else the count."""
+    if text == "all":
+        return None
+    if not text.isdigit():
+        die(f"--tail: expected a number or 'all', not '{text}'")
+    return int(text)
+
+
+def line_value(value: Any) -> str:
+    """VALUE bare if a plain token, else quoted as JSON, so that client text
+    can neither break nor forge a line."""
+    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+    plain = re.fullmatch(r"[\w./:@+#-]+", text, re.ASCII)
+    return text if plain else json.dumps(text, ensure_ascii=False)
+
+
+def line(rec: dict[str, Any], width: int) -> str:
+    """REC as one line: time, server, method or job, tool, outcome and
+    duration, then its arguments and other fields as KEY=VALUE."""
+    rest = dict(rec.get("args") or {})
+    rest |= {
+        k: v
+        for k, v in rec.items()
+        if k not in (*LINE_OWN, "server", "at") and k not in rest
+    }
+    ms = rec.get("ms")
+    cols = [
+        rec.get("ts", ""),
+        f"{rec['server']:<{width}}",
+        line_value(rec.get("method") or rec.get("event") or "-"),
+        line_value(rec.get("tool") or "-"),
+        line_value(rec.get("outcome", "-")),
+        f"{ms}ms" if isinstance(ms, int) else "-",
+        *(f"{k}={line_value(v)}" for k, v in rest.items()),
+    ]
+    return " ".join(cols)
+
+
+def output(rec: dict[str, Any], as_json: bool, width: int) -> str:
+    if as_json:
+        return json.dumps({k: v for k, v in rec.items() if k != "at"})
+    return line(rec, width)
+
+
+@dataclass
+class Cursor:
+    """Where --follow has read a log file to: its inode and offset, so that
+    a rotation (a new inode) or truncation (a shorter file) is noticed."""
+
+    inode: int
+    offset: int
+    partial: str = ""
+
+
+def follow(
+    logs: list[Log],
+    cursors: dict[Path, Cursor],
+    paths: list[str],
+    servers: list[str],
+    as_json: bool,
+    width: int,
+) -> NoReturn:
+    """Prints records as they are appended to LOGS after CURSORS. A rotated
+    file is read to its end before the new one is read from its start; a
+    server whose log appears later is picked up when no PATHS were named."""
+    while True:
+        time.sleep(FOLLOW_POLL)
+        if not paths:
+            for log in logs_in(state_dir()):
+                if log.path not in {lg.path for lg in logs} and (
+                    not servers or log.server in servers
+                ):
+                    logs.append(log)
+                    width = max(width, len(log.server))
+        batch: list[dict[str, Any]] = []
+        for log in logs:
+            batch += read_new(log, cursors)
+        batch.sort(key=lambda r: r["at"])
+        for rec in batch:
+            print(output(rec, as_json, width), flush=True)
+
+
+def read_from(f: Path, cursor: Cursor) -> str:
+    """The text of F after CURSOR, up to its last complete line; the rest is
+    kept for the next read."""
+    with open(f, "rb") as fh:
+        fh.seek(cursor.offset)
+        data = fh.read()
+    cursor.offset += len(data)
+    text = cursor.partial + data.decode("utf-8", errors="replace")
+    text, _, cursor.partial = text.rpartition("\n")
+    return text + "\n" if text else ""
+
+
+def read_new(log: Log, cursors: dict[Path, Cursor]) -> list[dict[str, Any]]:
+    """The records appended to LOG since its cursor."""
+    text = ""
+    try:
+        st = os.stat(log.path)
+    except FileNotFoundError:
+        return []  # between a rotation's two renames
+    cursor = cursors.get(log.path)
+    try:
+        if cursor is not None and st.st_ino != cursor.inode:
+            # Rotated: finish the old file, wherever it went.
+            for f in log.files():
+                if f != log.path and os.stat(f).st_ino == cursor.inode:
+                    text += read_from(f, cursor)
+                    break
+            cursor = None
+        if cursor is None:
+            cursor = cursors[log.path] = Cursor(st.st_ino, 0)
+        elif st.st_size < cursor.offset:
+            cursor.offset, cursor.partial = 0, ""  # truncated
+        text += read_from(log.path, cursor)
+    except OSError as e:
+        print(f"{PROG}: cannot read {log.path}: {e.strerror or e}", file=sys.stderr)
+        return []
+    records = (parse_record(raw, log.server) for raw in text.splitlines())
+    return [rec for rec in records if rec is not None]
+
+
+USAGE = f"{PROG} [OPTIONS] [PATH...]"
+DESCRIPTION = """\
+Print the request records of this repository's MCP servers, merged from any
+number of logs, oldest first."""
+EPILOG = f"""\
+Examples:
+  # The last ten requests to any server on this machine
+  mcp logs
+
+  # Every pinboard request of the last day, as JSON, failures only
+  mcp logs --server pinboard --since 1d --json | jq 'select(.outcome != "ok")'
+
+  # Watch requests arrive, from servers whose logs share a volume
+  mcp logs -f /srv/mcp-logs
+
+  # Requests per tool since a date
+  mcp logs -n all --since 2026-11-01 --json | jq -r .tool | sort | uniq -c
+
+Each server writes its own log (taskgo mcp, skill mcp, pinboard mcp, andon
+mcp): $XDG_STATE_HOME/<server>/{LOG_NAME} by default, rotated to {LOG_NAME}.1
+to .{LOG_ROTATED}. With no PATH, every such log in $XDG_STATE_HOME (else
+~/.local/state) is read. A PATH may be a log file, a directory holding
+{LOG_NAME}, or a directory of server directories. A server is named by its
+log's directory.
+
+A line gives the record's time (UTC), server, method (or a background job's
+name), tool, outcome and duration, then its arguments and other fields as
+KEY=VALUE. --json prints each record as the server wrote it, with "server"
+added. Records never hold content; see agent-config's references/mcp-logs.md
+for the format."""
+
+
+class Parser(argparse.ArgumentParser):
+    """The house help layout, and usage errors exit 1."""
+
+    def error(self, message: str) -> NoReturn:
+        print(f"{PROG}: {message}", file=sys.stderr)
+        print(f"Try '{PROG} --help' for more information.", file=sys.stderr)
+        sys.exit(1)
+
+    def format_help(self) -> str:
+        return (
+            super()
+            .format_help()
+            .replace("usage:", "Usage:", 1)
+            .replace(
+                "show this help message and exit",
+                "Display this help message and exit",
+                1,
+            )
+        )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = Parser(
+        prog=PROG,
+        usage=USAGE,
+        description=DESCRIPTION,
+        epilog=EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser._positionals.title = "Arguments"
+    parser._optionals.title = "Options"
+    parser.add_argument(
+        "paths",
+        nargs="*",
+        metavar="PATH",
+        help="A log file, or a directory of logs (default: $XDG_STATE_HOME)",
+    )
+    parser.add_argument(
+        "-n",
+        "--tail",
+        metavar="N",
+        help=f"Print the last N records, or 'all' (default: {DEFAULT_TAIL}; "
+        "all with --since)",
+    )
+    parser.add_argument(
+        "--since",
+        metavar="WHEN",
+        help="Only records from WHEN on: an age (30m, 1h, 2d, 1w) or a date or "
+        "time (2026-11-01, 2026-11-01T09:00)",
+    )
+    parser.add_argument(
+        "--server",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="Only this server's records (taskgo, skill, ...); repeatable",
+    )
+    parser.add_argument(
+        "-f",
+        "--follow",
+        action="store_true",
+        help="Keep printing records as they are written, across rotations",
+    )
+    parser.add_argument(
+        "--json", action="store_true", help="Print each record as a JSON line"
+    )
+    return parser
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+    now = time.time()
+    since = parse_since(args.since, now) if args.since else 0.0
+    tail = parse_tail(args.tail) if args.tail else None
+    if args.tail is None and not args.since:
+        tail = DEFAULT_TAIL
+    logs = find_logs(args.paths, args.server)
+    cursors: dict[Path, Cursor] = {}
+    records = read_records(logs, since, cursors)
+    if tail is not None:
+        records = records[len(records) - tail :] if tail else []
+    width = max(len(log.server) for log in logs)
+    for rec in records:
+        print(output(rec, args.json, width))
+    if args.follow:
+        sys.stdout.flush()
+        follow(logs, cursors, args.paths, args.server, args.json, width)
+    return 0
+
+
+def sigterm_handler(signum: int, frame: Any) -> NoReturn:
+    raise KeyboardInterrupt
+
+
+if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, sigterm_handler)
+    try:
+        sys.exit(main())
+    except BrokenPipeError:
+        # A reader such as head stopped early: not an error.
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        sys.exit(0)
+    except KeyboardInterrupt:
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        try:
+            sys.stderr.write("\n")
+            sys.stderr.flush()
+        except OSError:
+            pass
+        sys.exit(130)
