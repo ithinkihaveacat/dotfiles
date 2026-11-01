@@ -127,7 +127,7 @@ Options:
   --conv, -C, --conversation CONV
                         Active conversation or session ID
   --wait-for GATE       External or temporal gate (YYYY-MM-DD, b/..., cl/...,
-                        gh:..., @handle)
+                        gh:..., @handle, URL, or free text)
   --due YYYY-MM-DD      Committed completion deadline (YYYY-MM-DD)
   --stale-after YYYY-MM-DD
                         Relevance cutoff date (YYYY-MM-DD)
@@ -197,7 +197,7 @@ Options:
   --conv, -C, --conversation CONV
                         Active conversation or session ID
   --wait-for GATE       External or temporal gate (YYYY-MM-DD, b/..., cl/...,
-                        gh:..., @handle)
+                        gh:..., @handle, URL, or free text)
   --due YYYY-MM-DD      Committed completion deadline (YYYY-MM-DD)
   --stale-after YYYY-MM-DD
                         Relevance cutoff date (YYYY-MM-DD)

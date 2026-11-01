@@ -25,7 +25,7 @@ TEST_ROOT="$(mktemp -d)"
 trap 'rm -rf -- "$TEST_ROOT"' EXIT
 export TASKGO_MCP_LOG="$TEST_ROOT/mcp-requests.jsonl"
 
-echo "1..19"
+echo "1..20"
 
 init_base_repo() {
   local target="${1:-$TEST_ROOT/repo}"
@@ -232,7 +232,7 @@ if ("$BIN" --root "$SCH_REPO" update TASK-5C002 --add-wait-for 2026-10-13 --add-
   [[ "$SCH_OUT" == *$'wait_for:\n  - b/123\n'* ]] &&
   [[ "$SCH_OUT" == *$'conversations:\n  - codex://fedcba9876543210fedc\n'* ]] &&
   [[ "$SCH_OUT" != *'2026-10-13'* ]] && [[ "$SCH_OUT" != *'claude://'* ]] &&
-  ! ("$BIN" --root "$SCH_REPO" update TASK-5C002 --add-wait-for 'next week') >/dev/null 2>&1; then
+  ! ("$BIN" --root "$SCH_REPO" update TASK-5C002 --add-wait-for 'gh:owner/repo 82') >/dev/null 2>&1; then
   echo 'ok 11 - update adds and removes wait_for gates and conversations'
 else
   echo 'not ok 11 - update adds and removes wait_for gates and conversations'
@@ -251,11 +251,11 @@ else
   echo "# $SCH_OUT"
 fi
 
-printf '%s\n' '---' 'id: TASK-5C009' 'status: todo' 'wait_for: [soon]' 'created: 2026-10-01' \
+printf '%s\n' '---' 'id: TASK-5C009' 'status: todo' 'wait_for: [gh:owner/repo]' 'created: 2026-10-01' \
   '---' '' '# Off-schema task' >"$SCH_REPO/example/tasks/TASK-5C009-off-schema.md"
 ("$BIN" --root "$SCH_REPO" sync example) >/dev/null 2>&1
 SCH_OUT=$("$BIN" --root "$SCH_REPO" doctor example 2>&1 || true)
-if grep -q "TASK-5C009-off-schema.md: invalid wait_for 'soon'" <<<"$SCH_OUT" &&
+if grep -q "TASK-5C009-off-schema.md: invalid wait_for 'gh:owner/repo'" <<<"$SCH_OUT" &&
   grep -q "\[INFO\]  example/tasks/TASK-5C009-off-schema.md: frontmatter field 'created' is not in the task schema" <<<"$SCH_OUT"; then
   echo 'ok 13 - doctor checks task fields against the schema'
 else
@@ -430,3 +430,50 @@ fi
 
 # 'taskgo mcp' reads the committed tree only: the uncommitted status edit to
 # TASK-7E001 above must not show.
+
+# wait_for takes free text where no typed gate fits, kept whole, while a list
+# of typed gates still splits and a malformed typed gate is refused.
+GATE_REPO="$TEST_ROOT/gate-repo"
+mkdir -p "$GATE_REPO/example/tasks"
+git -C "$GATE_REPO" init -q
+cp "$REPO/AGENTS.md" "$GATE_REPO/AGENTS.md"
+printf '# Inbox\n' >"$GATE_REPO/INBOX.md"
+printf '# Example\n' >"$GATE_REPO/example/README.md"
+printf '%s\n' '---' 'id: TASK-6A001' 'status: todo' '---' '' '# Gate task' \
+  >"$GATE_REPO/example/tasks/TASK-6A001-gate.md"
+printf '%s\n' '---' 'id: TASK-6A002' 'status: todo' 'wait_for:' '  - 2026-13-01 or so' '---' '' '# Bad gate' \
+  >"$GATE_REPO/example/tasks/TASK-6A002-bad.md"
+GATE_TASK="$GATE_REPO/example/tasks/TASK-6A001-gate.md"
+GATE_OK=1
+if ! ("$BIN" --root "$GATE_REPO" update TASK-6A001 \
+  --add-wait-for 'ShellCheck release with SC2337, in shellcheck-py' \
+  --add-wait-for 'b/7,2026-01-02') >/dev/null 2>&1 ||
+  [[ "$(cat "$GATE_TASK")" != *$'wait_for:\n  - ShellCheck release with SC2337, in shellcheck-py\n  - b/7\n  - 2026-01-02\n'* ]]; then
+  GATE_OK=0
+  echo '# free text was not kept whole, or a typed list was not split'
+fi
+GATE_ERR=$( ("$BIN" --root "$GATE_REPO" update TASK-6A001 --add-wait-for 'gh:owner/repo 82') 2>&1) && GATE_OK=0
+[[ "$GATE_ERR" == *"'gh:owner/repo' looks like a typed gate but is malformed"* ]] || {
+  GATE_OK=0
+  echo "# malformed gh gate: $GATE_ERR"
+}
+GATE_ERR=$( ("$BIN" --root "$GATE_REPO" update TASK-6A001 --add-wait-for TASK-6A002) 2>&1) && GATE_OK=0
+[[ "$GATE_ERR" == *'TASK-6A002 is a task; put it in blocked_by'* ]] || {
+  GATE_OK=0
+  echo "# task ID gate: $GATE_ERR"
+}
+if [[ "$("$BIN" --root "$GATE_REPO" list example --state ready 2>/dev/null)" == *TASK-6A001* ]]; then
+  GATE_OK=0
+  echo '# a task waiting on free text was listed as ready'
+fi
+GATE_DR=$("$BIN" --root "$GATE_REPO" doctor example 2>&1) || true
+if [[ "$GATE_DR" != *"TASK-6A002-bad.md: invalid wait_for '2026-13-01 or so': '2026-13-01' looks like a typed gate"* ]] ||
+  [[ "$GATE_DR" == *"TASK-6A001-gate.md: invalid wait_for"* ]]; then
+  GATE_OK=0
+  printf '# %s\n' "$GATE_DR"
+fi
+if [ "$GATE_OK" = 1 ]; then
+  echo 'ok 20 - wait_for keeps free text whole and refuses malformed typed gates'
+else
+  echo 'not ok 20 - wait_for keeps free text whole and refuses malformed typed gates'
+fi
