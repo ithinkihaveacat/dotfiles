@@ -85,12 +85,12 @@ network: caching under `$XDG_CACHE_HOME`, strict offline mode enforcement via
 `AGENT_OFFLINE=1`, and cache-age reporting. See
 **[references/caching.md](references/caching.md)**.
 
-### Server Request Logs
+### Long-Running Servers
 
-Long-running servers (the MCP servers) log one content-free JSON record per
-request to a rotated, locked JSONL file, show the latest on an authenticated
-`/logs` page, and summarise it from the command line. See
-**[references/request-logs.md](references/request-logs.md)**.
+Servers log one content-free record per request, bounded on disk and readable
+where they run, and servers of one kind (this repository's MCP servers) match
+each other, taking the existing ones as their specification. See
+**[references/servers.md](references/servers.md)**.
 
 ### Git Operations & Commit Messages
 
@@ -118,8 +118,8 @@ See **[references/web.md](references/web.md)**.
   output streams, and exit codes.
 - **[Caching & Offline](references/caching.md)** — Network caching patterns and
   offline-mode variables.
-- **[Server Request Logs](references/request-logs.md)** — The request log
-  contract every MCP server follows.
+- **[Long-Running Servers](references/servers.md)** — Request logs, and
+  consistency between servers of one kind.
 - **[Git Operations](references/git.md)** — Conventional Commits syntax and
   commit message rules.
 - **[Web Guidelines](references/web.md)** — State management and web frontend
