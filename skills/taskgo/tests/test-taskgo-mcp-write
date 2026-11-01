@@ -1977,6 +1977,169 @@ def findings_checks(tap: Tap, tg, seed: Path, tmp: Path) -> None:
     )
 
 
+def project_checks(tap: Tap, tg, seed: Path, tmp: Path) -> None:
+    """A create of kind project makes a project every reader recognizes."""
+    tracker = Tracker(tmp / "project", seed)
+    call = caller(tg, server(tg, tracker))
+    before = tracker.head()
+    args = {
+        "request_id": "p1",
+        "kind": "project",
+        "project": "diy",
+        "title": "DIY",
+        "fields": {"skills": ["coding-standards"]},
+    }
+    ok, got = call("create", args)
+    readme = tracker.show("diy/README.md") if ok else ""
+    status = tracker.show("diy/STATUS.md") if ok else ""
+    tap.check(
+        "create of kind project writes README.md and STATUS.md in one commit",
+        ok
+        and len(tracker.commits(before)) == 1
+        and got["created"]
+        == [{"kind": "project", "project": "diy", "path": "diy/README.md"}]
+        and readme.startswith("---\nskills:\n  - coding-standards\n---\n")
+        and readme.endswith("\n# DIY")
+        and "## Summary" in status
+        and "<!-- taskgo:begin -->" in status
+        and "## Next" in status,
+        got,
+    )
+    ok, again = call("create", args)
+    # A new server finds the write by its trailers and rebuilds its result.
+    ok2, fresh = caller(tg, server(tg, tracker))("create", args)
+    tap.check(
+        "a replayed project create reports the same project",
+        ok
+        and ok2
+        and again.get("replayed")
+        and fresh.get("replayed")
+        and again["created"] == got["created"]
+        and fresh["created"] == got["created"]
+        and len(tracker.commits(before)) == 1,
+        (again, fresh),
+    )
+    ok, listed = call("list_projects", {})
+    ok2, made = call(
+        "create", {"request_id": "p2", "project": "diy", "title": "Fix the shed door"}
+    )
+    ok3, handed = call("handoff", {"target": "diy"})
+    tap.check(
+        "the new project is listed, takes tasks, and hands off",
+        ok
+        and "diy" in [p["project"] for p in listed["projects"]]
+        and ok2
+        and ok3
+        and handed["skills"] == ["coding-standards"]
+        and [t["id"] for t in handed["tasks"]["ready"]] == [made["created"][0]["id"]],
+        (listed, made, handed),
+    )
+
+    # A directory holding only an empty STATUS.md, as one pushed by hand
+    # before its README, becomes a project with a proper STATUS.md.
+    path = tracker.checkout("half")
+    (path / "half").mkdir()
+    (path / "half" / "STATUS.md").write_text("")
+    git(path, "add", "-A")
+    git(path, "commit", "-q", "-m", "chore: half a project")
+    git(path, "push", "-q", "origin", "main")
+    ok, got = call(
+        "create",
+        {"request_id": "p3", "kind": "project", "project": "half", "title": "Half"},
+    )
+    status = tracker.show("half/STATUS.md") if ok else ""
+    tap.check(
+        "a directory with tracker files but no README becomes a project",
+        ok and "## Summary" in status and "## Next" in status,
+        got,
+    )
+
+    # A directory that is neither a project nor a half-made one is not adopted.
+    path = tracker.checkout("notes")
+    (path / "notes").mkdir()
+    (path / "notes" / "ideas.md").write_text("# Ideas\n")
+    git(path, "add", "-A")
+    git(path, "commit", "-q", "-m", "chore: notes")
+    git(path, "push", "-q", "origin", "main")
+    head = tracker.head()
+    refusals = []
+    for request_id, extra, expect in (
+        ("p4", {"project": "alpha"}, "project 'alpha' already exists"),
+        ("p5", {"project": ".hidden"}, "invalid project name"),
+        ("p6", {"project": "a/b"}, "invalid project name"),
+        ("p7", {"project": "notes"}, "no STATUS.md or tasks/"),
+        ("p8", {"project": "p8", "slug": "x"}, "a project takes no slug"),
+        (
+            "p9",
+            {"project": "p9", "fields": {"owner": "x"}},
+            "unknown project field owner",
+        ),
+        (
+            "p10",
+            {"project": "p10", "sections": {"Goal": "x"}},
+            "unknown project section Goal",
+        ),
+    ):
+        args = {"request_id": request_id, "kind": "project", "title": "X", **extra}
+        ok, got = call("create", args)
+        refusals.append((ok, expect in str(got), got))
+    ok, got = call(
+        "apply_changes",
+        {
+            "request_id": "p11",
+            "changes": [
+                {
+                    "op": "create",
+                    "kind": "project",
+                    "project": "p11",
+                    "ref": "r",
+                    "sections": {"title": "X"},
+                }
+            ],
+        },
+    )
+    refusals.append((ok, "a project takes no ref" in str(got), got))
+    tap.check(
+        "existing projects and directories, invalid names, and keys a project "
+        "does not take are refused without a commit",
+        all(not ok and named for ok, named, _ in refusals) and tracker.head() == head,
+        refusals,
+    )
+
+    before = tracker.head()
+    ok, got = call(
+        "apply_changes",
+        {
+            "request_id": "p12",
+            "changes": [
+                {
+                    "op": "create",
+                    "kind": "project",
+                    "project": "garden",
+                    "sections": {"title": "Garden"},
+                },
+                {
+                    "op": "create",
+                    "kind": "decision",
+                    "project": "garden",
+                    "sections": {
+                        "title": "Use raised beds",
+                        "Context": "Clay soil.",
+                        "Decision": "Build raised beds.",
+                        "Consequences": "Buy timber.",
+                    },
+                },
+            ],
+        },
+    )
+    kinds = [c["kind"] for c in got["created"]] if ok else []
+    tap.check(
+        "a project and its first decision are created in one commit",
+        ok and kinds == ["project", "decision"] and len(tracker.commits(before)) == 1,
+        got,
+    )
+
+
 def bypass_proxy_for_loopback() -> None:
     """Keeps loopback requests away from any proxy in the environment.
 
@@ -2016,6 +2179,7 @@ def main() -> None:
         edit_checks(tap, tg, seed, tmp)
         section_input_checks(tap, tg, seed, tmp)
         findings_checks(tap, tg, seed, tmp)
+        project_checks(tap, tg, seed, tmp)
         local_checks(tap, tg, seed, tmp)
     print(f"1..{tap.n}", flush=True)
     sys.exit(1 if tap.failed else 0)

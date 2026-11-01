@@ -304,16 +304,24 @@ The file is a JSON object with one key, `changes`:
 ]}
 ```
 
-| Operation         | Keys                                                                                     | Precondition                          |
-| ----------------- | ---------------------------------------------------------------------------------------- | ------------------------------------- |
-| `create`          | `kind` (`task` or `decision`), `project`, `ref`, `slug`, `fields` (optional), `sections` | none; IDs and numbers are allocated   |
-| `set`             | `record`, `field`, `value`, `expected` (optional)                                        | `expected`, when given                |
-| `add`, `remove`   | `record`, `field`, `values`                                                              | none; repeats and absences are no-ops |
-| `replace_section` | `record`, `section`, `text`, `expected_hash`                                             | the section's hash                    |
-| `write_file`      | `path`, `content`, `expected_blob` (optional), `executable` (optional)                   | absent, or the file's Git blob SHA    |
-| `delete_file`     | `path`, `expected_blob`                                                                  | the file's Git blob SHA               |
-| `edit_file`       | `path`, `old_string`, `new_string`, `replace_all` (optional), `expected_blob` (optional) | `old_string` occurs; `expected_blob`  |
+| Operation         | Keys                                                                                                 | Precondition                          |
+| ----------------- | ---------------------------------------------------------------------------------------------------- | ------------------------------------- |
+| `create`          | `kind` (`task`, `decision`, or `project`), `project`, `ref`, `slug`, `fields` (optional), `sections` | none; IDs and numbers are allocated   |
+| `set`             | `record`, `field`, `value`, `expected` (optional)                                                    | `expected`, when given                |
+| `add`, `remove`   | `record`, `field`, `values`                                                                          | none; repeats and absences are no-ops |
+| `replace_section` | `record`, `section`, `text`, `expected_hash`                                                         | the section's hash                    |
+| `write_file`      | `path`, `content`, `expected_blob` (optional), `executable` (optional)                               | absent, or the file's Git blob SHA    |
+| `delete_file`     | `path`, `expected_blob`                                                                              | the file's Git blob SHA               |
+| `edit_file`       | `path`, `old_string`, `new_string`, `replace_all` (optional), `expected_blob` (optional)             | `old_string` occurs; `expected_blob`  |
 
+- **Projects:** `create` with `kind` `project` names a new top-level directory
+  in `project`, takes `sections` `{"title": ...}` (the README heading) and
+  optionally `fields` `{"skills": [...]}`, and no `ref` or `slug`. It writes
+  `README.md` and, unless one with content is there, `STATUS.md`. A directory
+  without a README that holds `STATUS.md` or `tasks/`, which `doctor` warns
+  about, becomes a project this way; an existing project, any other existing
+  directory, and an invalid name are refused. Later changes in the set can
+  create its tasks.
 - **Records:** A task ID, a decision path, a project's `STATUS.md`, or `$name`
   for a record an earlier `create` named with `ref`. `$name` also works in
   `blocked_by` and `supersedes` values, so one set can create a task and the
