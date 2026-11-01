@@ -349,7 +349,11 @@ mcp <command> [options] [arguments]
   rotation) and `--json` (one record per line, with `server` added). `--summary`
   prints statistics instead: outcomes; requests, failures and p50/p95 latency
   per server, client and tool; and the commonest two- and three-call sequences
-  in each caller's chains (`--gap SECS`, default 120; `--json` for JSON). It
+  in each caller's chains (`--gap SECS`, default 120; `--json` for JSON).
+  `--serve` (which must come first) serves one live page of the latest records
+  and the summary, filterable by server, on port 8792: loopback only, or behind
+  Cloudflare Access with `--access-team` and `--access-aud` (or
+  `MCP_LOGS_ACCESS_TEAM` and `MCP_LOGS_ACCESS_AUD`), with an open `GET /up`. It
   runs `scripts/mcp-logs`; the record format is in
   [MCP request logs](references/mcp-logs.md).
 
@@ -370,8 +374,8 @@ OpenCode has no remove command, so `mcp remove` edits its config file and keeps
 the file's comments. `add` does not log in to servers that use OAuth; finish
 with the agent's own login (`/mcp` in Claude Code, `codex mcp login NAME`,
 `opencode mcp auth NAME`). `add` and `remove` are declared in
-`permissions/unsafe`, since they change which tools an agent has; `logs` only
-reads.
+`permissions/unsafe`, since they change which tools an agent has, and so is
+`logs --serve`, which opens a port; reading logs stays pre-approved.
 
 See the [Command Index](references/command-index.md) for full help details.
 

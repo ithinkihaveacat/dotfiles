@@ -1,0 +1,325 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "cffi==2.1.1",
+#     "cryptography==50.0.2",
+#     "pycparser==3.0",
+# ]
+# ///
+"""Exercise 'mcp logs --serve': its health check, page and records, with and
+without a Cloudflare Access check against locally signed tokens."""
+# unittest supplies the assertion API.
+# ruff: noqa: PT009
+
+import base64
+import http.server
+import json
+import os
+import signal
+import socket
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import traceback
+import unittest
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
+
+READER = Path(__file__).resolve().parents[1] / "scripts" / "mcp-logs"
+TEAM, AUD = "test.invalid", "test-aud"
+KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+
+
+def bypass_proxy_for_loopback() -> None:
+    """Keeps loopback requests, the reader's JWKS fetch among them, away from
+    any proxy in the environment (an agent sandbox sets one)."""
+    for var in ("no_proxy", "NO_PROXY"):
+        hosts = [h for h in os.environ.get(var, "").split(",") if h]
+        hosts += [h for h in ("127.0.0.1", "localhost") if h not in hosts]
+        os.environ[var] = ",".join(hosts)
+
+
+def b64(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+
+def token(**claims) -> str:
+    now = int(time.time())
+    body = {
+        "iss": f"https://{TEAM}",
+        "aud": [AUD],
+        "email": "test@example.com",
+        "iat": now,
+        "exp": now + 300,
+        **claims,
+    }
+    head = b64(json.dumps({"alg": "RS256", "kid": "k1", "typ": "JWT"}).encode())
+    payload = b64(json.dumps(body).encode())
+    sig = KEY.sign(f"{head}.{payload}".encode(), padding.PKCS1v15(), hashes.SHA256())
+    return f"{head}.{payload}.{b64(sig)}"
+
+
+def certs_server() -> str:
+    n = KEY.public_key().public_numbers()
+    jwks = json.dumps(
+        {
+            "keys": [
+                {
+                    "kid": "k1",
+                    "kty": "RSA",
+                    "alg": "RS256",
+                    "use": "sig",
+                    "n": b64(n.n.to_bytes((n.n.bit_length() + 7) // 8, "big")),
+                    "e": b64(n.e.to_bytes(3, "big")),
+                }
+            ]
+        }
+    ).encode()
+
+    class Certs(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.end_headers()
+            self.wfile.write(jwks)
+
+        def log_message(self, *args):
+            pass
+
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Certs)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    return f"http://127.0.0.1:{httpd.server_address[1]}/certs"
+
+
+def record(ts: str, **fields) -> dict:
+    return {"ts": ts, "transport": "stdio", "outcome": "ok", "ms": 1, **fields}
+
+
+def write(path: Path, *records) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.writelines(json.dumps(rec) + "\n" for rec in records)
+
+
+def free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+class McpLogsServeTests(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.logs = Path(self.tmpdir.name) / "logs"
+        self.env = {
+            k: v for k, v in os.environ.items() if not k.startswith("MCP_LOGS_")
+        }
+        write(
+            self.logs / "skill" / "mcp.jsonl",
+            record(
+                "2026-10-01T10:00:00.000Z",
+                method="tools/call",
+                tool="load_skill",
+                caller="aaaaaaaaaa",
+            ),
+        )
+        write(
+            self.logs / "pinboard" / "mcp.jsonl",
+            record("2026-10-01T10:00:01.000Z", method="ping"),
+        )
+        self.proc = None
+
+    def tearDown(self):
+        if self.proc and self.proc.poll() is None:
+            self.proc.kill()
+            self.proc.wait()
+        self.tmpdir.cleanup()
+
+    def start(self, *args, env=None):
+        self.port = free_port()
+        self.base = f"http://127.0.0.1:{self.port}"
+        self.proc = subprocess.Popen(
+            [str(READER), "--serve", "--port", str(self.port), *args],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            env=env or self.env,
+        )
+        for _ in range(300):
+            if self.proc.poll() is not None:
+                self.fail(f"reader exited: {self.proc.stderr.read().decode()}")
+            try:
+                with socket.create_connection(("127.0.0.1", self.port), timeout=1):
+                    return
+            except OSError:
+                time.sleep(0.1)
+        self.fail("reader did not start")
+
+    def get(self, path, headers=None, method="GET"):
+        req = urllib.request.Request(
+            self.base + path, headers=headers or {}, method=method
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return resp.status, resp.headers, resp.read().decode()
+        except urllib.error.HTTPError as e:
+            return e.code, e.headers, e.read().decode()
+
+    def records(self, query="", headers=None) -> dict:
+        status, _, body = self.get("/records" + query, headers)
+        self.assertEqual(status, 200, body)
+        return json.loads(body)
+
+    def stop(self, sig) -> None:
+        self.proc.send_signal(sig)
+        self.assertEqual(self.proc.wait(timeout=10), 0)
+
+    def test_page_and_records(self):
+        self.start(str(self.logs), "--allow-host", "logs.test")
+        status, _, body = self.get("/up")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["status"], "ok")
+        status, headers, body = self.get("/")
+        self.assertEqual(status, 200)
+        self.assertIn("<title>MCP requests</title>", body)
+        self.assertIn("script-src 'sha256-", headers["Content-Security-Policy"])
+        self.assertEqual(headers["Cache-Control"], "no-store")
+
+        data = self.records()
+        self.assertEqual(data["servers"], ["pinboard", "skill"])
+        self.assertEqual(data["summary"]["requests"], 2)
+        self.assertEqual([r["server"] for r in data["records"]], ["skill", "pinboard"])
+        only = self.records("?server=skill")
+        self.assertEqual([r["server"] for r in only["records"]], ["skill"])
+        self.assertEqual(only["summary"]["tools"][0]["tool"], "load_skill")
+        same = self.records(f"?server=skill&seen={only['seq']}")
+        self.assertEqual(same, {"seq": only["seq"], "unchanged": True})
+
+        # Appended records, a rotation and a new server's log all show up.
+        write(self.logs / "skill" / "mcp.jsonl", record("2026-10-01T10:00:02.000Z"))
+        skill = self.logs / "skill" / "mcp.jsonl"
+        skill.rename(f"{skill}.1")
+        write(Path(f"{skill}.1"), record("2026-10-01T10:00:03.000Z", n=3))
+        write(skill, record("2026-10-01T10:00:04.000Z", n=4))
+        write(self.logs / "andon" / "mcp.jsonl", record("2026-10-01T10:00:05.000Z"))
+        data = self.records(f"?seen={data['seq']}")
+        self.assertEqual(data["servers"], ["andon", "pinboard", "skill"])
+        self.assertEqual(
+            [r["ts"][17:19] for r in data["records"]],
+            ["00", "01", "02", "03", "04", "05"],
+        )
+
+        for path, headers, method, want in (
+            ("/records", {"host": "evil.example"}, "GET", 421),
+            ("/", {"host": "evil.example"}, "GET", 421),
+            ("/records", {"host": "logs.test:443"}, "GET", 200),
+            ("/", {}, "POST", 405),
+            ("/nope", {}, "GET", 404),
+            ("/up", {"host": "evil.example"}, "GET", 200),
+        ):
+            with self.subTest(path=path, headers=headers, method=method):
+                self.assertEqual(self.get(path, headers, method)[0], want)
+        self.stop(signal.SIGTERM)
+
+    def test_access(self):
+        env = dict(
+            self.env,
+            MCP_LOGS_ACCESS_TEAM=TEAM,
+            MCP_LOGS_ACCESS_AUD=AUD,
+            MCP_LOGS_ACCESS_CERTS_URL=certs_server(),
+        )
+        self.start("--host", "0.0.0.0", str(self.logs), env=env)
+        now = int(time.time())
+        for name, tok, want in (
+            ("no token", None, 401),
+            ("malformed", "not.a.jwt", 403),
+            ("wrong audience", token(aud=["other"]), 403),
+            ("expired", token(exp=now - 600), 403),
+            ("wrong issuer", token(iss="https://evil.invalid"), 403),
+            ("valid", token(), 200),
+        ):
+            for path in ("/", "/records"):
+                with self.subTest(name=name, path=path):
+                    headers = {"cf-access-jwt-assertion": tok} if tok else {}
+                    # Any Host: Access, not the Host header, guards it.
+                    headers["host"] = "logs.example.com"
+                    self.assertEqual(self.get(path, headers)[0], want)
+        self.assertEqual(self.get("/up")[0], 200)
+        data = self.records(headers={"cf-access-jwt-assertion": token()})
+        self.assertEqual(data["summary"]["requests"], 2)
+        self.stop(signal.SIGINT)
+
+    def test_since_window(self):
+        recent = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
+        write(self.logs / "skill" / "mcp.jsonl", record(recent, n=1))
+        self.start("--since", "1h", str(self.logs))
+        data = self.records()
+        self.assertEqual([r.get("n") for r in data["records"]], [1])
+        self.assertEqual(data["since"], "1h")
+        self.stop(signal.SIGTERM)
+
+    def test_empty_directory(self):
+        empty = Path(self.tmpdir.name) / "empty"
+        empty.mkdir()
+        self.start(str(empty))
+        data = self.records()
+        self.assertEqual((data["servers"], data["records"]), ([], []))
+        write(empty / "taskgo" / "mcp.jsonl", record("2026-10-01T10:00:00.000Z"))
+        self.assertEqual(self.records()["servers"], ["taskgo"])
+        self.stop(signal.SIGTERM)
+
+    def test_command_line(self):
+        for args, says in (
+            ([str(self.logs), "--serve"], "--serve must be the first argument"),
+            (["--serve", "--json", str(self.logs)], "--json does not apply"),
+            (["--serve", "-f", str(self.logs)], "-f does not apply"),
+            (["--port", "1", str(self.logs)], "--port applies only to --serve"),
+            (["--ser", str(self.logs)], "unrecognized arguments: --ser"),
+            (["--serve", "--host", "0.0.0.0", str(self.logs)], "loopback only"),
+            (
+                ["--serve", "--access-team", TEAM, str(self.logs)],
+                "both --access-team and --access-aud",
+            ),
+            (["--serve", "--since", "soon", str(self.logs)], "--since: expected"),
+            (["--serve", str(self.logs / "nope")], "no such file or directory"),
+        ):
+            with self.subTest(args=args):
+                out = subprocess.run(
+                    [str(READER), *args],
+                    capture_output=True,
+                    text=True,
+                    env=self.env,
+                    timeout=60,
+                    check=False,
+                )
+                self.assertEqual(out.returncode, 1, out.stderr)
+                self.assertIn(says, out.stderr)
+
+
+if __name__ == "__main__":
+    bypass_proxy_for_loopback()
+    names = sorted(n for n in dir(McpLogsServeTests) if n.startswith("test_"))
+    print(f"1..{len(names)}", flush=True)
+    failures = 0
+    for number, name in enumerate(names, 1):
+        case = McpLogsServeTests(name)
+        try:
+            case.setUp()
+            try:
+                getattr(case, name)()
+            finally:
+                case.tearDown()
+        except Exception:
+            failures += 1
+            print(f"not ok {number} - {name}", flush=True)
+            for line in traceback.format_exc().splitlines():
+                print(f"# {line}")
+        else:
+            print(f"ok {number} - {name}", flush=True)
+    sys.exit(1 if failures else 0)

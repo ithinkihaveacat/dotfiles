@@ -230,25 +230,40 @@ are written as given; list shows only their names.
 
 ```text
 Usage: mcp logs [OPTIONS] [PATH...]
+       mcp logs --serve [SERVE OPTIONS] [PATH...]
 
 Print the request records of this repository's MCP servers, merged from any
 number of logs, oldest first.
 
 Arguments:
-  PATH           A log file, or a directory of logs (default: $XDG_STATE_HOME)
+  PATH                A log file, or a directory of logs (default:
+                      $XDG_STATE_HOME)
 
 Options:
-  -h, --help     Display this help message and exit
-  -n, --tail N   Print the last N records, or 'all' (default: 10; all with
-                 --since or --summary)
-  --since WHEN   Only records from WHEN on: an age (30m, 1h, 2d, 1w) or a date
-                 or time (2026-11-01, 2026-11-01T09:00)
-  --server NAME  Only this server's records (taskgo, skill, ...); repeatable
-  -f, --follow   Keep printing records as they are written, across rotations
-  --json         Print each record as a JSON line, or the summary as JSON
-  --summary      Print statistics over the records instead of the records
-  --gap SECS     With --summary, the longest pause within a chain (default:
-                 120)
+  -h, --help          Display this help message and exit
+  -n, --tail N        Print the last N records, or 'all' (default: 10; all
+                      with --since or --summary)
+  --since WHEN        Only records from WHEN on: an age (30m, 1h, 2d, 1w) or a
+                      date or time (2026-11-01, 2026-11-01T09:00)
+  --server NAME       Only this server's records (taskgo, skill, ...);
+                      repeatable
+  -f, --follow        Keep printing records as they are written, across
+                      rotations
+  --json              Print each record as a JSON line, or the summary as JSON
+  --summary           Print statistics over the records instead of the records
+  --gap SECS          With --summary, the longest pause within a chain
+                      (default: 120)
+
+Serve options:
+  --serve             Serve a live page of the latest records and their
+                      summary; must be the first argument
+  --host HOST         HTTP address (default: 127.0.0.1)
+  --port PORT         HTTP port (default: 8792)
+  --allow-host HOST   Without Access, also accept requests addressed to HOST
+  --access-team HOST  Cloudflare Access team domain (default:
+                      MCP_LOGS_ACCESS_TEAM)
+  --access-aud AUD    Cloudflare Access application audience tag (default:
+                      MCP_LOGS_ACCESS_AUD)
 
 Examples:
   # The last ten requests to any server on this machine
@@ -266,6 +281,11 @@ Examples:
 
   # Requests per tool since a date
   mcp logs -n all --since 2026-11-01 --json | jq -r .tool | sort | uniq -c
+
+  # A live page on loopback, then behind Cloudflare Access for a volume
+  mcp logs --serve
+  mcp logs --serve --host 0.0.0.0 --access-team example.cloudflareaccess.com \
+    --access-aud AUD /srv/mcp-logs
 
 Each server writes its own log (taskgo mcp, skill mcp, pinboard mcp, andon
 mcp): $XDG_STATE_HOME/<server>/mcp.jsonl by default, rotated to mcp.jsonl.1
@@ -288,6 +308,27 @@ and client. A chain is one caller's tool calls to one server, each no more
 than --gap seconds after the one before; records with no caller key (HTTP
 without authentication) form no chains. It reads every record unless --tail
 or --since limits them.
+
+--serve serves one live page instead: the latest records, newest first, and
+the summary, for every log or the servers ticked on it. The page polls the
+reader, which reads only what was appended since; a log that appears later is
+picked up. With --since, the page shows only records that recent. GET /up
+answers without a token, for a proxy's health check, with the version and
+source commit. Without --access-team and --access-aud the page listens on
+loopback only and checks the Host header (--allow-host admits a tunnel's
+name). With both, it may bind another --host and requires the
+Cf-Access-Jwt-Assertion header on every other request, checking the token
+against the team's certificates, issuer, audience, and expiry. A signal stops
+it with exit status 0. --serve must come first, so that a permission rule for
+'mcp logs --serve' can tell it from reading.
+
+Environment:
+  XDG_STATE_HOME                Where the servers' logs are (default:
+                                ~/.local/state)
+  MCP_LOGS_ACCESS_TEAM          Cloudflare Access team domain
+  MCP_LOGS_ACCESS_AUD           Cloudflare Access application audience tag
+  MCP_LOGS_ACCESS_CERTS_URL     Team certificate URL, for testing (default:
+                                https://TEAM/cdn-cgi/access/certs)
 ```
 
 <!-- /generated -->
