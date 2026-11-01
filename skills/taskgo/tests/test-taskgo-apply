@@ -25,7 +25,7 @@ TEST_ROOT="$(mktemp -d)"
 trap 'rm -rf -- "$TEST_ROOT"' EXIT
 export TASKGO_MCP_LOG="$TEST_ROOT/mcp-requests.jsonl"
 
-echo "1..9"
+echo "1..10"
 
 init_base_repo() {
   local target="${1:-$TEST_ROOT/repo}"
@@ -682,4 +682,47 @@ if [ "$EDIT_OK" = 1 ]; then
   echo 'ok 9 - taskgo edit keeps CRLF bytes and modes in the working tree'
 else
   echo 'not ok 9 - taskgo edit keeps CRLF bytes and modes in the working tree'
+fi
+
+# A change of kind project creates a project that list, handoff, and doctor
+# recognize; a directory with tracker files but no README is not a project,
+# and doctor says so.
+PROJECT_OK=1
+mkdir -p "$APPLY_REPO/diy"
+: >"$APPLY_REPO/diy/STATUS.md"
+if DOCTOR_OUT=$("$BIN" --root "$APPLY_REPO" doctor 2>&1) ||
+  [[ "$DOCTOR_OUT" != *'[WARN]  diy/: has STATUS.md or tasks/ but no README.md'* ]]; then
+  PROJECT_OK=0
+  echo '# doctor did not warn about diy/ without a README'
+fi
+if LIST_ERR=$("$BIN" --root "$APPLY_REPO" list diy 2>&1) ||
+  [[ "$LIST_ERR" != *'not a project (no README.md or PROJECT.md): diy'* ]]; then
+  PROJECT_OK=0
+  echo '# list accepted a directory without a README'
+fi
+printf '%s\n' '{"changes": [' \
+  '{"op": "create", "kind": "project", "project": "diy", "fields": {"skills": ["coding-standards"]}, "sections": {"title": "DIY"}},' \
+  '{"op": "create", "kind": "task", "project": "diy", "sections": {"title": "Fix the shed door"}}' \
+  ']}' >"$TEST_ROOT/apply-project.json"
+if ! "$BIN" --root "$APPLY_REPO" apply "$TEST_ROOT/apply-project.json" >/dev/null ||
+  [[ "$(cat "$APPLY_REPO/diy/README.md")" != $'---\nskills:\n  - coding-standards\n---\n\n# DIY' ]] ||
+  ! grep -qx '## Summary' "$APPLY_REPO/diy/STATUS.md" ||
+  [[ "$("$BIN" --root "$APPLY_REPO" list diy)" != *'Fix the shed door'* ]]; then
+  PROJECT_OK=0
+  echo '# apply did not create the project and its task'
+fi
+for name in diy alpha .hidden; do
+  printf '{"changes": [{"op": "create", "kind": "project", "project": "%s", "sections": {"title": "X"}}]}\n' \
+    "$name" >"$TEST_ROOT/apply-project-again.json"
+  if "$BIN" --root "$APPLY_REPO" apply "$TEST_ROOT/apply-project-again.json" >/dev/null 2>&1; then
+    PROJECT_OK=0
+    echo "# apply created project $name over an existing one or with an invalid name"
+  fi
+done
+git -C "$APPLY_REPO" checkout -q -- .
+git -C "$APPLY_REPO" clean -fdq
+if [ "$PROJECT_OK" = 1 ]; then
+  echo 'ok 10 - apply creates a project; a directory without a README is not one'
+else
+  echo 'not ok 10 - apply creates a project; a directory without a README is not one'
 fi

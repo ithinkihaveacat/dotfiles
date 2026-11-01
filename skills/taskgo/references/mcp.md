@@ -21,7 +21,7 @@ One server serves one control repository.
 | `list_files`         | Files with blob SHAs, optionally under one directory                                                                             | `git ls-files -s`              |
 | `handoff`            | For a project or task: the note, a guide, findings, the files to read first verbatim, the skills, and the active and ready tasks | `taskgo handoff --json`        |
 | `get_task_history`   | Changes of one frontmatter field, following renames                                                                              | `taskgo history`               |
-| `create`             | Creates one task or decision as one commit, and returns its ID                                                                   | `taskgo create`                |
+| `create`             | Creates one task, decision, or project as one commit, and returns its ID                                                         | `taskgo create`                |
 | `apply_changes`      | Applies a change set as one commit                                                                                               | `taskgo apply`, commit         |
 | `edit_file`          | Replaces exact text in one file as one commit; reports lines and the new blob                                                    | `taskgo edit`, commit          |
 
