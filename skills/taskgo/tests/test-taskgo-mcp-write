@@ -2054,27 +2054,89 @@ def project_checks(tap: Tap, tg, seed: Path, tmp: Path) -> None:
         got,
     )
 
+    # A directory that is neither a project nor a half-made one is not adopted.
+    path = tracker.checkout("notes")
+    (path / "notes").mkdir()
+    (path / "notes" / "ideas.md").write_text("# Ideas\n")
+    git(path, "add", "-A")
+    git(path, "commit", "-q", "-m", "chore: notes")
+    git(path, "push", "-q", "origin", "main")
     head = tracker.head()
     refusals = []
-    for request_id, project, expect in (
-        ("p4", "alpha", "project 'alpha' already exists"),
-        ("p5", ".hidden", "invalid project name"),
-        ("p6", "a/b", "invalid project name"),
+    for request_id, extra, expect in (
+        ("p4", {"project": "alpha"}, "project 'alpha' already exists"),
+        ("p5", {"project": ".hidden"}, "invalid project name"),
+        ("p6", {"project": "a/b"}, "invalid project name"),
+        ("p7", {"project": "notes"}, "no STATUS.md or tasks/"),
+        ("p8", {"project": "p8", "slug": "x"}, "a project takes no slug"),
+        (
+            "p9",
+            {"project": "p9", "fields": {"owner": "x"}},
+            "unknown project field owner",
+        ),
+        (
+            "p10",
+            {"project": "p10", "sections": {"Goal": "x"}},
+            "unknown project section Goal",
+        ),
     ):
-        ok, got = call(
-            "create",
-            {
-                "request_id": request_id,
-                "kind": "project",
-                "project": project,
-                "title": "X",
-            },
-        )
+        args = {"request_id": request_id, "kind": "project", "title": "X", **extra}
+        ok, got = call("create", args)
         refusals.append((ok, expect in str(got), got))
+    ok, got = call(
+        "apply_changes",
+        {
+            "request_id": "p11",
+            "changes": [
+                {
+                    "op": "create",
+                    "kind": "project",
+                    "project": "p11",
+                    "ref": "r",
+                    "sections": {"title": "X"},
+                }
+            ],
+        },
+    )
+    refusals.append((ok, "a project takes no ref" in str(got), got))
     tap.check(
-        "an existing project and invalid names are refused without a commit",
+        "existing projects and directories, invalid names, and keys a project "
+        "does not take are refused without a commit",
         all(not ok and named for ok, named, _ in refusals) and tracker.head() == head,
         refusals,
+    )
+
+    before = tracker.head()
+    ok, got = call(
+        "apply_changes",
+        {
+            "request_id": "p12",
+            "changes": [
+                {
+                    "op": "create",
+                    "kind": "project",
+                    "project": "garden",
+                    "sections": {"title": "Garden"},
+                },
+                {
+                    "op": "create",
+                    "kind": "decision",
+                    "project": "garden",
+                    "sections": {
+                        "title": "Use raised beds",
+                        "Context": "Clay soil.",
+                        "Decision": "Build raised beds.",
+                        "Consequences": "Buy timber.",
+                    },
+                },
+            ],
+        },
+    )
+    kinds = [c["kind"] for c in got["created"]] if ok else []
+    tap.check(
+        "a project and its first decision are created in one commit",
+        ok and kinds == ["project", "decision"] and len(tracker.commits(before)) == 1,
+        got,
     )
 
 

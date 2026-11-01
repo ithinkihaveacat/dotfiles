@@ -317,9 +317,11 @@ The file is a JSON object with one key, `changes`:
 - **Projects:** `create` with `kind` `project` names a new top-level directory
   in `project`, takes `sections` `{"title": ...}` (the README heading) and
   optionally `fields` `{"skills": [...]}`, and no `ref` or `slug`. It writes
-  `README.md` and, unless one with content is there, `STATUS.md`, so a directory
-  holding only an empty `STATUS.md` becomes a project. An existing project or an
-  invalid name is refused. Later changes in the set can create its tasks.
+  `README.md` and, unless one with content is there, `STATUS.md`. A directory
+  without a README that holds `STATUS.md` or `tasks/`, which `doctor` warns
+  about, becomes a project this way; an existing project, any other existing
+  directory, and an invalid name are refused. Later changes in the set can
+  create its tasks.
 - **Records:** A task ID, a decision path, a project's `STATUS.md`, or `$name`
   for a record an earlier `create` named with `ref`. `$name` also works in
   `blocked_by` and `supersedes` values, so one set can create a task and the

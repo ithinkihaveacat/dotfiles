@@ -10,20 +10,20 @@ One server serves one control repository.
 
 ## Tools
 
-| Tool                 | Returns                                                                                                                          | CLI equivalent                 |
-| -------------------- | -------------------------------------------------------------------------------------------------------------------------------- | ------------------------------ |
-| `list_projects`      | Projects with task counts and in-progress and blocked IDs                                                                        | `taskgo status --json`         |
-| `list_tasks`         | Task rows, by project and state (`ready` included)                                                                               | `taskgo list --json`           |
-| `get_task`           | One task: frontmatter, sections with hashes, unresolved dependencies, Markdown                                                   | `taskgo status TASK_ID --json` |
-| `get_project_status` | `STATUS.md`, its Summary and Next with hashes, the committed and a freshly computed block                                        | `taskgo status PROJECT`        |
-| `read_file`          | A UTF-8 file, whole or lines `start_line`..`end_line`, up to 256 KiB after a whole line                                          | `taskgo read --json`           |
-| `search_files`       | `git grep` lines and the files they name, up to 64 KiB; allowlisted options                                                      | `taskgo search --json`         |
-| `list_files`         | Files with blob SHAs, optionally under one directory                                                                             | `git ls-files -s`              |
-| `handoff`            | For a project or task: the note, a guide, findings, the files to read first verbatim, the skills, and the active and ready tasks | `taskgo handoff --json`        |
-| `get_task_history`   | Changes of one frontmatter field, following renames                                                                              | `taskgo history`               |
-| `create`             | Creates one task, decision, or project as one commit, and returns its ID                                                         | `taskgo create`                |
-| `apply_changes`      | Applies a change set as one commit                                                                                               | `taskgo apply`, commit         |
-| `edit_file`          | Replaces exact text in one file as one commit; reports lines and the new blob                                                    | `taskgo edit`, commit          |
+| Tool                 | Returns                                                                                                                          | CLI equivalent                  |
+| -------------------- | -------------------------------------------------------------------------------------------------------------------------------- | ------------------------------- |
+| `list_projects`      | Projects with task counts and in-progress and blocked IDs                                                                        | `taskgo status --json`          |
+| `list_tasks`         | Task rows, by project and state (`ready` included)                                                                               | `taskgo list --json`            |
+| `get_task`           | One task: frontmatter, sections with hashes, unresolved dependencies, Markdown                                                   | `taskgo status TASK_ID --json`  |
+| `get_project_status` | `STATUS.md`, its Summary and Next with hashes, the committed and a freshly computed block                                        | `taskgo status PROJECT`         |
+| `read_file`          | A UTF-8 file, whole or lines `start_line`..`end_line`, up to 256 KiB after a whole line                                          | `taskgo read --json`            |
+| `search_files`       | `git grep` lines and the files they name, up to 64 KiB; allowlisted options                                                      | `taskgo search --json`          |
+| `list_files`         | Files with blob SHAs, optionally under one directory                                                                             | `git ls-files -s`               |
+| `handoff`            | For a project or task: the note, a guide, findings, the files to read first verbatim, the skills, and the active and ready tasks | `taskgo handoff --json`         |
+| `get_task_history`   | Changes of one frontmatter field, following renames                                                                              | `taskgo history`                |
+| `create`             | Creates one task, decision, or project as one commit, and returns what it created                                                | `taskgo create`, `taskgo apply` |
+| `apply_changes`      | Applies a change set as one commit                                                                                               | `taskgo apply`, commit          |
+| `edit_file`          | Replaces exact text in one file as one commit; reports lines and the new blob                                                    | `taskgo edit`, commit           |
 
 Each call fetches the branch (`main` by default) from the remote (`origin`),
 resolves it once, and reads only that commit, through a Git tree snapshot. It
