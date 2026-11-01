@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.11"
-# dependencies = []
+# dependencies = ["publicsuffixlist==1.1.2.20261023"]
 # ///
 # Tests: tests/test-pinboard
 
@@ -15,6 +15,7 @@ import datetime
 import fcntl
 import hashlib
 import html
+import ipaddress
 import json
 import os
 import re
@@ -1900,6 +1901,7 @@ Commands:
   suggest URL       Ask Pinboard for tag suggestions
   doctor            Check the token, the clone and the mirror (read-only)
   audit             Check links for rot and tag the verdicts (resumable)
+  domain-tags       Add one canonical tag per frequent domain (resumable)
   mcp               Serve the mirror to agents over MCP
 
 Options:
@@ -2081,6 +2083,23 @@ class Pass:
 
 def strip_audit(tags: Iterable[str]) -> list[str]:
     return [tag for tag in tags if not AUDIT_RE.match(tag)]
+
+
+def valid_url(url: str) -> bool:
+    parts = urllib.parse.urlsplit(url)
+    return parts.scheme in ("http", "https") and bool(parts.hostname)
+
+
+def tag_key(tag: str) -> str:
+    """Tags are case-insensitive, unordered and sometimes HTML-escaped more
+    than once by Pinboard; compare them in that form."""
+    text = tag
+    while True:
+        decoded = html.unescape(text)
+        if decoded == text:
+            break
+        text = decoded
+    return text.casefold()
 
 
 def target_tags(current: Iterable[str], verdict: str, cohort: str) -> list[str]:
@@ -2602,7 +2621,11 @@ def recover_dirty(repo: Any) -> None:
 
 
 def commit_mirror(
-    repo: Any, records: dict[str, Any], count: int, push: bool = False
+    repo: Any,
+    records: dict[str, Any],
+    count: int,
+    push: bool = False,
+    message: str | None = None,
 ) -> None:
     """Commit the mirror locally; push only when asked. Pushing every batch
     would be hundreds of pushes over one pass, and Pinboard is authoritative
@@ -2615,7 +2638,13 @@ def commit_mirror(
             if not ok:
                 note(f"mirror committed but not pushed: {message}")
         return
-    repo.run("commit", "-q", "--no-gpg-sign", "-m", f"audit: apply {count} verdicts")
+    repo.run(
+        "commit",
+        "-q",
+        "--no-gpg-sign",
+        "-m",
+        message or f"audit: apply {count} verdicts",
+    )
     if push and repo.remote_url() is not None:
         ok, message = repo.push()
         if not ok:
@@ -2643,6 +2672,10 @@ def cmd_audit_apply(ctx: Any, args: argparse.Namespace) -> int:
     # One intent without done is the only ambiguous write. Resolve it first.
     for url, row in state.items():
         if "intent" in row and "done" not in row:
+            if not valid_url(url):
+                run.journal.append("skip", url=url, reason="invalid URL")
+                note(f"skipping invalid URL: {url!r}")
+                continue
             live = ctx.api.get(url)
             target = row["intent"]["target"]
             if live is not None and live["tags"] == target:
@@ -2679,6 +2712,10 @@ def cmd_audit_apply(ctx: Any, args: argparse.Namespace) -> int:
     skipped = 0
     for item in pending:
         url = item["url"]
+        if not valid_url(url):
+            run.journal.append("skip", url=url, reason="invalid URL")
+            skipped += 1
+            continue
         record = records.get(url)
         if record is None:
             run.journal.append("skip", url=url, reason="not in mirror")
@@ -2745,7 +2782,9 @@ def cmd_audit_status(ctx: Any, args: argparse.Namespace) -> int:
     skipped = len(skipped_urls)
     pending = len(run.plan) - done - skipped
     ambiguous = sum(
-        1 for row in state.values() if "intent" in row and "done" not in row
+        1
+        for row in state.values()
+        if "intent" in row and "done" not in row and "skip" not in row
     )
     payload = {
         "pass": run.manifest["pass"],
@@ -2797,7 +2836,9 @@ def cmd_audit_verify(ctx: Any, args: argparse.Namespace) -> int:
         if record is None:
             problems.append({"url": item["url"], "problem": "not in mirror"})
             continue
-        if record["tags"] != row["done"]["target"]:
+        if {tag_key(tag) for tag in record["tags"]} != {
+            tag_key(tag) for tag in row["done"]["target"]
+        }:
             problems.append(
                 {
                     "url": item["url"],
@@ -2865,6 +2906,537 @@ def cmd_audit_bump(ctx: Any, args: argparse.Namespace) -> int:
         commit_mirror(repo, records, changed, push=True)
     print(f"renamed {args.old} to {args.new} on {changed} bookmarks")
     return 0
+
+
+# --- Domain tags -------------------------------------------------------------
+
+DOMAIN_MIN = 5
+DOMAIN_PASS = "domains"
+_PSL: Any = None
+
+
+def public_suffix_list() -> Any:
+    """The pinned Public Suffix List, imported only on this code path so the
+    rest of the CLI does not pay for it."""
+    global _PSL
+    if _PSL is None:
+        from publicsuffixlist import PublicSuffixList
+
+        _PSL = PublicSuffixList()
+    return _PSL
+
+
+def domain_root(args: argparse.Namespace) -> Path:
+    if args.state:
+        return Path(args.state).expanduser()
+    base = Path(os.environ.get("XDG_STATE_HOME", "~/.local/state")).expanduser()
+    return base / "pinboard" / "domain-tags"
+
+
+def hostname_of_url(url: str) -> str | None:
+    """The lowercased host from an http(s) URL, without a trailing dot, or
+    None for other schemes, malformed URLs and missing hosts."""
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError:
+        return None
+    if parts.scheme.casefold() not in ("http", "https"):
+        return None
+    host = (parts.hostname or "").casefold().rstrip(".")
+    return host or None
+
+
+def registrable_domain(url: str) -> str | None:
+    """The private-suffix domain for a URL, excluding github.io (per-user
+    Pages sites are not useful domain tags) and IP literals."""
+    host = hostname_of_url(url)
+    if host is None or host == "github.io" or host.endswith(".github.io"):
+        return None
+    try:
+        ipaddress.ip_address(host)
+        return None
+    except ValueError:
+        pass
+    domain = public_suffix_list().privatesuffix(host)
+    if not domain:
+        return None
+    return domain.casefold().rstrip(".")
+
+
+def domain_tag(domain: str) -> str:
+    """The canonical tag for a registrable domain. www.*.uk would otherwise
+    become the useless tag 'www', so its remaining labels are joined without
+    dots: www.gov.uk becomes govuk, www.nhs.uk becomes nhsuk."""
+    if domain.startswith("www.") and domain.endswith(".uk"):
+        return domain[4:].replace(".", "")
+    return domain.split(".", maxsplit=1)[0]
+
+
+def has_tag(tags: Iterable[str], tag: str) -> bool:
+    key = tag_key(tag)
+    return any(tag_key(existing) == key for existing in tags)
+
+
+def domain_variants(tags: Iterable[str], domain: str, tag: str) -> list[str]:
+    """Tags that look like another form of the same domain, such as
+    'nytimes.com' instead of 'nytimes'. Reported, never changed."""
+    found = set()
+    canonical = tag_key(tag)
+    for item in tags:
+        key = tag_key(item)
+        if key == canonical:
+            continue
+        if key in (domain, f"www.{domain}") or key.endswith(f".{domain}"):
+            found.add(item)
+    return sorted(found)
+
+
+def analyze_domains(
+    records: dict[str, dict[str, Any]], minimum: int
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Group records by registrable domain and return (manifest, plan items)
+    for domains with at least MINIMUM unique URLs."""
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for record in records.values():
+        domain = registrable_domain(record["url"])
+        if domain is not None:
+            groups.setdefault(domain, []).append(record)
+
+    rows = []
+    plan = []
+    tags: dict[str, set[str]] = {}
+    for domain, items in groups.items():
+        if len(items) < minimum:
+            continue
+        tag = domain_tag(domain)
+        tags.setdefault(tag, set()).add(domain)
+        missing = [record for record in items if not has_tag(record["tags"], tag)]
+        variants = sorted(
+            {
+                variant
+                for record in items
+                for variant in domain_variants(record["tags"], domain, tag)
+            }
+        )
+        rows.append(
+            {
+                "domain": domain,
+                "tag": tag,
+                "urls": len(items),
+                "have": len(items) - len(missing),
+                "missing": len(missing),
+                "variants": variants,
+            }
+        )
+        for record in items:
+            plan.append({"url": record["url"], "domain": domain, "tag": tag})
+
+    rows.sort(key=lambda row: (-row["missing"], -row["urls"], row["domain"]))
+    plan.sort(key=lambda item: (item["domain"], item["url"]))
+    collisions = {
+        tag: sorted(domains) for tag, domains in tags.items() if len(domains) > 1
+    }
+    manifest = {
+        "pass": DOMAIN_PASS,
+        "created": iso(time.time()),
+        "min": minimum,
+        "groups": len(rows),
+        "urls": sum(row["urls"] for row in rows),
+        "have": sum(row["have"] for row in rows),
+        "missing": sum(row["missing"] for row in rows),
+        "variants": sum(len(row["variants"]) for row in rows),
+        "variant_domains": sum(1 for row in rows if row["variants"]),
+        "collisions": collisions,
+        "domains": rows,
+    }
+    return manifest, plan
+
+
+class DomainPass:
+    def __init__(self, root: Path, pass_id: str):
+        self.dir = root / pass_id
+        self.manifest_path = self.dir / "manifest.json"
+        self.plan_path = self.dir / "plan.jsonl"
+        self.journal = Journal(self.dir / "journal.jsonl")
+        if not self.manifest_path.exists():
+            raise Error(
+                f"no domain-tag pass at {self.dir}; run 'pinboard domain-tags plan' first"
+            )
+        self.manifest = json.loads(self.manifest_path.read_text(encoding="utf-8"))
+        self.plan = [
+            json.loads(line)
+            for line in self.plan_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+
+    def state(self) -> dict[str, dict[str, Any]]:
+        """Latest intent/done/skip per URL."""
+        out: dict[str, dict[str, Any]] = {}
+        for event in self.journal.events:
+            url = event.get("url")
+            if not url:
+                continue
+            out.setdefault(url, {})[event["op"]] = event
+        return out
+
+
+def print_domain_report(manifest: dict[str, Any], verbose: bool = True) -> None:
+    print(
+        f"pass {manifest['pass']}: {manifest['urls']} bookmarks in "
+        f"{manifest['groups']} domains (minimum {manifest['min']})"
+    )
+    print(
+        f"  already {manifest['have']}, missing {manifest['missing']}, "
+        f"variants {manifest['variants']} in {manifest['variant_domains']} domains"
+    )
+    if manifest["collisions"]:
+        print(f"  label collisions: {len(manifest['collisions'])}")
+        for tag, domains in sorted(manifest["collisions"].items()):
+            print(f"    {tag}: {', '.join(domains)}")
+    if not verbose:
+        return
+    print(f"domains ({manifest['groups']}):")
+    print(f"  {'domain':34} {'tag':18} {'urls':>5} {'have':>5} {'miss':>5}")
+    for row in manifest["domains"]:
+        print(
+            f"  {row['domain']:34} {row['tag']:18} "
+            f"{row['urls']:5} {row['have']:5} {row['missing']:5}"
+        )
+        if row["variants"]:
+            print(f"    variants: {' '.join(row['variants'])}")
+
+
+def cmd_domain_plan(ctx: Any, args: argparse.Namespace) -> int:
+    repo = ctx.require_clone()
+    manifest, plan = analyze_domains(load_committed(repo), args.min)
+    manifest["pass"] = args.pass_id
+    root = domain_root(args)
+    directory = root / args.pass_id
+    manifest_path = directory / "manifest.json"
+    if manifest_path.exists() and not args.force:
+        raise Error(f"{manifest_path} exists; pass --force to replace this pass")
+    if not args.dry_run:
+        atomic_write(
+            directory / "plan.jsonl",
+            "".join(json.dumps(item, ensure_ascii=False) + "\n" for item in plan),
+        )
+        atomic_write(
+            manifest_path, json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+        )
+    if args.json:
+        print(json.dumps(manifest, indent=2, sort_keys=True))
+    else:
+        if args.dry_run:
+            print(f"would plan {len(plan)} bookmarks in {directory}")
+        else:
+            print(f"planned {len(plan)} bookmarks in {directory}")
+        print_domain_report(manifest)
+    return 0
+
+
+def cmd_domain_status(ctx: Any, args: argparse.Namespace) -> int:
+    run = DomainPass(domain_root(args), args.pass_id)
+    state = run.state()
+    done_urls = {url for url, row in state.items() if "done" in row}
+    skipped_urls = {
+        url for url, row in state.items() if "skip" in row and url not in done_urls
+    }
+    done = len(done_urls)
+    noop = sum(1 for row in state.values() if row.get("done", {}).get("noop"))
+    skipped = len(skipped_urls)
+    remaining = len(run.plan) - done - skipped
+    ambiguous = sum(
+        1
+        for row in state.values()
+        if "intent" in row and "done" not in row and "skip" not in row
+    )
+    payload = {
+        "pass": run.manifest["pass"],
+        "total": len(run.plan),
+        "applied": done,
+        "writes": done - noop,
+        "noop": noop,
+        "skipped": skipped,
+        "remaining": max(0, remaining),
+        "ambiguous": ambiguous,
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(f"pass {payload['pass']}, {payload['total']} planned")
+        print(
+            f"applied {done} ({noop} no-op, {done - noop} writes), "
+            f"skipped {skipped}, remaining {payload['remaining']}"
+        )
+        if ambiguous:
+            print(f"ambiguous writes: {ambiguous} (run 'apply' to resolve)")
+    return 0
+
+
+def cmd_domain_apply(ctx: Any, args: argparse.Namespace) -> int:
+    repo = ctx.require_clone()
+    if not args.dry_run:
+        recover_dirty(repo)
+        catch_up(repo, ctx.local)
+    run = DomainPass(domain_root(args), args.pass_id)
+    records = load_committed(repo)
+    state = run.state()
+
+    repaired = False
+    if not args.dry_run:
+        # Rebuild a mirror that lost a tag the journal says was written.
+        for url, row in state.items():
+            if "done" not in row or url not in records:
+                continue
+            tag = row["done"]["tag"]
+            if not has_tag(records[url]["tags"], tag):
+                records[url]["tags"] = [*records[url]["tags"], tag]
+                repaired = True
+
+        # One intent without done is the only ambiguous write. Resolve it first.
+        for url, row in state.items():
+            if "intent" in row and "done" not in row and "skip" not in row:
+                tag = row["intent"]["tag"]
+                live = ctx.api.get(url)
+                if live is not None and has_tag(live["tags"], tag):
+                    run.journal.append(
+                        "done",
+                        url=url,
+                        tag=tag,
+                        target=live["tags"],
+                        noop=False,
+                        recovered=True,
+                    )
+                    if url in records:
+                        records[url]["tags"] = live["tags"]
+                        records[url]["meta"] = live.get(
+                            "meta", records[url].get("meta", "")
+                        )
+                        repaired = True
+                    note(f"recovered write for {url}")
+                elif live is None:
+                    run.journal.append("skip", url=url, reason="not in Pinboard")
+                    note(f"skipping {url}: not in Pinboard")
+                else:
+                    note(f"replaying unconfirmed write for {url}")
+                break
+        state = run.state()
+
+    pending = [
+        item
+        for item in run.plan
+        if "done" not in state.get(item["url"], {})
+        and "skip" not in state.get(item["url"], {})
+    ]
+    if args.limit:
+        pending = pending[: args.limit]
+    if not pending:
+        if repaired and not args.dry_run:
+            commit_mirror(
+                repo,
+                records,
+                1,
+                push=True,
+                message="domain-tags: repair the mirror",
+            )
+        print("nothing to apply")
+        return 0
+
+    if not args.dry_run:
+        ctx.api.require_online()
+
+    applied = 0
+    skipped = 0
+    for item in pending:
+        url, tag = item["url"], item["tag"]
+        if not valid_url(url):
+            run.journal.append("skip", url=url, reason="invalid URL")
+            skipped += 1
+            continue
+        record = records.get(url)
+        if record is None:
+            run.journal.append("skip", url=url, reason="not in mirror")
+            skipped += 1
+            continue
+        if has_tag(record["tags"], tag):
+            if args.dry_run:
+                print(f"{tag:18} {url} (already tagged)")
+                continue
+            run.journal.append("done", url=url, tag=tag, noop=True)
+            continue
+        target = [*record["tags"], tag]
+        try:
+            validate_fields(record["title"], record["notes"], target)
+        except Error as error:
+            run.journal.append("skip", url=url, reason=str(error))
+            skipped += 1
+            continue
+        if args.dry_run:
+            print(f"{tag:18} {url}")
+            continue
+        run.journal.append(
+            "intent", url=url, tag=tag, base_meta=record.get("meta", ""), target=target
+        )
+        params = post_params({**record, "tags": target}, replace=True, keep_time=True)
+        try:
+            code = ctx.api.add(params)
+        except NetworkError:
+            live = ctx.api.get(url)
+            if live is not None and has_tag(live["tags"], tag):
+                code = "done"
+            else:
+                raise
+        if code != "done":
+            raise Error(f"posts/add for {url}: {code}")
+        run.journal.append("done", url=url, tag=tag, target=target, noop=False)
+        record["tags"] = target
+        applied += 1
+        if args.commit_every and applied % args.commit_every == 0:
+            commit_mirror(
+                repo,
+                records,
+                applied,
+                message=f"domain-tags: apply {applied} tags",
+            )
+        if applied % 100 == 0:
+            note(f"applied {applied}/{len(pending)}")
+    if (applied or repaired) and not args.dry_run:
+        commit_mirror(
+            repo,
+            records,
+            applied or 1,
+            push=True,
+            message=f"domain-tags: apply {applied or 1} tags",
+        )
+    print(
+        f"applied {applied}, skipped {skipped}" + (" (dry run)" if args.dry_run else "")
+    )
+    return 0
+
+
+def cmd_domain_verify(ctx: Any, args: argparse.Namespace) -> int:
+    repo = ctx.require_clone()
+    run = DomainPass(domain_root(args), args.pass_id)
+    records = load_committed(repo)
+    state = run.state()
+    done_urls = {url for url, row in state.items() if "done" in row}
+    skipped_urls = {
+        url for url, row in state.items() if "skip" in row and url not in done_urls
+    }
+    remaining = len(run.plan) - len(done_urls) - len(skipped_urls)
+    problems = []
+    present = 0
+    for item in run.plan:
+        record = records.get(item["url"])
+        if record is None:
+            problems.append({"url": item["url"], "problem": "not in mirror"})
+        elif not has_tag(record["tags"], item["tag"]):
+            problems.append(
+                {
+                    "url": item["url"],
+                    "problem": "tag missing",
+                    "expected": item["tag"],
+                    "actual": record["tags"],
+                }
+            )
+        else:
+            present += 1
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "pass": run.manifest["pass"],
+                    "planned": len(run.plan),
+                    "present": present,
+                    "applied": len(done_urls),
+                    "skipped": len(skipped_urls),
+                    "remaining": remaining,
+                    "problems": problems,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+    else:
+        print(
+            f"{present}/{len(run.plan)} planned have their domain tag; "
+            f"{len(done_urls)} applied, {remaining} remaining"
+        )
+        for problem in problems[:20]:
+            print(f"  {problem['url']}: {problem['problem']}")
+        if remaining and args.require_complete:
+            print(f"  {remaining} planned bookmarks are not applied")
+    return 1 if problems or (remaining and args.require_complete) else 0
+
+
+def add_domain_tag_commands(sub: Any) -> None:
+    p = sub.add_parser(
+        "domain-tags",
+        prog=f"{PROG} domain-tags",
+        description="Add canonical domain tags to bookmarks, one per registrable\n"
+        "domain with at least five URLs. Analysis is offline from the mirror and a\n"
+        "pinned Public Suffix List. State lives under\n"
+        "~/.local/state/pinboard/domain-tags/<pass>/.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    tags = p.add_subparsers(
+        dest="domain_command", required=True, metavar="COMMAND", parser_class=Parser
+    )
+
+    def domain_command(name: str, description: str) -> Parser:
+        q = tags.add_parser(
+            name,
+            prog=f"{PROG} domain-tags {name}",
+            description=description,
+            help=description,
+        )
+        q.add_argument(
+            "--state",
+            metavar="DIR",
+            help="Domain-tag state root (default: ~/.local/state/pinboard/domain-tags)",
+        )
+        q.add_argument(
+            "--pass",
+            dest="pass_id",
+            default=DOMAIN_PASS,
+            metavar="ID",
+            help=f"Pass identifier (default: {DOMAIN_PASS})",
+        )
+        return q
+
+    q = domain_command("plan", "Freeze a work list and report every domain.")
+    q.add_argument(
+        "--min",
+        type=int,
+        default=DOMAIN_MIN,
+        metavar="N",
+        help=f"Minimum URLs per domain (default: {DOMAIN_MIN})",
+    )
+    q.add_argument("--force", action="store_true", help="Replace an existing pass")
+    q.add_argument(
+        "--dry-run", action="store_true", help="Report without writing state"
+    )
+    q.add_argument("--json", action="store_true", help="Print JSON")
+    q.set_defaults(func=cmd_domain_plan)
+
+    q = domain_command("apply", "Add missing domain tags through the API.")
+    q.add_argument("--limit", type=int, metavar="N")
+    q.add_argument("--commit-every", type=int, default=20, metavar="N")
+    q.add_argument("--dry-run", action="store_true")
+    q.set_defaults(func=cmd_domain_apply)
+
+    q = domain_command("status", "Show pass progress.")
+    q.add_argument("--json", action="store_true")
+    q.set_defaults(func=cmd_domain_status)
+
+    q = domain_command("verify", "Check the mirror has every planned domain tag.")
+    q.add_argument("--json", action="store_true")
+    q.add_argument(
+        "--require-complete",
+        action="store_true",
+        help="Fail if any planned URL is not applied",
+    )
+    q.set_defaults(func=cmd_domain_verify)
 
 
 def build_parser() -> Parser:
@@ -3082,6 +3654,7 @@ def build_parser() -> Parser:
     p.add_argument("--json", action="store_true", help="Print JSON")
     p.set_defaults(func=cmd_doctor)
     add_audit_commands(sub)
+    add_domain_tag_commands(sub)
     return parser
 
 

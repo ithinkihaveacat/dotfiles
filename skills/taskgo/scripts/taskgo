@@ -1794,7 +1794,8 @@ def list_projects(snap: Snapshot) -> list[str]:
     return [name for name in snap.list_dir("") if is_project(snap, name)]
 
 
-def check_project_name(project_name: str) -> None:
+def project_name_error(project_name: str) -> str | None:
+    """Why PROJECT_NAME cannot name a project, or None if it can."""
     if (
         "/" in project_name
         or "\\" in project_name
@@ -1802,13 +1803,19 @@ def check_project_name(project_name: str) -> None:
         or not project_name
         or project_name.startswith(".")
     ):
-        die(
-            f"invalid project name (must be a top-level directory and cannot start with a dot): {project_name}"
-        )
+        return f"invalid project name (must be a top-level directory and cannot start with a dot): {project_name}"
+    return None
+
+
+def check_project_name(project_name: str) -> None:
+    error = project_name_error(project_name)
+    if error:
+        die(error)
 
 
 def require_project(snap: Snapshot, project_name: str) -> str:
-    """Validates PROJECT_NAME and dies unless it names a directory."""
+    """Validates PROJECT_NAME and dies unless it names a project, as
+    is_project and list_projects define one."""
     check_project_name(project_name)
     if snap.is_file(project_name):
         die(
@@ -1816,6 +1823,8 @@ def require_project(snap: Snapshot, project_name: str) -> str:
         )
     if not snap.is_dir(project_name):
         die(f"unknown project: {project_name}")
+    if not is_project(snap, project_name):
+        die(f"not a project (no README.md or PROJECT.md): {project_name}")
     return project_name
 
 
@@ -3448,6 +3457,27 @@ def audit_snapshot(
                 )
             )
 
+        # 2b. Directories with tracker records but no README are not
+        # projects: list_projects, handoff, and the MCP server skip them.
+        if not target_project:
+            for name in snap.list_dir(""):
+                if name.startswith(".") or not snap.is_dir(name):
+                    continue
+                if is_project(snap, name):
+                    continue
+                if snap.is_file(f"{name}/STATUS.md") or snap.is_dir(f"{name}/tasks"):
+                    findings.append(
+                        Finding(
+                            category="root",
+                            severity="WARN",
+                            message=(
+                                f"{name}/: has STATUS.md or tasks/ but no README.md, "
+                                "so it is not a project; add a README.md"
+                            ),
+                            path=name,
+                        )
+                    )
+
     # 3. Duplicate global task IDs
     all_rows = get_task_rows(snap) if rows is None else rows
     status_idx = {r.task_id: r.status for r in all_rows if r.task_id}
@@ -4090,6 +4120,14 @@ def render_task_file(
         return raw
 
 
+def initial_status(project_name: str) -> str:
+    """A new project's STATUS.md, before sync_status fills its task block."""
+    return (
+        f"# Status\n\n## Summary\n\nInitial setup for {project_name}.\n\n"
+        f"{BEGIN}\n{END}\n\n## Next\n"
+    )
+
+
 def create_task(snap: Snapshot, project_name: str, rel_path: str, content: str) -> None:
     """Writes a new task, scaffolding its project if needed, and syncs STATUS.md."""
     # Auto-initialize project scaffolding if it's a new project
@@ -4099,10 +4137,7 @@ def create_task(snap: Snapshot, project_name: str, rel_path: str, content: str) 
             snap.write_markdown(readme, f"# {project_name}\n\nProject overview.\n")
         status_file = f"{project_name}/STATUS.md"
         if not snap.is_file(status_file):
-            snap.write_markdown(
-                status_file,
-                f"# Status\n\n## Summary\n\nInitial setup for {project_name}.\n\n<!-- taskgo:begin -->\n<!-- taskgo:end -->\n\n## Next\n",
-            )
+            snap.write_markdown(status_file, initial_status(project_name))
     snap.write_markdown(rel_path, content)
     sync_status(snap, project_name)
 
@@ -4132,16 +4167,7 @@ def cmd_create(
     add_conversations: list[str] | None = None,
 ) -> None:
     """Create a new task in PROJECT."""
-    if (
-        "/" in project_name
-        or "\\" in project_name
-        or ".." in project_name
-        or not project_name
-        or project_name.startswith(".")
-    ):
-        die(
-            f"invalid project name (must be a top-level directory and cannot start with a dot): {project_name}"
-        )
+    check_project_name(project_name)
 
     if due is not None and parse_iso_date(due) is None:
         die_scoped(f"invalid ISO date for --due (expected YYYY-MM-DD): {due}")
@@ -5069,13 +5095,64 @@ def create_decision_change(cs: ChangeSet, change: dict[str, Any], project: str) 
     return rel
 
 
+def create_project_change(cs: ChangeSet, change: dict[str, Any], project: str) -> None:
+    """Creates PROJECT: its README.md (title, optional skills) and, unless
+    one with content is there, its STATUS.md; apply_change_set then fills
+    the task block. A directory without a README that holds STATUS.md or
+    tasks/, as doctor reports, becomes a project; an existing project, or
+    any other existing directory, is refused."""
+    for key in ("ref", "slug"):
+        if key in change:
+            raise ChangeSetError(f"a project takes no {key}")
+    if "sections" not in change:
+        raise ChangeSetError("missing sections")
+    error = project_name_error(project)
+    if error:
+        raise ChangeSetError(error)
+    if cs.snap.is_file(project):
+        raise ChangeSetError(f"{project!r} is a file, not a project directory")
+    if is_project(cs.snap, project):
+        raise ChangeSetError(f"project {project!r} already exists")
+    if cs.snap.is_dir(project) and not (
+        cs.snap.is_file(f"{project}/STATUS.md") or cs.snap.is_dir(f"{project}/tasks")
+    ):
+        raise ChangeSetError(
+            f"{project!r} is a directory with no STATUS.md or tasks/, not a "
+            "half-made project; choose another name"
+        )
+    fields = change.get("fields") or {}
+    sections = change["sections"]
+    if not isinstance(fields, dict) or not isinstance(sections, dict):
+        raise ChangeSetError("fields and sections must be objects")
+    unknown = sorted(set(fields) - {"skills"})
+    if unknown:
+        raise ChangeSetError(f"unknown project field {', '.join(unknown)}")
+    unknown = sorted(set(sections) - {"title"})
+    if unknown:
+        raise ChangeSetError(f"unknown project section {', '.join(unknown)}")
+    title = change_line(sections.get("title"), "sections.title")
+    skills = _normalize_skill_list(change_list(fields.get("skills", []), "skills"))
+    readme = f"{project}/README.md"
+    front = dump_frontmatter({"skills": skills}) + "\n" if skills else ""
+    cs.touch(readme)
+    cs.snap.write_markdown(readme, f"{front}# {title}\n")
+    status = f"{project}/STATUS.md"
+    if not cs.snap.is_file(status) or not cs.snap.read_text(status).strip():
+        cs.touch(status)
+        cs.snap.write_markdown(status, initial_status(project))
+    cs.created.append({"kind": "project", "project": project, "path": readme})
+
+
 def apply_create(cs: ChangeSet, change: dict[str, Any]) -> None:
     change_keys(change, ("kind", "project"), ("ref", "slug", "fields", "sections"))
     kind = change["kind"]
     project = change_line(change["project"], "project")
+    if kind == "project":
+        create_project_change(cs, change, project)
+        return
     if "/" in project or project.startswith(".") or not is_project(cs.snap, project):
         raise ChangeSetError(
-            f"unknown project {project!r} (new projects are created locally)"
+            f"unknown project {project!r} (create it with kind 'project')"
         )
     ref = change.get("ref")
     if ref is not None:
@@ -5087,7 +5164,9 @@ def apply_create(cs: ChangeSet, change: dict[str, Any]) -> None:
     elif kind == "decision":
         target = create_decision_change(cs, change, project)
     else:
-        raise ChangeSetError(f"kind must be 'task' or 'decision', not {kind!r}")
+        raise ChangeSetError(
+            f"kind must be 'task', 'decision', or 'project', not {kind!r}"
+        )
     if ref is not None:
         cs.refs[ref] = target
         cs.created[-1]["ref"] = ref
@@ -7028,6 +7107,15 @@ def cmd_fix(
                 print(_tagged(f"[INFO]    - {f.message}", sys.stderr), file=sys.stderr)
                 if f.path:
                     dry_run_files.add(f.path)
+            for f in findings:
+                if f.remediation is None and f.severity in ("WARN", "FAIL"):
+                    print(
+                        _tagged(
+                            f"[{f.severity}]  Manual fix required: {f.message}",
+                            sys.stderr,
+                        ),
+                        file=sys.stderr,
+                    )
             if dry_run_files:
                 print("\n".join(sorted(dry_run_files)))
             return
@@ -8522,9 +8610,9 @@ with <agent> one of {", ".join(CANONICAL_AGENTS)} (claude for Claude Code).
 Where the skill names CLI steps: each write is one commit, so there is no
 checkpoint or commit step; STATUS.md task blocks are regenerated on every
 write, so there is no sync; --conv is the conversation argument; and in
-place of doctor, each write returns findings on what it touched. Repairs
-across many files (fix, renames) are the CLI's: report what needs one instead
-of working around it."""
+place of doctor, each write returns findings on what it touched. A new
+project is one create of kind project. Repairs across many files (fix,
+renames) are the CLI's: report what needs one instead of working around it."""
 
 MCP_INSTRUCTIONS = f"""\
 This server reads and writes a taskgo control repository: a private Git
@@ -9446,19 +9534,26 @@ MCP_TOOLS = [
     ),
     McpTool(
         "create",
-        "Create one task, or a decision, as one commit on main, and return its "
-        "ID: apply_changes with a single create. Task fields: status (default "
-        "todo), due, stale_after, blocked_by, wait_for, conversations. Task "
-        "sections: Problem, Cost, Goal, Criteria, Sketch, Constraints, "
+        "Create one task, a decision, or a project, as one commit on main, and "
+        "return what it created (a task's ID, a decision's or project's path): "
+        "apply_changes with a single create. Task fields: status "
+        "(default todo), due, stale_after, blocked_by, wait_for, conversations. "
+        "Task sections: Problem, Cost, Goal, Criteria, Sketch, Constraints, "
         "Outcome, Findings, Next. A decision needs sections Context, Decision, "
-        f"and Consequences.\n\n{MCP_DATA_CARE}",
+        "and Consequences. A project (kind project, project its new directory "
+        "name, title its README heading) takes one field, skills, and no "
+        "sections or slug; it gets a README.md and a STATUS.md.\n\n"
+        f"{MCP_DATA_CARE}",
         {
             "project": MCP_PROJECT,
             "title": {
                 "type": "string",
                 "description": "Title, as an imperative verb phrase.",
             },
-            "kind": {"type": "string", "description": "task (default) or decision."},
+            "kind": {
+                "type": "string",
+                "description": "task (default), decision, or project.",
+            },
             "fields": {"type": "object", "description": "Frontmatter fields."},
             "sections": {
                 "type": "object",
@@ -9476,9 +9571,11 @@ MCP_TOOLS = [
         "Apply a change set as one commit on main, or nothing (as 'taskgo "
         "apply', then a commit and push). Changes apply in order, each seeing "
         "the ones before it:\n"
-        "- create {kind: task|decision, project, ref?, slug?, fields?, "
+        "- create {kind: task|decision|project, project, ref?, slug?, fields?, "
         "sections}: sections.title is required; later changes name the record "
-        "'$ref'.\n"
+        "'$ref'. kind project {project, fields?: {skills}, sections: {title}} "
+        "creates a new project's README.md and STATUS.md; later changes in "
+        "the set can create its tasks.\n"
         "- set {record, field, value, expected?}: status, due, stale_after, or "
         "title; expected guards the current value. Setting status done needs "
         "the task's Outcome, giving a verdict against each criterion.\n"
@@ -9679,7 +9776,9 @@ def mcp_describe(cs: ChangeSet) -> str:
     diff = cs.snap.diff()
     new = {c["path"] for c in cs.created}
     created = [
-        c.get("id") or c["path"].rsplit("/", 1)[-1].removesuffix(".md")
+        c.get("id")
+        or (f"project {c['project']}" if c["kind"] == "project" else None)
+        or c["path"].rsplit("/", 1)[-1].removesuffix(".md")
         for c in cs.created
     ]
     updated = sorted(
@@ -10454,7 +10553,10 @@ class McpServer:
                     "blob": None if status == "D" else blob,
                 }
             )
-            if status == "A" and "/decisions/" in rel:
+            if status == "A" and rel.endswith("/README.md") and rel.count("/") == 1:
+                project = rel.split("/")[0]
+                created.append({"kind": "project", "project": project, "path": rel})
+            elif status == "A" and "/decisions/" in rel:
                 created.append({"kind": "decision", "path": rel})
             elif status == "A" and rows.get(rel):
                 created.append({"kind": "task", "id": rows[rel], "path": rel})
