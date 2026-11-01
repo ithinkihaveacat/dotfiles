@@ -2212,14 +2212,18 @@ def parse_date_field(fm: dict[str, Any], key: str) -> str | None:
 
 
 def normalize_wait_for_args(raw_list: list[str]) -> list[str]:
-    """Normalizes CLI --wait-for values into deduplicated gate tokens."""
-    tokens: list[str] = []
+    """Normalizes CLI wait_for values into deduplicated gates.
+
+    A value wrapped in one matching pair of quotes, as an agent may pass it,
+    is unwrapped first; frontmatter values arrive already unquoted.
+    """
+    unwrapped = []
     for entry in raw_list:
-        for sub in re.split(r"[,\s]+", str(entry)):
-            cleaned = sub.strip().strip("'\"")
-            if cleaned:
-                tokens.append(cleaned)
-    return list(dict.fromkeys(tokens))
+        text = str(entry).strip()
+        if len(text) >= 2 and text[0] == text[-1] and text[0] in "'\"":
+            text = text[1:-1]
+        unwrapped.append(text)
+    return split_field_values(unwrapped, TASK_SCHEMA.field("wait_for"))
 
 
 # Record schema. One declarative description per controlled record kind:
@@ -2227,12 +2231,18 @@ def normalize_wait_for_args(raw_list: list[str]) -> list[str]:
 # sections. Validation in create/update, the doctor field checks, and the
 # create/update set options read it; `taskgo schema --json` publishes it as a
 # conformance artifact for other implementations (such as an MCP server).
-SCHEMA_VERSION = 1
+# Version 2: wait_for also takes free text, so the gate type has no pattern.
+SCHEMA_VERSION = 2
 
+# The typed gates: those taskgo check can resolve or name precisely.
 GATE_PATTERN = (
     r"^(?:\d{4}-\d{2}-\d{2}|b/\d+|cl/\d+"
     r"|gh:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#\d+|@[A-Za-z0-9_.-]+|https?://\S+)$"
 )
+TYPED_GATE_PREFIXES = ("gh:", "b/", "cl/", "@", "http:", "https:")
+# Gates taskgo check resolves (dates) or polls (bugs, CLs, GitHub issues).
+CHECKED_GATE_PREFIXES = ("gh:", "b/", "cl/")
+DATE_SHAPE_RE = re.compile(r"^\d{4}-\d{1,2}-\d{1,2}$")
 
 
 @dataclass(slots=True, frozen=True)
@@ -2244,11 +2254,69 @@ class ValueType:
     metavar: str = "VALUE"
 
 
-def _is_gate(value: Any) -> bool:
+def is_typed_gate(value: Any) -> bool:
     token = str(value)
     if ISO_DATE_RE.match(token):
         return parse_iso_date(token) is not None
     return bool(re.match(GATE_PATTERN, token))
+
+
+def gate_error(value: Any) -> str | None:
+    """Why VALUE is not a wait_for gate, or None when it is one.
+
+    A gate is a typed gate or one line of free text. Free text is refused
+    when any word in it is a task ID, a gate taskgo check resolves (a date,
+    b/N, cl/N, gh:owner/repo#N), which would stop being checked, or looks
+    like a typed gate but is malformed, so a typo is caught instead of
+    holding its task for ever. A handle or URL inside free text is kept:
+    check does not poll those either way.
+    """
+    text = str(value).strip()
+    if not text or "\n" in text:
+        return "a gate is one non-empty line"
+    if not any(c.isalnum() for c in text):
+        return "a gate needs at least one letter or digit"
+    if is_typed_gate(text):
+        return None
+    words = [w.lstrip("([{\"'").rstrip(")]}.;!?\"'") for w in re.split(r"[,\s]+", text)]
+    words = [w for w in words if w]
+    # Typos first, so one message names what to correct.
+    for word in words:
+        if ID_PATTERN.match(word.upper()):
+            return f"{word} is a task; put it in blocked_by"
+        looks_typed = word.lower().startswith(TYPED_GATE_PREFIXES) or bool(
+            DATE_SHAPE_RE.match(word)
+        )
+        if looks_typed and not is_typed_gate(word):
+            return (
+                f"'{word}' looks like a typed gate but is malformed; typed gates are "
+                "YYYY-MM-DD, b/N, cl/N, gh:owner/repo#N, @handle, and http(s) URLs"
+            )
+    for word in words:
+        checked = ISO_DATE_RE.match(word) or word.lower().startswith(
+            CHECKED_GATE_PREFIXES
+        )
+        if checked and is_typed_gate(word):
+            return (
+                f"'{word}' is a gate taskgo check resolves; give it as its own "
+                "gate, and the rest as free text if still needed"
+            )
+    return None
+
+
+def _is_gate(value: Any) -> bool:
+    return gate_error(value) is None
+
+
+def split_gate_values(entry: str) -> list[str]:
+    """Splits ENTRY into gates: a list of typed gates separated by commas or
+    spaces gives each, and anything else is one free-text gate. A blank
+    ENTRY gives one empty gate, which validation refuses."""
+    tokens = [t.strip("'\"") for t in re.split(r"[,\s]+", entry.strip())]
+    tokens = [t for t in tokens if t]
+    if tokens and all(is_typed_gate(t) for t in tokens):
+        return tokens
+    return [entry.strip()]
 
 
 VALUE_TYPES: dict[str, ValueType] = {
@@ -2270,9 +2338,9 @@ VALUE_TYPES: dict[str, ValueType] = {
     ),
     "gate": ValueType(
         "External or temporal gate: YYYY-MM-DD, b/N, cl/N, "
-        "gh:owner/repo#N, @handle, or an http(s) URL",
+        "gh:owner/repo#N, @handle, an http(s) URL, or, when none fits, one "
+        "line of free text naming the condition",
         _is_gate,
-        GATE_PATTERN,
         metavar="GATE",
     ),
     "conversation": ValueType(
@@ -2420,6 +2488,9 @@ def split_field_values(raw_list: list[str], spec: FieldSpec) -> list[str]:
     """Splits CLI or frontmatter entries for a set field into distinct values."""
     values: list[str] = []
     for entry in raw_list:
+        if spec.value == "gate":
+            values.extend(split_gate_values(str(entry)))
+            continue
         for sub in re.split(r"[,\s]+", str(entry)):
             cleaned = sub.strip().strip("'\"")
             if cleaned:
@@ -2449,7 +2520,16 @@ def unknown_fields(fm: dict[str, Any], schema: RecordSchema) -> list[str]:
     return [k for k in fm if k not in known]
 
 
+def invalid_reason(spec: FieldSpec, value: str) -> str:
+    """Why VALUE is not valid for SPEC, as the expected form or a gate error."""
+    if spec.value == "gate":
+        return gate_error(value) or VALUE_TYPES["gate"].description
+    return f"expected {VALUE_TYPES[spec.value].description}"
+
+
 def describe_invalid(spec: FieldSpec, value: str) -> str:
+    if spec.value == "gate":
+        return f"invalid {spec.name} '{value}' ({invalid_reason(spec, value)})"
     if spec.value == "date":
         return f"invalid ISO date in {spec.name} '{value}' (expected YYYY-MM-DD)"
     if spec.value == "conversation":
@@ -2490,8 +2570,7 @@ def require_field_values(spec: FieldSpec, values: list[str], option: str) -> Non
     for value in values:
         if not field_is_valid(spec, value):
             die_scoped(
-                f"invalid {option} value '{value}' "
-                f"(expected {VALUE_TYPES[spec.value].description})"
+                f"invalid {option} value '{value}' ({invalid_reason(spec, value)})"
             )
 
 
@@ -2657,8 +2736,8 @@ def unresolved_wait_for(row: TaskRow, today: date) -> list[str]:
     """Returns wait_for entries still holding ROW back as of TODAY.
 
     ISO dates (YYYY-MM-DD) hold a task back only while date > today.
-    External/human gates (b/..., cl/..., gh:..., @handle) remain unresolved
-    while present in frontmatter.
+    Every other gate (b/..., cl/..., gh:..., @handle, a URL, free text)
+    remains unresolved while present in frontmatter.
     """
     out: list[str] = []
     for item in row.wait_for:
@@ -4176,9 +4255,7 @@ def cmd_create(
             f"invalid ISO date for --stale-after (expected YYYY-MM-DD): {stale_after}"
         )
     wait_spec = TASK_SCHEMA.field("wait_for")
-    norm_wait_for = split_field_values(
-        [*(wait_for or []), *(add_wait_for or [])], wait_spec
-    )
+    norm_wait_for = normalize_wait_for_args([*(wait_for or []), *(add_wait_for or [])])
     require_field_values(wait_spec, norm_wait_for, "--wait-for")
     blocked_spec = TASK_SCHEMA.field("blocked_by")
     deps = split_field_values(add_blocked_by or [], blocked_spec)
@@ -4450,10 +4527,10 @@ def edit_task_text(
     own_id = next((str(v) for k, v in data.items() if str(k).lower() == "id"), None)
     wait_spec = TASK_SCHEMA.field("wait_for")
     if add_wait_for or remove_wait_for:
-        adds = split_field_values(add_wait_for or [], wait_spec)
+        adds = normalize_wait_for_args(add_wait_for or [])
         require_field_values(wait_spec, adds, "--add-wait-for")
         edit_set_field(
-            data, wait_spec, adds, split_field_values(remove_wait_for or [], wait_spec)
+            data, wait_spec, adds, normalize_wait_for_args(remove_wait_for or [])
         )
 
     blocked_spec = TASK_SCHEMA.field("blocked_by")
@@ -4961,8 +5038,7 @@ def resolve_values(
             )
         if not field_is_valid(spec, value):
             raise ChangeSetError(
-                f"invalid {spec.name} value {raw!r} "
-                f"(expected {VALUE_TYPES[spec.value].description})"
+                f"invalid {spec.name} value {raw!r} ({invalid_reason(spec, value)})"
             )
         if rel and spec.name in ("blocked_by", "supersedes"):
             cs.added_refs.append((rel, value))
@@ -8570,7 +8646,7 @@ MCP_DATA_CARE = (
 )
 
 MCP_UNVERIFIED = (
-    "External wait_for gates (bugs, changes, issues, people) are not checked by "
+    "External wait_for gates (bugs, changes, issues, people, free text) are not checked by "
     "this server; each is reported as unverified and treated as still holding "
     "its task. Run 'taskgo check' locally to poll them."
 )
@@ -8592,7 +8668,8 @@ Tasks. The title is an imperative verb phrase; Goal says what should be true
 once done, and Criteria the observable end condition. Before work that may
 span sessions, set status in-progress. blocked_by goes on the task that is
 held, never on its blocker; wait_for holds external gates (a date, b/123,
-gh:owner/repo#1, @person).
+gh:owner/repo#1, @person, a URL), or, when none fits, one line saying what the
+task waits for; whoever sees it met removes it.
 
 Completing a task: set status done with an Outcome that gives a verdict
 against each criterion, then what shipped, with https URLs. Keep Problem,
@@ -11437,7 +11514,8 @@ than a few words.""",
         action="append",
         default=None,
         metavar="GATE",
-        help="External or temporal gate (YYYY-MM-DD, b/..., cl/..., gh:..., @handle)",
+        help="External or temporal gate (YYYY-MM-DD, b/..., cl/..., gh:..., "
+        "@handle, URL, or free text)",
     )
     p_create.add_argument(
         "--due",
@@ -11516,7 +11594,8 @@ than a few words.""",
         action="append",
         default=None,
         metavar="GATE",
-        help="External or temporal gate (YYYY-MM-DD, b/..., cl/..., gh:..., @handle)",
+        help="External or temporal gate (YYYY-MM-DD, b/..., cl/..., gh:..., "
+        "@handle, URL, or free text)",
     )
     p_update.add_argument(
         "--due",

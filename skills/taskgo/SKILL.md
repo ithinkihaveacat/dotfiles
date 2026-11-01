@@ -89,7 +89,14 @@ stale_after: 2026-11-01
 - **`wait_for`** — External or temporal gates keeping a task off the ready
   frontier: ISO cool-down dates (`YYYY-MM-DD`, resolved once `today >= date`),
   issue/CL URIs (`b/...`, `cl/...`, `gh:owner/repo#num`), human handles
-  (`@reviewer`), or `http(s)` URLs.
+  (`@reviewer`), or `http(s)` URLs. Prefer one of these typed gates; when none
+  fits, write the condition as one line of free text
+  (`ShellCheck release with SC2337`). `taskgo check` resolves dates and polls
+  issue and CL URIs; handles, URLs and free text hold the task until someone
+  removes them. Free text is refused when a word in it is a task ID (use
+  `blocked_by`), looks like a typed gate but is malformed (`gh:owner/repo 82`,
+  `2026-1-3`), or is a gate `check` resolves (`b/1 fixed upstream`): give that
+  gate as its own entry. Handles and URLs may appear inside free text.
 - **`due`** — Committed completion deadline (`YYYY-MM-DD`). `taskgo doctor`
   emits `[FAIL]` when overdue (`due < today`) and `[INFO]` within 48 hours;
   `taskgo list --state ready` sorts approaching `due` dates first.
