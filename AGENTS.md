@@ -26,6 +26,14 @@ rules remain in the applicable guides under
 the formatting scripts in `skills/coding-standards/scripts/` rather than their
 underlying tools directly. Where this file is more opinionated, follow it.
 
+## Branches and Pull Requests
+
+`main` is protected: GitHub refuses direct pushes, force pushes, and deletion,
+because machines install and run code from it. To publish a change, push a topic
+branch and open a pull request with `gh pr create` (a draft unless the owner
+asks otherwise); the owner reviews and merges it. Never try to work around the
+protection, and do not ask for a bypass.
+
 ## Privacy and Information Control
 
 This repository is strictly public. You must enforce rigid data segregation
