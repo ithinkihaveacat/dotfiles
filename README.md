@@ -179,38 +179,69 @@ To install: clone your private repos to `~/.private` and/or `~/.corp`, then run
 
 ## Secret management
 
-Secrets (API keys, tokens) live in `~/.private/fish/secrets.env`, one
-`NAME=value` per line (blank lines and `#` comments allowed, nothing expanded),
-or in `~/.private/fish/secrets.env.age`, the same file encrypted with
-[age](https://age-encryption.org/). When the encrypted file exists it wins: it
-is decrypted on each read with the identity in
-`~/.config/age/secrets-identity.txt` (for example an `age-plugin-se` Secure
-Enclave identity) and never written out in plaintext, except to a private
-temporary directory while it is being edited. The file is parsed, never sourced,
-and nothing loads it in full at shell startup. Four fish functions provide
-on-demand access:
+Secrets (API keys, tokens) live in plain `NAME=value` files, one per line (blank
+lines and `#` comments allowed, nothing expanded). The files are parsed, never
+sourced, and nothing loads them in full at shell startup. They sit in the two
+private overlays, `~/.private` for personal values and `~/.corp` for work
+values, and are read in this order, a later value for the same name winning:
 
 <!-- markdownlint-disable MD013 -->
 
-| Function      | Usage                           | Description                                  |
-| ------------- | ------------------------------- | -------------------------------------------- |
-| `setsecret`   | `setsecret NAME [NAME...]`      | Load secret(s) into the current shell        |
-| `getsecret`   | `getsecret NAME`                | Print a secret to stdout                     |
-| `envsecret`   | `envsecret NAME [...] [--] CMD` | Run a command with secret(s) injected        |
-| `editsecrets` | `editsecrets`                   | Edit the file in `$EDITOR`, re-encrypting it |
+| File                                 | In Git?   | What belongs there                                           |
+| ------------------------------------ | --------- | ------------------------------------------------------------ |
+| `~/.private/fish/secrets.shared.env` | Committed | Personal values every machine may hold                       |
+| `~/.private/fish/secrets.env.age`    | Ignored   | Personal values for this machine only, encrypted             |
+| `~/.private/fish/secrets.env`        | Ignored   | The same, in plaintext, where the machine has no `.age` file |
+| `~/.corp/fish/secrets.shared.env`    | Committed | Work values every work machine may hold                      |
+| `~/.corp/fish/secrets.env.age`       | Ignored   | Work values for this machine only, encrypted                 |
+| `~/.corp/fish/secrets.env`           | Ignored   | The same, in plaintext, where the machine has no `.age` file |
+
+<!-- markdownlint-restore MD013 -->
+
+Missing files are skipped. A **shared** file travels with its overlay's
+repository, so a new machine gets its values from `git clone`; put only values
+there whose leak would be acceptable (scoped, spend-capped, cheap to rotate),
+because anyone who can read the repository, or any agent on any machine that has
+it, can read them. Everything else goes in the machine's own file, which each
+overlay's `.gitignore` must exclude (`fish/secrets.env`, `fish/secrets.env.age`,
+`fish/secrets.env.age~`) and which is copied to a new machine by hand or
+re-entered. On a machine where agents run, the machine's own file is readable by
+them too, so it should also hold only values acceptable to leak; keep anything
+more sensitive on a machine without agents, encrypted.
+
+A `.age` file is the same format encrypted with
+[age](https://age-encryption.org/). It is decrypted on each read with the
+identity in `~/.config/age/secrets-identity.txt` (for example an `age-plugin-se`
+Secure Enclave identity), never written out in plaintext except to a private
+temporary directory while it is being edited, and re-encrypted to every
+recipient in `~/.config/age/secrets-recipients.txt`, so include a recovery key
+there alongside the machine's own. Encryption only helps where the identity is
+not a plain file beside the secrets; elsewhere use the plaintext file with mode
+`600`.
+
+Four fish functions provide on-demand access:
+
+<!-- markdownlint-disable MD013 -->
+
+| Function      | Usage                           | Description                                    |
+| ------------- | ------------------------------- | ---------------------------------------------- |
+| `setsecret`   | `setsecret NAME [NAME...]`      | Load secret(s) into the current shell          |
+| `getsecret`   | `getsecret NAME`                | Print a secret to stdout                       |
+| `envsecret`   | `envsecret NAME [...] [--] CMD` | Run a command with secret(s) injected          |
+| `editsecrets` | `editsecrets [FILE]`            | Edit a file in `$EDITOR`, re-encrypting `.age` |
 
 <!-- markdownlint-restore MD013 -->
 
 `envsecret` is the safest option for scripts: secrets are injected into the
-child process and never leak into the calling shell. `editsecrets` re-encrypts
-to every recipient in `~/.config/age/secrets-recipients.txt`, so include a
-recovery key there alongside the machine's own.
+child process and never leak into the calling shell. `editsecrets` with no
+argument edits this machine's personal file; pass a path to edit a shared or
+work file (a missing plaintext file is created with mode `600`).
 
 A `~/.private/fish/conf.d/` snippet uses `setsecret --if-unset` to auto-load a
 small set of everyday secrets at shell startup.
 
-Run `setsecret --help`, `getsecret --help`, `envsecret --help`, or
-`editsecrets --help` for details.
+Run `getsecret --help` for the file order, and `setsecret --help`,
+`envsecret --help` or `editsecrets --help` for details.
 
 ## Environment management
 
