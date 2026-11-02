@@ -192,9 +192,10 @@ pinboard mcp --http                          # loopback only, no authentication
 - Hosted behind Cloudflare Access, `--access-team` and `--access-aud` make it
   check the `Cf-Access-Jwt-Assertion` token on every request but `GET /up`;
   without them it binds loopback only.
-- Each call is logged to `~/.local/state/pinboard/mcp.jsonl` (or `--log`),
-  rotated at 8 MiB: the tool, outcome and duration, the host of a written URL
-  and a hash of search text, never titles, notes or the token.
+- Each request and scheduled sync is a record in
+  `~/.local/state/pinboard/mcp.jsonl` (or `--log`), rotated at 8 MiB: the
+  method, tool, outcome and duration, the host of a written URL and a hash of
+  search text, never titles, notes or the token. `mcp logs` reads it.
 - The server is `scripts/pinboard-mcp`, which `permission apply` does not
   pre-approve; a copy or hardlink outside the skill tree must set
   `PINBOARD_SKILL_DIR` to the skill root.

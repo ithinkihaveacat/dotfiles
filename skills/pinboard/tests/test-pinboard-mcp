@@ -26,6 +26,7 @@ import contextlib
 import inspect
 import json
 import os
+import re
 import shutil
 import signal
 import socket
@@ -52,9 +53,25 @@ sys.path.insert(0, str(HERE / "fixtures"))
 from fake_pinboard import API, FAKE, TOKEN  # noqa: E402
 
 BIN = HERE.parent / "scripts" / "pinboard"
+LOG_FORMAT = HERE.parents[1] / "agent-config" / "references" / "mcp-logs.md"
 TEAM, AUD = "test.invalid", "test-aud"
 OLD = "2020-03-04T05:06:07Z"
 STALE = time.time() - 3 * 86400
+
+
+def log_format() -> tuple[set[str], set[str]]:
+    """The fields and outcomes the request log reference lists, from the first
+    column of its Field and Outcome tables."""
+    tables: dict[str, set[str]] = {"Field": set(), "Outcome": set()}
+    current = None
+    for line in LOG_FORMAT.read_text().splitlines():
+        if m := re.match(r"\| (Field|Outcome) ", line):
+            current = tables[m[1]]
+        elif m := re.match(r"\| `([\w-]+)` ", line):
+            current.add(m[1])
+        elif not line.startswith("|"):
+            current = None
+    return tables["Field"], tables["Outcome"]
 
 
 def bypass_proxy_for_loopback() -> None:
@@ -431,19 +448,27 @@ class PinboardMcpTests(unittest.TestCase):
         for secret in ("Secret", "Other", "a=1", TOKEN, TOKEN.partition(":")[2]):
             self.assertNotIn(secret, log)
         records = self.records()
-        add = next(r for r in records if r["tool"] == "add_bookmark")
+        add = next(r for r in records if r.get("tool") == "add_bookmark")
         self.assertEqual(
-            {k: add[k] for k in ("transport", "outcome", "host")},
-            {"transport": "stdio", "outcome": "ok", "host": "example.org"},
+            {k: add[k] for k in ("transport", "method", "outcome", "args")},
+            {
+                "transport": "stdio",
+                "method": "tools/call",
+                "outcome": "ok",
+                "args": {"host": "example.org"},
+            },
         )
         self.assertIsInstance(add["ms"], int)
-        search = next(r for r in records if r["tool"] == "search_bookmarks")
-        self.assertRegex(search["search"], r"^[0-9a-f]{16}$")
-        self.assertNotIn("host", search)
+        self.assertRegex(add["caller"], r"^[0-9a-f]{10}$")
+        self.assertEqual(add["version"], "1")
+        search = next(r for r in records if r.get("tool") == "search_bookmarks")
+        self.assertRegex(search["args"]["search"], r"^[0-9a-f]{16}$")
+        self.assertNotIn("host", search["args"])
         self.assertIn(
-            {"error": "failed", "outcome": "error"},
-            [{k: r.get(k) for k in ("error", "outcome")} for r in records],
+            {"reason": "failed", "outcome": "tool-error"},
+            [{k: r.get(k) for k in ("reason", "outcome")} for r in records],
         )
+        self.assert_log_format(records)
 
     async def test_sync_gate(self):
         env = {"PINBOARD_TIME_SCALE": "0.01"}  # posts/all once every 3 s
@@ -470,8 +495,9 @@ class PinboardMcpTests(unittest.TestCase):
             self.assertGreater(refused["retry_after"], 0)
             record = self.records()[-1]
             self.assertEqual(
-                (record["outcome"], record["error"]), ("refused", "rate_limited")
+                (record["outcome"], record["reason"]), ("refused", "rate_limited")
             )
+            self.assertGreater(record["retry_after"], 0)
 
     async def test_one_sync_at_a_time(self, client):
         with FAKE.lock:
@@ -569,7 +595,7 @@ class PinboardMcpTests(unittest.TestCase):
             ):
                 before = self.calls()
                 up = await http.get(base + "/up")
-                self.assertEqual((up.status_code, up.text), (200, "ok"))
+                self.assertEqual((up.status_code, up.json()["status"]), (200, "ok"))
                 now = int(time.time())
                 for name, token, status in (
                     ("missing", None, 401),
@@ -601,6 +627,27 @@ class PinboardMcpTests(unittest.TestCase):
                     self.assertEqual(len(found["bookmarks"]), 1)
                 self.assertEqual(self.calls(), before)
                 self.assertEqual(self.records()[-1]["transport"], "http")
+
+                # There is no log page: GET needs a token, then is refused.
+                for path in ("/logs", "/logs/records"):
+                    got = await http.get(base + path)
+                    self.assertEqual(got.status_code, 401, path)
+                authed = {"cf-access-jwt-assertion": jwt(key)}
+                page = await http.get(base + "/logs", headers=authed)
+                self.assertEqual(page.status_code, 405)
+                for _ in range(50):
+                    kept = [r for r in self.records() if r["transport"] == "http"]
+                    if kept and kept[-1].get("status") == 405:
+                        break
+                    await asyncio.sleep(0.1)
+                search = next(r for r in kept if r.get("tool") == "search_bookmarks")
+                self.assertRegex(search["caller"], r"^[0-9a-f]{10}$")
+                self.assertEqual(
+                    [r["status"] for r in kept if r["outcome"] == "refused"],
+                    [401, 403, 403, 401, 401, 405],
+                )
+                self.assert_log_format(kept)
+                self.assertNotIn("lemon", self.log.read_text())
         finally:
             certs.shutdown()
 
@@ -630,6 +677,20 @@ class PinboardMcpTests(unittest.TestCase):
         res = run("--help")
         self.assertEqual(res.returncode, 0)
         self.assertIn("--sync-every", res.stdout)
+
+    def assert_log_format(self, records: list[dict[str, Any]]) -> None:
+        """Each record has only the fields, and an outcome, that the request
+        log reference (agent-config's references/mcp-logs.md) lists, so
+        'mcp logs' can read it."""
+        fields, outcomes = log_format()
+        self.assertIn("retry_after", fields)
+        self.assertIn("refused", outcomes)
+        self.assertTrue(records)
+        for rec in records:
+            self.assertLessEqual(set(rec), fields, rec)
+            self.assertLessEqual({"ts", "transport", "outcome", "ms"}, set(rec))
+            self.assertIn(rec["outcome"], outcomes)
+            self.assertRegex(rec["ts"], r"^\d{4}-\d\d-\d\dT[\d:.]+Z$")
 
     def test_symlinked_entry_point(self):
         """The installed layout is a symlink: either entry point, or a link to
@@ -726,7 +787,7 @@ class PinboardMcpTests(unittest.TestCase):
         self.assertEqual(self.calls(), before)
 
         async def schedule_runs() -> list[dict[str, Any]]:
-            return [r for r in self.records() if r["transport"] == "schedule"]
+            return [r for r in self.records() if r["transport"] == "background"]
 
         async with self.http_server():
             for _ in range(100):
@@ -736,9 +797,10 @@ class PinboardMcpTests(unittest.TestCase):
             await asyncio.sleep(1.0)  # several ticks: it must not run again
         runs = await schedule_runs()
         self.assertEqual(
-            [(r["tool"], r["outcome"], r["result"]) for r in runs],
-            [("sync", "ok", "+1 ~0 -0")],
+            [(r["event"], r["tool"], r["outcome"], r["result"]) for r in runs],
+            [("sync", "sync", "ok", "+1 ~0 -0")],
         )
+        self.assert_log_format(runs)
         with FAKE.lock:
             updates = FAKE.count("posts/update")
 
@@ -761,7 +823,7 @@ class PinboardMcpTests(unittest.TestCase):
                 await asyncio.sleep(0.1)
         failures = [r for r in await schedule_runs() if r["outcome"] != "ok"]
         self.assertGreaterEqual(len(failures), 2)
-        self.assertEqual(failures[0]["error"], "failed")
+        self.assertEqual(failures[0]["reason"], "failed")
 
     def fill_log(self) -> None:
         """A log one record short of rotation, and three older files."""
@@ -781,7 +843,9 @@ class PinboardMcpTests(unittest.TestCase):
         self.fill_log()
         await self.tool(client, "list_tags")
         self.assertEqual(self.rotated(), (8 * 1024 * 1024 - 9, "old 3\n", False))
-        self.assertEqual([r["tool"] for r in self.records()], ["list_tags"])
+        self.assertEqual(
+            [r.get("tool") for r in self.records() if r.get("tool")], ["list_tags"]
+        )
 
 
 if __name__ == "__main__":

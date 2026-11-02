@@ -26,6 +26,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -36,6 +37,9 @@ import urllib.request
 from pathlib import Path
 
 CLI = Path(__file__).resolve().parent.parent / "scripts" / "taskgo"
+LOG_FORMAT = (
+    Path(__file__).resolve().parents[2] / "agent-config" / "references" / "mcp-logs.md"
+)
 AGENTS = """\
 # Agent instructions
 
@@ -110,6 +114,21 @@ def git_argv(repo: Path) -> list[str]:
     --git-dir: Git refuses to discover one from the working directory where
     safe.bareRepository is 'explicit', as some systems set it system-wide."""
     return ["git", f"--git-dir={repo}"] if repo.suffix == ".git" else ["git"]
+
+
+def log_format() -> tuple[set[str], set[str]]:
+    """The fields and outcomes the request log reference lists, from the first
+    column of its Field and Outcome tables."""
+    tables: dict[str, set[str]] = {"Field": set(), "Outcome": set()}
+    current = None
+    for line in LOG_FORMAT.read_text().splitlines():
+        if m := re.match(r"\| (Field|Outcome) ", line):
+            current = tables[m[1]]
+        elif m := re.match(r"\| `([\w-]+)` ", line):
+            current.add(m[1])
+        elif not line.startswith("|"):
+            current = None
+    return tables["Field"], tables["Outcome"]
 
 
 def git(repo: Path, *args: str, check: bool = True) -> str:
@@ -852,9 +871,11 @@ def server(tg, tracker: Tracker, ttl: float | None = None):
 def caller(tg, srv):
     def call(tool: str, args: dict) -> tuple[bool, dict | str]:
         event = tg.McpEvent("none", time.monotonic())
+        call.events.append(event)
         params = {"name": tool, "arguments": args}
         return result_of({"result": srv.call_tool(params, event)})
 
+    call.events = []
     return call
 
 
@@ -1233,6 +1254,26 @@ def fault_checks(tap: Tap, tg, seed: Path, tmp: Path, ttl: float | None) -> None
         and "stale" not in current["as_of"]
         and current["as_of"]["commit"] == tracker.head(),
         (first["as_of"], stale["as_of"], refused, current["as_of"]),
+    )
+    records = [e.record() for e in call.events]
+    tap.check(
+        "the records say which fetches failed and which reads were stale",
+        [(r.get("fetch"), r.get("stale")) for r in records]
+        == [(None, None), ("failed", True), ("failed", None), (None, None)]
+        and records[2]["outcome"] == "tool-error",
+        records,
+    )
+    fields, outcomes = log_format()
+    tap.check(
+        "the records have only the fields and outcomes the request log "
+        "reference (agent-config's references/mcp-logs.md) lists",
+        all(
+            set(r) <= fields
+            and {"ts", "transport", "outcome", "ms"} <= set(r)
+            and r["outcome"] in outcomes
+            for r in records
+        ),
+        (sorted(fields), records),
     )
 
 

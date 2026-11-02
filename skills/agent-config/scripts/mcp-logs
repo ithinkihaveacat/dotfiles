@@ -1,0 +1,1191 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "PyJWT==2.15.1",
+#     "cffi==2.1.1",
+#     "cryptography==50.0.2",
+#     "pycparser==3.0",
+#     "uvicorn==0.54.0",
+# ]
+# ///
+# Tests: skills/agent-config/tests/test-mcp-logs
+"""The 'mcp logs' reader, run by 'mcp logs'. The record format it reads is
+skills/agent-config/references/mcp-logs.md."""
+
+import argparse
+import datetime
+import json
+import os
+import re
+import signal
+import sys
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, NoReturn
+
+PROG = "mcp logs"
+VERSION = "1"
+LOG_NAME = "mcp.jsonl"
+LOG_ROTATED = 4  # FILE.1 (newest) to FILE.4, as the servers rotate them
+DEFAULT_TAIL = 10
+# Tool calls by one caller this many seconds apart or less form one chain.
+DEFAULT_GAP = 120.0
+SUMMARY_TOP = 10  # commonest call sequences a summary lists
+CLIENT_MAX = 20  # longest client name a summary's columns show
+DEFAULT_PORT = 8792
+DATA_PATH = "/records"
+SERVE_POLL = 5.0  # seconds between the page's polls
+SERVE_RECENT = 200  # records the page lists
+SERVE_HELD = 500_000  # records the page keeps in memory, for its summary
+ENV_PREFIX = "MCP_LOGS_"
+LOOPBACK = ("127.0.0.1", "localhost", "::1")
+ACCESS_HEADER = "cf-access-jwt-assertion"
+CERTS_TTL = 3600
+# Set while serving: a signal then stops a server, which exits 0.
+SERVING = False
+FOLLOW_POLL = 0.5  # seconds between looks at the files with --follow
+SINCE_RE = re.compile(r"^(\d+(?:\.\d+)?)([smhdw])$")
+SINCE_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 7 * 86400}
+# Shown in their own columns, or not at all, in a plain line.
+LINE_OWN = ("ts", "method", "event", "tool", "outcome", "ms", "args", "version")
+
+
+def die(msg: str, code: int = 1) -> NoReturn:
+    print(f"{PROG}: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def state_dir() -> Path:
+    state = os.environ.get("XDG_STATE_HOME") or "~/.local/state"
+    return Path(state).expanduser()
+
+
+@dataclass
+class Log:
+    """One server's log: FILE and its rotated files. The server is named by
+    the directory the file is in."""
+
+    server: str
+    path: Path
+
+    def files(self) -> list[Path]:
+        """The file and its rotated files that exist, oldest first."""
+        rotated = [Path(f"{self.path}.{i}") for i in range(LOG_ROTATED, 0, -1)]
+        return [f for f in [*rotated, self.path] if f.is_file()]
+
+
+def logs_in(directory: Path) -> list[Log]:
+    """The logs under DIRECTORY: its own mcp.jsonl, else each subdirectory's
+    (a state directory, or a volume holding several servers' directories)."""
+    own = directory / LOG_NAME
+    if own.exists() or Path(f"{own}.1").exists():
+        return [Log(directory.resolve().name, own)]
+    found = []
+    for sub in sorted(p for p in directory.iterdir() if p.is_dir()):
+        log = sub / LOG_NAME
+        if log.exists() or Path(f"{log}.1").exists():
+            found.append(Log(sub.name, log))
+    return found
+
+
+def find_logs(paths: list[str], servers: list[str], waiting: bool = False) -> list[Log]:
+    """The logs PATHS name (files or directories), by default every one in
+    the state directory, kept to SERVERS if any are given. When WAITING for
+    logs to appear (--follow), finding none, or none for a server, is a
+    warning rather than an error."""
+    logs: list[Log] = []
+    for arg in paths or [str(state_dir())]:
+        path = Path(arg).expanduser()
+        if path.is_dir():
+            found = logs_in(path)
+            if paths and not found and not waiting:
+                die(f"no {LOG_NAME} in {path} or its subdirectories")
+            logs += found
+        elif path.is_file() or Path(f"{path}.1").is_file():
+            logs.append(Log(path.resolve().parent.name, path))
+        else:
+            die(f"{path}: no such file or directory")
+    if servers:
+        unknown = sorted(set(servers) - {log.server for log in logs})
+        if unknown:
+            known = ", ".join(sorted({log.server for log in logs})) or "none"
+            msg = f"no request log for server {', '.join(unknown)} (found: {known})"
+            if not waiting:
+                die(msg)
+            print(f"{PROG}: {msg}; waiting for one", file=sys.stderr, flush=True)
+        logs = [log for log in logs if log.server in servers]
+    if not logs:
+        where = ", ".join(paths) if paths else str(state_dir())
+        if not waiting:
+            die(f"no request logs in {where}; name a file or directory")
+        if not servers:  # the warning above already names the servers
+            print(f"{PROG}: waiting for request logs in {where}", file=sys.stderr)
+    return logs
+
+
+def parse_record(raw: str, server: str) -> dict[str, Any] | None:
+    """The record on line RAW, with its server first and its time as 'at';
+    None for a line that is not a record (a write cut short leaves a partial
+    line)."""
+    try:
+        rec = json.loads(raw)
+        at = datetime.datetime.fromisoformat(rec["ts"]).timestamp()
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return None
+    if not isinstance(rec, dict):
+        return None
+    return {"server": server, **rec, "at": at}
+
+
+def read_records(
+    logs: list[Log], since: float, cursors: dict[Path, "Cursor"]
+) -> list[dict[str, Any]]:
+    """Every record in LOGS from SINCE on, oldest first, noting in CURSORS
+    where each current file was read to. Records with the same time keep
+    their order within a file."""
+    records = []
+    for log in logs:
+        for f in log.files():
+            try:
+                with open(f, "rb") as fh:
+                    st = os.fstat(fh.fileno())
+                    data = fh.read()
+            except OSError as e:
+                die(f"cannot read {f}: {e.strerror or e}")
+            whole = data[: data.rfind(b"\n") + 1]
+            if f == log.path:
+                cursors[f] = Cursor(st.st_ino, len(whole))
+            for raw in whole.decode("utf-8", errors="replace").splitlines():
+                rec = parse_record(raw, log.server)
+                if rec is not None and rec["at"] >= since:
+                    records.append(rec)
+    records.sort(key=lambda r: r["at"])
+    return records
+
+
+def parse_since(text: str, now: float) -> float:
+    """The time SINCE names: an age such as 90s, 30m, 1h, 2d or 1w, or an ISO
+    8601 date or time (local time unless it gives a zone)."""
+    m = SINCE_RE.match(text)
+    if m:
+        return now - float(m[1]) * SINCE_UNITS[m[2]]
+    try:
+        when = datetime.datetime.fromisoformat(text)
+    except ValueError:
+        die(f"--since: expected an age (30m, 1h, 2d) or a time, not '{text}'")
+    if when.tzinfo is None:
+        when = when.astimezone()
+    return when.timestamp()
+
+
+def parse_tail(text: str) -> int | None:
+    """None for all, else the count."""
+    if text == "all":
+        return None
+    if not text.isdigit():
+        die(f"--tail: expected a number or 'all', not '{text}'")
+    return int(text)
+
+
+def line_value(value: Any) -> str:
+    """VALUE bare if a plain token, else quoted as JSON, so that client text
+    can neither break nor forge a line."""
+    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+    plain = re.fullmatch(r"[\w./:@+-]+", text, re.ASCII)
+    return text if plain else json.dumps(text, ensure_ascii=False)
+
+
+def line(rec: dict[str, Any], width: int) -> str:
+    """REC as one line: time, server, method or job, tool, outcome and
+    duration, then its arguments and other fields as KEY=VALUE."""
+    rest = dict(rec.get("args") or {})
+    rest |= {
+        k: v
+        for k, v in rec.items()
+        if k not in (*LINE_OWN, "server", "at") and k not in rest
+    }
+    ms = rec.get("ms")
+    cols = [
+        rec.get("ts", ""),
+        f"{rec['server']:<{width}}",
+        line_value(rec.get("method") or rec.get("event") or "-"),
+        line_value(rec.get("tool") or "-"),
+        line_value(rec.get("outcome", "-")),
+        f"{ms}ms" if isinstance(ms, int) else "-",
+        *(f"{k}={line_value(v)}" for k, v in rest.items()),
+    ]
+    return " ".join(cols)
+
+
+def output(rec: dict[str, Any], as_json: bool, width: int) -> str:
+    if as_json:
+        return json.dumps({k: v for k, v in rec.items() if k != "at"})
+    return line(rec, width)
+
+
+def percentile(values: list[int], pct: int) -> int | None:
+    """The nearest-rank PCT percentile of VALUES."""
+    if not values:
+        return None
+    ordered = sorted(values)
+    return ordered[max(0, -(-len(ordered) * pct // 100) - 1)]
+
+
+def client(rec: dict[str, Any]) -> str:
+    """The client a record came from: its User-Agent, else its transport."""
+    return str(rec.get("agent") or rec.get("transport") or "-")
+
+
+def group(records: list[dict[str, Any]], *keys: str) -> list[dict[str, Any]]:
+    """Requests, failures, latency and result size per value of KEYS, most
+    requests first. A record without a value for the last key is left out."""
+    rows: dict[tuple[str, ...], list[dict[str, Any]]] = {}
+    for rec in records:
+        name = tuple(client(rec) if k == "agent" else rec.get(k) for k in keys)
+        if name[-1] is not None:
+            rows.setdefault(tuple(str(n) for n in name), []).append(rec)
+    out = []
+    for name, recs in rows.items():
+        ms = [r["ms"] for r in recs if isinstance(r.get("ms"), int)]
+        sizes = [r["bytes"] for r in recs if isinstance(r.get("bytes"), int)]
+        out.append(
+            dict(zip(keys, name, strict=True))
+            | {
+                "requests": len(recs),
+                "failed": sum(r.get("outcome") != "ok" for r in recs),
+                "p50_ms": percentile(ms, 50),
+                "p95_ms": percentile(ms, 95),
+                "p50_bytes": percentile(sizes, 50),
+            }
+        )
+    return sorted(out, key=lambda row: (-row["requests"], *(row[k] for k in keys)))
+
+
+def sequences(
+    records: list[dict[str, Any]], gap: float, top: int
+) -> tuple[int, list[dict[str, Any]]]:
+    """The number of chains in RECORDS, and the commonest runs of two or three
+    tool calls within them, by server and client. A chain is one caller's tool
+    calls to one server, each GAP seconds or less after the one before."""
+    chains: list[tuple[str, str, list[str]]] = []
+    open_chains: dict[tuple[Any, ...], tuple[float, list[str]]] = {}
+    for rec in records:
+        # Without a caller key (HTTP with no authentication), calls from
+        # different clients cannot be told apart, so they form no chain.
+        if (
+            rec.get("method") != "tools/call"
+            or rec.get("tool") is None
+            or rec.get("caller") is None
+        ):
+            continue
+        key = (rec["server"], rec.get("transport"), rec["caller"], rec.get("agent"))
+        last = open_chains.get(key)
+        if last is None or rec["at"] - last[0] > gap:
+            calls: list[str] = []
+            chains.append((rec["server"], client(rec), calls))
+        else:
+            calls = last[1]
+        calls.append(str(rec["tool"]))
+        open_chains[key] = (rec["at"], calls)
+    runs: dict[tuple[str, str, tuple[str, ...]], int] = {}
+    for server, agent, calls in chains:
+        for size in (2, 3):
+            for i in range(len(calls) - size + 1):
+                run = (server, agent, tuple(calls[i : i + size]))
+                runs[run] = runs.get(run, 0) + 1
+    common = [
+        {"server": server, "agent": agent, "calls": list(calls), "count": count}
+        for (server, agent, calls), count in sorted(
+            runs.items(), key=lambda kv: (-kv[1], -len(kv[0][2]), kv[0])
+        )
+        if count > 1
+    ]
+    return len(chains), common[:top]
+
+
+def summary(records: list[dict[str, Any]], gap: float) -> dict[str, Any]:
+    """Descriptive statistics over RECORDS, oldest first."""
+    outcomes: dict[str, int] = {}
+    for rec in records:
+        outcome = str(rec.get("outcome"))
+        outcomes[outcome] = outcomes.get(outcome, 0) + 1
+    chains, common = sequences(records, gap, SUMMARY_TOP)
+    return {
+        "requests": len(records),
+        "first": records[0]["ts"] if records else None,
+        "last": records[-1]["ts"] if records else None,
+        "outcomes": dict(sorted(outcomes.items(), key=lambda kv: (-kv[1], kv[0]))),
+        "servers": group(records, "server"),
+        "agents": group(records, "agent"),
+        "tools": group(records, "server", "tool"),
+        "gap": gap,
+        "chains": chains,
+        "sequences": common,
+    }
+
+
+def clip(text: str, limit: int = CLIENT_MAX) -> str:
+    """TEXT cut for its column; --json has all of it."""
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def print_table(rows: list[dict[str, Any]], keys: list[tuple[str, str]]) -> None:
+    """ROWS from group() as a table, with KEYS (field, title) first."""
+    if not rows:
+        return
+    cells = [[clip(str(r[k])) for k, _ in keys] for r in rows]
+    widths = [
+        max(len(title), *(len(c[i]) for c in cells))
+        for i, (_, title) in enumerate(keys)
+    ]
+    head = "  ".join(f"{t:<{w}}" for (_, t), w in zip(keys, widths, strict=True))
+    print(f"\n{head}  Requests  Failed  p50 ms  p95 ms  p50 bytes")
+    for row, cell in zip(rows, cells, strict=True):
+        names = "  ".join(f"{c:<{w}}" for c, w in zip(cell, widths, strict=True))
+        nums = [row["p50_ms"], row["p95_ms"], row["p50_bytes"]]
+        nums = ["-" if n is None else str(n) for n in nums]
+        print(
+            f"{names}  {row['requests']:>8}  {row['failed']:>6}  "
+            f"{nums[0]:>6}  {nums[1]:>6}  {nums[2]:>9}"
+        )
+
+
+def print_summary(stats: dict[str, Any]) -> None:
+    if not stats["requests"]:
+        print("Requests: none")
+        return
+    print(f"Requests: {stats['requests']}, {stats['first']} to {stats['last']}")
+    print("Outcomes: " + ", ".join(f"{k} {v}" for k, v in stats["outcomes"].items()))
+    print_table(stats["servers"], [("server", "Server")])
+    print_table(stats["agents"], [("agent", "Client")])
+    print_table(stats["tools"], [("server", "Server"), ("tool", "Tool")])
+    print(f"\nChains: {stats['chains']} (tool calls {stats['gap']:g} s apart or less)")
+    common = stats["sequences"]
+    if common:
+        sw = max(len("Server"), *(len(q["server"]) for q in common))
+        cw = max(len("Client"), *(len(clip(q["agent"])) for q in common))
+        print(f"\nCount  {'Server':<{sw}}  {'Client':<{cw}}  Sequence")
+        for q in common:
+            print(
+                f"{q['count']:>5}  {q['server']:<{sw}}  {clip(q['agent']):<{cw}}  "
+                + " > ".join(q["calls"])
+            )
+
+
+@dataclass
+class Cursor:
+    """Where --follow has read a log file to: its inode and offset, so that
+    a rotation (a new inode) or truncation (a shorter file) is noticed."""
+
+    inode: int
+    offset: int
+    partial: bytes = b""  # a line not yet complete, undecoded
+
+
+def follow(
+    logs: list[Log],
+    cursors: dict[Path, Cursor],
+    paths: list[str],
+    servers: list[str],
+    as_json: bool,
+    width: int,
+) -> NoReturn:
+    """Prints records as they are appended to LOGS after CURSORS. A rotated
+    file is read to its end before the new one is read from its start; a
+    server whose log appears later, in the state directory or a directory
+    PATHS name, is picked up."""
+    dirs = [Path(p).expanduser() for p in paths or [str(state_dir())]]
+    while True:
+        time.sleep(FOLLOW_POLL)
+        for directory in (d for d in dirs if d.is_dir()):
+            for log in logs_in(directory):
+                if log.path not in {lg.path for lg in logs} and (
+                    not servers or log.server in servers
+                ):
+                    logs.append(log)
+                    width = max(width, len(log.server))
+        batch: list[dict[str, Any]] = []
+        for log in logs:
+            batch += read_new(log, cursors)
+        batch.sort(key=lambda r: r["at"])
+        for rec in batch:
+            print(output(rec, as_json, width), flush=True)
+
+
+def read_from(f: Path, cursor: Cursor) -> str:
+    """The text of F after CURSOR, up to its last complete line; the rest is
+    kept, as bytes, for the next read, so that a character split between two
+    reads is decoded whole."""
+    with open(f, "rb") as fh:
+        fh.seek(cursor.offset)
+        data = fh.read()
+    cursor.offset += len(data)
+    whole, _, cursor.partial = (cursor.partial + data).rpartition(b"\n")
+    return whole.decode("utf-8", errors="replace") + "\n" if whole else ""
+
+
+def read_new(log: Log, cursors: dict[Path, Cursor]) -> list[dict[str, Any]]:
+    """The records appended to LOG since its cursor."""
+    text = ""
+    try:
+        st = os.stat(log.path)
+    except FileNotFoundError:
+        return []  # between a rotation's two renames
+    cursor = cursors.get(log.path)
+    try:
+        if cursor is not None and st.st_ino != cursor.inode:
+            # Rotated: finish the old file, wherever it went.
+            for f in log.files():
+                if f != log.path and os.stat(f).st_ino == cursor.inode:
+                    text += read_from(f, cursor)
+                    break
+            cursor = None
+        if cursor is None:
+            cursor = cursors[log.path] = Cursor(st.st_ino, 0)
+        elif st.st_size < cursor.offset:
+            cursor.offset, cursor.partial = 0, b""  # truncated
+        text += read_from(log.path, cursor)
+    except OSError as e:
+        print(f"{PROG}: cannot read {log.path}: {e.strerror or e}", file=sys.stderr)
+        return []
+    records = (parse_record(raw, log.server) for raw in text.splitlines())
+    return [rec for rec in records if rec is not None]
+
+
+# --- The live page (--serve) ---------------------------------------------------
+
+
+class AccessError(Exception):
+    """A request without a usable Cloudflare Access token."""
+
+
+class AccessVerifier:
+    """Checks Cloudflare Access JWTs (Cf-Access-Jwt-Assertion): RS256
+    signature against the team's certificates, issuer, audience, and expiry,
+    as the MCP servers do."""
+
+    def __init__(self, team: str, audience: str, certs_url: str | None = None):
+        import jwt  # Only the page with Access needs it.
+
+        self.jwt = jwt
+        self.team, self.audience = team, audience
+        self.jwks = jwt.PyJWKClient(
+            certs_url or f"https://{team}/cdn-cgi/access/certs",
+            cache_keys=True,
+            lifespan=CERTS_TTL,
+            # Cloudflare refuses urllib's default user agent.
+            headers={"User-Agent": f"mcp-logs/{VERSION}"},
+            timeout=10,
+        )
+
+    def verify(self, token: str) -> dict[str, Any]:
+        jwt = self.jwt
+        try:
+            key = self.jwks.get_signing_key_from_jwt(token)
+            return jwt.decode(
+                token,
+                key.key,
+                algorithms=["RS256"],
+                audience=self.audience,
+                issuer=f"https://{self.team}",
+                leeway=60,
+                options={"require": ["exp", "iss", "aud"]},
+            )
+        except jwt.ExpiredSignatureError:
+            raise AccessError("Access token expired") from None
+        except jwt.InvalidAudienceError:
+            raise AccessError("Access token for another application") from None
+        except jwt.InvalidIssuerError:
+            raise AccessError("Access token from another team") from None
+        except jwt.PyJWKClientError as e:
+            raise AccessError(f"Access token key not usable: {e}") from None
+        except jwt.PyJWTError as e:
+            raise AccessError(f"Access token refused: {e}") from None
+
+
+def source_commit() -> str | None:
+    """The commit this script was checked out at, if it runs from Git."""
+    import contextlib
+    import subprocess
+
+    with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+        here = str(Path(__file__).resolve().parent)
+        proc = subprocess.run(
+            ["git", "-C", here, "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        return proc.stdout.strip()[:12] if proc.returncode == 0 else None
+    return None
+
+
+class Store:
+    """The records of the logs PATHS name, read once and then, on each
+    refresh, only what was appended: a log that appears later (a server's
+    first record) is picked up, a rotation is followed. At most SERVE_HELD
+    records are kept, the oldest dropped first."""
+
+    def __init__(self, paths: list[str], servers: list[str], since: str | None):
+        import collections
+        import threading
+
+        self.paths = [Path(p).expanduser() for p in paths or [str(state_dir())]]
+        for path in self.paths:
+            if not path.exists() and not Path(f"{path}.1").exists():
+                die(f"{path}: no such file or directory")
+        self.servers, self.since = servers, since
+        self.logs: dict[Path, Log] = {}
+        self.cursors: dict[Path, Cursor] = {}
+        self.records: collections.deque[dict[str, Any]] = collections.deque(
+            maxlen=SERVE_HELD
+        )
+        self.seq = 0  # records added so far; a page's cursor
+        self.lock = threading.Lock()
+        self.cache: tuple[Any, dict[str, Any]] | None = None
+
+    def discover(self) -> list[Log]:
+        found = []
+        for path in self.paths:
+            if path.is_dir():
+                found += logs_in(path)
+            else:
+                found.append(Log(path.resolve().parent.name, path))
+        return [lg for lg in found if not self.servers or lg.server in self.servers]
+
+    def cutoff(self) -> float:
+        return parse_since(self.since, time.time()) if self.since else 0.0
+
+    def refresh(self) -> None:
+        with self.lock:
+            batch: list[dict[str, Any]] = []
+            for log in self.discover():
+                if log.path not in self.logs:
+                    self.logs[log.path] = log
+                    try:
+                        batch += read_records([log], self.cutoff(), self.cursors)
+                    except SystemExit:  # read_records could not read it
+                        del self.logs[log.path]
+                else:
+                    batch += read_new(log, self.cursors)
+            batch.sort(key=lambda r: r["at"])
+            self.records.extend(batch)
+            self.seq += len(batch)
+
+    def view(self, servers: list[str], seen: str) -> dict[str, Any]:
+        """The latest records of SERVERS (all if empty), and their summary;
+        only the cursor if nothing changed since SEEN."""
+        self.refresh()
+        with self.lock:
+            cutoff = self.cutoff()
+            # A --since window moves on by itself: the cursor names the
+            # minute it starts at, so records leave the page as they age.
+            token = f"{self.seq}:{','.join(sorted(servers))}:{int(cutoff // 60)}"
+            if seen == token:
+                return {"seq": token, "unchanged": True}
+            if self.cache and self.cache[0] == token:
+                return self.cache[1]
+            names = sorted({lg.server for lg in self.logs.values()})
+            records = [
+                r
+                for r in self.records
+                if r["at"] >= cutoff and (not servers or r["server"] in servers)
+            ]
+        # Outside the lock: a summary of many records takes a while, and
+        # other polls and the next refresh need not wait for it.
+        payload = {
+            "seq": token,
+            "servers": names,
+            "since": self.since,
+            "summary": summary(records, DEFAULT_GAP),
+            "records": [
+                {k: v for k, v in r.items() if k != "at"}
+                for r in records[-SERVE_RECENT:]
+            ],
+        }
+        with self.lock:
+            self.cache = (token, payload)
+        return payload
+
+
+# The page: static, with every value inserted as text, polling DATA_PATH (a
+# buffering proxy holds a stream back). The script is pinned by its hash in
+# the page's CSP.
+PAGE_SCRIPT = """
+const state = { seq: "", servers: new URLSearchParams(location.search).getAll("server") };
+const $ = (id) => document.getElementById(id);
+
+function cell(tr, value, cls) {
+  const td = tr.insertCell();
+  td.textContent = value == null ? "" : String(value);
+  if (cls) td.className = cls;
+}
+
+function table(id, rows, keys) {
+  const body = $(id);
+  body.replaceChildren();
+  for (const r of rows) {
+    const tr = body.insertRow();
+    for (const k of keys) cell(tr, r[k], typeof r[k] === "number" ? "n" : "");
+    for (const k of ["requests", "failed", "p50_ms", "p95_ms", "p50_bytes"]) cell(tr, r[k], "n");
+  }
+}
+
+function filters(names) {
+  const box = $("servers");
+  if (box.dataset.names === names.join(",")) return;
+  box.dataset.names = names.join(",");
+  box.replaceChildren();
+  for (const name of names) {
+    const label = document.createElement("label");
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.checked = state.servers.includes(name);
+    input.addEventListener("change", () => {
+      state.servers = state.servers.filter((s) => s !== name);
+      if (input.checked) state.servers.push(name);
+      const q = new URLSearchParams(state.servers.map((s) => ["server", s]));
+      history.replaceState(null, "", "?" + q);
+      state.seq = "";
+      poll(false);
+    });
+    label.append(input, " " + name);
+    box.append(label);
+  }
+}
+
+function render(data) {
+  filters(data.servers);
+  const s = data.summary;
+  $("totals").textContent = s.requests
+    ? `${s.requests} requests, ${s.first} to ${s.last}` + (data.since ? ` (since ${data.since})` : "")
+    : "No requests";
+  $("outcomes").textContent = Object.entries(s.outcomes).map(([k, v]) => `${k} ${v}`).join(", ");
+  table("by-server", s.servers, ["server"]);
+  table("by-client", s.agents, ["agent"]);
+  table("by-tool", s.tools, ["server", "tool"]);
+  $("chains").textContent = `${s.chains} chains (tool calls ${s.gap} s apart or less)`;
+  const seqs = $("sequences");
+  seqs.replaceChildren();
+  for (const q of s.sequences) {
+    const tr = seqs.insertRow();
+    cell(tr, q.count, "n"); cell(tr, q.server); cell(tr, q.agent); cell(tr, q.calls.join(" > "));
+  }
+  const rows = $("rows");
+  rows.replaceChildren();
+  for (const rec of data.records.slice().reverse()) {
+    const tr = rows.insertRow();
+    if (rec.outcome !== "ok") tr.className = "fail";
+    const rest = { ...rec.args };
+    for (const [k, v] of Object.entries(rec))
+      if (!(k in rest) && !["server", "ts", "method", "event", "tool", "args", "outcome", "ms", "version"].includes(k))
+        rest[k] = typeof v === "object" ? JSON.stringify(v) : v;
+    cell(tr, new Date(rec.ts).toLocaleString([], { hour12: false }));
+    cell(tr, rec.server); cell(tr, rec.method || rec.event); cell(tr, rec.tool);
+    cell(tr, rec.outcome); cell(tr, rec.ms, "n");
+    cell(tr, Object.entries(rest).map(([k, v]) => `${k}=${v}`).join(" "));
+  }
+}
+
+async function poll(again = true) {
+  let delay = @POLL@;
+  try {
+    const q = new URLSearchParams([["seen", state.seq], ...state.servers.map((s) => ["server", s])]);
+    const reply = await fetch("@DATA@?" + q, { cache: "no-store" });
+    if (!reply.ok) throw new Error(`HTTP ${reply.status}`);
+    const data = await reply.json();
+    if (!data.unchanged) { state.seq = data.seq; render(data); }
+    $("status").textContent = `live \\u00b7 updated ${new Date().toLocaleTimeString([], { hour12: false })}`;
+  } catch (e) {
+    $("status").textContent = `disconnected (${e.message}); reload to sign in again`;
+    delay = 3 * @POLL@;
+  }
+  if (again) setTimeout(poll, delay);
+}
+
+poll();
+"""
+PAGE_SCRIPT = PAGE_SCRIPT.replace("@DATA@", DATA_PATH).replace(
+    "@POLL@", str(int(SERVE_POLL * 1000))
+)
+
+
+def page_html() -> tuple[str, str]:
+    """The page, and its Content-Security-Policy."""
+    import base64
+    import hashlib
+
+    digest = base64.b64encode(hashlib.sha256(PAGE_SCRIPT.encode()).digest()).decode()
+    csp = (
+        "default-src 'none'; style-src 'unsafe-inline'; img-src data:; "
+        f"connect-src 'self'; script-src 'sha256-{digest}'; base-uri 'none'; "
+        "form-action 'none'; frame-ancestors 'none'"
+    )
+    stats_head = (
+        "<tr><td>{}</td><td class=n>Requests</td><td class=n>Failed</td>"
+        "<td class=n>p50 ms</td><td class=n>p95 ms</td><td class=n>p50 bytes</td></tr>"
+    )
+    page = f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MCP requests</title><link rel="icon" href="data:,">
+<style>
+:root {{ color-scheme: light dark; --line: #8884; --fail: #d334; }}
+body {{ margin: 0; padding: 16px; font: 14px/1.4 system-ui, sans-serif; }}
+h1 {{ font-size: 18px; margin: 0 0 8px; }} h2 {{ font-size: 15px; margin: 20px 0 6px; }}
+#status {{ font-weight: normal; opacity: .7; }}
+#servers label {{ margin-right: 12px; white-space: nowrap; }}
+.grid {{ display: flex; flex-wrap: wrap; gap: 0 24px; }} .grid > div {{ min-width: 0; }}
+.wrap {{ overflow-x: auto; }}
+table {{ border-collapse: collapse; font: 12px/1.4 ui-monospace, monospace; }}
+#log {{ width: 100%; }}
+td {{ padding: 3px 8px 3px 0; border-bottom: 1px solid var(--line); vertical-align: top; }}
+td.n {{ text-align: right; }} thead td {{ font-weight: 600; }}
+tr.fail td {{ background: var(--fail); }}
+#rows td:first-child {{ white-space: nowrap; }}
+</style></head><body>
+<h1>MCP requests <span id="status">connecting</span></h1>
+<div id="servers"></div>
+<p><span id="totals"></span><br><span id="outcomes"></span></p>
+<div class="grid">
+<div><h2>Servers</h2><div class="wrap"><table><thead>{stats_head.format("Server")}</thead>
+<tbody id="by-server"></tbody></table></div></div>
+<div><h2>Clients</h2><div class="wrap"><table><thead>{stats_head.format("Client")}</thead>
+<tbody id="by-client"></tbody></table></div></div>
+</div>
+<h2>Tools</h2><div class="wrap"><table><thead>{stats_head.format("Server</td><td>Tool")}</thead>
+<tbody id="by-tool"></tbody></table></div>
+<h2>Call sequences</h2><p id="chains"></p>
+<div class="wrap"><table><thead><tr><td class=n>Count</td><td>Server</td><td>Client</td>
+<td>Sequence</td></tr></thead><tbody id="sequences"></tbody></table></div>
+<h2>Latest requests</h2>
+<div class="wrap"><table id="log"><thead><tr><td>Time</td><td>Server</td><td>Method</td>
+<td>Tool</td><td>Outcome</td><td class=n>ms</td><td>Details</td></tr></thead>
+<tbody id="rows"></tbody></table></div>
+<script>{PAGE_SCRIPT}</script></body></html>
+"""
+    return page, csp
+
+
+async def http_reply(
+    send: Any,
+    status: int,
+    text: str,
+    ctype: str = "text/plain",
+    extra: Any = (),
+    head: bool = False,
+) -> None:
+    """Replies with TEXT, or for a HEAD request (HEAD) only its headers."""
+    data = text.encode()
+    headers = [(b"content-type", f"{ctype}; charset=utf-8".encode())]
+    headers += [(b"content-length", str(len(data)).encode())]
+    headers += [(k.encode(), v.encode()) for k, v in extra]
+    await send({"type": "http.response.start", "status": status, "headers": headers})
+    await send({"type": "http.response.body", "body": b"" if head else data})
+
+
+class LogPage:
+    """ASGI: GET /up for the proxy, unauthenticated; the page and its data
+    behind the Access check, or, without Access, behind a Host check against
+    DNS rebinding."""
+
+    def __init__(self, store: Store, verifier: Any, hosts: list[str]):
+        self.store, self.verifier = store, verifier
+        names = [h.lower().rsplit(":", 1)[0] if "]" not in h else h for h in hosts]
+        self.hosts = {"127.0.0.1", "localhost", "[::1]", *names}
+        self.health = json.dumps(
+            {"status": "ok", "version": VERSION, "commit": source_commit()}
+        )
+        self.page, self.csp = page_html()
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        import asyncio
+        from urllib.parse import parse_qs
+
+        if scope["type"] == "lifespan":
+            while (await receive())["type"] != "lifespan.shutdown":
+                await send({"type": "lifespan.startup.complete"})
+            await send({"type": "lifespan.shutdown.complete"})
+            return
+        if scope["type"] != "http":
+            return
+        headers = {
+            k.decode("latin-1").lower(): v.decode("latin-1")
+            for k, v in scope["headers"]
+        }
+        path, method = scope["path"], scope["method"]
+        head = method == "HEAD"
+        if path == "/up" and method in ("GET", "HEAD"):
+            await http_reply(send, 200, self.health, "application/json", head=head)
+            return
+        refusal = self.refusal(headers)
+        if refusal is None and method not in ("GET", "HEAD"):
+            refusal = 405, "method not allowed", (("allow", "GET, HEAD"),)
+        if refusal is None and path not in ("/", DATA_PATH):
+            refusal = 404, "not found", ()
+        if refusal:
+            await http_reply(send, refusal[0], refusal[1], extra=refusal[2], head=head)
+            return
+        private = (("cache-control", "no-store"), ("x-content-type-options", "nosniff"))
+        if path == "/":
+            csp = (("content-security-policy", self.csp),)
+            await http_reply(
+                send, 200, self.page, "text/html", (*private, *csp), head=head
+            )
+            return
+        query = parse_qs(scope.get("query_string", b"").decode("latin-1"))
+        servers = query.get("server", [])
+        seen = query.get("seen", [""])[0]
+        payload = await asyncio.to_thread(self.store.view, servers, seen)
+        await http_reply(
+            send, 200, json.dumps(payload), "application/json", private, head=head
+        )
+
+    def refusal(self, headers: dict[str, str]) -> tuple | None:
+        """(status, reason, headers) if the request may not proceed."""
+        if self.verifier is None:
+            host = headers.get("host", "").lower()
+            name = host if host.endswith("]") else host.rsplit(":", 1)[0]
+            return None if name in self.hosts else (421, "host not allowed", ())
+        token = headers.get(ACCESS_HEADER)
+        if not token:
+            return (
+                401,
+                "Cloudflare Access token required",
+                (("www-authenticate", "Bearer"),),
+            )
+        try:
+            self.verifier.verify(token)
+        except AccessError as e:
+            return 403, str(e), ()
+        return None
+
+
+def serve(args: argparse.Namespace) -> int:
+    """Serves the page until a signal stops it, then exits 0."""
+    import uvicorn
+
+    team = args.access_team or os.environ.get(f"{ENV_PREFIX}ACCESS_TEAM")
+    audience = args.access_aud or os.environ.get(f"{ENV_PREFIX}ACCESS_AUD")
+    if bool(team) != bool(audience):
+        die(
+            "Access needs both --access-team and --access-aud "
+            f"(or {ENV_PREFIX}ACCESS_TEAM and {ENV_PREFIX}ACCESS_AUD)"
+        )
+    verifier = None
+    if team:
+        certs = os.environ.get(f"{ENV_PREFIX}ACCESS_CERTS_URL") or None
+        verifier = AccessVerifier(team, audience, certs)
+    elif args.host not in LOOPBACK:
+        die(f"--serve without Access serves loopback only, not {args.host}")
+    if args.since:
+        parse_since(args.since, time.time())  # reject a bad value now
+    store = Store(args.paths, args.server, args.since)
+    store.refresh()
+    missing = sorted(set(args.server) - {lg.server for lg in store.logs.values()})
+    if missing:
+        print(
+            f"{PROG}: no request log yet for server {', '.join(missing)}; "
+            "it will show once one appears",
+            file=sys.stderr,
+            flush=True,
+        )
+    auth = f"Access {team}" if team else "no authentication"
+    print(
+        f"{PROG}: serving {len(store.logs)} logs on http://{args.host}:{args.port} "
+        f"({auth})",
+        file=sys.stderr,
+        flush=True,
+    )
+    uvicorn.run(
+        LogPage(store, verifier, args.allow_host),
+        host=args.host,
+        port=args.port,
+        log_level="warning",
+        access_log=False,
+        server_header=False,
+        lifespan="on",
+    )
+    return 0
+
+
+USAGE = f"""{PROG} [OPTIONS] [PATH...]
+       {PROG} --serve [SERVE OPTIONS] [PATH...]"""
+DESCRIPTION = """\
+Print the request records of this repository's MCP servers, merged from any
+number of logs, oldest first."""
+EPILOG = f"""\
+Examples:
+  # The last ten requests to any server on this machine
+  mcp logs
+
+  # Every pinboard request of the last day, as JSON, failures only
+  mcp logs --server pinboard --since 1d --json | jq 'select(.outcome != "ok")'
+
+  # Watch requests arrive, from servers whose logs share a volume
+  mcp logs -f /srv/mcp-logs
+
+  # A week's statistics, and taskgo's commonest call sequences
+  mcp logs --summary --since 7d
+  mcp logs --summary --json --server taskgo | jq '.sequences[:3]'
+
+  # Requests per tool since a date
+  mcp logs -n all --since 2026-11-01 --json | jq -r .tool | sort | uniq -c
+
+  # A live page on loopback, then behind Cloudflare Access for a volume
+  mcp logs --serve
+  mcp logs --serve --host 0.0.0.0 --access-team example.cloudflareaccess.com \\
+    --access-aud AUD /srv/mcp-logs
+
+Each server writes its own log (taskgo mcp, skill mcp, pinboard mcp, andon
+mcp): $XDG_STATE_HOME/<server>/{LOG_NAME} by default, rotated to {LOG_NAME}.1
+to .{LOG_ROTATED}. With no PATH, every such log in $XDG_STATE_HOME (else
+~/.local/state) is read. A PATH may be a log file, a directory holding
+{LOG_NAME}, or a directory of server directories. A server is named by its
+log's directory.
+
+A line gives the record's time (UTC), server, method (or a background job's
+name), tool, outcome and duration, then its arguments and other fields as
+KEY=VALUE. --json prints each record as the server wrote it, with "server"
+added. Records never hold content; see agent-config's references/mcp-logs.md
+for the format.
+
+--summary describes the records instead of printing them: requests and
+outcomes; requests, failures, p50 and p95 latency and median result size per
+server, per client (User-Agent, else transport) and per tool; and the
+commonest runs of two or three tool calls in one caller's chains, by server
+and client. A chain is one caller's tool calls to one server, each no more
+than --gap seconds after the one before; records with no caller key (HTTP
+without authentication) form no chains. It reads every record unless --tail
+or --since limits them.
+
+--serve serves one live page instead: the latest records, newest first, and
+the summary, for every log or the servers ticked on it. The page polls the
+reader, which reads only what was appended since; a log that appears later is
+picked up. With --since, the page shows only records that recent. GET /up
+answers without a token, for a proxy's health check, with the version and
+source commit. Without --access-team and --access-aud the page listens on
+loopback only and checks the Host header (--allow-host admits a tunnel's
+name). With both, it may bind another --host and requires the
+Cf-Access-Jwt-Assertion header on every other request, checking the token
+against the team's certificates, issuer, audience, and expiry. A signal stops
+it with exit status 0. --serve must come first, so that a permission rule for
+'mcp logs --serve' can tell it from reading.
+
+Environment:
+  XDG_STATE_HOME                Where the servers' logs are (default:
+                                ~/.local/state)
+  MCP_LOGS_ACCESS_TEAM          Cloudflare Access team domain
+  MCP_LOGS_ACCESS_AUD           Cloudflare Access application audience tag
+  MCP_LOGS_ACCESS_CERTS_URL     Team certificate URL, for testing (default:
+                                https://TEAM/cdn-cgi/access/certs)"""
+
+
+class Parser(argparse.ArgumentParser):
+    """The house help layout, and usage errors exit 1."""
+
+    def error(self, message: str) -> NoReturn:
+        print(f"{PROG}: {message}", file=sys.stderr)
+        print(f"Try '{PROG} --help' for more information.", file=sys.stderr)
+        sys.exit(1)
+
+    def format_help(self) -> str:
+        return (
+            super()
+            .format_help()
+            .replace("usage:", "Usage:", 1)
+            .replace(
+                "show this help message and exit",
+                "Display this help message and exit",
+                1,
+            )
+        )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = Parser(
+        prog=PROG,
+        # An abbreviation such as --ser would slip past the permission rule
+        # for --serve.
+        allow_abbrev=False,
+        usage=USAGE,
+        description=DESCRIPTION,
+        epilog=EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser._positionals.title = "Arguments"
+    parser._optionals.title = "Options"
+    parser.add_argument(
+        "paths",
+        nargs="*",
+        metavar="PATH",
+        help="A log file, or a directory of logs (default: $XDG_STATE_HOME)",
+    )
+    parser.add_argument(
+        "-n",
+        "--tail",
+        metavar="N",
+        help=f"Print the last N records, or 'all' (default: {DEFAULT_TAIL}; "
+        "all with --since or --summary)",
+    )
+    parser.add_argument(
+        "--since",
+        metavar="WHEN",
+        help="Only records from WHEN on: an age (30m, 1h, 2d, 1w) or a date or "
+        "time (2026-11-01, 2026-11-01T09:00)",
+    )
+    parser.add_argument(
+        "--server",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="Only this server's records (taskgo, skill, ...); repeatable",
+    )
+    parser.add_argument(
+        "-f",
+        "--follow",
+        action="store_true",
+        help="Keep printing records as they are written, across rotations",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print each record as a JSON line, or the summary as JSON",
+    )
+    parser.add_argument(
+        "--summary",
+        action="store_true",
+        help="Print statistics over the records instead of the records",
+    )
+    parser.add_argument(
+        "--gap",
+        type=float,
+        metavar="SECS",
+        help=f"With --summary, the longest pause within a chain "
+        f"(default: {DEFAULT_GAP:g})",
+    )
+    web = parser.add_argument_group("Serve options")
+    web.add_argument(
+        "--serve",
+        action="store_true",
+        help="Serve a live page of the latest records and their summary; "
+        "must be the first argument",
+    )
+    web.add_argument(
+        "--host", default="127.0.0.1", help="HTTP address (default: 127.0.0.1)"
+    )
+    web.add_argument(
+        "--port",
+        type=int,
+        default=DEFAULT_PORT,
+        help=f"HTTP port (default: {DEFAULT_PORT})",
+    )
+    web.add_argument(
+        "--allow-host",
+        action="append",
+        default=[],
+        metavar="HOST",
+        help="Without Access, also accept requests addressed to HOST",
+    )
+    web.add_argument(
+        "--access-team",
+        metavar="HOST",
+        help=f"Cloudflare Access team domain (default: {ENV_PREFIX}ACCESS_TEAM)",
+    )
+    web.add_argument(
+        "--access-aud",
+        metavar="AUD",
+        help=f"Cloudflare Access application audience tag "
+        f"(default: {ENV_PREFIX}ACCESS_AUD)",
+    )
+    return parser
+
+
+SERVE_ONLY = ("--host", "--port", "--allow-host", "--access-team", "--access-aud")
+READ_ONLY = ("--tail", "-n", "--follow", "-f", "--json", "--summary", "--gap")
+
+
+def given(argv: list[str], names: tuple[str, ...]) -> list[str]:
+    """The NAMES that ARGV uses, as --name or --name=value."""
+    return [a.split("=", 1)[0] for a in argv if a.split("=", 1)[0] in names]
+
+
+def main() -> int:
+    global SERVING
+    argv = sys.argv[1:]
+    args = build_parser().parse_args(argv)
+    if args.serve:
+        # Permission rules match a command's leading words, so the one
+        # option that opens a port must lead.
+        if argv[0] != "--serve":
+            die("--serve must be the first argument")
+        if extra := given(argv, READ_ONLY):
+            die(f"{extra[0]} does not apply to --serve")
+        SERVING = True
+        return serve(args)
+    if extra := given(argv, SERVE_ONLY):
+        die(f"{extra[0]} applies only to --serve")
+    now = time.time()
+    since = parse_since(args.since, now) if args.since else 0.0
+    tail = parse_tail(args.tail) if args.tail else None
+    if args.tail is None and not args.since and not args.summary:
+        tail = DEFAULT_TAIL
+    if args.summary and args.follow:
+        die("--summary and --follow cannot be combined")
+    if args.gap is not None and not args.summary:
+        die("--gap applies only to --summary")
+    gap = DEFAULT_GAP if args.gap is None else args.gap
+    if not gap >= 0:
+        die(f"--gap must be 0 or more seconds, not {gap:g}")
+    logs = find_logs(args.paths, args.server, waiting=args.follow)
+    cursors: dict[Path, Cursor] = {}
+    records = read_records(logs, since, cursors)
+    if tail is not None:
+        records = records[len(records) - tail :] if tail else []
+    if args.summary:
+        stats = summary(records, gap)
+        if args.json:
+            print(json.dumps(stats, indent=2))
+        else:
+            print_summary(stats)
+        return 0
+    width = max((len(log.server) for log in logs), default=0)
+    for rec in records:
+        print(output(rec, args.json, width))
+    if args.follow:
+        sys.stdout.flush()
+        follow(logs, cursors, args.paths, args.server, args.json, width)
+    return 0
+
+
+def sigterm_handler(signum: int, frame: Any) -> NoReturn:
+    # A signal to the process group arrives twice (uv forwards it too); the
+    # second must not interrupt the first one's shutdown.
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    raise KeyboardInterrupt
+
+
+if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, sigterm_handler)
+    try:
+        sys.exit(main())
+    except BrokenPipeError:
+        # A reader such as head stopped early: not an error.
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        sys.exit(0)
+    except KeyboardInterrupt:
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        if SERVING:
+            # A server stops on a signal as asked, so it exits 0, not 130.
+            sys.exit(0)
+        try:
+            sys.stderr.write("\n")
+            sys.stderr.flush()
+        except OSError:
+            pass
+        sys.exit(130)

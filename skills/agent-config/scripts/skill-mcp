@@ -9,6 +9,8 @@
 #     "mcp==2.3.0",
 #     "mcp-types==2.3.0",
 #     "pycparser==3.0",
+#     "pydantic==2.13.5",
+#     "pydantic-core==2.46.5",
 #     "pyyaml==6.0.3",
 #     "starlette==1.7.0",
 #     "uvicorn==0.54.0",
@@ -22,6 +24,8 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import contextvars
+import datetime
 import hashlib
 import json
 import os
@@ -32,6 +36,7 @@ import subprocess
 import sys
 import textwrap
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, NoReturn
@@ -52,17 +57,31 @@ SCOPE_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 NAME_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 LOOPBACK = ("127.0.0.1", "localhost", "::1")
 ACCESS_HEADER = "cf-access-jwt-assertion"
-HEALTH_PATH = "/up"
 CERTS_TTL = 3600
+LOG_ENV = "SKILL_MCP_LOG"
+# Arguments a request's record keeps: those that name what a call is about,
+# never text, content or edits. A search pattern is kept as a hash.
+LOG_ARGS = ("name", "uri", "skill", "ignore_case", "replace_all")
+LOG_HASHED = ("pattern",)
 
 
 class SkillError(Exception):
-    """A request that cannot be served, reported to the caller as is."""
+    """A request that cannot be served, reported to the caller as is. REASON,
+    when given, is what the request log records instead of the message."""
+
+    def __init__(self, message: str, reason: str | None = None):
+        super().__init__(message)
+        self.reason = reason
 
 
 def die(msg: str, code: int = 1) -> NoReturn:
     print(f"{PROG}: {msg}", file=sys.stderr)
     sys.exit(code)
+
+
+def default_log() -> Path:
+    state = os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local/state")
+    return Path(state) / "skill" / "mcp.jsonl"
 
 
 # --- Skills ------------------------------------------------------------------
@@ -416,7 +435,8 @@ def tool_search(cat: Catalog, args: dict[str, Any]) -> str:
     try:
         regex = re.compile(pattern, flags)
     except re.error as e:
-        raise SkillError(f"invalid pattern: {e}") from None
+        # The message can quote the pattern, which the log must not keep.
+        raise SkillError(f"invalid pattern: {e}", "invalid pattern") from None
     names = [args["skill"]] if args.get("skill") else sorted(cat.skills)
     matches = []
     for name in names:
@@ -503,6 +523,9 @@ def tool_edit_file(cat: Catalog, args: dict[str, Any]) -> str:
             f"git commit failed, so the edit was undone: {(commit.stderr or commit.stdout).strip()}"
         )
     sha = run_git(skill.root, "rev-parse", "--short", "HEAD").stdout.strip()
+    event = EVENT.get()
+    if event is not None:
+        event.commit = sha
     note = ""
     if cat.push:
         push = run_git(skill.root, "push", "--quiet")
@@ -511,6 +534,8 @@ def tool_edit_file(cat: Catalog, args: dict[str, Any]) -> str:
             if push.returncode == 0
             else f"; push failed: {push.stderr.strip()}"
         )
+        if event is not None:
+            event.extra["push"] = "ok" if push.returncode == 0 else "failed"
     new_blob = git_blob(path.read_bytes())
     return f"Edited {skill.uri(rel)} in commit {sha}{note}; it is now blob {new_blob}."
 
@@ -633,6 +658,354 @@ def tool_listing(cat: Catalog) -> list[dict[str, Any]]:
     ]
 
 
+# --- Request log ---------------------------------------------------------------
+# The request log writer of this repository's MCP servers. skill-mcp and
+# pinboard-mcp carry this block; taskgo and andon write the same records with
+# code of their own. `mcp logs` reads them all, and its format reference
+# (skills/agent-config/references/mcp-logs.md) is the specification; each
+# server's tests check its records against it. Each file defines PROG, VERSION,
+# LOG_ARGS and LOG_HASHED outside the block.
+#
+# One JSON line per message, and per job the server starts itself, in --log,
+# else <TOOL>_MCP_LOG, else $XDG_STATE_HOME/<tool>/mcp.jsonl; rotated at 8 MiB
+# to FILE.1 (newest) to FILE.4, each append under flock. Fields, any of them
+# left out when empty:
+#   ts         UTC, ISO 8601 with milliseconds and Z
+#   transport  stdio, http, or background (a job the server started)
+#   event      a background job's name, such as sync
+#   http       the HTTP method
+#   method     the JSON-RPC method
+#   tool, args the tool, and its allowlisted arguments as short strings
+#   outcome    ok; tool-error (isError); rpc-error (a JSON-RPC error);
+#              refused (declined before it ran: auth, method, rate limit);
+#              error (no answer could be given)
+#   status, ms, bytes   HTTP status, duration, size of a tool's result
+#   reason     why it was not ok: a short phrase, never quoting input
+#   agent      the client's User-Agent
+#   caller     10 hex digits of SHA-256 over the Access token's identifying
+#              claims, or over stdio, the pid and start time
+#   commit     a Git commit the call made or read
+#   version    the server's
+# plus a tool's own fields (pinboard: result, retry_after; skill: scope). Over
+# HTTP, GET /up is open and unlogged and reports version and source commit.
+
+LOG_ROTATE_BYTES = 8 * 1024 * 1024
+LOG_ROTATED = 4  # FILE.1 (newest) to FILE.4
+MAX_REQUEST_BYTES = 1024 * 1024
+CALLER_CLAIMS = ("sub", "email", "client_id", "azp")
+LOG_QUOTED = re.compile(r"'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"")
+RPC_ERRORS = {
+    -32700: "parse error",
+    -32600: "invalid request",
+    -32601: "method not found",
+    -32602: "invalid params",
+    -32603: "internal error",
+}
+
+
+def log_text(value: Any, limit: int = 80) -> str | None:
+    if value is None:
+        return None
+    text = str(value)
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def log_value(value: Any) -> str:
+    """VALUE for a stderr line: bare if a plain token, else quoted as JSON, so
+    client text can neither break nor forge a line."""
+    text = str(value)
+    plain = re.fullmatch(r"[\w./:@+-]+", text, re.ASCII)
+    return text if plain else json.dumps(text, ensure_ascii=False)
+
+
+def log_reason(message: str) -> str:
+    """An error's first line, with quoted values elided: they can quote content."""
+    return LOG_QUOTED.sub("'…'", str(message).split("\n", 1)[0])
+
+
+def caller_key(*parts: Any) -> str:
+    joined = "\0".join("" if p is None else str(p) for p in parts)
+    return hashlib.sha256(joined.encode()).hexdigest()[:10]
+
+
+def log_args(args: dict[str, Any]) -> dict[str, str]:
+    """The LOG_ARGS in ARGS, shortened, and the LOG_HASHED as hashes; no others."""
+    out: dict[str, str] = {}
+    for k, v in args.items():
+        if k in LOG_ARGS and isinstance(v, (str, int, float, bool, list)):
+            v = " ".join(str(x) for x in v) if isinstance(v, list) else v
+            out[k] = log_text(" ".join(str(v).split()), 60) or ""
+        elif k in LOG_HASHED and v not in (None, "", []):
+            text = json.dumps(v, ensure_ascii=False, sort_keys=True)
+            out[k] = "#" + hashlib.sha256(text.encode()).hexdigest()[:12]
+    return out
+
+
+@dataclass
+class Event:
+    """What one request, or one job the server started, came to: never its
+    content. EXTRA holds the tool's own fields."""
+
+    transport: str
+    started: float = field(default_factory=time.monotonic)
+    at: float = field(default_factory=time.time)
+    event: str | None = None
+    http: str | None = None
+    method: Any = None
+    tool: Any = None
+    args: dict[str, str] | None = None
+    outcome: str = "ok"
+    status: int | None = None
+    size: int | None = None
+    reason: str | None = None
+    agent: str | None = None
+    caller: str | None = None
+    commit: str | None = None
+    extra: dict[str, Any] = field(default_factory=dict)
+
+    def fail(self, outcome: str, reason: str) -> None:
+        self.outcome, self.reason = outcome, reason
+
+    def record(self) -> dict[str, Any]:
+        stamp = datetime.datetime.fromtimestamp(self.at, datetime.UTC)
+        rec = {
+            "ts": stamp.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+            "transport": self.transport,
+            "event": self.event,
+            "http": self.http,
+            "method": log_text(self.method),
+            "tool": log_text(self.tool),
+            "args": self.args or None,
+            "outcome": self.outcome,
+            "status": self.status,
+            "ms": int((time.monotonic() - self.started) * 1000),
+            "bytes": self.size,
+            "reason": log_text(self.reason, 200),
+            "agent": log_text(self.agent),
+            "caller": self.caller,
+            "commit": self.commit,
+            **self.extra,
+            "version": VERSION,
+        }
+        return {k: v for k, v in rec.items() if v is not None}
+
+
+# The request being served: set by the HTTP gate, or by the middleware.
+EVENT: contextvars.ContextVar[Event | None] = contextvars.ContextVar(
+    "EVENT", default=None
+)
+
+
+class RequestLog:
+    """Each record goes to stderr and the log file. Logging never fails a
+    request: a record the file cannot take is dropped there, with one
+    warning. Servers may share the file; each append and rotation holds an
+    exclusive lock on it."""
+
+    def __init__(self, path: Path | None):
+        self.path = path
+        self.warned = False
+        self.lock = threading.Lock()
+
+    def emit(self, event: Event) -> None:
+        rec = event.record()
+        line = " ".join(
+            f"{k}={log_value(v)}"
+            for k, v in rec.items()
+            if k not in ("ts", "args", "version")
+        )
+        print(f"{PROG}: request {line}", file=sys.stderr, flush=True)
+        if self.path is None:
+            return
+        with self.lock:
+            try:
+                self.append(json.dumps(rec, ensure_ascii=False) + "\n")
+            except OSError as e:
+                if not self.warned:
+                    self.warned = True
+                    print(
+                        f"{PROG}: cannot use the request log {self.path}: {e}",
+                        file=sys.stderr,
+                    )
+
+    def append(self, line: str) -> None:
+        import fcntl
+
+        assert self.path is not None
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        # Another server may rotate the file between the open and the lock;
+        # then the lock is on a rotated file, so open the new one.
+        for _ in range(3):
+            with open(self.path, "a", encoding="utf-8") as fh:
+                fcntl.flock(fh, fcntl.LOCK_EX)
+                st = os.fstat(fh.fileno())
+                try:
+                    current = os.stat(self.path).st_ino == st.st_ino
+                except FileNotFoundError:
+                    current = False  # rotated, and not yet made again
+                if not current:
+                    continue
+                if st.st_size and st.st_size + len(line) > LOG_ROTATE_BYTES:
+                    for i in range(LOG_ROTATED - 1, 0, -1):
+                        if Path(f"{self.path}.{i}").exists():
+                            os.replace(f"{self.path}.{i}", f"{self.path}.{i + 1}")
+                    os.replace(self.path, f"{self.path}.1")
+                    with open(self.path, "a", encoding="utf-8") as fresh:
+                        fcntl.flock(fresh, fcntl.LOCK_EX)
+                        fresh.write(line)
+                else:
+                    fh.write(line)
+                return
+        raise OSError(f"{self.path} kept being rotated")
+
+
+def source_commit() -> str | None:
+    """The commit this script was checked out at, if it runs from Git."""
+    import subprocess
+
+    with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+        here = str(Path(__file__).resolve().parent)
+        proc = subprocess.run(
+            ["git", "-C", here, "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        return proc.stdout.strip()[:12] if proc.returncode == 0 else None
+    return None
+
+
+def request_logging(log: RequestLog) -> Any:
+    """SDK middleware for every message: over HTTP it fills in the gate's
+    event, which the gate logs; over stdio it makes and logs its own."""
+    from mcp.shared.exceptions import MCPError
+    from pydantic import ValidationError
+
+    stdio_caller = caller_key("stdio", os.getpid(), time.time())
+
+    async def logged(ctx: Any, call_next: Any) -> Any:
+        event = EVENT.get()
+        own = event is None
+        if own:
+            event = Event("stdio", caller=stdio_caller)
+        event.method = ctx.method
+        token = EVENT.set(event)
+        try:
+            return await call_next(ctx)
+        except MCPError as e:
+            event.fail("rpc-error", RPC_ERRORS.get(e.code, f"error {e.code}"))
+            raise
+        except ValidationError:
+            # The SDK reports malformed params as a pydantic ValidationError.
+            event.fail("rpc-error", RPC_ERRORS[-32602])
+            raise
+        except Exception:
+            # Anything else is the server's fault, not the request's.
+            event.fail("rpc-error", RPC_ERRORS[-32603])
+            raise
+        finally:
+            EVENT.reset(token)
+            if own:
+                log.emit(event)
+
+    return logged
+
+
+async def http_reply(
+    send: Any,
+    status: int,
+    text: str,
+    ctype: str = "text/plain",
+    extra: Any = (),
+    head: bool = False,
+) -> None:
+    """Replies with TEXT, or for a HEAD request (HEAD) only its headers."""
+    data = text.encode()
+    headers = [(b"content-type", f"{ctype}; charset=utf-8".encode())]
+    headers += [(b"content-length", str(len(data)).encode())]
+    headers += [(k.encode(), v.encode()) for k, v in extra]
+    await send({"type": "http.response.start", "status": status, "headers": headers})
+    await send({"type": "http.response.body", "body": b"" if head else data})
+
+
+class LoggingGate:
+    """ASGI, in front of the SDK's app: the health check, the Access check,
+    and one record for each request, refusals included."""
+
+    def __init__(self, app: Any, verifier: Any, log: RequestLog):
+        self.app, self.verifier, self.log = app, verifier, log
+        health = {"status": "ok", "version": VERSION, "commit": source_commit()}
+        self.health = json.dumps(health)
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope["type"] != "http":  # lifespan
+            await self.app(scope, receive, send)
+            return
+        headers = {
+            k.decode("latin-1").lower(): v.decode("latin-1")
+            for k, v in scope["headers"]
+        }
+        path, method = scope["path"], scope["method"]
+        if path == "/up" and method in ("GET", "HEAD"):
+            # Polled by the proxy, so open to all, and not logged.
+            await http_reply(
+                send, 200, self.health, "application/json", head=method == "HEAD"
+            )
+            return
+        event = Event("http", http=method, agent=headers.get("user-agent"))
+        token = EVENT.set(event)
+        refusal = self.refusal(headers, event)
+        if refusal is None and method != "POST":
+            # No server-initiated stream (GET), and no sessions to delete.
+            refusal = 405, "method not allowed", ()
+
+        async def sending(message: dict[str, Any]) -> None:
+            if message["type"] == "http.response.start":
+                event.status = message["status"]
+                if event.status >= 400 and event.outcome == "ok":
+                    # The SDK answers a message it cannot parse with a
+                    # JSON-RPC error and 400; other statuses are refusals.
+                    bad = event.status == 400
+                    event.fail(
+                        "rpc-error" if bad else "refused", f"HTTP {event.status}"
+                    )
+            await send(message)
+
+        try:
+            if refusal:
+                event.fail("refused", refusal[1])
+                await http_reply(sending, refusal[0], refusal[1], extra=refusal[2])
+            else:
+                await self.app(scope, receive, sending)
+        except BaseException as e:
+            event.fail("error", type(e).__name__)
+            raise
+        finally:
+            EVENT.reset(token)
+            self.log.emit(event)
+
+    def refusal(self, headers: dict[str, str], event: Event) -> tuple | None:
+        """(status, reason, headers) if the request may not proceed. A token
+        gives the request its caller key, from its claims."""
+        if self.verifier is None:
+            # Loopback only; the SDK checks the Host header against rebinding.
+            return None
+        token = headers.get("cf-access-jwt-assertion")
+        if not token:
+            bearer = (("www-authenticate", "Bearer"),)
+            return 401, "Cloudflare Access token required", bearer
+        try:
+            claims = self.verifier.verify(token)
+        except AccessError as e:
+            return 403, str(e), ()
+        event.caller = caller_key(*(claims.get(k) for k in CALLER_CLAIMS))
+        return None
+
+
+# --- End of request log --------------------------------------------------------
+
+
 # --- MCP server ---------------------------------------------------------------
 
 
@@ -640,7 +1013,16 @@ def tool_listing(cat: Catalog) -> list[dict[str, Any]]:
 REQUEST_LOCK = threading.Lock()
 
 
-def sdk_server(cat: Catalog) -> Any:
+def current_event(cat: Catalog, **args: Any) -> Event:
+    """The request being served, with the scope it was made to and ARGS."""
+    event = EVENT.get() or Event("none")
+    event.extra["scope"] = cat.scope
+    if args:
+        event.args = log_args(args)
+    return event
+
+
+def sdk_server(cat: Catalog, log: RequestLog) -> Any:
     import anyio
     import mcp_types as types
     from mcp.server.lowlevel import Server
@@ -663,6 +1045,8 @@ def sdk_server(cat: Catalog) -> Any:
         )
 
     async def call_tool(ctx: Any, params: Any) -> Any:
+        event = current_event(cat, **(params.arguments or {}))
+        event.tool = params.name
         fn = TOOLS.get(params.name)
         if fn is None:
             raise MCPError(
@@ -671,9 +1055,11 @@ def sdk_server(cat: Catalog) -> Any:
         try:
             text = await run(fn, cat, params.arguments or {})
         except (SkillError, OSError, UnicodeDecodeError) as e:
+            event.fail("tool-error", getattr(e, "reason", None) or log_reason(str(e)))
             return types.CallToolResult(
                 content=[types.TextContent(type="text", text=str(e))], is_error=True
             )
+        event.size = len(text.encode())
         return types.CallToolResult(content=[types.TextContent(type="text", text=text)])
 
     def resource(skill: Skill, rel: str) -> types.Resource:
@@ -698,6 +1084,7 @@ def sdk_server(cat: Catalog) -> Any:
         ]
 
     async def list_resources(ctx: Any, params: Any) -> Any:
+        current_event(cat)
         return types.ListResourcesResult(resources=await run(all_resources))
 
     def read(uri: str) -> types.ReadResourceResult:
@@ -716,6 +1103,7 @@ def sdk_server(cat: Catalog) -> Any:
         return types.ReadResourceResult(contents=[contents])
 
     async def read_resource(ctx: Any, params: Any) -> Any:
+        current_event(cat, uri=str(params.uri))
         try:
             return await run(read, str(params.uri))
         except SkillError as e:
@@ -769,6 +1157,7 @@ def sdk_server(cat: Catalog) -> Any:
         return {"resources": [children[k] for k in sorted(children)]}
 
     async def skills_list(ctx: Any, params: Any) -> Any:
+        current_event(cat)
         # A skill changed on disk since startup (SKILL.md now a link, say)
         # fails the listing with its reason rather than an opaque error.
         try:
@@ -777,12 +1166,14 @@ def sdk_server(cat: Catalog) -> Any:
             raise MCPError(code=types.INTERNAL_ERROR, message=str(e)) from None
 
     async def skills_get(ctx: Any, params: Any) -> Any:
+        current_event(cat, uri=params.uri)
         try:
             return await run(get_entry, params.uri)
         except SkillError as e:
             raise invalid(e) from None
 
     async def directory_read(ctx: Any, params: Any) -> Any:
+        current_event(cat, uri=params.uri)
         try:
             return await run(directory, params.uri)
         except SkillError as e:
@@ -824,10 +1215,11 @@ def sdk_server(cat: Catalog) -> Any:
         "resources/directory/read", DirectoryReadParams, directory_read
     )
     sdk.extensions = {EXTENSION: {"directoryRead": True}}
+    sdk.middleware.append(request_logging(log))
     return sdk
 
 
-def serve_stdio(cat: Catalog) -> None:
+def serve_stdio(cat: Catalog, log: RequestLog) -> None:
     import anyio
     from mcp.server.stdio import stdio_server
 
@@ -843,7 +1235,7 @@ def serve_stdio(cat: Catalog) -> None:
         signal.signal(sig, stop)
 
     async def serve() -> None:
-        sdk = sdk_server(cat)
+        sdk = sdk_server(cat, log)
         async with stdio_server() as (read, write):
             await sdk.run(read, write, sdk.create_initialization_options())
 
@@ -900,68 +1292,13 @@ class AccessVerifier:
             raise AccessError(f"Access token refused: {e}") from None
 
 
-async def asgi_reply(
-    send: Any,
-    status: int,
-    text: str,
-    extra: tuple[tuple[str, str], ...] = (),
-) -> None:
-    data = text.encode()
-    headers = [
-        (b"content-type", b"text/plain; charset=utf-8"),
-        (b"content-length", str(len(data)).encode()),
-    ]
-    headers += [(k.encode(), v.encode()) for k, v in extra]
-    await send({"type": "http.response.start", "status": status, "headers": headers})
-    await send({"type": "http.response.body", "body": data})
-
-
-class AccessGate:
-    """ASGI, in front of the MCP app: the unauthenticated health check, and
-    the Access JWT check that a proxy's Host header bypass would otherwise
-    skip. The SDK sees only requests that pass."""
-
-    def __init__(self, app: Any, verifier: AccessVerifier | None):
-        self.app = app
-        self.verifier = verifier
-
-    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
-        if scope["type"] != "http":
-            await self.app(scope, receive, send)
-            return
-        if scope["path"] == HEALTH_PATH and scope["method"] in ("GET", "HEAD"):
-            # Polled by the proxy, so reachable without a token, and reads
-            # nothing.
-            await asgi_reply(send, 200, "ok")
-            return
-        if self.verifier is not None:
-            headers = {
-                k.decode("latin-1").lower(): v.decode("latin-1")
-                for k, v in scope["headers"]
-            }
-            token = headers.get(ACCESS_HEADER)
-            if not token:
-                await asgi_reply(
-                    send,
-                    401,
-                    "Cloudflare Access token required",
-                    extra=(("www-authenticate", "Bearer"),),
-                )
-                return
-            try:
-                self.verifier.verify(token)
-            except AccessError as e:
-                await asgi_reply(send, 403, str(e))
-                return
-        await self.app(scope, receive, send)
-
-
 def serve_http(
     cats: list[Catalog],
     host: str,
     port: int,
     allow_hosts: list[str],
     verifier: AccessVerifier | None,
+    log: RequestLog,
 ) -> None:
     import uvicorn
     from mcp.server.transport_security import TransportSecuritySettings
@@ -974,13 +1311,14 @@ def serve_http(
         allowed_hosts=hosts,
         allowed_origins=["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"],
     )
-    servers = [sdk_server(cat) for cat in cats]
+    servers = [sdk_server(cat, log) for cat in cats]
     routes = []
     for cat, sdk in zip(cats, servers, strict=True):
         app = sdk.streamable_http_app(
             streamable_http_path=f"/mcp/{cat.scope}",
             stateless_http=True,
             json_response=True,
+            max_request_body_size=MAX_REQUEST_BYTES,
             transport_security=security,
         )
         routes += app.routes
@@ -995,12 +1333,12 @@ def serve_http(
     auth = f"Access {verifier.team}" if verifier else "no authentication"
     print(
         f"{PROG}: serving {', '.join(f'/mcp/{c.scope}' for c in cats)} "
-        f"on http://{host}:{port} ({auth})",
+        f"on http://{host}:{port} ({auth}); request log {log.path}",
         file=sys.stderr,
     )
     app = Starlette(routes=routes, lifespan=lifespan)
     uvicorn.run(
-        AccessGate(app, verifier),
+        LoggingGate(app, verifier, log),
         host=host,
         port=port,
         log_level="warning",
@@ -1028,6 +1366,9 @@ Environment:
   SKILL_MCP_ACCESS_AUD       Cloudflare Access application audience tag
   SKILL_MCP_ACCESS_CERTS_URL Team certificate URL, for testing (default:
                              https://TEAM/cdn-cgi/access/certs)
+  SKILL_MCP_LOG              Request log (default:
+                             $XDG_STATE_HOME/skill/mcp.jsonl, else
+                             ~/.local/state/skill/mcp.jsonl)
 
 Examples:
   skill mcp --list
@@ -1036,6 +1377,7 @@ Examples:
   skill mcp --http --allow-host skills.example.com \\
     --access-team example.cloudflareaccess.com --access-aud AUD
   claude mcp add skills -- skill mcp all
+  mcp logs --server skill --since 1d
 
 Each scope is one MCP server: over stdio, the SCOPE argument; over HTTP, every
 scope at /mcp/SCOPE. Its tools (load_skill, read_file, search, edit_file) work
@@ -1044,7 +1386,15 @@ skills/list, skills/get, resources/directory/read, and a skill:// resource for
 every file). A skill in a git work tree serves the files git tracks; symbolic
 links are never served. edit_file commits each edit in that work tree.
 
-The HTTP server serves GET /up without a token for a proxy's health check.
+Every request is appended to the request log as a JSON record (rotated at 8
+MiB, four old files kept) and printed to stderr: its method, tool, the
+arguments that name what it is about (a skill, a URI; a search pattern only as
+a hash), outcome, duration, the commit an edit made, and the scope. Never file
+contents or edits. 'mcp logs' reads and summarises the log.
+
+The HTTP server serves GET /up without a token for a proxy's health check,
+answering with its version and source commit. It refuses a request body over
+1 MiB with 413.
 Without --access-team and --access-aud it listens on loopback only and does no
 authentication of its own. With both, it may bind another --host and requires
 the Cf-Access-Jwt-Assertion header on every other request, checking the token
@@ -1106,11 +1456,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--list", action="store_true", help="print each scope's skills and exit"
     )
+    parser.add_argument(
+        "--log", metavar="FILE", help=f"request log (default: ${LOG_ENV})"
+    )
     return parser
 
 
 def main() -> int:
     args = build_parser().parse_args()
+    log_path = Path(args.log or os.environ.get(LOG_ENV) or default_log()).expanduser()
     cfg_path = Path(
         args.config or os.environ.get("SKILL_MCP_CONFIG") or DEFAULT_CONFIG
     ).expanduser()
@@ -1142,11 +1496,14 @@ def main() -> int:
             elif args.host not in LOOPBACK:
                 die(f"--http without Access serves loopback only, not {args.host}")
             cats = [Catalog.build(cfg, s, args.push) for s in sorted(cfg.scopes)]
-            serve_http(cats, args.host, args.port, args.allow_host, verifier)
+            log = RequestLog(log_path)
+            serve_http(cats, args.host, args.port, args.allow_host, verifier, log)
         else:
             if team:
                 die("--access-team and --access-aud apply only to --http")
-            serve_stdio(Catalog.build(cfg, args.scope or "all", args.push))
+            serve_stdio(
+                Catalog.build(cfg, args.scope or "all", args.push), RequestLog(log_path)
+            )
     except SkillError as e:
         die(str(e))
     return 0

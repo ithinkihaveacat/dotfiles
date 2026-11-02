@@ -19,6 +19,7 @@ import hashlib
 import inspect
 import json
 import os
+import re
 import shutil
 import signal
 import socket
@@ -40,6 +41,7 @@ from mcp.shared.exceptions import MCPError
 from pydantic import TypeAdapter
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "skill"
+LOG_FORMAT = SCRIPT.parents[1] / "references" / "mcp-logs.md"
 ANY = TypeAdapter(dict)
 # A request whose params pass through as written: the extension's methods
 # have no model in mcp_types.
@@ -59,6 +61,21 @@ def git(cwd, *args):
     subprocess.run(
         ["git", "-C", str(cwd), *args], check=True, capture_output=True, text=True
     )
+
+
+def log_format() -> tuple[set[str], set[str]]:
+    """The fields and outcomes the request log reference lists, from the first
+    column of its Field and Outcome tables."""
+    tables: dict[str, set[str]] = {"Field": set(), "Outcome": set()}
+    current = None
+    for line in LOG_FORMAT.read_text().splitlines():
+        if m := re.match(r"\| (Field|Outcome) ", line):
+            current = tables[m[1]]
+        elif m := re.match(r"\| `([\w-]+)` ", line):
+            current.add(m[1])
+        elif not line.startswith("|"):
+            current = None
+    return tables["Field"], tables["Outcome"]
 
 
 def blob(data: bytes) -> str:
@@ -127,6 +144,7 @@ class SkillMcpTests(unittest.TestCase):
             **UV_DIRS,
             "HOME": str(self.home),
             "SKILL_MCP_CONFIG": str(self.config),
+            "SKILL_MCP_LOG": str(self.tmp / "log" / "mcp.jsonl"),
             "XDG_CONFIG_HOME": str(self.home / ".config"),
             "GIT_CONFIG_NOSYSTEM": "1",
         }
@@ -340,7 +358,8 @@ class SkillMcpTests(unittest.TestCase):
                         self.fail(f"server not listening on {base}")
                     health = await http.get(base + "/up")
                     self.assertEqual(health.status_code, 200)
-                    self.assertEqual(health.text, "ok")
+                    self.assertEqual(health.json()["status"], "ok")
+                    self.assertIn("version", health.json())
                     for scope, names in (
                         ("one", ["alpha"]),
                         ("all", ["alpha", "beta"]),
@@ -375,6 +394,30 @@ class SkillMcpTests(unittest.TestCase):
                         )
                         return reply.status_code
 
+                    # The servers keep no log page: GET is refused, and recorded.
+                    for path in ("/logs", "/logs/records", "/mcp/all"):
+                        reply = await http.get(base + path)
+                        self.assertEqual(reply.status_code, 405, path)
+                    log = self.tmp / "log" / "mcp.jsonl"
+                    for _ in range(50):
+                        records = [
+                            json.loads(line) for line in log.read_text().splitlines()
+                        ]
+                        if sum(r.get("http") == "GET" for r in records) == 3:
+                            break
+                        await asyncio.sleep(0.1)
+                    tools = [r.get("tool") for r in records]
+                    self.assertEqual(tools.count("load_skill"), 2)
+                    self.assertEqual(
+                        {r["scope"] for r in records if r.get("tool")},
+                        {"one", "all"},
+                    )
+                    refused = [r for r in records if r.get("http") == "GET"]
+                    self.assertEqual(
+                        {(r["outcome"], r["status"]) for r in refused},
+                        {("refused", 405)},
+                    )
+                    self.assert_log_format(records)
                     self.assertEqual(await status("/mcp/nope"), 404)
                     self.assertEqual(await status("/mcp/all", "evil.example"), 421)
                     self.assertNotEqual(await status("/mcp/all", "skills.test"), 421)
@@ -528,6 +571,84 @@ class SkillMcpTests(unittest.TestCase):
         self.assertIn("skills/alpha/references/notes.md", log)
         # The same edit again no longer matches the file's blob.
         await self.tool(client, "edit_file", args, error=True)
+
+    async def test_request_log(self, client):
+        """Each message is a record naming what it was about, never its
+        content: the pattern of a search only as a hash, an edit by its
+        commit, and no file text or edit strings at all."""
+        path = self.repo / "skills/alpha/references/notes.md"
+        await self.tool(client, "load_skill", {"name": "alpha"})
+        await self.tool(client, "search", {"pattern": "window seats"})
+        await self.tool(client, "read_file", {"uri": "skill://alpha/nope"}, error=True)
+        await self.tool(
+            client,
+            "edit_file",
+            {
+                "uri": "skill://alpha/references/notes.md",
+                "old_string": "Likes trains.",
+                "new_string": "Likes boats.",
+                "expected_blob": blob(path.read_bytes()),
+            },
+        )
+        await client.read_resource("skill://alpha/references/notes.md")
+        log = self.tmp / "log" / "mcp.jsonl"
+        text = log.read_text()
+        for secret in ("window seats", "Likes boats", "Likes trains", "Prefers"):
+            self.assertNotIn(secret, text)
+        records = [json.loads(line) for line in text.splitlines()]
+        calls = {r["tool"]: r for r in records if r.get("method") == "tools/call"}
+        self.assertEqual(
+            sorted(calls), ["edit_file", "load_skill", "read_file", "search"]
+        )
+        for rec in records:
+            self.assertEqual(rec["transport"], "stdio")
+            if rec["method"] in ("tools/call", "resources/read"):
+                self.assertEqual(rec["scope"], "all")
+            self.assertEqual(rec["version"], "1")
+            self.assertRegex(rec["caller"], r"^[0-9a-f]{10}$")
+            self.assertRegex(rec["ts"], r"Z$")
+        self.assertEqual(calls["load_skill"]["args"], {"name": "alpha"})
+        self.assertGreater(calls["load_skill"]["bytes"], 0)
+        self.assertRegex(calls["search"]["args"]["pattern"], r"^#[0-9a-f]{12}$")
+        self.assertEqual(calls["read_file"]["outcome"], "tool-error")
+        self.assertIn("no file", calls["read_file"]["reason"])
+        edit = calls["edit_file"]
+        self.assertEqual(edit["outcome"], "ok")
+        self.assertEqual(set(edit["args"]), {"uri"})
+        head = (
+            await asyncio.to_thread(
+                subprocess.run,
+                ["git", "-C", str(self.repo), "rev-parse", "--short", "HEAD"],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+        ).stdout.strip()
+        self.assertEqual(edit["commit"], head)
+        read = [r for r in records if r.get("method") == "resources/read"]
+        self.assertEqual(read[0]["args"], {"uri": "skill://alpha/references/notes.md"})
+
+        self.assert_log_format(records)
+
+        # An invalid pattern's error quotes it; its record does not.
+        await self.tool(client, "search", {"pattern": "[z-a]"}, error=True)
+        last = json.loads(log.read_text().splitlines()[-1])
+        self.assertEqual(last["reason"], "invalid pattern")
+        self.assertNotIn("z-a", log.read_text())
+
+    def assert_log_format(self, records):
+        """Each record has only the fields, and an outcome, that the request
+        log reference (references/mcp-logs.md) lists, so 'mcp logs' can read
+        it."""
+        fields, outcomes = log_format()
+        self.assertIn("caller", fields)
+        self.assertIn("refused", outcomes)
+        self.assertTrue(records)
+        for rec in records:
+            self.assertLessEqual(set(rec), fields, rec)
+            self.assertLessEqual({"ts", "transport", "outcome", "ms"}, set(rec))
+            self.assertIn(rec["outcome"], outcomes)
+            self.assertRegex(rec["ts"], r"^\d{4}-\d\d-\d\dT[\d:.]+Z$")
 
     async def test_edit_keeps_mode(self, client):
         path = self.repo / "skills/alpha/scripts/run"

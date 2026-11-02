@@ -97,6 +97,7 @@ complete -c skill -f -n '__fish_seen_subcommand_from mcp' -l allow-host -x -d 'A
 complete -c skill -n '__fish_seen_subcommand_from mcp' -l config -r -F -d 'Configuration file'
 complete -c skill -f -n '__fish_seen_subcommand_from mcp' -l push -d 'Push after each edit commit'
 complete -c skill -f -n '__fish_seen_subcommand_from mcp' -l list -d "Print each scope's skills and exit"
+complete -c skill -n '__fish_seen_subcommand_from mcp' -l log -r -F -d 'Request log'
 
 # Complete flags
 complete -c skill -f -s h -l help -d 'Display help message and exit'

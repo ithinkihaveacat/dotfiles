@@ -8589,8 +8589,9 @@ MCP_REQUEST_DIGEST_TRAILER = "Request-Digest"
 MCP_REQUEST_DIGEST_LEN = 16
 MCP_CERTS_TTL = 3600
 MCP_LOOPBACK = ("localhost", "127.0.0.1", "::1")
-# Answers GET with 200 and no content, unauthenticated, for health checks such
-# as a reverse proxy's. It reads nothing.
+# Answers GET and HEAD with 200 and the server's version and source commit,
+# unauthenticated, for health checks such as a reverse proxy's. It reads
+# nothing of the tracker.
 MCP_HEALTH_PATH = "/up"
 # Icons a browser asks for on its own (Safari asks for three on each visit to
 # the log page): answered 404, unauthenticated, and not logged.
@@ -8898,6 +8899,7 @@ class McpReader:
         except subprocess.TimeoutExpired:
             self.failed_at = time.monotonic()
             mcp_log(f"fetch failed: timed out after {MCP_FETCH_TIMEOUT}s")
+            mcp_note(fetch="timed out")
             raise McpToolError(
                 f"could not fetch {cfg.branch} from {cfg.remote} (timed out); "
                 "pass an earlier as_of.commit as 'at' to read it"
@@ -8905,6 +8907,7 @@ class McpReader:
         if res.returncode != 0:
             self.failed_at = time.monotonic()
             mcp_log(f"fetch failed: {res.stderr.strip()}")
+            mcp_note(fetch="failed")
             raise McpToolError(
                 f"could not fetch {cfg.branch} from {cfg.remote}; pass an "
                 "earlier as_of.commit as 'at' to read it"
@@ -8958,6 +8961,7 @@ class McpReader:
         if not at and self.cfg.remote and self.failing() and not self.fresh():
             sha = resolve_commit(self.cfg.repo, self.tracking_ref())
             if sha is not None:
+                mcp_note(stale=True)
                 return sha, True
         try:
             return self.resolve(at), False
@@ -8968,6 +8972,7 @@ class McpReader:
             if sha is None:
                 raise
             mcp_log(f"serving the last fetched head {sha[:12]} as stale")
+            mcp_note(stale=True)
             return sha, True
 
     def snapshot(self, sha: str) -> tuple[GitTreeSnapshot, int]:
@@ -9926,6 +9931,16 @@ def mcp_log(message: str) -> None:
     print(f"taskgo mcp: {message}", file=sys.stderr)
 
 
+def mcp_note(**fields: Any) -> None:
+    """Sets FIELDS on the record of the request being served, if any: what
+    happened behind it (a failed fetch, a stale head) that its outcome alone
+    does not say."""
+    event = MCP_EVENT.get()
+    if event is not None:
+        for name, value in fields.items():
+            setattr(event, name, value)
+
+
 def mcp_log_value(value: Any, limit: int = MCP_LOG_VALUE_MAX) -> str:
     """VALUE as a log field: bare when it is a plain token, otherwise quoted
     as JSON, so text from a client can neither break nor forge a line."""
@@ -9969,6 +9984,10 @@ class McpEvent:
     caller: str | None = None
     size: int | None = None  # bytes of a tool call's result
     args: dict[str, str] | None = None
+    # A fetch of the remote that failed or timed out during the request, and
+    # whether a read was served the last fetched head because of one.
+    fetch: str | None = None
+    stale: bool | None = None
     at: float = dataclass_field(default_factory=time.time)
     ms: int | None = None
 
@@ -9990,6 +10009,8 @@ class McpEvent:
             ("status", self.status),
             ("ms", self.ms),
             ("commit", self.commit),
+            ("fetch", self.fetch),
+            ("stale", self.stale),
         ]
         parts = [f"{k}={mcp_log_value(v)}" for k, v in fields if v is not None]
         if self.reason:
@@ -10026,6 +10047,8 @@ class McpEvent:
             "reason": text(self.reason, MCP_LOG_REASON_MAX),
             "agent": text(self.agent),
             "caller": self.caller,
+            "fetch": self.fetch,
+            "stale": self.stale,
             "version": MCP_SERVER_VERSION,
         }
         return {k: v for k, v in rec.items() if v is not None}
@@ -10189,6 +10212,7 @@ class McpLog:
                             os.replace(older, f"{self.path}.{i + 1}")
                     os.replace(self.path, f"{self.path}.1")
                     with open(self.path, "ab") as fresh:
+                        fcntl.flock(fresh, fcntl.LOCK_EX)
                         fresh.write(data)
                 else:
                     fh.write(data)
@@ -10244,7 +10268,13 @@ def mcp_log_stats(
     chains: list[tuple[str, list[str]]] = []
     open_chains: dict[tuple[Any, ...], tuple[float, list[str]]] = {}
     for rec in records:
-        if rec.get("method") != "tools/call" or rec.get("tool") is None:
+        # Without a caller key (HTTP with --auth none), calls from different
+        # clients cannot be told apart, so they form no chain.
+        if (
+            rec.get("method") != "tools/call"
+            or rec.get("tool") is None
+            or rec.get("caller") is None
+        ):
             continue
         at = rec.get("_at")
         if at is None:
@@ -10308,6 +10338,14 @@ class McpServer:
         self.requests: dict[str, McpRequest] = {}
 
     def call_tool(self, params: dict[str, Any], event: McpEvent) -> dict[str, Any]:
+        # So that what happens behind the call (mcp_note) reaches its record.
+        token = MCP_EVENT.set(event)
+        try:
+            return self.run_tool(params, event)
+        finally:
+            MCP_EVENT.reset(token)
+
+    def run_tool(self, params: dict[str, Any], event: McpEvent) -> dict[str, Any]:
         event.tool = params.get("name")
         tool = MCP_TOOLS_BY_NAME.get(params.get("name"))
         if tool is None:
@@ -10639,6 +10677,7 @@ def mcp_sdk_server(server: McpServer) -> Any:
     import mcp_types
     from mcp.server.lowlevel import Server
     from mcp.shared.exceptions import MCPError
+    from pydantic import ValidationError
 
     async def list_tools(ctx: Any, params: Any) -> Any:
         return mcp_types.ListToolsResult(
@@ -10669,9 +10708,13 @@ def mcp_sdk_server(server: McpServer) -> Any:
         except MCPError as e:
             event.fail("rpc-error", mcp_rpc_reason(e.code))
             raise
-        except Exception:
+        except ValidationError:
             # The SDK reports malformed params as a pydantic ValidationError.
             event.fail("rpc-error", mcp_rpc_reason(-32602))
+            raise
+        except Exception:
+            # Anything else is the server's fault, not the request's.
+            event.fail("rpc-error", mcp_rpc_reason(-32603))
             raise
         finally:
             MCP_EVENT.reset(token)
@@ -10941,6 +10984,13 @@ class McpGate:
         self.path = path
         self.log = log
         self.claim_sets: set[frozenset[str]] = set()
+        self.health = json.dumps(
+            {
+                "status": "ok",
+                "version": MCP_SERVER_VERSION,
+                "commit": mcp_source_commit(),
+            }
+        )
 
     async def __call__(self, scope: dict, receive: Callable, send: Callable) -> None:
         if scope["type"] != "http":  # lifespan
@@ -10949,9 +10999,11 @@ class McpGate:
         headers: dict[str, str] = {}
         for k, v in scope["headers"]:
             headers.setdefault(k.decode("latin-1").lower(), v.decode("latin-1"))
-        if scope["path"] == MCP_HEALTH_PATH and scope["method"] == "GET":
+        if scope["path"] == MCP_HEALTH_PATH and scope["method"] in ("GET", "HEAD"):
             # Polled by the proxy, so not logged.
-            await mcp_asgi_reply(send, 200, "ok")
+            await mcp_asgi_reply(
+                send, 200, self.health, content_type="application/json"
+            )
             return
         if scope["method"] == "GET" and MCP_ICON_PATHS.fullmatch(scope["path"]):
             await mcp_asgi_reply(send, 404, "not found")
@@ -11146,6 +11198,22 @@ class McpGate:
                 return None
             more = message.get("more_body", False)
         return body
+
+
+def mcp_source_commit() -> str | None:
+    """The commit this script was checked out at, if it runs from Git."""
+    try:
+        res = subprocess.run(
+            ["git", "-C", str(Path(__file__).resolve().parent), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    sha = res.stdout.strip()
+    return sha[:12] if res.returncode == 0 and sha else None
 
 
 def mcp_serve_http(
@@ -12015,10 +12083,11 @@ task file's Git commit watermark, emitting nothing when no tasks trigger.""",
             appended to the request log (rotated at 8 MiB, keeping 4 old
             files); a record keeps a tool call's short identifying arguments
             (project, task, path, search), never text such as titles, bodies,
-            or file content. 'taskgo requests' summarises the log.
+            or file content, and notes a fetch that failed behind it and a
+            read served a stale head. 'taskgo requests' summarises the log.
             Over HTTP, GET /logs is a live page of the latest requests, behind
             the same check as the endpoint; GET /up is an unauthenticated
-            health check.
+            health check that reports the server's version and commit.
 
             Environment:
               TASKGO_MCP_ACCESS_TEAM  Default for --access-team

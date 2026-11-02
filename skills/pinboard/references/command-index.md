@@ -389,14 +389,22 @@ Examples:
   pinboard mcp --http
   pinboard mcp --http --host 0.0.0.0 --allow-host pinboard.example.com \
     --access-team example.cloudflareaccess.com --access-aud AUD
+  mcp logs --server pinboard --since 1d
 
 Over stdio the server never syncs on its own; call the sync tool, or run
 'pinboard sync'. Over HTTP (at /mcp) it also syncs whenever the last sync
 is older than --sync-every hours: at startup, then checking hourly, so a
-refused or failed run is retried an hour later. Each tool call and scheduled
-sync is appended to the request log, rotated at 8 MiB with four old files kept.
+refused or failed run is retried an hour later.
 
-The HTTP server serves GET /up without a token for a proxy's health check.
+Every request and scheduled sync is appended to the request log as a JSON
+record (rotated at 8 MiB, four old files kept) and printed to stderr: its
+method, tool, outcome and duration; for a write, only its URL's host; for a
+search, a hash of its text; for a sync, its counts. Never titles, notes, URLs,
+or the token. 'mcp logs' reads and summarises the log.
+
+The HTTP server serves GET /up without a token for a proxy's health check,
+answering with its version and source commit. It refuses a request body over
+1 MiB with 413.
 Without --access-team and --access-aud it listens on loopback only and does no
 authentication of its own. With both, it may bind another --host and requires
 the Cf-Access-Jwt-Assertion header on every other request, checking the token
