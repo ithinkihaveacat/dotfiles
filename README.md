@@ -162,7 +162,7 @@ installs, auth setup, etc.).
 │   ├── conf.d/         # Startup snippets sourced by config.fish
 │   ├── completions/    # Completions prepended to fish_complete_path
 │   ├── functions/      # Functions prepended to fish_function_path
-│   └── secrets.fish    # API keys and tokens (chmod 600)
+│   └── secrets.env     # API keys and tokens (chmod 600), or secrets.env.age
 ├── home/               # Dotfiles symlinked into $HOME (e.g. .gitconfig.local)
 ├── etc/                # Tool-specific config (see overlay-aware paths above)
 ├── skills/             # Agent skills that shadow ~/.dotfiles/skills/ by name
@@ -179,26 +179,38 @@ To install: clone your private repos to `~/.private` and/or `~/.corp`, then run
 
 ## Secret management
 
-Secrets (API keys, tokens) live in `~/.private/fish/secrets.fish` and are not
-sourced in full at shell startup. Three fish functions provide on-demand access:
+Secrets (API keys, tokens) live in `~/.private/fish/secrets.env`, one
+`NAME=value` per line (blank lines and `#` comments allowed, nothing expanded),
+or in `~/.private/fish/secrets.env.age`, the same file encrypted with
+[age](https://age-encryption.org/). When the encrypted file exists it wins: it
+is decrypted on each read with the identity in
+`~/.config/age/secrets-identity.txt` (for example an `age-plugin-se` Secure
+Enclave identity) and never written out in plaintext, except to a private
+temporary directory while it is being edited. The file is parsed, never sourced,
+and nothing loads it in full at shell startup. Four fish functions provide
+on-demand access:
 
 <!-- markdownlint-disable MD013 -->
 
-| Function    | Usage                           | Description                                  |
-| ----------- | ------------------------------- | -------------------------------------------- |
-| `setsecret` | `setsecret NAME [NAME...]`      | Load secret(s) into the current shell        |
-| `getsecret` | `getsecret NAME`                | Print secret value(s) to stdout (array-safe) |
-| `envsecret` | `envsecret NAME [...] [--] CMD` | Run a command with secret(s) injected        |
+| Function      | Usage                           | Description                                  |
+| ------------- | ------------------------------- | -------------------------------------------- |
+| `setsecret`   | `setsecret NAME [NAME...]`      | Load secret(s) into the current shell        |
+| `getsecret`   | `getsecret NAME`                | Print a secret to stdout                     |
+| `envsecret`   | `envsecret NAME [...] [--] CMD` | Run a command with secret(s) injected        |
+| `editsecrets` | `editsecrets`                   | Edit the file in `$EDITOR`, re-encrypting it |
 
 <!-- markdownlint-restore MD013 -->
 
 `envsecret` is the safest option for scripts: secrets are injected into the
-child process and never leak into the calling shell.
+child process and never leak into the calling shell. `editsecrets` re-encrypts
+to every recipient in `~/.config/age/secrets-recipients.txt`, so include a
+recovery key there alongside the machine's own.
 
 A `~/.private/fish/conf.d/` snippet uses `setsecret --if-unset` to auto-load a
 small set of everyday secrets at shell startup.
 
-Run `setsecret --help`, `getsecret --help`, or `envsecret --help` for details.
+Run `setsecret --help`, `getsecret --help`, `envsecret --help`, or
+`editsecrets --help` for details.
 
 ## Environment management
 

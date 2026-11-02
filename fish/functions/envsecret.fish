@@ -2,11 +2,14 @@ function envsecret --description 'Run a command with secret env var(s) set, with
     if contains -- --help $argv
         echo "Usage: envsecret NAME [NAME...] [--] COMMAND [ARGS...]
 
-Run COMMAND with one or more secrets from ~/.private/fish/secrets.fish injected
-into its environment. The secrets are not set in the calling shell.
+Run COMMAND with one or more secrets injected into its environment. The
+secrets are not set in the calling shell.
 
 Uppercase identifiers at the start of the argument list are treated as secret
 names. The first non-identifier argument (or an explicit --) begins the command.
+
+Secrets are read from ~/.private/fish/secrets.env.age (decrypted with age) if
+it exists, otherwise from ~/.private/fish/secrets.env; see getsecret --help.
 
 Arguments:
   NAME          Name of the secret variable to inject
@@ -18,12 +21,11 @@ Options:
 
 Examples:
   envsecret GITHUB_TOKEN gh api user
-  envsecret OPENAI_API_KEY -- python3 script.py
+  envsecret CLOUDFLARE_API_TOKEN -- wrangler whoami
   envsecret HASS_TOKEN HASS_SERVER ha state list"
         return 0
     end
 
-    set -l file $HOME/.private/fish/secrets.fish
     set -l names
     set -l cmd
     set -l mode names
@@ -56,31 +58,18 @@ Examples:
         return 1
     end
 
-    if not test -r $file
-        echo "envsecret: $file not readable" >&2
-        return 1
-    end
+    set -l entries (__secrets_parse envsecret); or return
 
-    set -l output (fish --no-config -c '
-        set -l file $argv[1]
-        set -l names $argv[2..-1]
-        source $file 2>/dev/null
-        for name in $names
-            printf "%s\t%s\n" $name "$$name"
-        end
-    ' $file $names)
-
-    set -l env_args
-    for line in $output
-        set -l parts (string split -m 1 \t -- $line)
-        set -l name $parts[1]
-        set -l value $parts[2]
+    # Exported function-scoped variables reach COMMAND but not the calling
+    # shell, and keep the values out of any process's arguments.
+    for name in $names
+        set -l value (string replace -rf "^$name=" '' -- $entries)[-1]
         if test -z "$value"
-            echo "envsecret: $name is unset or empty in $file" >&2
+            echo "envsecret: $name is unset or empty" >&2
             return 1
         end
-        set -a env_args "$name=$value"
+        set -fx $name $value
     end
 
-    env $env_args $cmd
+    $cmd
 end

@@ -1,47 +1,41 @@
-function getsecret --description 'Print secret value(s) from ~/.private/fish/secrets.fish to stdout'
+function getsecret --description 'Print a secret from ~/.private/fish/secrets.env[.age] to stdout'
     if contains -- --help $argv
         echo "Usage: getsecret NAME
 
-Print the value of a secret from ~/.private/fish/secrets.fish to stdout,
-without setting it in the current shell. Array values are printed one per line.
+Print the value of a secret to stdout, without setting it in the current shell.
 Intended for use in command substitution or scripts.
 
+Secrets are read from ~/.private/fish/secrets.env.age (decrypted with age and
+the identity in ~/.config/age/secrets-identity.txt) if it exists, otherwise
+from ~/.private/fish/secrets.env. Edit either with editsecrets.
+
 Arguments:
-  NAME          Name of the secret variable to read
+  NAME          Name of the secret to read
 
 Options:
   --help        Display this help message and exit
 
 Examples:
   getsecret GITHUB_TOKEN
-  set keys (getsecret GEMINI_API_KEYS)
-  curl -H \"Authorization: Bearer (getsecret OPENAI_API_KEY)\" ..."
+  curl -H \"Authorization: Bearer (getsecret PINBOARD_API_TOKEN)\" ..."
         return 0
     end
 
-    set -l file $HOME/.private/fish/secrets.fish
     if test (count $argv) -ne 1
         echo "getsecret: missing NAME operand" >&2
         echo "Try 'getsecret --help' for more information." >&2
         return 1
     end
-    if not test -r $file
-        echo "getsecret: $file not readable" >&2
-        return 1
-    end
     set -l name $argv[1]
-    set -l values (fish --no-config -c '
-        source $argv[1] 2>/dev/null
-        set -q $argv[2]; or exit 1
-        for v in $$argv[2]
-            echo $v
-        end
-    ' $file $name)
-    if test $status -ne 0
-        echo "getsecret: $name is unset or empty in $file" >&2
+    if not string match -qr '^[A-Za-z_][A-Za-z0-9_]*$' -- $name
+        echo "getsecret: invalid name: $name" >&2
         return 1
     end
-    for v in $values
-        echo $v
+    set -l entries (__secrets_parse getsecret); or return
+    set -l value (string replace -rf "^$name=" '' -- $entries)[-1]
+    if test -z "$value"
+        echo "getsecret: $name is unset or empty" >&2
+        return 1
     end
+    printf '%s\n' $value
 end
