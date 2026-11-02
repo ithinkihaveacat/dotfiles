@@ -104,6 +104,14 @@ doctor_json() {
   "${SCRIPT}" doctor --json 2>/dev/null || true
 }
 
+# own_output TEXT -- print TEXT without the lines that begin "warning: ".
+# uv writes those to stderr before a `uv run --script` tool starts (for a
+# deprecated UV_* variable, say); skill prefixes its own warnings with its name,
+# so checks on captured output still see everything skill wrote.
+own_output() {
+  grep -v '^warning: ' <<<"$1" || true
+}
+
 # json_get JSON EXPR -- evaluate a Python expression against the parsed JSON
 # (bound to `d`) and print it in a shell-friendly form: bools as true/false,
 # lists space-joined, None as empty. Used to read `skill doctor --json` /
