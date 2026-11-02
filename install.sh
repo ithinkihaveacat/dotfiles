@@ -4,7 +4,8 @@
 
 # Tests: tests/test-install-only (--only), tests/test-install-prune (--prune),
 # tests/test-install-profiles (--profile, --with, --without, --dry-run),
-# tests/test-install-node (the per-user default Node.js)
+# tests/test-install-node (the per-user default Node.js),
+# tests/test-install-fish-completions (generated fish completions)
 
 # When piped from the network the caller picks the interpreter
 # (`curl ... | bash`), so the shebang above is bypassed. The body of this script
@@ -1023,8 +1024,24 @@ function feature_macos {
   git config --file ~/.gitconfig.local credential.helper osxkeychain
 }
 
+# generate_completion FILE COMMAND... -- write COMMAND's fish completions to
+# FILE. A tool that fails or prints nothing (a version without completion
+# support, say) leaves FILE as it was and gets a warning, rather than stopping
+# install.sh under set -e or truncating a working completion file.
+function generate_completion {
+  local dest=$1 tmp
+  shift
+  tmp=$(mktemp)
+  if x "$@" >"$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+    x cp "$tmp" "$dest"
+  else
+    echo "warning: '$*' failed; $(basename "$dest") not updated" >&2
+  fi
+  rm -f "$tmp"
+}
+
 function feature_fish_completions {
-  local fish_completions_dir completions_dir bat_cmd="" tmp_comp
+  local fish_completions_dir completions_dir bat_cmd=""
 
   # Update completions if completions more than 7 days old
   if exists fish; then
@@ -1032,7 +1049,7 @@ function feature_fish_completions {
     fish_completions_dir=$(fish -c 'echo $__fish_cache_dir/generated_completions' 2>/dev/null)
     if [[ -n "$fish_completions_dir" ]] && [[ -z "$(find "$fish_completions_dir" -maxdepth 0 -mtime -7 2>/dev/null)" ]]; then
       echo "Updating fish completions..."
-      fish -c fish_update_completions
+      fish -c fish_update_completions || echo "warning: fish_update_completions failed" >&2
     fi
   fi
 
@@ -1044,11 +1061,11 @@ function feature_fish_completions {
   xmkdir "$completions_dir"
 
   if exists hcloud; then
-    x hcloud completion fish >"$completions_dir/hcloud.fish"
+    generate_completion "$completions_dir/hcloud.fish" hcloud completion fish
   fi
 
   if exists gog; then
-    x gog completion fish >"$completions_dir/gog.fish"
+    generate_completion "$completions_dir/gog.fish" gog completion fish
   fi
 
   if exists bat; then
@@ -1057,13 +1074,9 @@ function feature_fish_completions {
     bat_cmd="batcat"
   fi
 
+  # bat added --completion in 0.25.0
   if [ -n "$bat_cmd" ]; then
-    # bat / batcat --completion was added in 0.25.0; attempt completion generation without halting install.sh on error
-    tmp_comp=$(mktemp)
-    if "$bat_cmd" --completion fish >"$tmp_comp" 2>/dev/null; then
-      x cp "$tmp_comp" "$completions_dir/bat.fish"
-    fi
-    rm -f "$tmp_comp"
+    generate_completion "$completions_dir/bat.fish" "$bat_cmd" --completion fish
   fi
 }
 
