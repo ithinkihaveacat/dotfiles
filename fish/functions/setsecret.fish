@@ -1,27 +1,26 @@
-function setsecret --description 'Load secret(s) from ~/.private/fish/secrets.env[.age] into env'
-    if contains -- --help $argv
+function setsecret --description 'Load secret(s) from the secrets files into env'
+    if contains -- "$argv[1]" -h --help
         echo "Usage: setsecret [--if-unset] NAME [NAME...]
 
 Load one or more secrets into the current shell as exported variables. Errors
 if a named variable is already set, unless --if-unset is given.
-
-Secrets are read from ~/.private/fish/secrets.env.age (decrypted with age) if
-it exists, otherwise from ~/.private/fish/secrets.env; see getsecret --help.
 
 Arguments:
   NAME          Name of the secret variable to load
 
 Options:
   --if-unset    Skip variables that are already set instead of erroring
-  --help        Display this help message and exit
+  -h, --help    Display this help message and exit
 
 Examples:
   setsecret GITHUB_TOKEN
   setsecret HASS_SERVER HASS_TOKEN
-  setsecret --if-unset GEMINI_API_KEY GITHUB_TOKEN"
+  setsecret --if-unset GEMINI_API_KEY GITHUB_TOKEN
+
+Secrets are read from the secrets files in ~/.private and ~/.corp; see
+getsecret --help for the files and their order."
         return 0
     end
-
     set -l if_unset 0
     set -l names
 
@@ -45,8 +44,14 @@ Examples:
     end
 
     if test (count $names) -eq 0
-        echo "setsecret: missing NAME operand" >&2
-        echo "Try 'setsecret --help' for more information." >&2
+        echo "Usage: setsecret [--if-unset] NAME [NAME...]
+
+Load secrets into the current shell as exported variables.
+
+Examples:
+  setsecret HASS_SERVER HASS_TOKEN
+
+Try 'setsecret --help' for more information." >&2
         return 1
     end
 
