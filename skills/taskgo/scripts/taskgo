@@ -4834,6 +4834,11 @@ class ChangeSet:
     unformatted: set[str] = dataclass_field(default_factory=set)
     # What each edit_file did, in order, for the result.
     edits: list[AppliedEdit] = dataclass_field(default_factory=list)
+    # (record path, schema, section name) of each section replace_section or
+    # a task create wrote, in order, for the hashes in the result.
+    sections: list[tuple[str, "RecordSchema", str]] = dataclass_field(
+        default_factory=list
+    )
     # The task rows of the result, once the whole set has applied.
     rows: list[TaskRow] | None = None
 
@@ -5110,6 +5115,7 @@ def create_task_change(cs: ChangeSet, change: dict[str, Any], project: str) -> s
     )
     cs.touch(rel)
     cs.snap.write_markdown(rel, content)
+    cs.sections.extend((rel, TASK_SCHEMA, name) for name in texts)
     cs.added_refs.extend((rel, dep) for dep in sets["blocked_by"])
     cs.created.append({"kind": "task", "id": task_id, "path": rel})
     return task_id
@@ -5405,6 +5411,7 @@ def apply_replace_section(cs: ChangeSet, change: dict[str, Any]) -> None:
         )
     cs.touch(rel)
     cs.snap.write_markdown(rel, join_record(data, new_body))
+    cs.sections.append((rel, schema, name))
 
 
 def check_asset_path(snap: Snapshot, path: Any) -> str:
@@ -5914,11 +5921,24 @@ def apply_change_set(
     return cs
 
 
+# An edit_file whose lines were reformatted returns their text up to this
+# size; most edits are a few hundred bytes.
+EDIT_TEXT_MAX_BYTES = 1024
+
+
+def line_range(text: str, start: int, end: int) -> str:
+    """Lines START..END (1-indexed, inclusive) of TEXT, joined by '\n'."""
+    return "\n".join(text.splitlines()[start - 1 : end])
+
+
 def change_set_result(cs: ChangeSet) -> dict[str, Any]:
     """The created records and the files changed, with their new blob SHAs.
 
     A file whose executable bit changed says so; each edit_file reports its
-    replacements, the lines of the first, and the file's lines afterwards.
+    replacements, the lines of the first, and the file's lines afterwards,
+    and, when formatting changed those lines, their text as it now stands
+    (up to EDIT_TEXT_MAX_BYTES). Each section replace_section or a task
+    create wrote is listed with its new hash, ready for the next write.
     """
     files = []
     for rel, (before, after) in cs.snap.diff().items():
@@ -5951,23 +5971,51 @@ def change_set_result(cs: ChangeSet) -> dict[str, Any]:
                 s_line, e_line = remap_line_span(
                     e.pre_format, final[e.path], s_line, e_line
                 )
-            edits_out.append(
-                {
-                    "path": e.path,
-                    "occurrences_replaced": e.occurrences_replaced,
-                    "start_line": s_line,
-                    "end_line": e_line,
-                    "total_lines": (
-                        count_lines(final[e.path]) if e.path in final else None
-                    ),
-                    "blob": (
-                        git_blob_sha(final[e.path].encode("utf-8"))
-                        if e.path in final
-                        else None
-                    ),
-                }
-            )
+            entry = {
+                "path": e.path,
+                "occurrences_replaced": e.occurrences_replaced,
+                "start_line": s_line,
+                "end_line": e_line,
+                "total_lines": (
+                    count_lines(final[e.path]) if e.path in final else None
+                ),
+                "blob": (
+                    git_blob_sha(final[e.path].encode("utf-8"))
+                    if e.path in final
+                    else None
+                ),
+            }
+            if e.path in final:
+                text = line_range(final[e.path], s_line, e_line)
+                # Assets are written as replaced; only records are formatted.
+                entry["reformatted"] = e.path in cs.unformatted and text != (
+                    line_range(e.pre_format, e.start_line, e.end_line)
+                )
+                if entry["reformatted"]:
+                    if len(text.encode("utf-8")) <= EDIT_TEXT_MAX_BYTES:
+                        entry["text"] = text
+                    else:
+                        entry["text_omitted"] = True
+            edits_out.append(entry)
         result["edits"] = edits_out
+    if cs.sections:
+        ids = {r.rel_path: r.task_id for r in cs.rows or [] if r.task_id}
+        latest: dict[tuple[str, str], str | None] = {}
+        for rel, schema, name in cs.sections:
+            hashes = [
+                s["hash"]
+                for s in (
+                    record_sections(cs.snap.read_text(rel), schema)
+                    if cs.snap.is_file(rel)
+                    else []
+                )
+                if s["name"] == name
+            ]
+            latest[(rel, name)] = hashes[0] if len(hashes) == 1 else None
+        result["sections"] = [
+            {"record": ids.get(rel, rel), "section": name, "hash": h}
+            for (rel, name), h in latest.items()
+        ]
     return result
 
 
@@ -6099,6 +6147,10 @@ def cmd_edit(
         f"{e['path']}: replaced {n} occurrence{'s' if n != 1 else ''} "
         f"(first at {lines}); {e['total_lines']} lines, blob {e['blob'][:12]}"
     )
+    if e.get("reformatted"):
+        print(
+            "formatting changed the edited lines; --json returns them as they now stand"
+        )
     others = [f["path"] for f in result["files"] if f["path"] != e["path"]]
     if others:
         print(f"also changed: {', '.join(others)}")
@@ -9662,7 +9714,8 @@ MCP_TOOLS = [
         "section or STATUS.md Summary or Next; expected_hash from get_task or "
         "get_project_status, null if absent; text null removes it. Supply "
         "the section body only, without its heading or run-in label. Summary "
-        "and Next are rewritten to the current state, never appended to.\n"
+        "and Next are rewritten to the current state, never appended to. The "
+        "result's sections list each section's new hash, for the next write.\n"
         "- write_file {path, content, expected_blob?, executable?}: a whole "
         "project file outside tasks/, decisions/, and STATUS.md, or INBOX.md; "
         "without expected_blob the file must be new, and to overwrite one "
@@ -9671,11 +9724,14 @@ MCP_TOOLS = [
         "- delete_file {path, expected_blob}: deletes such a file whose blob "
         "is expected_blob.\n"
         "- edit_file {path, old_string, new_string, replace_all?, "
-        "expected_blob?}: exact text replacement, as the edit_file tool does.\n"
+        "expected_blob?}: exact text replacement, as the edit_file tool does, "
+        "with the same edits in the result.\n"
         "A record is a task ID, a '$ref', a decision path, or "
         "'<project>/STATUS.md'. The result must validate (known blockers, no "
         "cycles, an Outcome on done tasks); the affected STATUS.md blocks are "
-        "regenerated. The result lists findings on what the write touched.\n\n"
+        "regenerated. Records are reformatted (Markdown, wrapped at 80 "
+        "columns), so their text may differ from what was sent. The result "
+        "lists findings on what the write touched.\n\n"
         f"{MCP_DATA_CARE}",
         {
             "changes": {
@@ -9701,9 +9757,14 @@ MCP_TOOLS = [
         "task, a decision, or a project's STATUS.md outside its generated "
         "block; a record must still validate (same id, known status, "
         "parseable frontmatter, no duplicated section, known blockers) and is "
-        f"formatted. Files up to {WRITE_FILE_MAX_BYTES // 1024} KiB. Returns "
-        "edits: occurrences_replaced, the start_line and end_line of the "
-        "first replacement, total_lines, and the new blob.\n\n"
+        "then reformatted (Markdown, wrapped at 80 columns), so its text may "
+        "differ from new_string. Files up to "
+        f"{WRITE_FILE_MAX_BYTES // 1024} KiB. Returns edits: "
+        "occurrences_replaced, the start_line and end_line of the first "
+        "replacement, total_lines, the new blob, and reformatted; when that is "
+        "true, text holds those lines as they now stand (or text_omitted is "
+        f"true past {EDIT_TEXT_MAX_BYTES} bytes: read them back). Quote that "
+        "text, not new_string, in a later edit of the same lines.\n\n"
         f"{MCP_DATA_CARE}",
         {
             "path": {
@@ -11691,8 +11752,9 @@ than a few words.""",
             "write_file, delete_file, and edit_file), all or none. Preconditions\n"
             "are checked as each change applies; the state after the whole set is\n"
             "validated; the affected projects' STATUS.md blocks are regenerated.\n"
-            "Nothing is committed. Prints the created records and changed files\n"
-            "as JSON."
+            "Records are reformatted (wrapped at 80 columns), so their text may\n"
+            "differ from what was sent. Nothing is committed. Prints the created\n"
+            "records, changed files, edits, and new section hashes as JSON."
         ),
         epilog=(
             "Example CHANGES.json:\n"
@@ -11730,8 +11792,9 @@ than a few words.""",
             "match verbatim; only when nothing matches in a CRLF file are both\n"
             "texts retried with CRLF line endings. Assets are written as\n"
             "replaced and keep their mode; tasks, decisions, and STATUS.md are\n"
-            "checked and formatted, and the affected STATUS.md blocks are\n"
-            f"regenerated. Files up to {WRITE_FILE_MAX_BYTES // 1024} KiB. "
+            "checked and reformatted (wrapped at 80 columns), so their text may\n"
+            "differ from NEW, and the affected STATUS.md blocks are regenerated.\n"
+            f"Files up to {WRITE_FILE_MAX_BYTES // 1024} KiB. "
             "Nothing is committed."
         ),
         epilog="""Examples:
