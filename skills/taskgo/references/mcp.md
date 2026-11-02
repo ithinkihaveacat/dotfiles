@@ -21,7 +21,7 @@ One server serves one control repository.
 | `list_files`         | Files with blob SHAs, optionally under one directory                                                                             | `git ls-files -s`               |
 | `handoff`            | For a project or task: the note, a guide, findings, the files to read first verbatim, the skills, and the active and ready tasks | `taskgo handoff --json`         |
 | `get_task_history`   | Changes of one frontmatter field, following renames                                                                              | `taskgo history`                |
-| `create`             | Creates one task, decision, or project as one commit, and returns what it created                                                | `taskgo create`, `taskgo apply` |
+| `create`             | Creates one task, decision, or project as one commit, and returns what it created and a new task's section hashes                | `taskgo create`, `taskgo apply` |
 | `apply_changes`      | Applies a change set as one commit                                                                                               | `taskgo apply`, commit          |
 | `edit_file`          | Replaces exact text in one file as one commit; reports lines and the new blob                                                    | `taskgo edit`, commit           |
 
@@ -173,9 +173,9 @@ survives a restart: a write whose ID is not in memory first looks for its
 `Request-Id:` trailer in the last 200 commits behind the head: a commit found
 with the same `Request-Digest:` is reported as `replayed: true`, from what the
 commit records (its subject, the records it created, and the files it changed,
-but not the lines of its edits), and one with another digest is refused as a
-reused ID. A retry is thus recorded once across restarts, as long as its commit
-is within those 200.
+but not its `edits` or `sections`, so read the file or record again before
+editing it), and one with another digest is refused as a reused ID. A retry is
+thus recorded once across restarts, as long as its commit is within those 200.
 
 Each write logs a line to standard error for each push attempt, with the request
 ID, the commit, and the head it was built on, or Git's reason for a refusal, and

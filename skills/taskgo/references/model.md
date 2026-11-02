@@ -371,7 +371,10 @@ The file is a JSON object with one key, `changes`:
   text there may differ from `new_string`: `reformatted` says whether it does,
   and then `text` holds those lines as they now stand, or, past 1 KiB,
   `text_omitted` is true and the caller reads them back. A later edit of the
-  same lines quotes that text.
+  same lines quotes that text. With `replace_all`, both cover the first
+  replacement only. `reformatted` is judged after the whole set, so a later edit
+  of the same lines in the set also makes it true; `text` is still what to
+  quote.
 
 Each precondition is checked when its change applies, against the state the
 changes before it left. Validation then runs on the state after the whole set:

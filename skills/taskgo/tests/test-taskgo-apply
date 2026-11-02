@@ -531,15 +531,36 @@ assert set(cs.snap.diff()) == {"alpha/PLAN.md"}  # no STATUS.md for an asset
 assert not e["reformatted"] and "text" not in e, e  # assets are never formatted
 
 # A record edit that formatting rewraps returns the lines as they now stand,
-# up to EDIT_TEXT_MAX_BYTES; one left as sent returns none.
+# up to EDIT_TEXT_MAX_BYTES; one left as sent returns none. Lines end at
+# '\n' only, so a U+2028 elsewhere in the record moves nothing, and the text
+# returned quotes as old_string in the next edit.
 long = " ".join(["word"] * 30)
-cs = apply(edit(TASK, "**Goal:** One.", "**Goal:** One. " + long))
-e = tg.change_set_result(cs)["edits"][0]
-lines = cs.snap.read_text(TASK).splitlines()[e["start_line"] - 1 : e["end_line"]]
-assert e["reformatted"] and e["text"] == "\n".join(lines), e
-assert e["text"].startswith("**Goal:** One. word") and len(lines) == 3, e
+sep = apply(edit(TASK, "# First", "# First\n\nA\u2028B."))
+assert "\u2028" in sep.snap.read_text(TASK)
+for base in (None, sep.snap):
+    cs = apply(edit(TASK, "**Goal:** One.", "**Goal:** One. " + long), base=base)
+    e = tg.change_set_result(cs)["edits"][0]
+    final = cs.snap.read_text(TASK)
+    lines = final.split("\n")[e["start_line"] - 1 : e["end_line"]]
+    assert e["reformatted"] and e["text"] == "\n".join(lines), e
+    assert e["text"].startswith("**Goal:** One. word") and long not in final, e
+    again = apply(edit(TASK, e["text"], "**Goal:** Done."), base=cs.snap)
+    assert "**Goal:** Done." in again.snap.read_text(TASK)
 e = tg.change_set_result(apply(edit(TASK, "**Goal:** One.", "**Goal:** Two.")))
 assert not e["edits"][0]["reformatted"] and "text" not in e["edits"][0], e
+
+# The cap is inclusive: text of exactly EDIT_TEXT_MAX_BYTES is returned.
+cs = apply(edit(TASK, "**Goal:** One.", "**Goal:** One. " + long))
+size = len(tg.change_set_result(cs)["edits"][0]["text"].encode("utf-8"))
+cap = tg.EDIT_TEXT_MAX_BYTES
+try:
+    tg.EDIT_TEXT_MAX_BYTES = size
+    assert "text" in tg.change_set_result(cs)["edits"][0]
+    tg.EDIT_TEXT_MAX_BYTES = size - 1
+    e = tg.change_set_result(cs)["edits"][0]
+    assert e["reformatted"] and e.get("text_omitted") and "text" not in e, e
+finally:
+    tg.EDIT_TEXT_MAX_BYTES = cap
 big = "\n\n".join([long] * 8)
 e = tg.change_set_result(apply(edit(TASK, "**Goal:** One.", "**Goal:** " + big)))
 e = e["edits"][0]
