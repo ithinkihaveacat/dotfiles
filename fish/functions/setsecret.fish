@@ -1,10 +1,12 @@
-function setsecret --description 'Load secret(s) from ~/.private/fish/secrets.fish into env'
+function setsecret --description 'Load secret(s) from ~/.private/fish/secrets.env[.age] into env'
     if contains -- --help $argv
         echo "Usage: setsecret [--if-unset] NAME [NAME...]
 
-Load one or more secrets from ~/.private/fish/secrets.fish into the current
-shell as exported variables. Errors if a named variable is already set, unless
---if-unset is given.
+Load one or more secrets into the current shell as exported variables. Errors
+if a named variable is already set, unless --if-unset is given.
+
+Secrets are read from ~/.private/fish/secrets.env.age (decrypted with age) if
+it exists, otherwise from ~/.private/fish/secrets.env; see getsecret --help.
 
 Arguments:
   NAME          Name of the secret variable to load
@@ -15,12 +17,11 @@ Options:
 
 Examples:
   setsecret GITHUB_TOKEN
-  setsecret OPENAI_API_KEY MISTRAL_API_KEY
+  setsecret HASS_SERVER HASS_TOKEN
   setsecret --if-unset GEMINI_API_KEY GITHUB_TOKEN"
         return 0
     end
 
-    set -l file $HOME/.private/fish/secrets.fish
     set -l if_unset 0
     set -l names
 
@@ -35,6 +36,10 @@ Examples:
                 echo "Try 'setsecret --help' for more information." >&2
                 return 1
             case '*'
+                if not string match -qr '^[A-Za-z_][A-Za-z0-9_]*$' -- $arg
+                    echo "setsecret: invalid name: $arg" >&2
+                    return 1
+                end
                 set -a names $arg
         end
     end
@@ -42,11 +47,6 @@ Examples:
     if test (count $names) -eq 0
         echo "setsecret: missing NAME operand" >&2
         echo "Try 'setsecret --help' for more information." >&2
-        return 1
-    end
-
-    if not test -r $file
-        echo "setsecret: $file not readable" >&2
         return 1
     end
 
@@ -66,22 +66,13 @@ Examples:
         return 0
     end
 
-    set -l output (fish --no-config -c '
-        set -l file $argv[1]
-        set -l names $argv[2..-1]
-        source $file 2>/dev/null
-        for name in $names
-            printf "%s\t%s\n" $name "$$name"
-        end
-    ' $file $to_load)
+    set -l entries (__secrets_parse setsecret); or return
 
     set -l rc 0
-    for line in $output
-        set -l parts (string split -m 1 \t -- $line)
-        set -l name $parts[1]
-        set -l value $parts[2]
+    for name in $to_load
+        set -l value (string replace -rf "^$name=" '' -- $entries)[-1]
         if test -z "$value"
-            echo "setsecret: $name is unset or empty in $file" >&2
+            echo "setsecret: $name is unset or empty" >&2
             set rc 1
             continue
         end
