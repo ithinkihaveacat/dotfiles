@@ -336,7 +336,9 @@ The file is a JSON object with one key, `changes`:
   `text` removes an optional section. A new section goes where the schema orders
   it. Supply the section body only: omit its `## Heading` or `**Label:**`, which
   the tool adds. Text that duplicates a section or adds or removes any other
-  section is refused.
+  section is refused. The result's `sections` list gives the new hash of each
+  section `replace_section` or a task `create` wrote (`record`, `section`,
+  `hash`; null when removed), ready for the next `replace_section`.
 - **Files:** `write_file` writes project assets: any file in an existing project
   outside `tasks/`, `decisions/`, and `STATUS.md`, and `INBOX.md`. It refuses
   `.git*` paths, `..`, symbolic links, more than 256 KiB, non-UTF-8 content, and
@@ -365,7 +367,14 @@ The file is a JSON object with one key, `changes`:
   lines; several matches without `replace_all` are invalid. The result's `edits`
   list gives each edit's `occurrences_replaced`, the `start_line` and `end_line`
   of its first replacement (lines end at `\n`), and the file's `total_lines` and
-  `blob` after the set.
+  `blob` after the set. Formatting can rewrap a record's edited lines, so the
+  text there may differ from `new_string`: `reformatted` says whether it does,
+  and then `text` holds those lines as they now stand, or, past 1 KiB,
+  `text_omitted` is true and the caller reads them back. A later edit of the
+  same lines quotes that text. With `replace_all`, the returned `text` and line
+  numbers cover the first replacement only. `reformatted` is judged after the
+  whole set, so a later edit of the same lines in the set also makes it true;
+  `text` is still what to quote.
 
 Each precondition is checked when its change applies, against the state the
 changes before it left. Validation then runs on the state after the whole set:

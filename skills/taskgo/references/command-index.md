@@ -237,8 +237,9 @@ server's writes use (create, set, add, remove, replace_section,
 write_file, delete_file, and edit_file), all or none. Preconditions
 are checked as each change applies; the state after the whole set is
 validated; the affected projects' STATUS.md blocks are regenerated.
-Nothing is committed. Prints the created records and changed files
-as JSON.
+Records are reformatted (wrapped at 80 columns), so their text may
+differ from what was sent. Nothing is committed. Prints the created
+records, changed files, edits, and new section hashes as JSON.
 
 Arguments:
   CHANGES.json  Change set file, or - for standard input
@@ -278,8 +279,9 @@ OLD must occur exactly once unless --replace-all is given. Bytes
 match verbatim; only when nothing matches in a CRLF file are both
 texts retried with CRLF line endings. Assets are written as
 replaced and keep their mode; tasks, decisions, and STATUS.md are
-checked and formatted, and the affected STATUS.md blocks are
-regenerated. Files up to 256 KiB. Nothing is committed.
+checked and reformatted (wrapped at 80 columns), so their text may
+differ from NEW, and the affected STATUS.md blocks are regenerated.
+Files up to 256 KiB. Nothing is committed.
 
 Arguments:
   PATH                 Repository-relative path
