@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+
+# Tests: tests/test-install-fish-completions (install.sh --only fish-completions)
+#
+# Runs the fish-completions feature against stub hcloud, gog, bat, batcat and
+# fish commands in a temporary HOME and XDG_DATA_HOME. A tool that fails or
+# prints nothing must leave its completion file as it was, warn, and let the
+# other tools' completions be generated.
+
+set -euo pipefail
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+BIN="$DIR/../install.sh"
+
+echo "1..6"
+
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
+
+# stub NAME BODY -- write an executable sh script NAME into $TMP/bin.
+stub() {
+  printf '#!/bin/sh\n%s\n' "$2" >"$TMP/bin/$1"
+  chmod +x "$TMP/bin/$1"
+}
+
+# run -- run the feature with only the stubs and the base system on PATH, into
+# a fresh HOME and data directory; sets STATUS, OUT (stdout and stderr) and
+# COMP (the completions directory).
+run() {
+  local home="$TMP/home" data="$TMP/data"
+  COMP="$data/fish/completions"
+  STATUS=0
+  OUT=$(HOME="$home" XDG_DATA_HOME="$data" PATH="$TMP/bin:/usr/bin:/bin" \
+    "$BIN" --only fish-completions 2>&1) || STATUS=$?
+}
+
+reset() {
+  rm -rf "${TMP:?}/bin" "${TMP:?}/home" "${TMP:?}/data"
+  mkdir -p "$TMP/bin" "$TMP/home" "$TMP/data/fish/completions" "$TMP/cache"
+  # fish's generated completions are older than 7 days, so the feature asks
+  # fish to update them; the stub then fails.
+  stub fish "case \"\$2\" in
+  fish_update_completions) exit 1 ;;
+  *) echo '$TMP/cache' ;;
+esac"
+  touch -t 202001010000 "$TMP/cache"
+}
+
+# Test 1-3: a failing hcloud keeps its file and does not stop gog or bat
+reset
+echo "complete -c hcloud # old" >"$TMP/data/fish/completions/hcloud.fish"
+stub hcloud 'echo "hcloud: unknown command \"completion\"" >&2; exit 1'
+stub gog 'echo "complete -c gog"'
+stub bat 'echo "complete -c bat"'
+run
+if [[ $STATUS -eq 0 && "$OUT" == *"warning: 'hcloud completion fish' failed; hcloud.fish not updated"* ]] &&
+  [[ "$(cat "$COMP/hcloud.fish")" == "complete -c hcloud # old" ]]; then
+  echo "ok 1 - a failing tool warns and keeps its completion file"
+else
+  echo "not ok 1 - a failing tool warns and keeps its completion file (status $STATUS)"
+  printf '%s\n' "$OUT" | sed 's/^/# /'
+fi
+
+if [[ "$(cat "$COMP/gog.fish" 2>/dev/null)" == "complete -c gog" ]] &&
+  [[ "$(cat "$COMP/bat.fish" 2>/dev/null)" == "complete -c bat" ]]; then
+  echo "ok 2 - the other tools' completions are still written"
+else
+  echo "not ok 2 - the other tools' completions are still written"
+  find "$COMP" -type f | sed 's/^/# /'
+fi
+
+if [[ "$OUT" == *"warning: fish_update_completions failed"* ]]; then
+  echo "ok 3 - a failing fish_update_completions warns and continues"
+else
+  echo "not ok 3 - a failing fish_update_completions warns and continues"
+  printf '%s\n' "$OUT" | sed 's/^/# /'
+fi
+
+# Test 4: a tool that succeeds without output keeps its file
+reset
+echo "complete -c gog # old" >"$TMP/data/fish/completions/gog.fish"
+stub gog 'exit 0'
+run
+if [[ $STATUS -eq 0 && "$OUT" == *"warning: 'gog completion fish' failed; gog.fish not updated"* ]] &&
+  [[ "$(cat "$COMP/gog.fish")" == "complete -c gog # old" ]]; then
+  echo "ok 4 - empty output warns and keeps the completion file"
+else
+  echo "not ok 4 - empty output warns and keeps the completion file (status $STATUS)"
+  printf '%s\n' "$OUT" | sed 's/^/# /'
+fi
+
+# Test 5: a bat without --completion (before 0.25.0) writes no bat.fish, and
+# says nothing, since it fails on every run
+reset
+stub bat 'echo "error: unexpected argument --completion" >&2; exit 2'
+run
+if [[ $STATUS -eq 0 && "$OUT" != *"bat"* && ! -e "$COMP/bat.fish" ]]; then
+  echo "ok 5 - a bat without --completion quietly writes no bat.fish"
+else
+  echo "not ok 5 - a bat without --completion quietly writes no bat.fish (status $STATUS)"
+  printf '%s\n' "$OUT" | sed 's/^/# /'
+fi
+
+# Test 6: Debian's batcat is used when there is no bat
+reset
+stub batcat 'echo "complete -c batcat"'
+run
+if [[ -x /usr/bin/bat || -x /bin/bat ]]; then
+  echo "ok 6 - batcat generates bat.fish when bat is absent # SKIP bat is installed in /usr/bin"
+elif [[ $STATUS -eq 0 && "$(cat "$COMP/bat.fish" 2>/dev/null)" == "complete -c batcat" && "$OUT" != *warning:\ \'* ]]; then
+  echo "ok 6 - batcat generates bat.fish when bat is absent"
+else
+  echo "not ok 6 - batcat generates bat.fish when bat is absent (status $STATUS)"
+  printf '%s\n' "$OUT" | sed 's/^/# /'
+fi
