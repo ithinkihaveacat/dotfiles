@@ -20,6 +20,9 @@ from pathlib import Path
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 READER = SCRIPTS / "mcp-logs"
 MCP = SCRIPTS / "mcp"
+# Quiet, so that uv's "Installed N packages" on a cold cache does not reach
+# the stderr these tests check.
+RUN = ["uv", "run", "--quiet", "--script"]
 
 
 def record(ts: str, **fields) -> dict:
@@ -87,8 +90,9 @@ class McpLogsTests(unittest.TestCase):
         self.tmpdir.cleanup()
 
     def run_reader(self, *args, env=None, script=READER):
+        cmd = [*RUN, str(script)] if script == READER else [str(script)]
         return subprocess.run(
-            [str(script), *args],
+            [*cmd, *args],
             capture_output=True,
             text=True,
             env=env or self.env,
@@ -209,7 +213,7 @@ class McpLogsTests(unittest.TestCase):
         out = Path(self.tmpdir.name) / "follow.out"
         with open(out, "w") as fh:
             proc = subprocess.Popen(
-                [str(READER), "-f", "-n", "1"],
+                [*RUN, str(READER), "-f", "-n", "1"],
                 stdout=fh,
                 stderr=subprocess.PIPE,
                 env=self.env,
@@ -241,9 +245,70 @@ class McpLogsTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 130)
         self.assertEqual(err, b"\n")
 
+    def follow_proc(self, out: Path, *args) -> subprocess.Popen:
+        with open(out, "w") as fh:
+            return subprocess.Popen(
+                [*RUN, str(READER), "-f", *args],
+                stdout=fh,
+                stderr=subprocess.PIPE,
+                env=self.env,
+            )
+
+    def stop_follow(self, proc: subprocess.Popen) -> bytes:
+        proc.send_signal(signal.SIGINT)
+        _, err = proc.communicate(timeout=10)
+        self.assertEqual(proc.returncode, 130)
+        return err
+
+    def test_follow_split_character(self):
+        """A line written in two parts, split inside a character, is
+        decoded whole."""
+        skill = self.state / "skill" / "mcp.jsonl"
+        out = Path(self.tmpdir.name) / "split.out"
+        line = json.dumps(
+            record("2026-11-04T00:00:01.000Z", agent="café-ü"), ensure_ascii=False
+        ).encode()
+        cut = line.index("é".encode()) + 1
+        proc = self.follow_proc(out, "-n", "0", "--server", "skill")
+        try:
+            time.sleep(1.5)
+            with open(skill, "ab") as fh:
+                fh.write(line[:cut])
+            time.sleep(1.5)
+            with open(skill, "ab") as fh:
+                fh.write(line[cut:] + b"\n")
+            self.wait_for(out, 1)
+        finally:
+            self.stop_follow(proc)
+        self.assertIn('agent="café-ü"', out.read_text(encoding="utf-8"))
+
+    def test_follow_waits_for_logs(self):
+        """--follow starts on a directory with no logs yet, and on a server
+        with none yet, and prints their records once they appear."""
+        empty = Path(self.tmpdir.name) / "volume"
+        empty.mkdir()
+        out = Path(self.tmpdir.name) / "wait.out"
+        proc = self.follow_proc(out, str(empty))
+        other = self.follow_proc(Path(f"{out}.2"), "--server", "taskgo")
+        try:
+            time.sleep(1.5)
+            write(empty / "taskgo" / "mcp.jsonl", record("2026-11-04T00:00:01.000Z"))
+            write(
+                self.state / "taskgo" / "mcp.jsonl",
+                record("2026-11-04T00:00:02.000Z"),
+            )
+            self.wait_for(out, 1)
+            self.wait_for(Path(f"{out}.2"), 1)
+        finally:
+            self.stop_follow(proc)
+            err = self.stop_follow(other)
+        self.assertIn(" taskgo ", out.read_text())
+        self.assertIn(" taskgo ", Path(f"{out}.2").read_text())
+        self.assertIn(b"no request log for server taskgo", err)
+
     def test_sigterm(self):
         proc = subprocess.Popen(
-            [str(READER), "-f"],
+            [*RUN, str(READER), "-f"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             env=self.env,
@@ -267,7 +332,7 @@ class McpLogsTests(unittest.TestCase):
             *(record("2026-11-05T00:00:00.000Z", n=i) for i in range(5000)),
         )
         out = subprocess.run(
-            f"'{READER}' -n all | head -n 1",
+            f"uv run --quiet --script '{READER}' -n all | head -n 1",
             shell=True,
             capture_output=True,
             text=True,

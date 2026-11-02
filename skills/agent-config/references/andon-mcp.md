@@ -41,8 +41,8 @@ else `${XDG_STATE_HOME:-~/.local/state}/andon/mcp.jsonl` (never in
 `ANDON_STATE_DIR`, so a read still writes nothing to the store), and printed to
 stderr as a `request` line. A record names the method, tool, the alert ID,
 color, kind and filters given, the outcome and duration, never an alert's text.
-The format is the one every MCP server in this repository writes, documented at
-the head of the request log block in `scripts/skill-mcp`.
+The format is the one every MCP server in this repository writes, documented in
+[MCP request logs](mcp-logs.md); `mcp logs` reads it.
 
 ## Tools
 

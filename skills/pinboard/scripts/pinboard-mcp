@@ -285,15 +285,19 @@ class RequestLog:
             with open(self.path, "a", encoding="utf-8") as fh:
                 fcntl.flock(fh, fcntl.LOCK_EX)
                 st = os.fstat(fh.fileno())
-                with contextlib.suppress(FileNotFoundError):
-                    if os.stat(self.path).st_ino != st.st_ino:
-                        continue
+                try:
+                    current = os.stat(self.path).st_ino == st.st_ino
+                except FileNotFoundError:
+                    current = False  # rotated, and not yet made again
+                if not current:
+                    continue
                 if st.st_size and st.st_size + len(line) > LOG_ROTATE_BYTES:
                     for i in range(LOG_ROTATED - 1, 0, -1):
                         if Path(f"{self.path}.{i}").exists():
                             os.replace(f"{self.path}.{i}", f"{self.path}.{i + 1}")
                     os.replace(self.path, f"{self.path}.1")
                     with open(self.path, "a", encoding="utf-8") as fresh:
+                        fcntl.flock(fresh, fcntl.LOCK_EX)
                         fresh.write(line)
                 else:
                     fh.write(line)
@@ -322,6 +326,7 @@ def request_logging(log: RequestLog) -> Any:
     """SDK middleware for every message: over HTTP it fills in the gate's
     event, which the gate logs; over stdio it makes and logs its own."""
     from mcp.shared.exceptions import MCPError
+    from pydantic import ValidationError
 
     stdio_caller = caller_key("stdio", os.getpid(), time.time())
 
@@ -337,9 +342,13 @@ def request_logging(log: RequestLog) -> Any:
         except MCPError as e:
             event.fail("rpc-error", RPC_ERRORS.get(e.code, f"error {e.code}"))
             raise
-        except Exception:
+        except ValidationError:
             # The SDK reports malformed params as a pydantic ValidationError.
             event.fail("rpc-error", RPC_ERRORS[-32602])
+            raise
+        except Exception:
+            # Anything else is the server's fault, not the request's.
+            event.fail("rpc-error", RPC_ERRORS[-32603])
             raise
         finally:
             EVENT.reset(token)
@@ -350,14 +359,20 @@ def request_logging(log: RequestLog) -> Any:
 
 
 async def http_reply(
-    send: Any, status: int, text: str, ctype: str = "text/plain", extra: Any = ()
+    send: Any,
+    status: int,
+    text: str,
+    ctype: str = "text/plain",
+    extra: Any = (),
+    head: bool = False,
 ) -> None:
+    """Replies with TEXT, or for a HEAD request (HEAD) only its headers."""
     data = text.encode()
     headers = [(b"content-type", f"{ctype}; charset=utf-8".encode())]
     headers += [(b"content-length", str(len(data)).encode())]
     headers += [(k.encode(), v.encode()) for k, v in extra]
     await send({"type": "http.response.start", "status": status, "headers": headers})
-    await send({"type": "http.response.body", "body": data})
+    await send({"type": "http.response.body", "body": b"" if head else data})
 
 
 class LoggingGate:
@@ -380,7 +395,9 @@ class LoggingGate:
         path, method = scope["path"], scope["method"]
         if path == "/up" and method in ("GET", "HEAD"):
             # Polled by the proxy, so open to all, and not logged.
-            await http_reply(send, 200, self.health, "application/json")
+            await http_reply(
+                send, 200, self.health, "application/json", head=method == "HEAD"
+            )
             return
         event = Event("http", http=method, agent=headers.get("user-agent"))
         token = EVENT.set(event)
@@ -1257,7 +1274,8 @@ search, a hash of its text; for a sync, its counts. Never titles, notes, URLs,
 or the token. 'mcp logs' reads and summarises the log.
 
 The HTTP server serves GET /up without a token for a proxy's health check,
-answering with its version and source commit.
+answering with its version and source commit. It refuses a request body over
+1 MiB with 413.
 Without --access-team and --access-aud it listens on loopback only and does no
 authentication of its own. With both, it may bind another --host and requires
 the Cf-Access-Jwt-Assertion header on every other request, checking the token

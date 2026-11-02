@@ -28,30 +28,30 @@ starts on its own (a scheduled sync). A field with no value is left out.
 
 <!-- The server tests read the field names from the first column. -->
 
-| Field         | Value                                                                                             |
-| ------------- | ------------------------------------------------------------------------------------------------- |
-| `ts`          | When the request came: UTC, ISO 8601 with milliseconds and `Z`                                    |
-| `transport`   | `stdio`, `http`, or `background` (a job the server started)                                       |
-| `event`       | A background job's name, such as `sync`                                                           |
-| `http`        | The HTTP method                                                                                   |
-| `method`      | The JSON-RPC method, such as `tools/call`                                                         |
-| `tool`        | The tool called                                                                                   |
-| `args`        | The tool's allowlisted arguments, as short strings; user text only as a `#` hash                  |
-| `outcome`     | One of the outcomes below                                                                         |
-| `status`      | The HTTP status                                                                                   |
-| `ms`          | Duration in milliseconds                                                                          |
-| `bytes`       | Size of a tool's result                                                                           |
-| `reason`      | Why it was not `ok`: a short phrase, never quoting input                                          |
-| `agent`       | The client's `User-Agent`                                                                         |
-| `caller`      | 10 hex digits of SHA-256 over the Access token's identifying claims, or over stdio, pid and start |
-| `commit`      | A Git commit the call made or read                                                                |
-| `version`     | The server's version                                                                              |
-| `scope`       | `skill mcp`: the scope the request was made to                                                    |
-| `push`        | `skill mcp`: `ok` or `failed`, for an edit pushed after its commit                                |
-| `result`      | `pinboard mcp`: a sync's counts                                                                   |
-| `retry_after` | `pinboard mcp`: seconds until a rate-limited call may be retried                                  |
-| `fetch`       | `taskgo mcp`: why a fetch of the remote during the request failed or timed out                    |
-| `stale`       | `taskgo mcp`: `true` when a read was served the last fetched head because the fetch failed        |
+| Field         | Value                                                                                                                                                                   |
+| ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ts`          | When the request came: UTC, ISO 8601 with milliseconds and `Z`                                                                                                          |
+| `transport`   | `stdio`, `http`, or `background` (a job the server started)                                                                                                             |
+| `event`       | A background job's name, such as `sync`                                                                                                                                 |
+| `http`        | The HTTP method                                                                                                                                                         |
+| `method`      | The JSON-RPC method, such as `tools/call`                                                                                                                               |
+| `tool`        | The tool called                                                                                                                                                         |
+| `args`        | The tool's allowlisted arguments, and identifiers derived from them (pinboard: a written URL's `host`, a `search` hash), as short strings; user text only as a `#` hash |
+| `outcome`     | One of the outcomes below                                                                                                                                               |
+| `status`      | The HTTP status                                                                                                                                                         |
+| `ms`          | Duration in milliseconds                                                                                                                                                |
+| `bytes`       | Size of a tool's result                                                                                                                                                 |
+| `reason`      | Why it was not `ok`: a short phrase, never quoting input                                                                                                                |
+| `agent`       | The client's `User-Agent`                                                                                                                                               |
+| `caller`      | 10 hex digits of SHA-256 over the Access token's identifying claims, or over stdio, pid and start                                                                       |
+| `commit`      | A Git commit the call made or read                                                                                                                                      |
+| `version`     | The server's version                                                                                                                                                    |
+| `scope`       | `skill mcp`: the scope the request was made to                                                                                                                          |
+| `push`        | `skill mcp`: `ok` or `failed`, for an edit pushed after its commit                                                                                                      |
+| `result`      | `pinboard mcp`: a sync's counts                                                                                                                                         |
+| `retry_after` | `pinboard mcp`: seconds until a rate-limited call may be retried                                                                                                        |
+| `fetch`       | `taskgo mcp`: why a fetch of the remote during the request failed or timed out                                                                                          |
+| `stale`       | `taskgo mcp`: `true` when a read was served the last fetched head because the fetch failed                                                                              |
 
 <!-- The server tests read the outcomes from the first column. -->
 

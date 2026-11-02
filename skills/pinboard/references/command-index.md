@@ -403,7 +403,8 @@ search, a hash of its text; for a sync, its counts. Never titles, notes, URLs,
 or the token. 'mcp logs' reads and summarises the log.
 
 The HTTP server serves GET /up without a token for a proxy's health check,
-answering with its version and source commit.
+answering with its version and source commit. It refuses a request body over
+1 MiB with 413.
 Without --access-team and --access-aud it listens on loopback only and does no
 authentication of its own. With both, it may bind another --host and requires
 the Cf-Access-Jwt-Assertion header on every other request, checking the token

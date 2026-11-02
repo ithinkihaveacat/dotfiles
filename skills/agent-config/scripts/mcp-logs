@@ -90,15 +90,17 @@ def logs_in(directory: Path) -> list[Log]:
     return found
 
 
-def find_logs(paths: list[str], servers: list[str]) -> list[Log]:
+def find_logs(paths: list[str], servers: list[str], waiting: bool = False) -> list[Log]:
     """The logs PATHS name (files or directories), by default every one in
-    the state directory, kept to SERVERS if any are given."""
+    the state directory, kept to SERVERS if any are given. When WAITING for
+    logs to appear (--follow, --serve), finding none, or none for a server,
+    is a warning rather than an error."""
     logs: list[Log] = []
     for arg in paths or [str(state_dir())]:
         path = Path(arg).expanduser()
         if path.is_dir():
             found = logs_in(path)
-            if paths and not found:
+            if paths and not found and not waiting:
                 die(f"no {LOG_NAME} in {path} or its subdirectories")
             logs += found
         elif path.is_file() or Path(f"{path}.1").is_file():
@@ -109,9 +111,12 @@ def find_logs(paths: list[str], servers: list[str]) -> list[Log]:
         unknown = sorted(set(servers) - {log.server for log in logs})
         if unknown:
             known = ", ".join(sorted({log.server for log in logs})) or "none"
-            die(f"no request log for server {', '.join(unknown)} (found: {known})")
+            msg = f"no request log for server {', '.join(unknown)} (found: {known})"
+            if not waiting:
+                die(msg)
+            print(f"{PROG}: {msg}; waiting for one", file=sys.stderr, flush=True)
         logs = [log for log in logs if log.server in servers]
-    if not logs:
+    if not logs and not waiting:
         die(f"no request logs in {state_dir()}; name a file or directory")
     return logs
 
@@ -184,7 +189,7 @@ def line_value(value: Any) -> str:
     """VALUE bare if a plain token, else quoted as JSON, so that client text
     can neither break nor forge a line."""
     text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
-    plain = re.fullmatch(r"[\w./:@+#-]+", text, re.ASCII)
+    plain = re.fullmatch(r"[\w./:@+-]+", text, re.ASCII)
     return text if plain else json.dumps(text, ensure_ascii=False)
 
 
@@ -372,7 +377,7 @@ class Cursor:
 
     inode: int
     offset: int
-    partial: str = ""
+    partial: bytes = b""  # a line not yet complete, undecoded
 
 
 def follow(
@@ -385,11 +390,13 @@ def follow(
 ) -> NoReturn:
     """Prints records as they are appended to LOGS after CURSORS. A rotated
     file is read to its end before the new one is read from its start; a
-    server whose log appears later is picked up when no PATHS were named."""
+    server whose log appears later, in the state directory or a directory
+    PATHS name, is picked up."""
+    dirs = [Path(p).expanduser() for p in paths or [str(state_dir())]]
     while True:
         time.sleep(FOLLOW_POLL)
-        if not paths:
-            for log in logs_in(state_dir()):
+        for directory in (d for d in dirs if d.is_dir()):
+            for log in logs_in(directory):
                 if log.path not in {lg.path for lg in logs} and (
                     not servers or log.server in servers
                 ):
@@ -405,14 +412,14 @@ def follow(
 
 def read_from(f: Path, cursor: Cursor) -> str:
     """The text of F after CURSOR, up to its last complete line; the rest is
-    kept for the next read."""
+    kept, as bytes, for the next read, so that a character split between two
+    reads is decoded whole."""
     with open(f, "rb") as fh:
         fh.seek(cursor.offset)
         data = fh.read()
     cursor.offset += len(data)
-    text = cursor.partial + data.decode("utf-8", errors="replace")
-    text, _, cursor.partial = text.rpartition("\n")
-    return text + "\n" if text else ""
+    whole, _, cursor.partial = (cursor.partial + data).rpartition(b"\n")
+    return whole.decode("utf-8", errors="replace") + "\n" if whole else ""
 
 
 def read_new(log: Log, cursors: dict[Path, Cursor]) -> list[dict[str, Any]]:
@@ -434,7 +441,7 @@ def read_new(log: Log, cursors: dict[Path, Cursor]) -> list[dict[str, Any]]:
         if cursor is None:
             cursor = cursors[log.path] = Cursor(st.st_ino, 0)
         elif st.st_size < cursor.offset:
-            cursor.offset, cursor.partial = 0, ""  # truncated
+            cursor.offset, cursor.partial = 0, b""  # truncated
         text += read_from(log.path, cursor)
     except OSError as e:
         print(f"{PROG}: cannot read {log.path}: {e.strerror or e}", file=sys.stderr)
@@ -570,29 +577,34 @@ class Store:
         self.refresh()
         with self.lock:
             cutoff = self.cutoff()
-            key = (self.seq, tuple(sorted(servers)), int(cutoff))
-            names = sorted({lg.server for lg in self.logs.values()})
-            if seen == f"{key[0]}:{','.join(key[1])}":
-                return {"seq": seen, "unchanged": True}
-            if self.cache and self.cache[0] == key:
+            # A --since window moves on by itself: the cursor names the
+            # minute it starts at, so records leave the page as they age.
+            token = f"{self.seq}:{','.join(sorted(servers))}:{int(cutoff // 60)}"
+            if seen == token:
+                return {"seq": token, "unchanged": True}
+            if self.cache and self.cache[0] == token:
                 return self.cache[1]
+            names = sorted({lg.server for lg in self.logs.values()})
             records = [
                 r
                 for r in self.records
                 if r["at"] >= cutoff and (not servers or r["server"] in servers)
             ]
-            payload = {
-                "seq": f"{key[0]}:{','.join(key[1])}",
-                "servers": names,
-                "since": self.since,
-                "summary": summary(records, DEFAULT_GAP),
-                "records": [
-                    {k: v for k, v in r.items() if k != "at"}
-                    for r in records[-SERVE_RECENT:]
-                ],
-            }
-            self.cache = (key, payload)
-            return payload
+        # Outside the lock: a summary of many records takes a while, and
+        # other polls and the next refresh need not wait for it.
+        payload = {
+            "seq": token,
+            "servers": names,
+            "since": self.since,
+            "summary": summary(records, DEFAULT_GAP),
+            "records": [
+                {k: v for k, v in r.items() if k != "at"}
+                for r in records[-SERVE_RECENT:]
+            ],
+        }
+        with self.lock:
+            self.cache = (token, payload)
+        return payload
 
 
 # The page: static, with every value inserted as text, polling DATA_PATH (a
@@ -755,14 +767,20 @@ tr.fail td {{ background: var(--fail); }}
 
 
 async def http_reply(
-    send: Any, status: int, text: str, ctype: str = "text/plain", extra: Any = ()
+    send: Any,
+    status: int,
+    text: str,
+    ctype: str = "text/plain",
+    extra: Any = (),
+    head: bool = False,
 ) -> None:
+    """Replies with TEXT, or for a HEAD request (HEAD) only its headers."""
     data = text.encode()
     headers = [(b"content-type", f"{ctype}; charset=utf-8".encode())]
     headers += [(b"content-length", str(len(data)).encode())]
     headers += [(k.encode(), v.encode()) for k, v in extra]
     await send({"type": "http.response.start", "status": status, "headers": headers})
-    await send({"type": "http.response.body", "body": data})
+    await send({"type": "http.response.body", "body": b"" if head else data})
 
 
 class LogPage:
@@ -795,8 +813,9 @@ class LogPage:
             for k, v in scope["headers"]
         }
         path, method = scope["path"], scope["method"]
+        head = method == "HEAD"
         if path == "/up" and method in ("GET", "HEAD"):
-            await http_reply(send, 200, self.health, "application/json")
+            await http_reply(send, 200, self.health, "application/json", head=head)
             return
         refusal = self.refusal(headers)
         if refusal is None and method not in ("GET", "HEAD"):
@@ -804,18 +823,22 @@ class LogPage:
         if refusal is None and path not in ("/", DATA_PATH):
             refusal = 404, "not found", ()
         if refusal:
-            await http_reply(send, refusal[0], refusal[1], extra=refusal[2])
+            await http_reply(send, refusal[0], refusal[1], extra=refusal[2], head=head)
             return
         private = (("cache-control", "no-store"), ("x-content-type-options", "nosniff"))
         if path == "/":
             csp = (("content-security-policy", self.csp),)
-            await http_reply(send, 200, self.page, "text/html", (*private, *csp))
+            await http_reply(
+                send, 200, self.page, "text/html", (*private, *csp), head=head
+            )
             return
         query = parse_qs(scope.get("query_string", b"").decode("latin-1"))
         servers = query.get("server", [])
         seen = query.get("seen", [""])[0]
         payload = await asyncio.to_thread(self.store.view, servers, seen)
-        await http_reply(send, 200, json.dumps(payload), "application/json", private)
+        await http_reply(
+            send, 200, json.dumps(payload), "application/json", private, head=head
+        )
 
     def refusal(self, headers: dict[str, str]) -> tuple | None:
         """(status, reason, headers) if the request may not proceed."""
@@ -858,6 +881,14 @@ def serve(args: argparse.Namespace) -> int:
         parse_since(args.since, time.time())  # reject a bad value now
     store = Store(args.paths, args.server, args.since)
     store.refresh()
+    missing = sorted(set(args.server) - {lg.server for lg in store.logs.values()})
+    if missing:
+        print(
+            f"{PROG}: no request log yet for server {', '.join(missing)}; "
+            "it will show once one appears",
+            file=sys.stderr,
+            flush=True,
+        )
     auth = f"Access {team}" if team else "no authentication"
     print(
         f"{PROG}: serving {len(store.logs)} logs on http://{args.host}:{args.port} "
@@ -1105,7 +1136,7 @@ def main() -> int:
     gap = DEFAULT_GAP if args.gap is None else args.gap
     if not gap >= 0:
         die(f"--gap must be 0 or more seconds, not {gap:g}")
-    logs = find_logs(args.paths, args.server)
+    logs = find_logs(args.paths, args.server, waiting=args.follow)
     cursors: dict[Path, Cursor] = {}
     records = read_records(logs, since, cursors)
     if tail is not None:
@@ -1117,7 +1148,7 @@ def main() -> int:
         else:
             print_summary(stats)
         return 0
-    width = max(len(log.server) for log in logs)
+    width = max((len(log.server) for log in logs), default=0)
     for rec in records:
         print(output(rec, args.json, width))
     if args.follow:
