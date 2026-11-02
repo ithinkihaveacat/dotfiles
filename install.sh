@@ -1024,17 +1024,23 @@ function feature_macos {
   git config --file ~/.gitconfig.local credential.helper osxkeychain
 }
 
-# generate_completion FILE COMMAND... -- write COMMAND's fish completions to
-# FILE. A tool that fails or prints nothing (a version without completion
-# support, say) leaves FILE as it was and gets a warning, rather than stopping
-# install.sh under set -e or truncating a working completion file.
+# generate_completion [--quiet] FILE COMMAND... -- write COMMAND's fish
+# completions to FILE. A tool that fails or prints nothing (a version without
+# completion support, say) leaves FILE as it was and gets a warning, unless
+# --quiet, rather than stopping install.sh under set -e or truncating a working
+# completion file.
 function generate_completion {
-  local dest=$1 tmp
+  local quiet=0 dest tmp
+  if [ "$1" = --quiet ]; then
+    quiet=1
+    shift
+  fi
+  dest=$1
   shift
   tmp=$(mktemp)
   if x "$@" >"$tmp" 2>/dev/null && [ -s "$tmp" ]; then
     x cp "$tmp" "$dest"
-  else
+  elif [ "$quiet" = 0 ]; then
     echo "warning: '$*' failed; $(basename "$dest") not updated" >&2
   fi
   rm -f "$tmp"
@@ -1074,9 +1080,10 @@ function feature_fish_completions {
     bat_cmd="batcat"
   fi
 
-  # bat added --completion in 0.25.0
+  # bat added --completion in 0.25.0; older ones (Debian 12's batcat is 0.22)
+  # fail on every run, so they fail quietly.
   if [ -n "$bat_cmd" ]; then
-    generate_completion "$completions_dir/bat.fish" "$bat_cmd" --completion fish
+    generate_completion --quiet "$completions_dir/bat.fish" "$bat_cmd" --completion fish
   fi
 }
 
