@@ -23,13 +23,18 @@ teach how to do a class of task are capability skills; see
 A fact belongs in a knowledge skill when it is true of the thing regardless of
 any particular project or task, and more than one piece of work may need it.
 
-| Belongs here                                                 | Belongs elsewhere                                       |
-| ------------------------------------------------------------ | ------------------------------------------------------- |
-| What a machine or service is, where it runs, how to reach it | How a codebase works (its own repository)               |
-| Where a credential is stored, how to renew or rotate it      | The credential's value (a secrets store)                |
-| Accounts, registrars, providers, and their recovery paths    | Work in progress and plans (a project tracker)          |
-| People, households, and places, to the extent needed         | The history of how things changed (version control)     |
-| Standing preferences that apply across many requests         | Decisions specific to one project (that project's docs) |
+| Belongs here                                                 | Belongs elsewhere                                                                |
+| ------------------------------------------------------------ | -------------------------------------------------------------------------------- |
+| What a machine or service is, where it runs, how to reach it | How a codebase works (its own repository)                                        |
+| Where a credential is stored, how to renew or rotate it      | The credential's value (a secrets store)                                         |
+| Accounts, registrars, providers, and their recovery paths    | Work in progress and plans (a project tracker)                                   |
+| People, households, and places, to the extent needed         | The history of how things changed (version control)                              |
+| Standing preferences that apply across many requests         | Decisions or evolving domain notes specific to one project (that project's docs) |
+
+Project reference pages do not need a skill wrapper. Consider a knowledge or
+capability skill when material is repeatedly needed outside its originating
+project and topic-based discovery would improve access. Update an existing owner
+regardless of how quickly the information is changing.
 
 ## Structure
 

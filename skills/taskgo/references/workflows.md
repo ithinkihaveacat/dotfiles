@@ -26,8 +26,9 @@ Before starting work, an agent must:
    `skill --scope session` reports that the session has no directory of its own,
    ask before adding the skills to the workspace instead. Without a skill
    manager, read each skill's `SKILL.md` directly.
-1. Inspect linked artifact repos under their own instructions, and check
-   `<project>/scripts/` before writing new scratch helpers.
+1. Inspect linked artifact repos under their own instructions, consult reference
+   pages relevant to the task using the project map and task links to find them,
+   and check `<project>/scripts/` before writing new scratch helpers.
 
 ### Commit Authority
 
@@ -68,20 +69,30 @@ subject, and a `Conversation:` trailer).
    `## Findings`, recording `[<conversation-id>](<agent>://<conversation-id>)`).
    A completed task keeps Problem, Cost, Goal, and Criteria; Outcome and
    Findings replace Sketch and Constraints, and the Outcome gives a verdict
-   against each criterion.
+   against each criterion. If the task produced domain findings, playbooks, or
+   architectural syntheses that future tasks in the project will need, fold them
+   into a topic page in `<project>/references/`, or update the existing owner in
+   an artifact repository or skill. Update maintained claims in place and keep
+   pages discoverable from the `README.md` map, directly or through a reference
+   index, rather than leaving them buried in a completed task record. When a
+   task relies on or updates a reference page, link that path from the task's
+   `Sketch` or `Findings`.
 1. Update `STATUS.md` prose (`## Summary` captures the new baseline, active
    session link, and recent outcome; `## Next` reflects immediate next actions);
    `PLAN.md` only if intended direction changed. Rewrite the Summary rather than
    appending a paragraph per session: outcomes of earlier sessions belong in
    their task records and commit history.
-1. Update the project `README.md` only if identity, map, or standing rules
-   changed. If the work changed a system described by a knowledge skill or an
-   artifact repository's documentation, update that owner and record its commit
-   with a `Ref:` trailer rather than copying the new facts into the tracker.
+1. Update the project `README.md` only if identity, map (including new
+   `references/` or `docs/` pages), or standing rules changed. If the work
+   changed or corrected understanding of a system described by a knowledge skill
+   or an artifact repository's documentation, update that owner and record its
+   commit with a `Ref:` trailer rather than copying the new facts into the
+   tracker.
 1. Run `<skill-dir>/scripts/taskgo sync PROJECT` after semantic edits are
    coherent.
 1. Run `<skill-dir>/scripts/taskgo doctor PROJECT` and perform its semantic
-   review.
+   review. Review reference pages affected by the work for outdated or
+   contradicted claims, and keep their navigation links current.
 1. Commit a coherent transition when practical using `checkpoint` with `--conv`
    when standing authority is present. Subjects follow the workspace commit
    standard (Conventional Commits, `type(scope): description`, at most 50
@@ -90,13 +101,15 @@ subject, and a `Conversation:` trailer).
 ### Handoff-Ready State
 
 Before leaving or completing a task, double-check that the project is left in a
-strict **handoff-ready** state. A reader must be able to understand the state of
-the project and what needs to be done next without referencing anything else.
+strict **handoff-ready** state. A reader can understand the operational state
+and find the information needed to resume without recovering the conversation.
+Keep state and next actions in the tracker; link to reference pages for
+supporting knowledge.
 
-1. **Handoff-ready tracker:** State, findings, decisions, and full
-   session/conversation IDs (`[<conversation-id>](<agent>://<conversation-id>)`)
-   needed to resume are fully written into the task/STATUS/PLAN, not left only
-   in the conversation.
+1. **Handoff-ready tracker:** State, next actions, and full session/conversation
+   IDs (`[<conversation-id>](<agent>://<conversation-id>)`) needed to resume are
+   written into the task/STATUS/PLAN. Supporting findings and decisions are
+   recorded there or linked from it, not left only in the conversation.
 1. **Handoff-ready artifacts:** Tracker claims match actual artifact-repo state.
 
 ## Session Attribution & Environment Variables
