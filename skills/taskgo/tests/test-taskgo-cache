@@ -50,7 +50,7 @@ make_repo() {
 REPO="$TEST_ROOT/repo"
 make_repo "$REPO"
 
-echo "1..7"
+echo "1..10"
 
 # 1-4: the row cache, on one repository, in one process.
 if OUT=$(
@@ -91,8 +91,9 @@ sha = tg.resolve_commit(repo, "HEAD")
 git = tg.GitTreeSnapshot(repo, sha)
 assert git.read_text("README.md").startswith("---\ntimezone:")
 assert set(git.texts) == {"README.md"}, set(git.texts)
-# ...and its rows are the working tree's, from the same cache.
+# ...and its rows are the working tree's, from the same cache, without reads.
 assert tg.get_task_rows(git) == tg.get_task_rows(snap)
+assert set(git.texts) == {"README.md"}, set(git.texts)
 
 # 2. Changed content is re-parsed, and only that file.
 task = repo / "alpha/tasks/TASK-AA002-second.md"
@@ -210,5 +211,100 @@ else
   echo 'not ok 5 - find_record tries the filename and falls back to frontmatter'
   echo 'not ok 6 - duplicate task IDs are still refused'
   echo 'not ok 7 - a format verdict follows the content'
+  printf '# %s\n' "$OUT"
+fi
+
+# 8-10: key from the bytes parsed, Markdown-only shortcut, no cached failures.
+REPO3="$TEST_ROOT/repo3"
+mkdir -p "$REPO3/alpha/tasks"
+git -C "$REPO3" init -q -b main
+printf '%s\n' '# Tracker' >"$REPO3/README.md"
+printf '%s\n' \
+  '# Agent instructions' '' 'This repository follows taskgo:' \
+  '<https://github.com/ithinkihaveacat/dotfiles/tree/main/skills/taskgo>.' \
+  >"$REPO3/AGENTS.md"
+printf '# Inbox\n' >"$REPO3/INBOX.md"
+printf '# Alpha\n' >"$REPO3/alpha/README.md"
+printf '%s\n' '---' 'id: TASK-DD001' 'status: todo' '---' '' '# Race' \
+  >"$REPO3/alpha/tasks/TASK-DD001-race.md"
+printf '%s\n' '---' 'id: TASK-CC001' 'status: todo' '---' '' '# Not a task' \
+  >"$REPO3/alpha/tasks/TASK-CC001-backup.txt"
+git -C "$REPO3" add -A
+git -C "$REPO3" commit -qm fixture
+
+if OUT=$(
+  "$PY" - "$BIN" "$REPO3" 2>&1 <<'PY'
+import importlib.machinery
+import importlib.util
+import sys
+from pathlib import Path
+
+loader = importlib.machinery.SourceFileLoader("taskgo_under_test", sys.argv[1])
+tg = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+loader.exec_module(tg)
+repo = Path(sys.argv[2])
+task = repo / "alpha/tasks/TASK-DD001-race.md"
+
+
+class StaleIds(tg.FsSnapshot):
+    """A working tree whose content_id lies, as one does across a write."""
+
+    def content_id(self, rel):
+        return "0" * 40
+
+
+# 8. The key comes from the bytes parsed, not from an earlier hash.
+snap = StaleIds(repo)
+row = next(r for r in tg.get_task_rows(snap) if r.rel_path == task.relative_to(repo).as_posix())
+assert row.status == "todo", row
+task.write_text(
+    task.read_text().replace("status: todo", "status: done")
+    + "\n## Outcome\n\nMet.\n"
+)
+row = next(r for r in tg.get_task_rows(snap) if r.rel_path == task.relative_to(repo).as_posix())
+assert row.status == "done", row
+
+# 9. The filename shortcut sees Markdown tasks only.
+try:
+    tg.apply_change_set(
+        tg.FsSnapshot(repo),
+        {"changes": [{"op": "set", "record": "TASK-CC001", "field": "status",
+                      "value": "done"}]},
+    )
+except tg.ChangeSetError as e:
+    assert "no task TASK-CC001" in str(e), e
+else:
+    raise AssertionError("accepted a task file that is not Markdown")
+
+
+# 10. A read failure is not cached, so a recovered read is judged afresh.
+class Flaky(tg.FsSnapshot):
+    def __init__(self, root):
+        super().__init__(root)
+        self.fail = True
+
+    def content_id(self, rel):
+        return "1" * 40
+
+    def read_text(self, rel):
+        if self.fail:
+            raise OSError("transient read failure")
+        return super().read_text(rel)
+
+
+snap = Flaky(repo)
+first = tg.markdown_finding(snap, "alpha/README.md")
+assert first is not None and first.severity == "WARN", first
+snap.fail = False
+assert tg.markdown_finding(snap, "alpha/README.md") is None
+PY
+); then
+  echo 'ok 8 - the cache key comes from the bytes parsed'
+  echo 'ok 9 - the filename shortcut sees Markdown tasks only'
+  echo 'ok 10 - a read failure is not cached'
+else
+  echo 'not ok 8 - the cache key comes from the bytes parsed'
+  echo 'not ok 9 - the filename shortcut sees Markdown tasks only'
+  echo 'not ok 10 - a read failure is not cached'
   printf '# %s\n' "$OUT"
 fi
