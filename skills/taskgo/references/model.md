@@ -79,14 +79,26 @@ when `README.md` is absent, but new and renamed projects use `README.md`.
 `docs/`, `bugreports/`, and `reviews/` hold authored prose deliverables when the
 output is a document, issue report, or review for a milestone or external
 audience rather than code; when published externally, the `README.md` map
-records which copy is canonical. `references/` holds the project's compounding
-reference material: topic- and entity-oriented Markdown pages (domain syntheses,
-capability matrices, operational playbooks, external resource catalogs) that
-outlive individual tasks and are private to the project. When a task uncovers
-durable domain facts or invalidates an earlier claim, fold the synthesis into
-the relevant `references/` page in place and keep it indexed with a one-line
-summary in the `README.md` map; when that material stabilizes and serves
-multiple projects or workspaces, promote the reusable portion into a skill.
+records which copy is canonical.
+
+`references/` holds the project's compounding reference material: topic- and
+entity-oriented Markdown pages (domain syntheses, capability matrices,
+operational playbooks, external resource catalogs) that outlive individual tasks
+and are private to the project. When a task uncovers durable domain facts or
+invalidates an earlier claim, fold the synthesis into the relevant `references/`
+page in place. Link supporting sources and distinguish observations,
+interpretations, and untested proposals. Date observations when their age
+affects their meaning. Revise maintained reference pages as understanding
+changes; preserve the historical meaning of task outcomes, captured evidence,
+and dated reports. Keep pages discoverable from the `README.md` map, directly or
+through a short reference index, with one-line summaries to help readers choose
+what to open.
+
+Project reference pages do not need a skill wrapper. Consider a knowledge or
+capability skill when material is repeatedly needed outside its originating
+project and topic-based discovery would improve access. Update an existing owner
+regardless of how quickly the information is changing.
+
 `scripts/` holds repeatable, project-scoped helpers (queries, audit runners,
 report builders) so future sessions reuse them instead of recreating them in
 scratch; they need not meet the packaging bar of reusable skill scripts. Raw run
@@ -127,7 +139,7 @@ needs the fact and how often it changes:
 | Intended route                                                              | `PLAN.md`                                                                     |
 | Current situation and next actions                                          | `STATUS.md`                                                                   |
 | A unit of work, its outcome, and findings                                   | `tasks/`                                                                      |
-| Project-scoped domain notes, playbooks, and syntheses across tasks          | Project `references/` (indexed in `README.md`; promoted to a skill if shared) |
+| Project-scoped domain notes, playbooks, and syntheses across tasks          | Project `references/` (linked from `README.md`, directly or through an index) |
 | Run evidence, benchmark telemetry, and static input datasets                | Project `results/` and `data/`                                                |
 | What changed, when, and why                                                 | Git history (commit prose, `Ref:` and `Conversation:`)                        |
 
@@ -163,9 +175,9 @@ not see. It has three roles:
   never mentions ("not the in-repository backlog", "no paid APIs").
 - **Map:** where everything lives — checkouts, remotes and forks, deployments,
   data, project `references/`, `docs/`, and `scripts/`, related projects, and
-  the knowledge skills describing the systems it runs on — with a one-line
-  summary of each local reference page and which source is canonical where
-  several overlap.
+  the knowledge skills describing the systems it runs on — with links to
+  reference pages or a reference index, one-line summaries to guide selection,
+  and which source is canonical where several overlap.
 - **Standing rules:** constraints that govern work and outlast any task,
   especially private ones such as data-safety rules, spending limits, and
   publication boundaries. State each rule briefly and link the ADR that explains

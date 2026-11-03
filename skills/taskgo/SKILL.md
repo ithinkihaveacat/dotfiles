@@ -250,8 +250,9 @@ task to an isolated worker that cannot read the control repository, see
   (`handoff` returns the same note and files); otherwise the CLI with `--root`.
 - **After work:** update files, task frontmatter (`conversations`), and
   `STATUS.md` prose (`Summary` & `Next`). Fold durable domain findings that
-  outlive the task into `<project>/references/` (indexed in `README.md`), or
-  into the artifact repository or skill that owns the fact. Update the project
+  outlive the task into `<project>/references/`, or into the artifact repository
+  or skill that owns the fact. Keep reference pages discoverable from the
+  `README.md` map, directly or through a reference index. Update the project
   `README.md` only if identity, map, or standing rules changed. Run
   `taskgo sync` and `taskgo doctor`. Optionally commit using
   `taskgo checkpoint`. Ensure the project is left in a strict **handoff-ready**

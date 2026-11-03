@@ -31,10 +31,10 @@ any particular project or task, and more than one piece of work may need it.
 | People, households, and places, to the extent needed         | The history of how things changed (version control)                              |
 | Standing preferences that apply across many requests         | Decisions or evolving domain notes specific to one project (that project's docs) |
 
-Domain notes, playbooks, and syntheses that apply to a single active project (or
-are still evolving rapidly during an investigation) belong in that project's own
-reference documentation. Promote them to a knowledge or capability skill once
-the facts stabilize and more than one project or workspace needs them.
+Project reference pages do not need a skill wrapper. Consider a knowledge or
+capability skill when material is repeatedly needed outside its originating
+project and topic-based discovery would improve access. Update an existing owner
+regardless of how quickly the information is changing.
 
 ## Structure
 
