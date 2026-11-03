@@ -59,6 +59,7 @@ import subprocess
 import sys
 import textwrap
 import time
+from collections import OrderedDict
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
 from dataclasses import field as dataclass_field
@@ -1424,6 +1425,26 @@ class Snapshot:
         """Returns the file's UTF-8 text; raises OSError when it is absent."""
         raise NotImplementedError
 
+    def content_id(self, rel: str) -> str | None:
+        """The Git blob SHA of REL's bytes, or None when it is absent.
+
+        A blob SHA names the content, so process-wide caches keyed by it never
+        go stale. Snapshots that already know their blob SHAs answer without
+        reading the file.
+        """
+        try:
+            return git_blob_sha(self.read_text(rel).encode("utf-8"))
+        except OSError:
+            return None
+
+    def content_id_is_authoritative(self, rel: str) -> bool:
+        """True when content_id(REL) names the bytes read_text(REL) returns.
+
+        False for a working tree, whose file can change between the two calls;
+        a cache key must then come from the bytes actually parsed.
+        """
+        return False
+
     def is_file(self, rel: str) -> bool:
         raise NotImplementedError
 
@@ -1604,6 +1625,9 @@ class WorktreeSnapshot(FsSnapshot):
         self.rev = rev
         self.blobs = WorktreeBlobs(root)
 
+    def content_id(self, rel: str) -> str | None:
+        return self.blobs.get(rel)
+
 
 class GitTreeSnapshot(Snapshot):
     """The tree of one Git commit, read without a checkout. Read-only.
@@ -1634,7 +1658,15 @@ class GitTreeSnapshot(Snapshot):
             for i in range(len(parts)):
                 parent = "/".join(parts[:i])
                 self.children.setdefault(parent, set()).add(parts[i])
-        self.texts: dict[str, str] | None = None
+        self.texts: dict[str, str] = {}
+        self.bulk_loaded = False
+
+    def content_id(self, rel: str) -> str | None:
+        return self.blobs.get(rel)
+
+    def content_id_is_authoritative(self, rel: str) -> bool:
+        # A commit's blob is immutable, so its SHA names the bytes it holds.
+        return True
 
     def historical_task_ids(self) -> set[str]:
         return task_ids_in_history(self.repo)
@@ -1646,11 +1678,15 @@ class GitTreeSnapshot(Snapshot):
     def is_executable(self, rel: str) -> bool:
         return self.modes.get(rel) == "100755"
 
-    def _load(self) -> dict[str, str]:
-        if self.texts is None:
-            md = [rel for rel in self.blobs if rel.endswith(".md")]
-            self.texts = self._cat(md)
-        return self.texts
+    def _load_all(self) -> None:
+        """Reads every Markdown blob in one batch, as a whole-tree scan needs."""
+        if self.bulk_loaded:
+            return
+        md = [
+            rel for rel in self.blobs if rel.endswith(".md") and rel not in self.texts
+        ]
+        self.texts.update(self._cat(md))
+        self.bulk_loaded = True
 
     def _cat(self, rels: list[str]) -> dict[str, str]:
         if not rels:
@@ -1674,10 +1710,16 @@ class GitTreeSnapshot(Snapshot):
     def read_text(self, rel: str) -> str:
         if rel not in self.blobs:
             raise FileNotFoundError(f"{rel} is not in {self.rev[:12]}")
-        texts = self._load()
-        if rel not in texts:
-            texts.update(self._cat([rel]))
-        return texts[rel]
+        if rel in self.texts:
+            return self.texts[rel]
+        # Reading one file is the common case for a write's as_of: keep it to
+        # one blob. A second distinct read means a scan, so batch the rest as
+        # before rather than paying one Git process per file.
+        if self.texts and not self.bulk_loaded:
+            self._load_all()
+        if rel not in self.texts:
+            self.texts.update(self._cat([rel]))
+        return self.texts[rel]
 
     def is_file(self, rel: str) -> bool:
         return rel in self.blobs
@@ -1714,6 +1756,18 @@ class OverlaySnapshot(Snapshot):
                 raise FileNotFoundError(f"{rel} is deleted")
             return text
         return self.base.read_text(rel)
+
+    def content_id(self, rel: str) -> str | None:
+        if rel in self.changes:
+            text = self.changes[rel]
+            return None if text is None else git_blob_sha(text.encode("utf-8"))
+        return self.base.content_id(rel)
+
+    def content_id_is_authoritative(self, rel: str) -> bool:
+        # Text held here is fixed for the change set's lifetime.
+        if rel in self.changes:
+            return True
+        return self.base.content_id_is_authoritative(rel)
 
     def is_file(self, rel: str) -> bool:
         if rel in self.changes:
@@ -2677,40 +2731,91 @@ class TaskRow:
     stale_after: str | None = None
 
 
+# Parsed task rows and Markdown-format verdicts, keyed by (path, blob SHA).
+# A blob SHA names the content, so an entry never goes stale; the path is in
+# the key because a rename keeps the SHA. Both caches are least-recently-used
+# so a long-running server's churn cannot grow them without bound.
+CACHE_MAX_ENTRIES = 200_000
+_ROW_CACHE: "OrderedDict[tuple[str, str], TaskRow]" = OrderedDict()
+# (rel, blob) -> True when that content is already formatted.
+_FORMAT_CACHE: "OrderedDict[tuple[str, str], bool]" = OrderedDict()
+
+
+def cache_get(cache: "OrderedDict[Any, Any]", key: Any) -> Any:
+    value = cache.get(key)
+    if value is not None:
+        cache.move_to_end(key)
+    return value
+
+
+def cache_put(cache: "OrderedDict[Any, Any]", key: Any, value: Any) -> None:
+    cache[key] = value
+    if len(cache) > CACHE_MAX_ENTRIES:
+        cache.popitem(last=False)
+
+
+def task_row_from_text(rel_path: str, content: str) -> TaskRow:
+    """The row REL_PATH's CONTENT describes, parsed as get_task_rows always has."""
+    fm, body = parse_frontmatter(content)
+    task_id = str(fm.get("id", ""))
+    if not task_id:
+        m = re.search(r"^id:\s*(.+)$", content, re.MULTILINE | re.IGNORECASE)
+        if m:
+            task_id = m.group(1).strip().strip("'\"")
+    status = str(fm.get("status", ""))
+    if not status:
+        m = re.search(r"^status:\s*(.+)$", content, re.MULTILINE | re.IGNORECASE)
+        if m:
+            status = m.group(1).strip().strip("'\"")
+    title = extract_title_from_body(body)
+    project = rel_path.split("/", 1)[0]
+    return TaskRow(
+        project,
+        task_id,
+        status,
+        title,
+        rel_path,
+        parse_blocked_by(fm),
+        parse_wait_for(fm),
+        parse_date_field(fm, "due"),
+        parse_date_field(fm, "stale_after"),
+    )
+
+
+def task_row_for_path(snap: Snapshot, rel_path: str) -> TaskRow | None:
+    """The cached row for one task file, parsing it only when its content is new.
+
+    The key is the SHA of the bytes parsed, so a working-tree file that changes
+    between a hash and a read cannot store one version's row under another's
+    SHA. Immutable snapshots answer from their blob SHAs without reading.
+    """
+    if snap.content_id_is_authoritative(rel_path):
+        blob = snap.content_id(rel_path)
+        if blob is None:
+            return None
+        row = cache_get(_ROW_CACHE, (rel_path, blob))
+        if row is not None:
+            return row
+    try:
+        content = snap.read_text(rel_path)
+    except OSError:
+        return None
+    key = (rel_path, git_blob_sha(content.encode("utf-8")))
+    row = cache_get(_ROW_CACHE, key)
+    if row is not None:
+        return row
+    row = task_row_from_text(rel_path, content)
+    cache_put(_ROW_CACHE, key, row)
+    return row
+
+
 def get_task_rows(snap: Snapshot, project_name: str | None = None) -> list[TaskRow]:
     files = get_task_files(snap, project_name)
     rows: list[TaskRow] = []
     for rel_path in files:
-        try:
-            content = snap.read_text(rel_path)
-        except OSError:
-            continue
-        fm, body = parse_frontmatter(content)
-        task_id = str(fm.get("id", ""))
-        if not task_id:
-            m = re.search(r"^id:\s*(.+)$", content, re.MULTILINE | re.IGNORECASE)
-            if m:
-                task_id = m.group(1).strip().strip("'\"")
-        status = str(fm.get("status", ""))
-        if not status:
-            m = re.search(r"^status:\s*(.+)$", content, re.MULTILINE | re.IGNORECASE)
-            if m:
-                status = m.group(1).strip().strip("'\"")
-        title = extract_title_from_body(body)
-        project = rel_path.split("/")[0]
-        rows.append(
-            TaskRow(
-                project,
-                task_id,
-                status,
-                title,
-                rel_path,
-                parse_blocked_by(fm),
-                parse_wait_for(fm),
-                parse_date_field(fm, "due"),
-                parse_date_field(fm, "stale_after"),
-            )
-        )
+        row = task_row_for_path(snap, rel_path)
+        if row is not None:
+            rows.append(row)
     return rows
 
 
@@ -3405,36 +3510,52 @@ def is_record_file(rel: str) -> bool:
 
 def markdown_finding(snap: Snapshot, rel: str) -> Finding | None:
     """A finding when REL is not formatted (fixable) or cannot be formatted."""
-    try:
-        content = snap.read_text(rel)
-        if format_markdown(content) == content:
-            return None
+    verdict = None
+    if snap.content_id_is_authoritative(rel):
+        try:
+            blob = snap.content_id(rel)
+        except Exception:
+            blob = None
+        if blob is not None:
+            verdict = cache_get(_FORMAT_CACHE, (rel, blob))
+    if verdict is None:
+        try:
+            content = snap.read_text(rel)
+            key = (rel, git_blob_sha(content.encode("utf-8")))
+            verdict = cache_get(_FORMAT_CACHE, key)
+            if verdict is None:
+                verdict = format_markdown(content) == content
+                cache_put(_FORMAT_CACHE, key, verdict)
+        except Exception as e:
+            # A read or format failure may be transient, so retry it next time.
+            return Finding(
+                category="markdown",
+                severity="WARN",
+                message=f"{rel}: failed to format markdown: {e}",
+                path=rel,
+                remediation=None,
+            )
 
-        def remediate(target=rel) -> list[str]:
-            if not snap.is_file(target):
-                return []
-            current = snap.read_text(target)
-            formatted = format_markdown(current)
-            if current != formatted:
-                snap.write_text(target, formatted)
-                return [target]
+    if verdict:
+        return None
+
+    def remediate(target=rel) -> list[str]:
+        if not snap.is_file(target):
             return []
+        current = snap.read_text(target)
+        formatted = format_markdown(current)
+        if current != formatted:
+            snap.write_text(target, formatted)
+            return [target]
+        return []
 
-        return Finding(
-            category="markdown",
-            severity="INFO",
-            message=f"{rel}: markdown formatting needed",
-            path=rel,
-            remediation=remediate,
-        )
-    except Exception as e:
-        return Finding(
-            category="markdown",
-            severity="WARN",
-            message=f"{rel}: failed to format markdown: {e}",
-            path=rel,
-            remediation=None,
-        )
+    return Finding(
+        category="markdown",
+        severity="INFO",
+        message=f"{rel}: markdown formatting needed",
+        path=rel,
+        remediation=remediate,
+    )
 
 
 def audit_snapshot(
@@ -8630,7 +8751,7 @@ def cmd_commit(
 # Cloudflare Access authenticates callers in front of the server; McpGate
 # checks the Access JWT on every HTTP request before the SDK sees it.
 
-MCP_SERVER_VERSION = "0.14.1"
+MCP_SERVER_VERSION = "0.14.2"
 MCP_MAX_FILE_BYTES = READ_MAX_BYTES
 MCP_MAX_REQUEST_BYTES = 1024 * 1024
 MCP_FETCH_TIMEOUT = 60

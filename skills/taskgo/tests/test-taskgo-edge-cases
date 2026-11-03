@@ -69,6 +69,7 @@ printf '# Status\n' >"$SIG_REPO/proj/STATUS.md"
 
 cat <<'EOF' >"$TEST_ROOT/mock-bin/git"
 #!/bin/sh
+touch "$MOCK_GIT_MARKER"
 trap 'exit 143' TERM
 trap 'exit 130' INT
 sleep 30
@@ -80,10 +81,21 @@ import sys, os, signal, subprocess, time
 repo, bin_path, mock_bin = sys.argv[1:4]
 env = os.environ.copy()
 env["PATH"] = mock_bin + ":" + env.get("PATH", "")
+marker = os.path.join(mock_bin, "started")
 
 def run_test(sig, expected, test_num, desc):
+    try:
+        os.unlink(marker)
+    except FileNotFoundError:
+        pass
+    env["MOCK_GIT_MARKER"] = marker
     p = subprocess.Popen([bin_path, "--root", repo, "create", "proj", f"Slow task {test_num}"], cwd=repo, env=env, stderr=subprocess.PIPE, text=True, start_new_session=True)
-    time.sleep(0.8)
+    # Signal only once the process is past argument parsing and has installed
+    # its handlers: its first Git call writes the marker. A fixed sleep is not
+    # enough when several test files share the machine.
+    deadline = time.monotonic() + 10
+    while not os.path.exists(marker) and p.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.02)
     os.killpg(os.getpgid(p.pid), sig)
     _, err = p.communicate(timeout=5)
     if p.returncode == expected and "TimeoutExpired" not in err and "Traceback" not in err:
