@@ -142,7 +142,7 @@ snapshots answer from their blob SHAs without reading; a working tree is read
 first, so a file that changes between a hash and a read cannot store one
 version's result under another's SHA. A read or format failure is not cached. A
 long-lived server therefore parses the tracker once: on a synthetic 10,000-task
-tracker a warm `apply_change_set` takes 0.65 s and a handoff 1.35 s, where one
+tracker a warm `apply_change_set` takes 0.78 s and a handoff 1.34 s, where one
 parse pass is 20 s. A fresh process still pays one full parse, because
 validation and the handoff's duplicate-ID check read every row. At 100,000
 tasks, revisit the Markdown text each snapshot holds and the tree listing each

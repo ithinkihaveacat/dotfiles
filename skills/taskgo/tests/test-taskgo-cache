@@ -50,7 +50,7 @@ make_repo() {
 REPO="$TEST_ROOT/repo"
 make_repo "$REPO"
 
-echo "1..10"
+echo "1..11"
 
 # 1-4: the row cache, on one repository, in one process.
 if OUT=$(
@@ -80,9 +80,9 @@ tg.parse_frontmatter = counted
 
 # 1. One parse per task, then none; rows equal a fresh parse.
 rows = tg.get_task_rows(snap)
-assert calls == 3, calls
+assert calls == 3, (calls, seen)
 tg.get_task_rows(snap)
-assert calls == 3, calls
+assert calls == 3, (calls, seen)
 fresh = [tg.task_row_from_text(r.rel_path, snap.read_text(r.rel_path)) for r in rows]
 assert rows == fresh, (rows, fresh)
 
@@ -170,10 +170,10 @@ def set_status(task_id):
     )
 
 
-# 5. A normal ID resolves by its filename, without scanning every row.
+# 5. An ID resolves through the frontmatter, not the filename.
 cs = set_status("TASK-BB001")
 assert "alpha/tasks/TASK-BB001-first.md" in cs.snap.changes, cs.snap.changes
-# A filename that lies falls back to the frontmatter ID.
+# A file whose name lies still resolves by its frontmatter ID.
 cs = set_status("TASK-BB005")
 assert "alpha/tasks/TASK-BB004-liar.md" in cs.snap.changes, cs.snap.changes
 assert "alpha/tasks/TASK-BB005-liar.md" not in cs.snap.changes, cs.snap.changes
@@ -204,17 +204,17 @@ snap.write_text(rel, snap.read_text(rel).replace("- untidy bullet", "* tidy   bu
 assert tg.markdown_finding(snap, rel) is not None
 PY
 ); then
-  echo 'ok 5 - find_record tries the filename and falls back to frontmatter'
+  echo 'ok 5 - find_record resolves the frontmatter ID, not the filename'
   echo 'ok 6 - duplicate task IDs are still refused'
   echo 'ok 7 - a format verdict follows the content'
 else
-  echo 'not ok 5 - find_record tries the filename and falls back to frontmatter'
+  echo 'not ok 5 - find_record resolves the frontmatter ID, not the filename'
   echo 'not ok 6 - duplicate task IDs are still refused'
   echo 'not ok 7 - a format verdict follows the content'
   printf '# %s\n' "$OUT"
 fi
 
-# 8-10: key from the bytes parsed, Markdown-only shortcut, no cached failures.
+# 8-10: key from the bytes parsed, non-Markdown files, no cached failures.
 REPO3="$TEST_ROOT/repo3"
 mkdir -p "$REPO3/alpha/tasks"
 git -C "$REPO3" init -q -b main
@@ -271,7 +271,7 @@ assert tg.markdown_finding(snap, "alpha/README.md") is not None
 readme.write_text("# Alpha\n\n- tidy bullet\n")
 assert tg.markdown_finding(snap, "alpha/README.md") is None
 
-# 9. The filename shortcut sees Markdown tasks only.
+# 9. A non-Markdown file is not a task.
 try:
     tg.apply_change_set(
         tg.FsSnapshot(repo),
@@ -307,11 +307,57 @@ assert tg.markdown_finding(snap, "alpha/README.md") is None
 PY
 ); then
   echo 'ok 8 - the cache key comes from the bytes parsed'
-  echo 'ok 9 - the filename shortcut sees Markdown tasks only'
+  echo 'ok 9 - a non-Markdown file is not a task'
   echo 'ok 10 - a read failure is not cached'
 else
   echo 'not ok 8 - the cache key comes from the bytes parsed'
-  echo 'not ok 9 - the filename shortcut sees Markdown tasks only'
+  echo 'not ok 9 - a non-Markdown file is not a task'
   echo 'not ok 10 - a read failure is not cached'
+  printf '# %s\n' "$OUT"
+fi
+
+# 11: one operation parses unchanged tasks once; only the written task is re-read.
+if OUT=$(
+  "$PY" - "$BIN" "$REPO" 2>&1 <<'PY'
+import importlib.machinery
+import importlib.util
+import sys
+from pathlib import Path
+
+loader = importlib.machinery.SourceFileLoader("taskgo_under_test", sys.argv[1])
+tg = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+loader.exec_module(tg)
+repo = Path(sys.argv[2])
+
+calls = 0
+seen = []
+original = tg.task_row_from_text
+
+
+def counted(rel_path, content):
+    global calls
+    calls += 1
+    seen.append(rel_path)
+    return original(rel_path, content)
+
+
+tg.task_row_from_text = counted
+tg.apply_change_set(
+    tg.FsSnapshot(repo),
+    {"changes": [{"op": "set", "record": "TASK-AA001", "field": "status",
+                  "value": "in-progress"}]},
+)
+from collections import Counter
+
+counts = Counter(seen)
+changed = "alpha/tasks/TASK-AA001-first.md"
+assert len(counts) == 3, counts
+assert counts[changed] == 2, counts
+assert all(v == 1 for rel, v in counts.items() if rel != changed), counts
+PY
+); then
+  echo 'ok 11 - a write parses unchanged tasks once'
+else
+  echo 'not ok 11 - a write parses unchanged tasks once'
   printf '# %s\n' "$OUT"
 fi
