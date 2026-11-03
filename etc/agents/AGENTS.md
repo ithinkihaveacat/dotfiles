@@ -16,6 +16,10 @@ instructions > activated skills > general training knowledge.
   `skill catalog --json` and activate matching skills with
   `skill --scope session add <NAME>...` (or use other skill-search tools if
   available).
+- **Skill symlinks and relative paths**: Installed skill directories are
+  symlinks, so cross-skill links (`../<sibling>/...`) must be resolved against
+  the symlink's `realpath` (or activated via `skill --scope session add`), and
+  repo-relative commands run from the target repository root.
 - **Common skill triggers**:
   - **Android & Wear OS devices**: Use the relevant device skill's exact `adb`
     commands and scripts (e.g., for screenshots or UI interaction).
