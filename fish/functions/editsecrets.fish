@@ -6,8 +6,8 @@ Open a secrets file in \$VISUAL or \$EDITOR, then check that every line is
 NAME=value (blank lines and # comments are allowed).
 
 Arguments:
-  FILE          Secrets file to edit (default: this machine's personal file,
-                ~/.private/fish/secrets.env.age, else secrets.env beside it)
+  FILE          Secrets file to edit (default: this machine's ~/.corp/fish or
+                ~/.private/fish secrets.env.age, else secrets.env beside it)
 
 Options:
   -h, --help    Display this help message and exit
@@ -43,13 +43,17 @@ To encrypt an existing plaintext file:
         return 1
     end
     if test -z "$target"
-        set -l dir $HOME/.private/fish
-        if test -e $dir/secrets.env.age
-            set target $dir/secrets.env.age
-        else if test -e $dir/secrets.env
-            set target $dir/secrets.env
-        else
-            echo "editsecrets: neither $dir/secrets.env.age nor $dir/secrets.env exists" >&2
+        for dir in $HOME/.corp/fish $HOME/.private/fish
+            if test -e $dir/secrets.env.age
+                set target $dir/secrets.env.age
+                break
+            else if test -e $dir/secrets.env
+                set target $dir/secrets.env
+                break
+            end
+        end
+        if test -z "$target"
+            echo "editsecrets: no secrets.env.age or secrets.env found in ~/.corp/fish or ~/.private/fish" >&2
             echo "Try 'editsecrets FILE' to create one." >&2
             return 1
         end
