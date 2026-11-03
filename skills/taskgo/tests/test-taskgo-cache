@@ -1,0 +1,214 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Color styling is asserted explicitly per test; isolate from inherited
+# NO_COLOR/FORCE_COLOR.
+unset NO_COLOR FORCE_COLOR
+
+# Isolate test suite from ambient agent runtime variables.
+unset AI_AGENT INVOKER_INFO_NAME
+unset JETSKI_CONVERSATION_ID ANTIGRAVITY_CONVERSATION_ID ANTIGRAVITY_SESSION
+unset CLAUDE_CODE_SESSION_ID CLAUDE_CODE_REMOTE_SESSION_ID CLAUDE_SESSION_ID CLAUDE_PROJECT_ID
+unset OPENCODE_SESSION_ID CODEX_SESSION_ID
+unset INVOKER_INFO_ROOT_SESSION_ID CONVERSATION_ID
+
+export GIT_AUTHOR_NAME="Taskgo Test"
+export GIT_AUTHOR_EMAIL="taskgo@example.com"
+export GIT_COMMITTER_NAME="Taskgo Test"
+export GIT_COMMITTER_EMAIL="taskgo@example.com"
+
+TEST_DIR="$(cd "$(dirname "$0")" && pwd)"
+BIN="$TEST_DIR/../scripts/taskgo"
+TEST_ROOT="$(mktemp -d)"
+trap 'rm -rf -- "$TEST_ROOT"' EXIT
+
+PY=$(uv sync -q --script "$BIN" </dev/null && uv python find --script "$BIN")
+
+make_repo() {
+  local repo="$1"
+  mkdir -p "$repo/alpha/tasks"
+  git -C "$repo" init -q -b main
+  printf '%s\n' '---' 'timezone: Europe/London' '---' '' '# Tracker' >"$repo/README.md"
+  printf '%s\n' \
+    '# Agent instructions' \
+    '' \
+    'This repository follows taskgo:' \
+    '<https://github.com/ithinkihaveacat/dotfiles/tree/main/skills/taskgo>.' \
+    >"$repo/AGENTS.md"
+  printf '# Inbox\n' >"$repo/INBOX.md"
+  printf '# Alpha\n' >"$repo/alpha/README.md"
+  printf '%s\n' '---' 'id: TASK-AA001' 'status: todo' '---' '' '# First' \
+    '' '**Goal:** One.' >"$repo/alpha/tasks/TASK-AA001-first.md"
+  printf '%s\n' '---' 'id: TASK-AA002' 'status: todo' '---' '' '#Second' \
+    '' '**Goal:** Two.' >"$repo/alpha/tasks/TASK-AA002-second.md"
+  printf '%s\n' '---' 'id: TASK-AA003' 'status: todo' '---' '' '# Third' \
+    '' '**Goal:** Three.' >"$repo/alpha/tasks/TASK-AA003-third.md"
+  git -C "$repo" add -A
+  git -C "$repo" commit -qm fixture
+}
+
+REPO="$TEST_ROOT/repo"
+make_repo "$REPO"
+
+echo "1..7"
+
+# 1-4: the row cache, on one repository, in one process.
+if OUT=$(
+  "$PY" - "$BIN" "$REPO" 2>&1 <<'PY'
+import importlib.machinery
+import importlib.util
+import sys
+from pathlib import Path
+
+loader = importlib.machinery.SourceFileLoader("taskgo_under_test", sys.argv[1])
+tg = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+loader.exec_module(tg)
+repo = Path(sys.argv[2])
+snap = tg.WorktreeSnapshot(repo, tg.resolve_commit(repo, "HEAD"))
+
+calls = 0
+original = tg.parse_frontmatter
+
+
+def counted(*args, **kwargs):
+    global calls
+    calls += 1
+    return original(*args, **kwargs)
+
+
+tg.parse_frontmatter = counted
+
+# 1. One parse per task, then none; rows equal a fresh parse.
+rows = tg.get_task_rows(snap)
+assert calls == 3, calls
+tg.get_task_rows(snap)
+assert calls == 3, calls
+fresh = [tg.task_row_from_text(r.rel_path, snap.read_text(r.rel_path)) for r in rows]
+assert rows == fresh, (rows, fresh)
+
+# 4a. Reading one blob of a commit does not load the whole tree.
+sha = tg.resolve_commit(repo, "HEAD")
+git = tg.GitTreeSnapshot(repo, sha)
+assert git.read_text("README.md").startswith("---\ntimezone:")
+assert set(git.texts) == {"README.md"}, set(git.texts)
+# ...and its rows are the working tree's, from the same cache.
+assert tg.get_task_rows(git) == tg.get_task_rows(snap)
+
+# 2. Changed content is re-parsed, and only that file.
+task = repo / "alpha/tasks/TASK-AA002-second.md"
+changed = task.read_text().replace("status: todo", "status: done")
+task.write_text(changed + "\n## Outcome\n\nMet.\n")
+calls = 0
+rows = tg.get_task_rows(snap)
+by_id = {r.task_id: r for r in rows}
+assert by_id["TASK-AA002"].status == "done", by_id["TASK-AA002"]
+assert calls == 1, calls
+
+# 3. A rename keeps the content but is a new cache entry and path.
+task.rename(repo / "alpha/tasks/TASK-AA002-renamed.md")
+calls = 0
+rows = tg.get_task_rows(snap)
+renamed = {r.task_id: r for r in rows}["TASK-AA002"]
+assert renamed.rel_path == "alpha/tasks/TASK-AA002-renamed.md", renamed.rel_path
+assert calls == 1, calls
+PY
+); then
+  echo 'ok 1 - a task row is parsed once and reused'
+  echo 'ok 2 - changed content is re-parsed'
+  echo 'ok 3 - a rename is a new cache entry'
+  echo 'ok 4 - one blob read does not load the whole tree'
+else
+  echo 'not ok 1 - a task row is parsed once and reused'
+  echo 'not ok 2 - changed content is re-parsed'
+  echo 'not ok 3 - a rename is a new cache entry'
+  echo 'not ok 4 - one blob read does not load the whole tree'
+  printf '# %s\n' "$OUT"
+fi
+
+# 5-7: find_record, duplicates, and format verdicts on a second repository.
+REPO2="$TEST_ROOT/repo2"
+mkdir -p "$REPO2/alpha/tasks"
+git -C "$REPO2" init -q -b main
+printf '%s\n' '# Tracker' >"$REPO2/README.md"
+printf '%s\n' \
+  '# Agent instructions' '' 'This repository follows taskgo:' \
+  '<https://github.com/ithinkihaveacat/dotfiles/tree/main/skills/taskgo>.' \
+  >"$REPO2/AGENTS.md"
+printf '# Inbox\n' >"$REPO2/INBOX.md"
+printf '# Alpha\n' >"$REPO2/alpha/README.md"
+printf '%s\n' '---' 'id: TASK-BB001' 'status: todo' '---' '' '# First' \
+  >"$REPO2/alpha/tasks/TASK-BB001-first.md"
+printf '%s\n' '---' 'id: TASK-BB002' 'status: todo' '---' '' '# Second' \
+  '' '* untidy   bullet' >"$REPO2/alpha/tasks/TASK-BB002-second.md"
+printf '%s\n' '---' 'id: TASK-BB005' 'status: todo' '---' '' '# Liar' \
+  >"$REPO2/alpha/tasks/TASK-BB004-liar.md"
+git -C "$REPO2" add -A
+git -C "$REPO2" commit -qm fixture
+
+if OUT=$(
+  "$PY" - "$BIN" "$REPO2" 2>&1 <<'PY'
+import importlib.machinery
+import importlib.util
+import sys
+from pathlib import Path
+
+loader = importlib.machinery.SourceFileLoader("taskgo_under_test", sys.argv[1])
+tg = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+loader.exec_module(tg)
+repo = Path(sys.argv[2])
+snap = tg.FsSnapshot(repo)
+
+
+def apply(*changes):
+    return tg.apply_change_set(snap, {"changes": list(changes)})
+
+
+def set_status(task_id):
+    return apply(
+        {"op": "set", "record": task_id, "field": "status", "value": "in-progress"}
+    )
+
+
+# 5. A normal ID resolves by its filename, without scanning every row.
+cs = set_status("TASK-BB001")
+assert "alpha/tasks/TASK-BB001-first.md" in cs.snap.changes, cs.snap.changes
+# A filename that lies falls back to the frontmatter ID.
+cs = set_status("TASK-BB005")
+assert "alpha/tasks/TASK-BB004-liar.md" in cs.snap.changes, cs.snap.changes
+assert "alpha/tasks/TASK-BB005-liar.md" not in cs.snap.changes, cs.snap.changes
+try:
+    set_status("TASK-BB004")
+except tg.ChangeSetError as e:
+    assert "no task TASK-BB004" in str(e), e
+else:
+    raise AssertionError("accepted a filename that does not name the task")
+
+# 6. Duplicate IDs are still refused, whichever file holds the matching name.
+(repo / "alpha/tasks/TASK-BB001-copy.md").write_text(
+    "---\nid: TASK-BB001\nstatus: todo\n---\n\n# Copy\n"
+)
+try:
+    set_status("TASK-BB001")
+except tg.ChangeSetError as e:
+    assert "names 2 records" in str(e), e
+else:
+    raise AssertionError("accepted a duplicate ID")
+
+# 7. A format verdict follows the content: unformatted, formatted, unformatted.
+rel = "alpha/tasks/TASK-BB002-second.md"
+assert tg.markdown_finding(snap, rel) is not None
+snap.write_text(rel, tg.format_markdown(snap.read_text(rel)))
+assert tg.markdown_finding(snap, rel) is None
+snap.write_text(rel, snap.read_text(rel).replace("- untidy bullet", "* tidy   bullet"))
+assert tg.markdown_finding(snap, rel) is not None
+PY
+); then
+  echo 'ok 5 - find_record tries the filename and falls back to frontmatter'
+  echo 'ok 6 - duplicate task IDs are still refused'
+  echo 'ok 7 - a format verdict follows the content'
+else
+  echo 'not ok 5 - find_record tries the filename and falls back to frontmatter'
+  echo 'not ok 6 - duplicate task IDs are still refused'
+  echo 'not ok 7 - a format verdict follows the content'
+  printf '# %s\n' "$OUT"
+fi

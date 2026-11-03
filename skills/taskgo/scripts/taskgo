@@ -59,6 +59,7 @@ import subprocess
 import sys
 import textwrap
 import time
+from collections import OrderedDict
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
 from dataclasses import field as dataclass_field
@@ -1424,6 +1425,18 @@ class Snapshot:
         """Returns the file's UTF-8 text; raises OSError when it is absent."""
         raise NotImplementedError
 
+    def content_id(self, rel: str) -> str | None:
+        """The Git blob SHA of REL's bytes, or None when it is absent.
+
+        A blob SHA names the content, so process-wide caches keyed by it never
+        go stale. Snapshots that already know their blob SHAs answer without
+        reading the file.
+        """
+        try:
+            return git_blob_sha(self.read_text(rel).encode("utf-8"))
+        except OSError:
+            return None
+
     def is_file(self, rel: str) -> bool:
         raise NotImplementedError
 
@@ -1604,6 +1617,9 @@ class WorktreeSnapshot(FsSnapshot):
         self.rev = rev
         self.blobs = WorktreeBlobs(root)
 
+    def content_id(self, rel: str) -> str | None:
+        return self.blobs.get(rel)
+
 
 class GitTreeSnapshot(Snapshot):
     """The tree of one Git commit, read without a checkout. Read-only.
@@ -1634,7 +1650,11 @@ class GitTreeSnapshot(Snapshot):
             for i in range(len(parts)):
                 parent = "/".join(parts[:i])
                 self.children.setdefault(parent, set()).add(parts[i])
-        self.texts: dict[str, str] | None = None
+        self.texts: dict[str, str] = {}
+        self.bulk_loaded = False
+
+    def content_id(self, rel: str) -> str | None:
+        return self.blobs.get(rel)
 
     def historical_task_ids(self) -> set[str]:
         return task_ids_in_history(self.repo)
@@ -1646,11 +1666,15 @@ class GitTreeSnapshot(Snapshot):
     def is_executable(self, rel: str) -> bool:
         return self.modes.get(rel) == "100755"
 
-    def _load(self) -> dict[str, str]:
-        if self.texts is None:
-            md = [rel for rel in self.blobs if rel.endswith(".md")]
-            self.texts = self._cat(md)
-        return self.texts
+    def _load_all(self) -> None:
+        """Reads every Markdown blob in one batch, as a whole-tree scan needs."""
+        if self.bulk_loaded:
+            return
+        md = [
+            rel for rel in self.blobs if rel.endswith(".md") and rel not in self.texts
+        ]
+        self.texts.update(self._cat(md))
+        self.bulk_loaded = True
 
     def _cat(self, rels: list[str]) -> dict[str, str]:
         if not rels:
@@ -1674,10 +1698,16 @@ class GitTreeSnapshot(Snapshot):
     def read_text(self, rel: str) -> str:
         if rel not in self.blobs:
             raise FileNotFoundError(f"{rel} is not in {self.rev[:12]}")
-        texts = self._load()
-        if rel not in texts:
-            texts.update(self._cat([rel]))
-        return texts[rel]
+        if rel in self.texts:
+            return self.texts[rel]
+        # Reading one file is the common case for a write's as_of: keep it to
+        # one blob. A second distinct read means a scan, so batch the rest as
+        # before rather than paying one Git process per file.
+        if self.texts and not self.bulk_loaded:
+            self._load_all()
+        if rel not in self.texts:
+            self.texts.update(self._cat([rel]))
+        return self.texts[rel]
 
     def is_file(self, rel: str) -> bool:
         return rel in self.blobs
@@ -1714,6 +1744,12 @@ class OverlaySnapshot(Snapshot):
                 raise FileNotFoundError(f"{rel} is deleted")
             return text
         return self.base.read_text(rel)
+
+    def content_id(self, rel: str) -> str | None:
+        if rel in self.changes:
+            text = self.changes[rel]
+            return None if text is None else git_blob_sha(text.encode("utf-8"))
+        return self.base.content_id(rel)
 
     def is_file(self, rel: str) -> bool:
         if rel in self.changes:
@@ -2677,40 +2713,82 @@ class TaskRow:
     stale_after: str | None = None
 
 
+# Parsed task rows and Markdown-format verdicts, keyed by (path, blob SHA).
+# A blob SHA names the content, so an entry never goes stale; the path is in
+# the key because a rename keeps the SHA. Both caches are least-recently-used
+# so a long-running server's churn cannot grow them without bound.
+CACHE_MAX_ENTRIES = 200_000
+_ROW_CACHE: "OrderedDict[tuple[str, str], TaskRow]" = OrderedDict()
+# (rel, blob) -> ("ok" | "needs" | "error", detail)
+_FORMAT_CACHE: "OrderedDict[tuple[str, str], tuple[str, str | None]]" = OrderedDict()
+
+
+def cache_get(cache: "OrderedDict[Any, Any]", key: Any) -> Any:
+    value = cache.get(key)
+    if value is not None:
+        cache.move_to_end(key)
+    return value
+
+
+def cache_put(cache: "OrderedDict[Any, Any]", key: Any, value: Any) -> None:
+    cache[key] = value
+    if len(cache) > CACHE_MAX_ENTRIES:
+        cache.popitem(last=False)
+
+
+def task_row_from_text(rel_path: str, content: str) -> TaskRow:
+    """The row REL_PATH's CONTENT describes, parsed as get_task_rows always has."""
+    fm, body = parse_frontmatter(content)
+    task_id = str(fm.get("id", ""))
+    if not task_id:
+        m = re.search(r"^id:\s*(.+)$", content, re.MULTILINE | re.IGNORECASE)
+        if m:
+            task_id = m.group(1).strip().strip("'\"")
+    status = str(fm.get("status", ""))
+    if not status:
+        m = re.search(r"^status:\s*(.+)$", content, re.MULTILINE | re.IGNORECASE)
+        if m:
+            status = m.group(1).strip().strip("'\"")
+    title = extract_title_from_body(body)
+    project = rel_path.split("/", 1)[0]
+    return TaskRow(
+        project,
+        task_id,
+        status,
+        title,
+        rel_path,
+        parse_blocked_by(fm),
+        parse_wait_for(fm),
+        parse_date_field(fm, "due"),
+        parse_date_field(fm, "stale_after"),
+    )
+
+
+def task_row_for_path(snap: Snapshot, rel_path: str) -> TaskRow | None:
+    """The cached row for one task file, parsing it only when its content is new."""
+    blob = snap.content_id(rel_path)
+    if blob is None:
+        return None
+    key = (rel_path, blob)
+    row = cache_get(_ROW_CACHE, key)
+    if row is not None:
+        return row
+    try:
+        content = snap.read_text(rel_path)
+    except OSError:
+        return None
+    row = task_row_from_text(rel_path, content)
+    cache_put(_ROW_CACHE, key, row)
+    return row
+
+
 def get_task_rows(snap: Snapshot, project_name: str | None = None) -> list[TaskRow]:
     files = get_task_files(snap, project_name)
     rows: list[TaskRow] = []
     for rel_path in files:
-        try:
-            content = snap.read_text(rel_path)
-        except OSError:
-            continue
-        fm, body = parse_frontmatter(content)
-        task_id = str(fm.get("id", ""))
-        if not task_id:
-            m = re.search(r"^id:\s*(.+)$", content, re.MULTILINE | re.IGNORECASE)
-            if m:
-                task_id = m.group(1).strip().strip("'\"")
-        status = str(fm.get("status", ""))
-        if not status:
-            m = re.search(r"^status:\s*(.+)$", content, re.MULTILINE | re.IGNORECASE)
-            if m:
-                status = m.group(1).strip().strip("'\"")
-        title = extract_title_from_body(body)
-        project = rel_path.split("/")[0]
-        rows.append(
-            TaskRow(
-                project,
-                task_id,
-                status,
-                title,
-                rel_path,
-                parse_blocked_by(fm),
-                parse_wait_for(fm),
-                parse_date_field(fm, "due"),
-                parse_date_field(fm, "stale_after"),
-            )
-        )
+        row = task_row_for_path(snap, rel_path)
+        if row is not None:
+            rows.append(row)
     return rows
 
 
@@ -3406,35 +3484,51 @@ def is_record_file(rel: str) -> bool:
 def markdown_finding(snap: Snapshot, rel: str) -> Finding | None:
     """A finding when REL is not formatted (fixable) or cannot be formatted."""
     try:
-        content = snap.read_text(rel)
-        if format_markdown(content) == content:
-            return None
+        blob = snap.content_id(rel)
+    except Exception:
+        blob = None
+    key = (rel, blob) if blob is not None else None
+    verdict = cache_get(_FORMAT_CACHE, key) if key is not None else None
+    if verdict is None:
+        try:
+            content = snap.read_text(rel)
+            verdict = (
+                ("ok", None) if format_markdown(content) == content else ("needs", None)
+            )
+        except Exception as e:
+            verdict = ("error", str(e))
+        if key is not None:
+            cache_put(_FORMAT_CACHE, key, verdict)
 
-        def remediate(target=rel) -> list[str]:
-            if not snap.is_file(target):
-                return []
-            current = snap.read_text(target)
-            formatted = format_markdown(current)
-            if current != formatted:
-                snap.write_text(target, formatted)
-                return [target]
-            return []
-
-        return Finding(
-            category="markdown",
-            severity="INFO",
-            message=f"{rel}: markdown formatting needed",
-            path=rel,
-            remediation=remediate,
-        )
-    except Exception as e:
+    kind, detail = verdict
+    if kind == "ok":
+        return None
+    if kind == "error":
         return Finding(
             category="markdown",
             severity="WARN",
-            message=f"{rel}: failed to format markdown: {e}",
+            message=f"{rel}: failed to format markdown: {detail}",
             path=rel,
             remediation=None,
         )
+
+    def remediate(target=rel) -> list[str]:
+        if not snap.is_file(target):
+            return []
+        current = snap.read_text(target)
+        formatted = format_markdown(current)
+        if current != formatted:
+            snap.write_text(target, formatted)
+            return [target]
+        return []
+
+    return Finding(
+        category="markdown",
+        severity="INFO",
+        message=f"{rel}: markdown formatting needed",
+        path=rel,
+        remediation=remediate,
+    )
 
 
 def audit_snapshot(
@@ -4982,11 +5076,36 @@ def check_record_path(snap: Snapshot, rel: str) -> str:
     return rel
 
 
+def task_paths_for_id(snap: Snapshot, task_id: str) -> list[str]:
+    """Task files whose name begins with TASK_ID, found without parsing them.
+
+    The filename carries the ID; callers check the frontmatter before trusting
+    a single candidate, and fall back to a scan when the name is not the ID.
+    """
+    paths: list[str] = []
+    for project in list_projects(snap):
+        tasks_dir = f"{project}/tasks"
+        for name in snap.list_dir(tasks_dir):
+            if name != f"{task_id}.md" and not name.startswith(f"{task_id}-"):
+                continue
+            rel = join_rel(tasks_dir, name)
+            if snap.is_file(rel):
+                paths.append(rel)
+    return paths
+
+
 def find_record(cs: ChangeSet, record: Any) -> tuple[str, RecordSchema]:
     """The path and schema of RECORD: a task ID, a '$ref', or a path."""
     token = resolve_ref(cs, change_line(record, "record"))
     if ID_PATTERN.match(token.upper()):
         task_id = token.upper()
+        # The filename names the task, so try it first; confirm with the one
+        # record rather than parsing every row.
+        by_name = task_paths_for_id(cs.snap, task_id)
+        if len(by_name) == 1:
+            row = task_row_for_path(cs.snap, by_name[0])
+            if row is not None and row.task_id == task_id:
+                return check_record_path(cs.snap, by_name[0]), TASK_SCHEMA
         paths = [r.rel_path for r in get_task_rows(cs.snap) if r.task_id == task_id]
         if not paths:
             raise ChangeSetError(f"no task {task_id}")
@@ -8630,7 +8749,7 @@ def cmd_commit(
 # Cloudflare Access authenticates callers in front of the server; McpGate
 # checks the Access JWT on every HTTP request before the SDK sees it.
 
-MCP_SERVER_VERSION = "0.14.1"
+MCP_SERVER_VERSION = "0.14.2"
 MCP_MAX_FILE_BYTES = READ_MAX_BYTES
 MCP_MAX_REQUEST_BYTES = 1024 * 1024
 MCP_FETCH_TIMEOUT = 60
