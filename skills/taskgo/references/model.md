@@ -64,7 +64,7 @@ INBOX.md                  # zero-ceremony capture; no schema
   tasks/*.md              # stable task records
   decisions/*.md          # ADRs for private or cross-artifact decisions (optional)
   docs/*                  # authored prose deliverables, specs, guides, or sync mirrors (optional)
-  references/*            # current-state supporting context private to the project (optional)
+  references/*            # compounding project reference pages, playbooks, and domain notes (optional)
   bugreports/*            # captured bug reports, reproduction logs, triage traces (optional)
   reviews/*               # code, design, or document reviews (optional)
   scripts/*               # automation, audit harnesses, pipelines, report generators (optional)
@@ -77,15 +77,22 @@ INBOX.md                  # zero-ceremony capture; no schema
 when `README.md` is absent, but new and renamed projects use `README.md`.
 
 `docs/`, `bugreports/`, and `reviews/` hold authored prose deliverables when the
-output is a document, issue report, or review rather than code; when published
-externally, the `README.md` map records which copy is canonical. `scripts/`
-holds repeatable, project-scoped helpers (queries, audit runners, report
-builders) so future sessions reuse them instead of recreating them in scratch;
-they need not meet the packaging bar of reusable skill scripts. `references/`
-holds stable descriptions that are private to the project and true now, such as
-domain notes or source material for a deliverable. Evidence from runs belongs in
-`results/`. Material imported from elsewhere and kept for history is labeled as
-such in the README map rather than presented as current.
+output is a document, issue report, or review for a milestone or external
+audience rather than code; when published externally, the `README.md` map
+records which copy is canonical. `references/` holds the project's compounding
+reference material: topic- and entity-oriented Markdown pages (domain syntheses,
+capability matrices, operational playbooks, external resource catalogs) that
+outlive individual tasks and are private to the project. When a task uncovers
+durable domain facts or invalidates an earlier claim, fold the synthesis into
+the relevant `references/` page in place and keep it indexed with a one-line
+summary in the `README.md` map; when that material stabilizes and serves
+multiple projects or workspaces, promote the reusable portion into a skill.
+`scripts/` holds repeatable, project-scoped helpers (queries, audit runners,
+report builders) so future sessions reuse them instead of recreating them in
+scratch; they need not meet the packaging bar of reusable skill scripts. Raw run
+evidence and captured telemetry belong in `results/`. Material imported from
+elsewhere and kept for history is labeled as such in the README map rather than
+presented as current.
 
 ## System & Non-Code Projects
 
@@ -120,7 +127,8 @@ needs the fact and how often it changes:
 | Intended route                                                              | `PLAN.md`                                                                     |
 | Current situation and next actions                                          | `STATUS.md`                                                                   |
 | A unit of work, its outcome, and findings                                   | `tasks/`                                                                      |
-| Run evidence, supporting context                                            | `results/`, `references/`                                                     |
+| Project-scoped domain notes, playbooks, and syntheses across tasks          | Project `references/` (indexed in `README.md`; promoted to a skill if shared) |
+| Run evidence, benchmark telemetry, and static input datasets                | Project `results/` and `data/`                                                |
 | What changed, when, and why                                                 | Git history (commit prose, `Ref:` and `Conversation:`)                        |
 
 The control repository files differ mainly in how often they change: `README.md`
@@ -154,8 +162,9 @@ not see. It has three roles:
   and what is in and out of scope. Scope may exclude things the code README
   never mentions ("not the in-repository backlog", "no paid APIs").
 - **Map:** where everything lives — checkouts, remotes and forks, deployments,
-  data, project `scripts/`, related projects, and the knowledge skills
-  describing the systems it runs on — and which source is canonical where
+  data, project `references/`, `docs/`, and `scripts/`, related projects, and
+  the knowledge skills describing the systems it runs on — with a one-line
+  summary of each local reference page and which source is canonical where
   several overlap.
 - **Standing rules:** constraints that govern work and outlast any task,
   especially private ones such as data-safety rules, spending limits, and
@@ -189,6 +198,7 @@ In scope, and explicitly out of scope.
 
 - Repository: <https://github.com/owner/repo>; local checkout: `~/workspace/repo`
 - Deployment and host details: the `<knowledge-skill>` skill
+- Reference notes: [`references/topic.md`](references/topic.md) — one-line summary
 - Backlog: this tracker owns <X>; the in-repository `TODO.md` owns <Y>
 - Related projects: [other](../other/README.md) owns <Z>
 

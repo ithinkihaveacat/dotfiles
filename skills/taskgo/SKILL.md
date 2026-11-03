@@ -249,8 +249,10 @@ task to an isolated worker that cannot read the control repository, see
   the CLI. Elsewhere, prefer the `taskgo` MCP tools when the harness has them
   (`handoff` returns the same note and files); otherwise the CLI with `--root`.
 - **After work:** update files, task frontmatter (`conversations`), and
-  `STATUS.md` prose (`Summary` & `Next`). Update the project `README.md`, or the
-  artifact or knowledge skill that owns a fact, only if that fact changed. Run
+  `STATUS.md` prose (`Summary` & `Next`). Fold durable domain findings that
+  outlive the task into `<project>/references/` (indexed in `README.md`), or
+  into the artifact repository or skill that owns the fact. Update the project
+  `README.md` only if identity, map, or standing rules changed. Run
   `taskgo sync` and `taskgo doctor`. Optionally commit using
   `taskgo checkpoint`. Ensure the project is left in a strict **handoff-ready**
   state.
