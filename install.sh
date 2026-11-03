@@ -89,6 +89,7 @@ FEATURES=(
   'vscode|workstation|Link VS Code settings'
   'npm|workstation|Set the npm global prefix; a per-user Node.js where the distribution'"'"'s is too old'
   'cloudflare|-|Cloudflare'"'"'s cf CLI (beta) from npm, with its telemetry off'
+  'app-host|-|cloudflared, for a host serving apps through a Cloudflare Tunnel'
   'skills|workstation cloud|Link skill and permission plugins; apply default skills'
   'agents|workstation|Link agent context and hooks, and synchronize permissions'
   'upgrades|workstation|Daily: upgrade packages, uv, ruby-build, Android and agent CLIs'
@@ -1288,6 +1289,10 @@ function feature_upgrades {
       # Autoclean and clean package archives
       x sudo apt-get -y autoclean || echo "warning: apt-get autoclean failed, skipping" >&2
       x sudo apt-get -y clean || echo "warning: apt-get clean failed, skipping" >&2
+      # The cloudflared package does not restart its service on upgrade.
+      if exists cloudflared; then
+        cloudflared_service_refresh || true
+      fi
     fi
   fi
 
@@ -1670,6 +1675,87 @@ function feature_cloudflare {
   x env CF_SEND_TELEMETRY=0 cf cli telemetry disable >/dev/null
 }
 
+# app-host: a host that publishes apps through a Cloudflare Tunnel. Installs
+# cloudflared from Cloudflare's apt repository (Linux with apt only), which the
+# upgrades feature then keeps current like any other package. The connector
+# service is created once by hand, since its token is a secret:
+# `sudo cloudflared service install TOKEN`.
+function feature_app_host {
+  local url=https://pkg.cloudflare.com
+  local key=/usr/share/keyrings/cloudflare-public-v2.gpg
+  local list=/etc/apt/sources.list.d/cloudflared.list
+  local line="deb [signed-by=$key] $url/cloudflared any main"
+  local tmp_key status=0
+
+  heading "app-host"
+
+  if is_offline; then
+    skip_offline "app-host"
+    return 0
+  fi
+  if [ "$PLATFORM" != "linux" ] || ! exists apt-get; then
+    echo "$(basename "$0"): app-host: needs Linux with apt-get, skipping" >&2
+    return 0
+  fi
+  if ! $HAS_SUDO; then
+    echo "$(basename "$0"): app-host: no usable sudo" >&2
+    return 1
+  fi
+
+  # https://pkg.cloudflare.com/index.html
+  if [ ! -f "$key" ] || [ "$(cat "$list" 2>/dev/null)" != "$line" ]; then
+    echo "Configuring the cloudflared apt repository ($url)..."
+    tmp_key=$(mktemp)
+    { curl "${CURL_OPTS[@]}" -fsSL -o "$tmp_key" "$url/cloudflare-public-v2.gpg" &&
+      x sudo install -m 644 "$tmp_key" "$key" &&
+      echo "$line" | x sudo tee "$list" >/dev/null &&
+      x sudo apt-get update; } || status=$?
+    rm -f "$tmp_key"
+    if [ "$status" -ne 0 ]; then
+      echo "$(basename "$0"): app-host: failed to configure the cloudflared apt repository from $url" >&2
+      return 1
+    fi
+  fi
+
+  if [ "$(dpkg-query -W -f='${Status}' cloudflared 2>/dev/null)" != "install ok installed" ]; then
+    x sudo apt-get -y install cloudflared || return 1
+  fi
+  cloudflared --version
+
+  if ! cloudflared_service_exists; then
+    echo "note: no cloudflared service yet; create it with the tunnel's token:" >&2
+    echo "  sudo cloudflared service install TOKEN" >&2
+    return 0
+  fi
+  cloudflared_service_refresh
+}
+
+function cloudflared_service_exists {
+  exists systemctl &&
+    [ -n "$(systemctl list-unit-files --no-legend cloudflared.service 2>/dev/null)" ]
+}
+
+# Restart the cloudflared service if a package upgrade replaced the binary it
+# runs, since the package does not restart it, and report it if it is not
+# running. Does nothing where there is no such service. Needs sudo.
+function cloudflared_service_refresh {
+  local pid exe
+  cloudflared_service_exists || return 0
+  if ! systemctl is-active --quiet cloudflared; then
+    echo "warning: the cloudflared service is not running; see 'systemctl status cloudflared'" >&2
+    return 1
+  fi
+  pid=$(systemctl show -p MainPID --value cloudflared 2>/dev/null) || pid=""
+  exe=$(sudo readlink "/proc/${pid:-0}/exe" 2>/dev/null) || exe=""
+  if [[ "$exe" == *" (deleted)" ]]; then
+    echo "Restarting cloudflared, whose binary an upgrade replaced"
+    x sudo systemctl restart cloudflared || {
+      echo "warning: failed to restart cloudflared" >&2
+      return 1
+    }
+  fi
+}
+
 # Download installer script $1 and run it with the remaining arguments. Unlike
 # `bash <(curl ...)`, a failed download is an error rather than an empty script
 # that "succeeds".
@@ -1981,7 +2067,7 @@ function feature_overlay_hooks {
 # setup script with no terminal at all) uses sudo only if it is passwordless,
 # and skips apt otherwise.
 if [ "$PLATFORM" = "linux" ] && ! is_offline &&
-  { packages_selected || { selected upgrades && ! is_fresh "$PACKAGE_STAMP"; }; }; then
+  { packages_selected || selected app-host || { selected upgrades && ! is_fresh "$PACKAGE_STAMP"; }; }; then
   if ! command -v sudo >/dev/null 2>&1; then
     echo "warning: sudo not found; skipping apt" >&2
   elif sudo -n true 2>/dev/null; then
