@@ -338,7 +338,9 @@ taskgo requests [--log FILE] [--days N] [--gap SECS] [--json]
   commit repairs by default. Other documents are left as their owners wrote
   them.
 - `checkpoint`: Safe automatic-commit path requiring the `taskgo` declaration in
-  committed `AGENTS.md`. Enforces 50-char subject limits.
+  committed `AGENTS.md`. Expects a `<= 50`-char Conventional Commits `SUBJECT`
+  (`type(scope): description`; nonconforming subjects are rewritten as
+  `chore(<project>): <subject>` and truncated).
 - Remote sync by default: when the repository and `.git/` are writable, CLI
   reads and writes serialize on `<git-dir>/taskgo.lock`, fetch the upstream
   tracking branch (`@{u}`), and fast-forward or rebase with `--autostash` when
