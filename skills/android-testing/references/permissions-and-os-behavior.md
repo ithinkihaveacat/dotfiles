@@ -1,9 +1,10 @@
-# Permissions & OS Behavior
+# Permissions, Application State & OS Behavior
 
-Testing permissions and system lifecycle behavior on Wear OS and modern Android
-versions requires understanding both baseline Android security changes and
-Wear-specific quirks (such as granular health siloing, Foreground Service
-restrictions, package stopped state, localization, and cloud backup).
+Testing permissions, application state, and system lifecycle behavior on Android
+and Wear OS requires understanding both baseline Android platform mechanics and
+surprising places where state persists across reinstalls (such as install-time
+cloud backup, Google Play Services Block Store, installer attribution, and
+paired-device Data Layer caches).
 
 ______________________________________________________________________
 
@@ -128,21 +129,91 @@ Settings UI:
 
 ______________________________________________________________________
 
-## Cloud Backup & Restore (Wear OS 4+)
+## Application State & Persistence Across Reinstalls
 
-Wear OS 4+ supports cloud backup and restore (up to 25 MB per app). If the
-backup exceeds 25 MB, **no data** is backed up.
+When testing onboarding, authentication, or error handling, state often persists
+in surprising places outside an app's local sandbox—causing a freshly installed
+APK to behave differently than it would for a first-time user.
 
-- **Simulate Backup**: Force a backup using the local transport:
+### 1. Cloud Auto Backup & Install-Time Restore (`BackupManager`)
+
+Android 6.0+ (API 23+) and Wear OS 4+ support automatic cloud backup and restore
+(up to 25 MB per app; if the backup exceeds 25 MB, **no data** is backed up).
+When you reinstall an app (`adb install`) on a device signed into a Google
+Account that has used the app before, `BackupManager` (`bmgr`) silently restores
+backed-up `SharedPreferences`, databases, and auth tokens from Google Drive
+**during package installation, before the app is ever launched**.
+
+- **Guarantee a Clean First Run (Defeat Install-Time Restore)**: Run `pm clear`
+  *after* `adb install` completes and *before* launching the app. This wipes the
+  restored `/data/data/<package>` directory without re-triggering install-time
+  restore:
   ```bash
-  adb shell bmgr backupnow <your.package.name>
-  ```
-- **Simulate Restore**:
-  ```bash
-  adb shell bmgr restore <your.package.name>
-  ```
-- **Wipe Data to Test Restore Flow**: Clear the app's data before restoring to
-  verify the fresh install + restore experience:
-  ```bash
+  adb install-multiple -r -i com.android.vending base.apk split_config.*.apk
   adb shell pm clear <your.package.name>
   ```
+- **Explicitly Test Backup & Restore Flows**:
+  ```bash
+  adb shell bmgr backupnow <your.package.name>
+  adb shell pm clear <your.package.name>
+  adb shell bmgr restore <your.package.name>
+  ```
+
+### 2. Google Play Services State (`BlockStore` & OAuth Grants)
+
+Even after `adb uninstall` and `adb shell pm clear`, two forms of account state
+persist inside Google Play Services (`com.google.android.gms`):
+
+- **Block Store (`com.google.android.gms.auth.blockstore`)**: Credentials saved
+  via the Block Store API reside in Play Services storage rather than the app's
+  `/data/data/<package>` directory, surviving both app uninstallation and
+  `pm clear`.
+- **Prior Google Account OAuth Grants (`AccountManager` / Credential Manager)**:
+  If the device's Google Account previously granted OAuth consent to the app,
+  silent sign-in (`GoogleAuthUtil` or Credential Manager) can succeed on first
+  launch without showing a consent screen. Test with a fresh account (or revoke
+  the app's access in Google Account settings) to reproduce true first-time
+  sign-in prompts.
+
+### 3. Paired Phone ↔ Watch State (`WearableService` Data Layer Cache)
+
+On paired phone and Wear OS devices, state is shared across nodes via Google
+Play Services (`WearableService`):
+
+- **Persistent Cross-Node `DataItem`s**: `DataItem`s written by the **remote
+  node** (`DataClient.putDataItem()`) are cached locally and **survive
+  uninstalling and reinstalling the local app**. They are only purged when the
+  companion app on the remote device is also uninstalled or cleared.
+- **Advertised Capabilities & Background Listeners**: An installed companion app
+  on the paired device continues advertising `CapabilityClient` capabilities
+  (`res/values/wear.xml`) and responding to background `MessageClient` requests
+  even if never opened during the test. To test standalone or missing-companion
+  behavior, uninstall (or disable) the package on **both** the phone and watch.
+
+### 4. Pre-Installed System Apps (`pm disable-user`)
+
+Pre-installed system apps cannot be removed with `adb uninstall` on unrooted
+builds. To reset a system preload or simulate an absent companion app on a
+paired device, temporarily disable it for the current user and clear its data:
+
+```bash
+adb shell pm disable-user --user 0 <your.package.name>
+adb shell pm clear <your.package.name>
+
+# Restore the pre-installed app after testing:
+adb shell pm enable <your.package.name>
+```
+
+### 5. Installer Attribution (`getInstallSourceInfo`) & Play Licensing (`pairip`)
+
+- **Installer Attribution**: Plain `adb install` sets the installer package to
+  `null` (or `com.android.shell`). If an app checks
+  `PackageManager.getInstallSourceInfo()`, pass `-i com.android.vending` so the
+  OS attributes the install to Google Play:
+  ```bash
+  adb install -r -i com.android.vending app.apk
+  ```
+- **Play Integrity License Checks (`com.pairip.licensecheck`)**: Release APKs
+  wrapped with Google Play's `LicenseActivity` verify a Play-issued license
+  token at startup and will redirect sideloaded installs to the Play Store
+  unless installed directly from Play or tested with an unwrapped/debug build.
