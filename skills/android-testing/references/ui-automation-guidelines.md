@@ -140,6 +140,12 @@ and configure the corresponding mobile app in a clean, logged-in state:
 1. **Onboard & Log In**: Launch the app and automate onboarding using UI
    automation tools (like `popper`). Prompt the user for manual help if
    2FA/CAPTCHAs block automation.
+1. **Testing Missing-Companion or Cold First-Run States**: When testing how an
+   app behaves *without* its companion app or on a clean first run, uninstall
+   (or `pm disable-user --user 0`) the package on **both** phone and watch and
+   run `adb shell pm clear <package>` *after* `adb install` so cached Data Layer
+   `DataItem`s and `BackupManager` cloud restores do not leak prior state (see
+   **[Permissions, Application State & OS Behavior](permissions-and-os-behavior.md#application-state--persistence-across-reinstalls)**).
 
 ______________________________________________________________________
 

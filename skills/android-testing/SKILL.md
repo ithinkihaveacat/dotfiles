@@ -131,10 +131,12 @@ adb shell cmd IWearGestureService gesture DoublePinch
 - **[Location & Sensors](references/location-and-sensors.md)** — Fused Location
   Provider anti-spoofing rules, Mock Location App requirements, and Wear Health
   Services (`whs.*`) synthetic exercise and biometric data.
-- **[Permissions & OS Behavior](references/permissions-and-os-behavior.md)** —
-  Wear OS 5 vs. 6 granular health permissions, Foreground Service types, Watch
+- **[Permissions, Application State & OS Behavior](references/permissions-and-os-behavior.md)**
+  — Wear OS 5 vs. 6 granular health permissions, Foreground Service types, Watch
   Face Push permission limits, `FLAG_STOPPED` de-isolation, locale switching,
-  and cloud backup/restore (`bmgr`).
+  and state persistence across reinstalls (`BackupManager` install-time restore,
+  Play Services `BlockStore`, `WearableService` cross-node `DataItem` cache,
+  `pm disable-user`, and `-i com.android.vending` installer attribution).
 - **[Watch Faces & Complications](references/watch-faces-and-complications.md)**
   — Forcing complication updates via `DEBUG_SYSUI` (`adb-complication-update`)
   and simulating ambient mode (`cmd wearable_sensing set-ambient-mode`).
