@@ -606,7 +606,8 @@ Commit an authorized tracker checkpoint for TASK_ID. Nonconforming subjects are 
 
 Arguments:
   TASK_ID               Target task ID
-  SUBJECT               Conventional Commits subject line (rewritten when
+  SUBJECT               Conventional Commits subject ('type(scope):
+                        description', <= 50 chars; rewritten when
                         nonconforming)
 
 Options:
