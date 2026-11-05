@@ -43,8 +43,10 @@ See `references/command-index.md` for detailed usage.
 
 ### Extraction & Decoding
 
-- `scripts/apk-decode`: Decompile the entire APK using apktool to inspect
-  resources.
+- `scripts/apk-decode`: Decompile the entire APK using `apktool` to inspect
+  resources. (`apktool` is an external tool not bundled with the Android SDK; if
+  unavailable, use `scripts/apk-info file`, `aapt2 dump resources` /
+  `aapt2 dump xmltree`, or `apkanalyzer` instead.)
 - `scripts/apk-launcher-icon-extract`: Decompile and extract the launcher and
   round launcher icons as files.
 - `scripts/apk-unzip`: Unzip ZIP archives, split APK bundles, or app bundles.

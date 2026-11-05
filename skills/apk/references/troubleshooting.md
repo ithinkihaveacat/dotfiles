@@ -29,10 +29,27 @@ from the manifest. **Solution**:
 ### `apktool` not found
 
 **Context**: `apk-decode` and `apk-launcher-icon-extract` require `apktool` to
-decompile resources. **Solution**:
+decompile resources. `apktool` is a third-party open-source tool
+(`iBotPeaches/Apktool`) and is **not** bundled with the Android SDK
+(`cmdline-tools` or `build-tools`). **Solution**:
 
 - macOS: `brew install apktool`
 - Debian/Ubuntu: `sudo apt-get install apktool`
+- Dotfiles (`android` feature, which is opt-in and not in the default
+  `workstation` profile): `~/.dotfiles/install.sh --with android` (requires
+  `sudo` on Linux)
+- Without `sudo`/Homebrew: download the `apktool` JAR from upstream and place a
+  wrapper in `~/.local/bin/apktool` (or put `apktool.jar` at
+  `~/.local/share/apktool/apktool.jar`).
+
+**Alternatives without `apktool`**:
+
+- `apk-info file <apk> <path>` — extract and format binary XML files (e.g.
+  `AndroidManifest.xml` or `res/xml/...`) via `apkanalyzer`.
+- `aapt2 dump resources <apk>` — dump `resources.arsc` resource table entries.
+- `aapt2 dump xmltree <apk> --file <path>` — inspect a compiled binary XML tree.
+- `apkanalyzer resources` / `apkanalyzer files cat` — inspect resource packages
+  and raw archive entries.
 
 ### `aapt` not found
 
