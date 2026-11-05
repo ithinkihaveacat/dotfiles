@@ -1,0 +1,822 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
+# TAP tests for 'pinboard audit fallbacks'. A fake Pinboard API, the bookmark
+# site, Wayback, archive.today and a subscription site all run in this process;
+# no network access.
+
+from __future__ import annotations
+
+import importlib.util
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import threading
+import urllib.parse
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from importlib.machinery import SourceFileLoader
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE / "fixtures"))
+from fake_pinboard import API, FAKE, TOKEN  # noqa: E402
+
+BIN = HERE.parent / "scripts" / "pinboard"
+TMP = Path(tempfile.mkdtemp())
+
+COOKIES: list[str] = []
+HITS: dict[str, int] = {}
+
+
+class Site(BaseHTTPRequestHandler):
+    def log_message(self, *args) -> None:
+        pass
+
+    def send(self, status: int, body, content_type: str = "text/html") -> None:
+        data = body if isinstance(body, bytes) else body.encode()
+        self.send_response(status)
+        self.send_header("Content-Type", f"{content_type}; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def html(self, title: str, status: int = 200) -> None:
+        self.send(
+            status,
+            f"<html><head><title>{title}</title></head><body>x</body></html>",
+        )
+
+    def do_GET(self) -> None:
+        parts = urllib.parse.urlsplit(self.path)
+        path, query = parts.path, urllib.parse.parse_qs(parts.query)
+        HITS[path] = HITS.get(path, 0) + 1
+        if path == "/wayback/available":
+            target = urllib.parse.urlsplit(query.get("url", [""])[0]).path
+            stamps = {
+                "/gone": "20200101000000",
+                "/wall": "20200102000000",
+                "/nogood": "20200103000000",
+            }
+            closest = (
+                {
+                    "available": True,
+                    "status": "200",
+                    "timestamp": stamps[target],
+                    "url": self.path,
+                }
+                if target in stamps
+                else None
+            )
+            payload = {"archived_snapshots": {"closest": closest} if closest else {}}
+            self.send(200, json.dumps(payload), "application/json")
+            return
+        if path == "/cdx/search/cdx":
+            url = query.get("url", [""])[0]
+            target = urllib.parse.urlsplit(url).path
+            rows = [["timestamp", "original", "statuscode"]]
+            if target == "/changed":
+                rows.append(["20200202000000", url, "200"])
+            self.send(200, json.dumps(rows), "application/json")
+            return
+        if path == "/throttle":
+            self.html("Too Many Requests", 429)
+            return
+        if path == "/sub/article":
+            cookie = self.headers.get("Cookie", "")
+            COOKIES.append(cookie)
+            if "session=test" in cookie:
+                self.html("Sub Article")
+            else:
+                self.html("Forbidden", 403)
+            return
+        if path.startswith(("/web/", "/archive/newest/")):
+            for marker, title in (
+                ("/gone", "Gone Article"),
+                ("/wall", "Wall Article"),
+                ("/changed", "Changed Article"),
+                ("/nogood", "Totally Different"),
+            ):
+                if marker in path:
+                    self.html(title)
+                    return
+            self.html("Not Found", 404)
+            return
+        titles = {
+            "/gone": ("Gone", 404),
+            "/wall": ("Forbidden", 403),
+            "/changed": ("Different Title", 200),
+            "/ok": ("Same Title", 200),
+            "/nogood": ("Forbidden", 403),
+            "/": ("Archive", 200),
+        }
+        if path in titles:
+            title, status = titles[path]
+            self.html(title, status)
+            return
+        self.html("Not Found", 404)
+
+
+SITE = ThreadingHTTPServer(("127.0.0.1", 0), Site)
+threading.Thread(target=SITE.serve_forever, daemon=True).start()
+BASE = f"http://127.0.0.1:{SITE.server_address[1]}"
+
+ENV = {
+    k: v
+    for k, v in os.environ.items()
+    if not k.startswith(("PINBOARD_", "GIT_"))
+    and k not in ("AGENT_OFFLINE", "NO_COLOR", "FORCE_COLOR")
+}
+ENV.update(
+    PINBOARD_API_URL=API,
+    PINBOARD_API_TOKEN=TOKEN,
+    PINBOARD_TIME_SCALE="0.0001",
+    PINBOARD_WAYBACK_API=f"{BASE}/wayback/available",
+    PINBOARD_WAYBACK_WEB=f"{BASE}/web/",
+    PINBOARD_CDX_API=f"{BASE}/cdx/search/cdx",
+    PINBOARD_ARCHIVE_TODAY=f"{BASE}/archive/newest/",
+    XDG_STATE_HOME=str(TMP / "state"),
+    GIT_CONFIG_GLOBAL=str(TMP / "gitconfig"),
+    GIT_CONFIG_NOSYSTEM="1",
+    GIT_AUTHOR_NAME="Pinboard Test",
+    GIT_AUTHOR_EMAIL="pinboard@example.com",
+    GIT_COMMITTER_NAME="Pinboard Test",
+    GIT_COMMITTER_EMAIL="pinboard@example.com",
+    NO_PROXY="*",
+    no_proxy="*",
+)
+(TMP / "gitconfig").write_text("[init]\n\tdefaultBranch = main\n")
+
+n = 0
+failed = 0
+
+
+def ok(condition: bool, description: str, diag: str = "") -> None:
+    global n, failed
+    n += 1
+    print(f"{'ok' if condition else 'not ok'} {n} - {description}")
+    if not condition:
+        failed += 1
+        for line in diag.splitlines()[-12:]:
+            print(f"# {line}")
+
+
+def reset_api() -> None:
+    with FAKE.lock:
+        FAKE.posts.clear()
+        FAKE.calls.clear()
+        FAKE.tick = 0
+        FAKE.update_time = ""
+        FAKE.reset_knobs()
+    COOKIES.clear()
+    HITS.clear()
+
+
+def git(*args: str, cwd: Path) -> str:
+    proc = subprocess.run(
+        ["git", *args], capture_output=True, text=True, env=ENV, cwd=cwd, check=False
+    )
+    if proc.returncode:
+        raise RuntimeError(proc.stderr)
+    return proc.stdout.strip()
+
+
+def record(
+    url: str,
+    title: str,
+    time_: str,
+    tags: list[str] | None = None,
+) -> dict:
+    return {
+        "url": url,
+        "hash": "0" * 32,
+        "title": title,
+        "notes": "",
+        "tags": tags or [],
+        "time": time_,
+        "shared": False,
+        "toread": False,
+        "meta": "0" * 32,
+    }
+
+
+def make_repo(records: list[dict]) -> Path:
+    repo = TMP / f"repo-{len(records)}-{os.urandom(4).hex()}"
+    (repo / "bookmarks").mkdir(parents=True)
+    by_year: dict[str, list[dict]] = {}
+    for item in records:
+        by_year.setdefault(item["time"][:4], []).append(item)
+    for year, items in by_year.items():
+        items.sort(key=lambda r: (r["time"], r["url"]))
+        (repo / "bookmarks" / f"{year}.jsonl").write_text(
+            "".join(json.dumps(item, ensure_ascii=False) + "\n" for item in items)
+        )
+    (repo / "state.json").write_text('{"format": 1, "update_time": ""}\n')
+    (repo / "README.md").write_text("# Pinboard mirror\n")
+    (repo / ".gitattributes").write_text("*.jsonl text eol=lf\n")
+    git("init", "-b", "main", cwd=repo)
+    git("add", "-A", cwd=repo)
+    git("commit", "-q", "-m", "fixture", cwd=repo)
+    return repo
+
+
+def audit(repo: Path, *args: str, env: dict | None = None):
+    return subprocess.run(
+        [str(BIN), "--repo", str(repo), "audit", *args],
+        capture_output=True,
+        text=True,
+        env=env or ENV,
+        check=False,
+    )
+
+
+def journal(state: Path, pass_id: str = "2026") -> list[dict]:
+    path = state / pass_id / "journal.jsonl"
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+
+def fixture(name: str) -> tuple[Path, Path, list[dict]]:
+    reset_api()
+    records = [
+        record(
+            f"{BASE}/gone",
+            "Gone Article",
+            "2021-01-01T00:00:00Z",
+            ["rust", ".status:dead", ".checked:2026"],
+        ),
+        record(
+            f"{BASE}/wall",
+            "Wall Article",
+            "2021-01-02T00:00:00Z",
+            [".status:blocked", ".checked:2026"],
+        ),
+        record(
+            f"{BASE}/changed",
+            "Changed Article",
+            "2021-01-03T00:00:00Z",
+            [".status:changed", ".checked:2026"],
+        ),
+        record(
+            f"{BASE}/nogood",
+            "No Good",
+            "2021-01-04T00:00:00Z",
+            [".status:blocked", ".checked:2026"],
+        ),
+        record(
+            f"{BASE}/sub/article",
+            "Sub Article",
+            "2021-01-05T00:00:00Z",
+            [".status:blocked", ".checked:2026"],
+        ),
+        record(
+            f"{BASE}/ok",
+            "Same Title",
+            "2021-01-06T00:00:00Z",
+            [".status:ok", ".checked:2026"],
+        ),
+    ]
+    for item in records:
+        FAKE.put(
+            item["url"],
+            item["title"],
+            item["time"],
+            tags=" ".join(item["tags"]),
+        )
+    repo = make_repo(records)
+    state = TMP / name
+    proc = audit(repo, "plan", "--state", str(state), "--pass", "2026")
+    if proc.returncode:
+        raise RuntimeError(proc.stderr)
+    proc = audit(
+        repo,
+        "check",
+        "--state",
+        str(state),
+        "--pass",
+        "2026",
+        "--jobs",
+        "1",
+        "--timeout",
+        "5",
+    )
+    if proc.returncode:
+        raise RuntimeError(proc.stderr)
+    return repo, state, records
+
+
+def seed_checks(state: Path, verdicts: dict[str, str]) -> None:
+    """Replace the journal with hand-written checks, when a test wants an
+    exact target set without running the HTTP check phase."""
+    (state / "2026" / "journal.jsonl").write_text(
+        "".join(
+            json.dumps({"seq": i, "op": "check", "url": url, "verdict": verdict}) + "\n"
+            for i, (url, verdict) in enumerate(verdicts.items(), 1)
+        )
+    )
+
+
+def tags_of(url: str) -> set[str]:
+    return set(FAKE.posts[url]["tags"].split())
+
+
+def load_pinboard():
+    loader = SourceFileLoader("pb_fallbacks", str(BIN))
+    spec = importlib.util.spec_from_loader("pb_fallbacks", loader)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["pb_fallbacks"] = module
+    loader.exec_module(module)
+    return module
+
+
+PB = load_pinboard()
+
+
+def test_alt_tags() -> None:
+    got = PB.alt_target_tags(
+        ["rust", ".status:dead", ".alt:wayback", ".checked:2026"],
+        ["archive-today"],
+    )
+    ok(
+        got == ["rust", ".status:dead", ".checked:2026", ".alt:archive-today"],
+        "alt namespace is replaced, status tags are kept",
+        repr(got),
+    )
+    got = PB.alt_target_tags([], ["subscription", "wayback"])
+    ok(
+        got == [".alt:wayback", ".alt:subscription"],
+        "sources follow the canonical order",
+        repr(got),
+    )
+
+
+def test_rate_limit_stops_instead_of_matching() -> None:
+    start, attempts = PB.RETRY_START, PB.RETRY_ATTEMPTS
+    PB.RETRY_START, PB.RETRY_ATTEMPTS = 0.01, 2
+    try:
+        try:
+            PB.fetch_with_retry(f"{BASE}/throttle", 5, PB.Pacer(0))
+            ok(False, "a persistent 429 is not treated as a result")
+        except PB.Error as error:
+            ok(
+                "attempts" in str(error) and "larger --interval" in str(error),
+                "a persistent 429 stops the run with advice",
+                str(error),
+            )
+    finally:
+        PB.RETRY_START, PB.RETRY_ATTEMPTS = start, attempts
+
+
+def test_transient_results_are_retried() -> None:
+    def fake(events: list[dict]):
+        return type("P", (), {"journal": type("J", (), {"events": events})()})()
+
+    throttled = {
+        "op": "fallback",
+        "url": "u",
+        "source": "wayback",
+        "http": 429,
+        "error": "",
+        "match": False,
+    }
+    real = {
+        "op": "fallback",
+        "url": "u",
+        "source": "wayback",
+        "http": 200,
+        "error": "not-found",
+        "match": False,
+    }
+    got = PB.fallback_events(fake([throttled, real]))
+    ok(
+        got["u"]["wayback"]["http"] == 200,
+        "a throttled result is ignored in favour of a real one",
+        str(got),
+    )
+    ok(
+        "u" not in PB.fallback_events(fake([throttled])),
+        "a lone transient result leaves the URL unchecked",
+    )
+
+
+def test_snapshot_score() -> None:
+    score, seen = PB.snapshot_score(
+        "Gone Article", b"<title>Gone Article</title>", "text/html"
+    )
+    ok(
+        score == 1.0 and seen == "Gone Article",
+        "matching title scores 1.0",
+        repr(score),
+    )
+    score, _ = PB.snapshot_score(
+        "Gone Article", b"<title>404 Not Found</title>", "text/html"
+    )
+    ok(score == 0.0, "an error page never matches", repr(score))
+    score, _ = PB.snapshot_score(
+        "Gone Article", b"<title>Just a moment...</title>", "text/html"
+    )
+    ok(score == 0.0, "a challenge page never matches", repr(score))
+
+
+def test_year_filter() -> None:
+    repo, state, _ = fixture("years")
+    proc = audit(
+        repo,
+        "fallbacks",
+        "status",
+        "--state",
+        str(state),
+        "--pass",
+        "2026",
+        "--year",
+        "2021",
+        "--json",
+    )
+    payload = json.loads(proc.stdout)
+    ok(
+        payload["targets"] == 5 and payload["years"] == ["2021"],
+        "status narrows to the requested year",
+        proc.stdout,
+    )
+    proc = audit(
+        repo,
+        "fallbacks",
+        "status",
+        "--state",
+        str(state),
+        "--pass",
+        "2026",
+        "--year",
+        "2020",
+        "--json",
+    )
+    payload = json.loads(proc.stdout)
+    ok(payload["targets"] == 0, "an empty year has no targets", proc.stdout)
+    proc = audit(
+        repo,
+        "fallbacks",
+        "check",
+        "--state",
+        str(state),
+        "--pass",
+        "2026",
+        "--year",
+        "2020",
+        "--dry-run",
+    )
+    ok(
+        "no dead, blocked or changed bookmarks" in proc.stdout,
+        "check honours an empty year",
+        proc.stdout,
+    )
+
+
+def test_wayback_check_apply_and_resume() -> None:
+    repo, state, _ = fixture("wayback")
+    proc = audit(
+        repo,
+        "fallbacks",
+        "check",
+        "--state",
+        str(state),
+        "--pass",
+        "2026",
+        "--source",
+        "wayback",
+        "--interval",
+        "0",
+    )
+    ok(proc.returncode == 0, "wayback check exits 0", proc.stderr)
+    events = [e for e in journal(state) if e["op"] == "fallback"]
+    ok(len(events) == 5, "one result per dead/blocked/changed target", str(len(events)))
+    by_url = {e["url"].removeprefix(BASE): e for e in events}
+    ok(
+        by_url["/gone"]["match"] and by_url["/gone"]["score"] == 1.0,
+        "the closest capture matches",
+        str(by_url.get("/gone")),
+    )
+    ok(
+        by_url["/changed"]["match"],
+        "CDX finds a capture when availability returns none",
+        str(by_url.get("/changed")),
+    )
+    ok(
+        not by_url["/nogood"]["match"],
+        "a capture with a different title does not match",
+        str(by_url.get("/nogood")),
+    )
+    ok(
+        by_url["/gone"]["snapshot"].startswith(f"{BASE}/web/20200101000000id_/"),
+        "the raw snapshot URL is journaled",
+        by_url["/gone"]["snapshot"],
+    )
+    ok(
+        len(by_url["/gone"]["sha256"]) == 64 and by_url["/gone"]["ts"],
+        "the journal records a content hash and fetch time",
+        str(by_url["/gone"]),
+    )
+    ok(
+        not any(tag.startswith(".alt:") for tag in tags_of(f"{BASE}/gone")),
+        "check writes no tags",
+    )
+
+    proc = audit(
+        repo,
+        "fallbacks",
+        "apply",
+        "--state",
+        str(state),
+        "--pass",
+        "2026",
+        "--dry-run",
+    )
+    ok(proc.returncode == 0, "apply dry run exits 0", proc.stderr)
+    ok(".alt:wayback" in proc.stdout, "dry run reports the proposed tag", proc.stdout)
+    ok(
+        not any(tag.startswith(".alt:") for tag in tags_of(f"{BASE}/gone")),
+        "dry run writes nothing",
+    )
+
+    proc = audit(repo, "fallbacks", "apply", "--state", str(state), "--pass", "2026")
+    ok(proc.returncode == 0, "apply exits 0", proc.stderr)
+    ok(
+        tags_of(f"{BASE}/gone")
+        == {"rust", ".status:dead", ".checked:2026", ".alt:wayback"},
+        "apply keeps status tags and adds the alt tag",
+        str(tags_of(f"{BASE}/gone")),
+    )
+    ok(
+        tags_of(f"{BASE}/changed")
+        == {".status:changed", ".checked:2026", ".alt:wayback"},
+        "CDX match is tagged",
+        str(tags_of(f"{BASE}/changed")),
+    )
+    ok(
+        not any(tag.startswith(".alt:") for tag in tags_of(f"{BASE}/nogood")),
+        "a miss is not tagged",
+    )
+    ok(
+        not any(tag.startswith(".alt:") for tag in tags_of(f"{BASE}/ok")),
+        "an ok bookmark is untouched",
+    )
+
+    proc = audit(repo, "fallbacks", "verify", "--state", str(state), "--pass", "2026")
+    ok(proc.returncode == 0, "verify passes after apply", proc.stdout + proc.stderr)
+
+    proc = audit(
+        repo, "fallbacks", "status", "--state", str(state), "--pass", "2026", "--json"
+    )
+    payload = json.loads(proc.stdout)
+    ok(
+        payload["targets"] == 5
+        and payload["checked"] == 5
+        and payload["matched"] == 3
+        and payload["applied"] == 3,
+        "status counts targets, matches and writes",
+        proc.stdout,
+    )
+    ok(
+        payload["sources"]["wayback"] == {"checked": 5, "matched": 3},
+        "status breaks results down by source",
+        proc.stdout,
+    )
+
+    before = len([e for e in journal(state) if e["op"] == "fallback"])
+    proc = audit(
+        repo,
+        "fallbacks",
+        "check",
+        "--state",
+        str(state),
+        "--pass",
+        "2026",
+        "--source",
+        "wayback",
+        "--interval",
+        "0",
+    )
+    ok(proc.returncode == 0, "a repeated check exits 0", proc.stderr)
+    after = len([e for e in journal(state) if e["op"] == "fallback"])
+    ok(
+        before == after,
+        "a repeated check does not repeat lookups",
+        f"{before}->{after}",
+    )
+
+    proc = audit(repo, "fallbacks", "apply", "--state", str(state), "--pass", "2026")
+    ok("nothing to apply" in proc.stdout, "apply is idempotent", proc.stdout)
+
+
+def test_archive_today() -> None:
+    repo, state, _ = fixture("archive-today")
+    proc = audit(
+        repo,
+        "fallbacks",
+        "check",
+        "--state",
+        str(state),
+        "--pass",
+        "2026",
+        "--source",
+        "archive-today",
+        "--interval",
+        "0",
+    )
+    ok(proc.returncode == 0, "archive.today check exits 0", proc.stderr)
+    events = [e for e in journal(state) if e["op"] == "fallback"]
+    ok(len(events) == 5, "archive.today checks every target", str(len(events)))
+    ok(
+        sum(1 for e in events if e["match"]) == 3,
+        "archive.today matches three captures",
+        str([e["match"] for e in events]),
+    )
+    proc = audit(repo, "fallbacks", "apply", "--state", str(state), "--pass", "2026")
+    ok(proc.returncode == 0, "archive.today apply exits 0", proc.stderr)
+    ok(
+        ".alt:archive-today" in tags_of(f"{BASE}/gone"),
+        "the archive.today tag is written",
+        str(tags_of(f"{BASE}/gone")),
+    )
+    ok(
+        ".alt:wayback" not in tags_of(f"{BASE}/gone"),
+        "an unchecked source is not tagged",
+        str(tags_of(f"{BASE}/gone")),
+    )
+
+
+def test_subscription() -> None:
+    repo, state, _ = fixture("subscription")
+    headers = TMP / "subscription.headers"
+    headers.write_text("Cookie: session=test\nUser-Agent: Test\n")
+    headers.chmod(0o600)
+    proc = audit(
+        repo,
+        "fallbacks",
+        "check",
+        "--state",
+        str(state),
+        "--pass",
+        "2026",
+        "--source",
+        "subscription",
+        "--subscription",
+        f"127.0.0.1={headers}",
+        "--interval",
+        "0",
+    )
+    ok(proc.returncode == 0, "subscription check exits 0", proc.stderr)
+    events = [
+        e
+        for e in journal(state)
+        if e["op"] == "fallback" and e["source"] == "subscription"
+    ]
+    ok(len(events) == 5, "subscription checks every target", str(len(events)))
+    matched = [e for e in events if e["match"]]
+    ok(
+        len(matched) == 1 and matched[0]["url"] == f"{BASE}/sub/article",
+        "only the opted-in page matches",
+        str(matched),
+    )
+    ok(
+        "session=test" in COOKIES[-1],
+        "the local cookie was sent",
+        str(COOKIES[-1:]),
+    )
+    ok(
+        "session=test" not in (state / "2026" / "journal.jsonl").read_text(),
+        "the journal never stores the cookie",
+    )
+    proc = audit(repo, "fallbacks", "apply", "--state", str(state), "--pass", "2026")
+    ok(proc.returncode == 0, "subscription apply exits 0", proc.stderr)
+    ok(
+        ".alt:subscription" in tags_of(f"{BASE}/sub/article"),
+        "the subscription tag is written",
+        str(tags_of(f"{BASE}/sub/article")),
+    )
+    ok(
+        not any(tag.startswith(".alt:") for tag in tags_of(f"{BASE}/nogood")),
+        "an unmatched page is not tagged",
+    )
+
+
+def test_subscription_config_and_permissions() -> None:
+    repo, state, _ = fixture("subscription-config")
+    headers = TMP / "config.headers"
+    headers.write_text("Cookie: session=test\n")
+    headers.chmod(0o600)
+    config = TMP / "fallbacks.json"
+    config.write_text(json.dumps({"subscriptions": {"127.0.0.1": str(headers)}}))
+    proc = audit(
+        repo,
+        "fallbacks",
+        "check",
+        "--state",
+        str(state),
+        "--pass",
+        "2026",
+        "--source",
+        "subscription",
+        "--subscription-config",
+        str(config),
+        "--interval",
+        "0",
+    )
+    ok(proc.returncode == 0, "the config file selects the domain", proc.stderr)
+    ok(
+        any(
+            e["op"] == "fallback"
+            and e["source"] == "subscription"
+            and e["match"]
+            and e["url"] == f"{BASE}/sub/article"
+            for e in journal(state)
+        ),
+        "the config-driven check matches",
+    )
+
+    loose = TMP / "loose.headers"
+    loose.write_text("Cookie: session=test\n")
+    loose.chmod(0o644)
+    try:
+        PB.load_subscription_headers(loose)
+        ok(False, "a group/world-readable header file is refused")
+    except PB.Error as error:
+        ok("chmod 600" in str(error), "refuse a loose header file", str(error))
+    missing = TMP / "missing.headers"
+    missing.write_text("User-Agent: Test\n")
+    missing.chmod(0o600)
+    try:
+        PB.load_subscription_headers(missing)
+        ok(False, "a header file without Cookie is refused")
+    except PB.Error as error:
+        ok("Cookie" in str(error), "require a Cookie header", str(error))
+
+
+def test_unreachable_archive_today() -> None:
+    repo, state, _ = fixture("unreachable")
+    env = {**ENV, "PINBOARD_ARCHIVE_TODAY": "http://127.0.0.1:1/newest/"}
+    proc = audit(
+        repo,
+        "fallbacks",
+        "check",
+        "--state",
+        str(state),
+        "--pass",
+        "2026",
+        "--source",
+        "archive-today",
+        "--interval",
+        "0",
+        "--timeout",
+        "1",
+        env=env,
+    )
+    ok(proc.returncode == 0, "an unreachable source is not fatal", proc.stderr)
+    ok("unreachable" in proc.stderr, "the skip is reported", proc.stderr)
+    ok(
+        not any(e["op"] == "fallback" for e in journal(state)),
+        "an unreachable source writes no results",
+    )
+
+
+def test_check_dry_run() -> None:
+    repo, state, _ = fixture("dry-run")
+    before = len([e for e in journal(state) if e["op"] == "fallback"])
+    hits = dict(HITS)
+    proc = audit(
+        repo,
+        "fallbacks",
+        "check",
+        "--state",
+        str(state),
+        "--pass",
+        "2026",
+        "--source",
+        "wayback",
+        "--dry-run",
+    )
+    ok(proc.returncode == 0, "check dry run exits 0", proc.stderr)
+    ok("would check" in proc.stdout, "dry run lists the scope", proc.stdout)
+    ok(
+        len([e for e in journal(state) if e["op"] == "fallback"]) == before,
+        "dry run writes no results",
+    )
+    ok(hits == HITS, "dry run makes no upstream requests", str(HITS))
+
+
+def main() -> int:
+    for name, fn in sorted(globals().items()):
+        if name.startswith("test_") and callable(fn):
+            try:
+                fn()
+            except Exception as error:
+                ok(False, f"{name} raised {type(error).__name__}: {error}")
+    print(f"1..{n}")
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
