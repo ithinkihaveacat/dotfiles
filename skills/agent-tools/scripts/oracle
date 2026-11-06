@@ -341,6 +341,99 @@ def write_private_text(file_path: str, content: str) -> None:
         raise
 
 
+def resolve_tools_label(use_search: bool, use_maps: bool, use_code: bool) -> str:
+    """Return the compact status/telemetry label for active server tools."""
+    if use_maps:
+        return "maps"
+    enabled: list[str] = []
+    if use_search:
+        enabled.append("search")
+    if use_code:
+        enabled.append("code")
+    return "+".join(enabled) if enabled else "none"
+
+
+def build_system_instruction(
+    current_date_str: str,
+    *,
+    use_search: bool = True,
+    use_maps: bool = False,
+) -> str:
+    """Build the Oracle system instruction matched to the active grounding tools."""
+    if use_maps:
+        intro_tail = "rigorous reasoning and real-time research."
+        grounding_mandate = (
+            " Use the Google Maps tool to supplement with place, location, and"
+            " routing information where relevant."
+        )
+        time_bullet = (
+            "- **Time Sensitivity:** Interpret time-relative details in the"
+            " prompt and context against the current date."
+        )
+    elif use_search:
+        intro_tail = "rigorous reasoning and real-time research."
+        grounding_mandate = (
+            " Use the Google Search tool to supplement with up-to-date"
+            " information, especially for technical details or recent"
+            " developments."
+        )
+        time_bullet = (
+            "- **Time Sensitivity:** For queries requiring up-to-date"
+            " information, you MUST use the provided current date when"
+            " formulating search queries."
+        )
+    else:
+        intro_tail = "rigorous reasoning and close analysis of the provided context."
+        grounding_mandate = (
+            " External web grounding is disabled; rely strictly on the provided"
+            " context and established technical knowledge rather than live"
+            " external sources."
+        )
+        time_bullet = (
+            "- **Time Sensitivity:** External web grounding is disabled;"
+            " evaluate recency and temporal references strictly from the"
+            " provided context and current date."
+        )
+
+    return f"""You are the Oracle, an elite researcher and strategist known for providing the highest quality, most carefully considered answers possible. You combine deep technical expertise with {intro_tail}
+
+### Core Mandates
+
+1.  **Highest Quality & Depth:** Your answers must be exhaustive, insightful, and technically precise. Do not settle for surface-level summaries.
+2.  **Unwavering Acceptance:** Assume the user's question is correct and well-informed. Do not second-guess the intent, push back against the premise, or suggest the question is misinformed. Answer the question exactly as posed using your best judgment and the provided context.
+3.  **Authoritative Voice:** Present information directly as fact. Instead of using weak conversational meta-references (e.g., "The provided text says..." or "According to the documentation..."), use formal, explicit citations (like Markdown footnotes, bracketed references, or direct blockquotes) to attribute information while maintaining a confident tone.
+4.  **Markdown Excellence:** Use valid Markdown. Start with a descriptive H1 title. Use lists, tables, and code blocks (preferring Python, then Kotlin, then curl) to enhance clarity.
+5.  **Context & Citations:** Prioritize any provided context, assuming it contains highly relevant information. When your answer draws upon this context, use explicit citations (e.g., inlining exact code snippets, quoting transcripts, or citing specific records) to make your response trustworthy and verifiable.{grounding_mandate}
+
+### Contextual Awareness
+
+- **Current Date:** Today is {current_date_str}.
+{time_bullet}
+
+### Output Style
+
+- **Verbosity:** High. Provide detailed analysis and comprehensive answers.
+- **Tone:** Professional, direct, and authoritative.
+- **Directness:** Just answer the question. Skip conversational filler or introductory pleasantries.
+"""
+
+
+def wants_help(argv: list[str]) -> bool:
+    """Whether argv contains -h/--help before '--', ignoring option values."""
+    skip_next = False
+    for token in argv:
+        if skip_next:
+            skip_next = False
+            continue
+        if token == "--":
+            return False
+        if token in ("-h", "--help"):
+            return True
+        if token in ("--model", "--request-timeout"):
+            skip_next = True
+    return False
+
+
 def usage():
     print(
         f"""\
@@ -406,6 +499,8 @@ Input:
 
 Options:
   --force               Bypass context size limits (1MB for text, 20MB per media file).
+  --search, --no-search
+                        Google Search grounding for external context (default: on).
   --maps                Use Google Maps grounding instead of Google Search. (Cannot be combined with --code).
   --code                Enable Code Execution for Python.
   --dry-run             Output a summary of the payload (resolved files, sizes, and prompt) without calling the Gemini API.
@@ -417,7 +512,7 @@ Options:
   --serialize           Save the request payload and the answer to files in the state
                         directory (~/.local/state/oracle/). (Default: on).
   --no-serialize        Disable saving the payload and answer to the state directory.
-  --help                Display this help message and exit.
+  -h, --help            Display this help message and exit.
 
 Environment:
   GEMINI_API_KEY        Required. Your Gemini API key.
@@ -459,10 +554,12 @@ def main():
     telemetry_error = None
 
     force = False
+    use_search = True
     use_maps = False
     use_code = False
     dry_run = False
     serialize = True
+    tools_str = "search"
     model_id = os.environ.get("GEMINI_MODEL", "gemini-4-argon")
     raw_request_timeout = os.environ.get("ORACLE_REQUEST_TIMEOUT") or None
     parts: list[types.Part] = []
@@ -485,6 +582,7 @@ def main():
                 "status": status_label,
                 "success": status_label == "Succeeded",
                 "elapsed_seconds": round(elapsed, 3),
+                "tools": tools_str,
                 "prompt_tokens": prompt_tokens,
                 "candidate_tokens": candidate_tokens,
                 "thinking_tokens": thinking_tokens,
@@ -515,18 +613,25 @@ def main():
             )
 
     try:
-        if "--help" in sys.argv or "-h" in sys.argv:
+        argv = sys.argv[1:]
+        if wants_help(argv):
             usage()
             telemetry_status = "Succeeded"
             sys.exit(0)
 
         args = []
-        argv = sys.argv[1:]
         i = 0
         while i < len(argv):
             arg = argv[i]
-            if arg == "--force":
+            if arg == "--":
+                args.extend(argv[i + 1 :])
+                break
+            elif arg == "--force":
                 force = True
+            elif arg == "--search":
+                use_search = True
+            elif arg == "--no-search":
+                use_search = False
             elif arg == "--maps":
                 use_maps = True
             elif arg == "--code":
@@ -548,6 +653,16 @@ def main():
                     sys.exit(1)
                 model_id = argv[i + 1]
                 i += 1
+            elif arg.startswith("--model="):
+                model_id = arg.split("=", 1)[1]
+                if not model_id:
+                    print(
+                        f"{os.path.basename(sys.argv[0])}: error: --model requires an argument",
+                        file=sys.stderr,
+                    )
+                    telemetry_status = "Error"
+                    telemetry_error = "--model requires an argument"
+                    sys.exit(1)
             elif arg == "--request-timeout":
                 if i + 1 >= len(argv):
                     print(
@@ -559,9 +674,22 @@ def main():
                     sys.exit(1)
                 raw_request_timeout = argv[i + 1]
                 i += 1
+            elif arg.startswith("--request-timeout="):
+                raw_request_timeout = arg.split("=", 1)[1]
+            elif arg.startswith("-") and arg != "-":
+                err = f"unrecognized option: {arg}"
+                print(
+                    f"{os.path.basename(sys.argv[0])}: error: {err}",
+                    file=sys.stderr,
+                )
+                telemetry_status = "Error"
+                telemetry_error = err
+                sys.exit(1)
             else:
                 args.append(arg)
             i += 1
+
+        tools_str = resolve_tools_label(use_search, use_maps, use_code)
 
         request_timeout_override: int | None = None
         if raw_request_timeout is not None:
@@ -737,27 +865,11 @@ def main():
         now = datetime.datetime.now().astimezone()
         current_date_str = now.strftime("%A, %d %B %Y")
 
-        system_instruction = f"""You are the Oracle, an elite researcher and strategist known for providing the highest quality, most carefully considered answers possible. You combine deep technical expertise with rigorous reasoning and real-time research.
-
-### Core Mandates
-
-1.  **Highest Quality & Depth:** Your answers must be exhaustive, insightful, and technically precise. Do not settle for surface-level summaries.
-2.  **Unwavering Acceptance:** Assume the user's question is correct and well-informed. Do not second-guess the intent, push back against the premise, or suggest the question is misinformed. Answer the question exactly as posed using your best judgment and the provided context.
-3.  **Authoritative Voice:** Present information directly as fact. Instead of using weak conversational meta-references (e.g., "The provided text says..." or "According to the documentation..."), use formal, explicit citations (like Markdown footnotes, bracketed references, or direct blockquotes) to attribute information while maintaining a confident tone.
-4.  **Markdown Excellence:** Use valid Markdown. Start with a descriptive H1 title. Use lists, tables, and code blocks (preferring Python, then Kotlin, then curl) to enhance clarity.
-5.  **Context & Citations:** Prioritize any provided context, assuming it contains highly relevant information. When your answer draws upon this context, use explicit citations (e.g., inlining exact code snippets, quoting transcripts, or citing specific records) to make your response trustworthy and verifiable. Use the Google Search tool to supplement with up-to-date information, especially for technical details or recent developments.
-
-### Contextual Awareness
-
-- **Current Date:** Today is {current_date_str}.
-- **Time Sensitivity:** For queries requiring up-to-date information, you MUST use the provided current date when formulating search queries.
-
-### Output Style
-
-- **Verbosity:** High. Provide detailed analysis and comprehensive answers.
-- **Tone:** Professional, direct, and authoritative.
-- **Directness:** Just answer the question. Skip conversational filler or introductory pleasantries.
-"""
+        system_instruction = build_system_instruction(
+            current_date_str,
+            use_search=use_search,
+            use_maps=use_maps,
+        )
 
         # Construct self-contained XML document for caching
         payload_xml = (
@@ -801,6 +913,12 @@ def main():
                     file=sys.stderr,
                 )
 
+        if use_maps and use_code:
+            print(
+                f"{os.path.basename(sys.argv[0])}: warning: --code cannot be combined with --maps, ignoring --code",
+                file=sys.stderr,
+            )
+
         if dry_run:
             text_files_count = len(text_files)
             total_inline_media_size = sum(s for _, _, s in media_files_to_inline)
@@ -814,6 +932,7 @@ def main():
             print(f"{user_prompt}\n", file=sys.stdout)
 
             print("Payload Summary:", file=sys.stdout)
+            print(f"  Tools:          {tools_str}", file=sys.stdout)
             print(
                 f"  Text Context:   {text_files_count} file(s){stdin_note} ({total_text_size / 1024:.2f} KB, ~{total_text_size / 4 / 1000:.0f}k tokens)",
                 file=sys.stdout,
@@ -885,24 +1004,16 @@ def main():
 
         client = genai.Client(api_key=api_key)
 
-        tools_config = []
+        tools_config: list[types.Tool] = []
         if use_maps:
             tools_config.append(types.Tool(google_maps=types.GoogleMaps()))
-            tools_str = "maps"
-            if use_code:
-                print(
-                    f"{os.path.basename(sys.argv[0])}: warning: --code cannot be combined with --maps, ignoring --code",
-                    file=sys.stderr,
-                )
         else:
-            tools_config.append(types.Tool(google_search=types.GoogleSearch()))
+            if use_search:
+                tools_config.append(types.Tool(google_search=types.GoogleSearch()))
             if use_code:
                 tools_config.append(
                     types.Tool(code_execution=types.ToolCodeExecution())
                 )
-                tools_str = "search+code"
-            else:
-                tools_str = "search"
 
         context_parts = []
         if total_text_size > 0:
@@ -1017,7 +1128,7 @@ def main():
                     contents=[types.Content(role="user", parts=parts)],
                     config=types.GenerateContentConfig(
                         system_instruction=system_instruction,
-                        tools=tools_config,
+                        tools=tools_config or None,
                         thinking_config=types.ThinkingConfig(
                             thinking_level="high", include_thoughts=True
                         ),
@@ -1220,3 +1331,7 @@ if __name__ == "__main__":
         except Exception:
             pass
         sys.exit(130)
+    except BrokenPipeError:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        sys.exit(141)

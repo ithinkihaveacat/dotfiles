@@ -226,6 +226,9 @@ scripts/oracle [OPTIONS] "PROMPT" [FILE_OR_DIR ...]
 - `--force`: Bypass context size limits (1MB for text, 20MB per media file). Use
   when you are confident the large context is necessary and the model can handle
   it.
+- `--search` / `--no-search`: Google Search grounding for live external context
+  (default: on). Pass `--no-search` for closed-world analysis restricted to the
+  provided context (ignored if `--maps` is set).
 - `--maps`: Use Google Maps grounding instead of Google Search. Use this for
   queries about locations, places, or general routing options. **Warning:**
   Specific details like live star ratings, current operating hours, or recent
