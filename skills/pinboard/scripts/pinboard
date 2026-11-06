@@ -1076,6 +1076,7 @@ def run_sync(
             report.total = len(mirror)
             if not dry_run:
                 ctx.local.data["last_sync"] = iso(time.time())
+                ctx.local.data.pop("last_refusal", None)
                 ctx.local.save()
             return report
         try:
@@ -1113,6 +1114,7 @@ def run_sync(
         )
         ctx.local.data["last_sync"] = iso(time.time())
         ctx.local.data["update_time"] = update_time
+        ctx.local.data.pop("last_refusal", None)
         ctx.local.save()
     return report
 
@@ -1930,6 +1932,17 @@ if Pinboard changed, and refuses to delete more than 10 bookmarks at once.
 
 VERDICTS = ("ok", "moved", "changed", "dead", "blocked")
 AUDIT_RE = re.compile(r"^\.(status|checked):", re.IGNORECASE)
+ALT_RE = re.compile(r"^\.alt:", re.IGNORECASE)
+FALLBACK_SOURCES = ("wayback", "archive-today", "subscription")
+DEFAULT_WAYBACK_API = "https://archive.org/wayback/available"
+DEFAULT_WAYBACK_WEB = "https://web.archive.org/web/"
+DEFAULT_CDX_API = "https://web.archive.org/cdx/search/cdx"
+DEFAULT_ARCHIVE_TODAY = "https://archive.ph/newest/"
+DEFAULT_SUBSCRIPTION_CONFIG = "~/.local/state/pinboard/fallbacks.json"
+RETRY_STATUS = {429, 500, 502, 503, 504}
+RETRY_ATTEMPTS = 3
+RETRY_START = 30.0
+TRANSIENT_ERRORS = {"timeout", "network", "tls", "dns", "refused"}
 USER_AGENT = "pinboard-audit/1 (+https://pinboard.in)"
 MAX_BODY = 512 * 1024
 PARKED = (
@@ -2085,6 +2098,19 @@ def strip_audit(tags: Iterable[str]) -> list[str]:
     return [tag for tag in tags if not AUDIT_RE.match(tag)]
 
 
+def strip_alt(tags: Iterable[str]) -> list[str]:
+    return [tag for tag in tags if not ALT_RE.match(tag)]
+
+
+def alt_target_tags(current: Iterable[str], sources: Iterable[str]) -> list[str]:
+    """Keep every existing tag, replace the .alt:* namespace with the sources
+    that currently have a verified copy."""
+    chosen = set(sources)
+    tags = strip_alt(current)
+    tags.extend(f".alt:{source}" for source in FALLBACK_SOURCES if source in chosen)
+    return tags
+
+
 def valid_url(url: str) -> bool:
     parts = urllib.parse.urlsplit(url)
     return parts.scheme in ("http", "https") and bool(parts.hostname)
@@ -2226,14 +2252,16 @@ def same_url(left: str, right: str) -> bool:
     return key(left) == key(right)
 
 
-def fetch(url: str, timeout: float) -> dict[str, Any]:
-    request = urllib.request.Request(
-        url,
-        headers={
-            "User-Agent": USER_AGENT,
-            "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.5",
-        },
-    )
+def fetch(
+    url: str, timeout: float, headers: dict[str, str] | None = None
+) -> dict[str, Any]:
+    request_headers = {
+        "User-Agent": USER_AGENT,
+        "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.5",
+    }
+    if headers:
+        request_headers.update(headers)
+    request = urllib.request.Request(url, headers=request_headers)
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             body = response.read(MAX_BODY)
@@ -2350,6 +2378,389 @@ def classify_url(saved_title: str, url: str, result: dict[str, Any]) -> str:
     if verdict == "ok" and not same_url(url, result["final"]):
         return "moved"
     return verdict
+
+
+# --- Fallbacks ---------------------------------------------------------------
+
+
+def fallback_targets(run: Pass, years: set[str] | None = None) -> list[dict[str, Any]]:
+    """Planned bookmarks whose latest check is dead, blocked or changed,
+    optionally narrowed to the years the bookmarks were created."""
+    state = run.state()
+    out = []
+    for item in run.plan:
+        if years and str(item.get("time", ""))[:4] not in years:
+            continue
+        checked = state.get(item["url"], {}).get("check")
+        if checked and checked.get("verdict") in ("dead", "blocked", "changed"):
+            out.append(item)
+    return out
+
+
+def fallback_years(values: list[str]) -> set[str]:
+    years = set()
+    for value in values:
+        if not re.fullmatch(r"\d{4}", value):
+            raise Error(f"--year wants YYYY, not {value!r}")
+        years.add(value)
+    return years
+
+
+def fallback_events(run: Pass) -> dict[str, dict[str, dict[str, Any]]]:
+    """The latest usable result per URL and source. Transient failures are
+    discarded so the next run retries them instead of treating them as misses."""
+    out: dict[str, dict[str, dict[str, Any]]] = {}
+    for event in run.journal.events:
+        if event.get("op") != "fallback":
+            continue
+        if event.get("http") in RETRY_STATUS or event.get("error") in TRANSIENT_ERRORS:
+            continue
+        url = event.get("url")
+        source = event.get("source")
+        if url and source:
+            out.setdefault(url, {})[source] = event
+    return out
+
+
+class Pacer:
+    """Space out requests so an archive may rate-limit rather than refuse us."""
+
+    def __init__(self, interval: float):
+        self.interval = max(0.0, interval)
+        self.last = 0.0
+
+    def wait(self) -> None:
+        if self.interval:
+            delay = self.interval - (time.monotonic() - self.last)
+            if delay > 0:
+                time.sleep(delay)
+        self.last = time.monotonic()
+
+
+def fetch_with_retry(
+    url: str,
+    timeout: float,
+    pacer: Pacer,
+    headers: dict[str, str] | None = None,
+    statuses: set[int] | None = None,
+) -> dict[str, Any]:
+    """Fetch an archive endpoint, backing off on throttling. Raises rather than
+    journaling a false negative when the source stays unavailable."""
+    retry = RETRY_STATUS if statuses is None else statuses
+    delay = RETRY_START
+    result: dict[str, Any] = {}
+    for attempt in range(RETRY_ATTEMPTS):
+        pacer.wait()
+        result = fetch(url, timeout, headers)
+        if result["status"] not in retry and result["error"] not in TRANSIENT_ERRORS:
+            return result
+        if attempt + 1 == RETRY_ATTEMPTS:
+            break
+        note(
+            f"{urllib.parse.urlsplit(url).netloc}: "
+            f"{result['status'] or result['error']}; retrying in {delay:.0f}s"
+        )
+        time.sleep(delay)
+        delay *= 2
+    raise Error(
+        f"{urllib.parse.urlsplit(url).netloc}: "
+        f"{result['status'] or result['error']} after {RETRY_ATTEMPTS} attempts; "
+        "stopped to avoid false negatives, rerun with a larger --interval"
+    )
+
+
+def json_payload(body: bytes) -> Any:
+    try:
+        return json.loads(body.decode("utf-8", "replace"))
+    except ValueError:
+        return None
+
+
+def snapshot_score(
+    saved_title: str, body: bytes, content_type: str
+) -> tuple[float, str]:
+    seen = clean_title(title_of(body, content_type))
+    if not seen or not saved_title.strip():
+        return 0.0, seen
+    low = seen.casefold().strip().replace("\u2019", "'").replace("\u2018", "'")
+    if (
+        is_bad_title(seen)
+        or low in BLOCKED_TITLES
+        or any(marker in low for marker in LOGIN_TITLE_MARKERS)
+    ):
+        return 0.0, seen
+    return similarity(saved_title, seen), seen
+
+
+def wayback_snapshot_url(timestamp: str, url: str) -> str:
+    base = os.environ.get("PINBOARD_WAYBACK_WEB") or DEFAULT_WAYBACK_WEB
+    if not base.endswith("/"):
+        base += "/"
+    return f"{base}{timestamp}id_/{url}"
+
+
+def fallback_failure(source: str, result: dict[str, Any], error: str) -> dict[str, Any]:
+    return {
+        "source": source,
+        "match": False,
+        "snapshot": "",
+        "sha256": "",
+        "score": 0.0,
+        "http": result.get("status"),
+        "error": result.get("error") or error,
+    }
+
+
+def verify_wayback_snapshot(
+    url: str,
+    saved_title: str,
+    timestamp: str,
+    original: str,
+    timeout: float,
+    pacer: Pacer,
+) -> dict[str, Any]:
+    snapshot = wayback_snapshot_url(timestamp, original or url)
+    result = fetch_with_retry(snapshot, timeout, pacer)
+    score, seen = snapshot_score(saved_title, result["body"], result["content_type"])
+    match = result["status"] == 200 and bool(seen) and score >= TITLE_MATCH
+    return {
+        "source": "wayback",
+        "match": match,
+        "snapshot": snapshot,
+        "sha256": hashlib.sha256(result["body"]).hexdigest() if result["body"] else "",
+        "score": round(score, 4),
+        "http": result["status"],
+        "error": result["error"],
+    }
+
+
+def cdx_candidates(
+    url: str, timeout: float, pacer: Pacer, limit: int
+) -> list[dict[str, str]]:
+    if limit <= 0:
+        return []
+    api = os.environ.get("PINBOARD_CDX_API") or DEFAULT_CDX_API
+    params: dict[str, Any] = {
+        "url": url,
+        "output": "json",
+        "filter": ["statuscode:200", "mimetype:text/html"],
+        "fl": "timestamp,original,statuscode",
+        "collapse": "digest",
+        "limit": str(limit),
+    }
+    query = f"{api}?{urllib.parse.urlencode(params, doseq=True)}"
+    result = fetch_with_retry(query, timeout, pacer)
+    payload = json_payload(result["body"])
+    if (
+        result["error"]
+        or result["status"] != 200
+        or not isinstance(payload, list)
+        or len(payload) < 2
+    ):
+        return []
+    header = payload[0]
+    if not isinstance(header, list):
+        return []
+    out = []
+    for row in payload[1:]:
+        if not isinstance(row, list):
+            continue
+        record = dict(zip(header, row, strict=False))
+        if str(record.get("statuscode", "200")) != "200":
+            continue
+        timestamp = str(record.get("timestamp", ""))
+        if not timestamp:
+            continue
+        out.append(
+            {
+                "timestamp": timestamp,
+                "original": str(record.get("original") or url),
+            }
+        )
+    return out
+
+
+def wayback_lookup(
+    url: str,
+    saved_title: str,
+    timeout: float,
+    pacer: Pacer,
+    cdx_tries: int,
+) -> dict[str, Any]:
+    api = os.environ.get("PINBOARD_WAYBACK_API") or DEFAULT_WAYBACK_API
+    query = f"{api}?{urllib.parse.urlencode({'url': url})}"
+    result = fetch_with_retry(query, timeout, pacer)
+    failed = bool(result["error"]) or result["status"] != 200
+    payload = None if failed else json_payload(result["body"])
+    snapshots = payload.get("archived_snapshots") if isinstance(payload, dict) else None
+    closest = snapshots.get("closest") if isinstance(snapshots, dict) else None
+    candidates: list[dict[str, str]] = []
+    if (
+        isinstance(closest, dict)
+        and closest.get("available")
+        and closest.get("timestamp")
+    ):
+        candidates.append(
+            {
+                "timestamp": str(closest["timestamp"]),
+                "original": url,
+            }
+        )
+    best: dict[str, Any] | None = None
+    tried: set[str] = set()
+    for candidate in candidates:
+        tried.add(candidate["timestamp"])
+        outcome = verify_wayback_snapshot(
+            url,
+            saved_title,
+            candidate["timestamp"],
+            candidate["original"],
+            timeout,
+            pacer,
+        )
+        if outcome["match"]:
+            return outcome
+        best = best or outcome
+    for candidate in cdx_candidates(url, timeout, pacer, cdx_tries):
+        if candidate["timestamp"] in tried:
+            continue
+        tried.add(candidate["timestamp"])
+        outcome = verify_wayback_snapshot(
+            url,
+            saved_title,
+            candidate["timestamp"],
+            candidate["original"],
+            timeout,
+            pacer,
+        )
+        if outcome["match"]:
+            return outcome
+        best = best or outcome
+    if best is not None:
+        return best
+    return fallback_failure(
+        "wayback", result, "availability" if failed else "not-found"
+    )
+
+
+def archive_today_lookup(
+    url: str, saved_title: str, timeout: float, pacer: Pacer
+) -> dict[str, Any]:
+    base = os.environ.get("PINBOARD_ARCHIVE_TODAY") or DEFAULT_ARCHIVE_TODAY
+    if not base.endswith("/"):
+        base += "/"
+    result = fetch_with_retry(
+        base + url, timeout, pacer, statuses={429, 500, 502, 503, 504}
+    )
+    score, seen = snapshot_score(saved_title, result["body"], result["content_type"])
+    match = result["status"] == 200 and bool(seen) and score >= TITLE_MATCH
+    return {
+        "source": "archive-today",
+        "match": match,
+        "snapshot": result["final"] if match else "",
+        "sha256": hashlib.sha256(result["body"]).hexdigest() if result["body"] else "",
+        "score": round(score, 4),
+        "http": result["status"],
+        "error": result["error"],
+    }
+
+
+def load_subscriptions(config: str | None, overrides: list[str]) -> dict[str, Path]:
+    path = Path(config or DEFAULT_SUBSCRIPTION_CONFIG).expanduser()
+    raw: dict[str, Any] = {}
+    if path.exists():
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as error:
+            raise Error(f"cannot read {path}: {error}") from None
+        if not isinstance(loaded, dict):
+            raise Error(f"{path}: expected a JSON object")
+        value = loaded.get("subscriptions", {})
+        if not isinstance(value, dict):
+            raise Error(f"{path}: 'subscriptions' must be an object")
+        raw.update(value)
+    for item in overrides:
+        domain, separator, file = item.partition("=")
+        if not separator or not domain or not file:
+            raise Error("--subscription wants DOMAIN=HEADERS_FILE")
+        raw[domain] = file
+    out: dict[str, Path] = {}
+    for domain, file in raw.items():
+        key = str(domain).strip().casefold().strip(".")
+        if not key or "/" in key or " " in key:
+            raise Error(f"bad subscription domain {domain!r}")
+        out[key] = Path(str(file)).expanduser()
+    return out
+
+
+def load_subscription_headers(path: Path) -> dict[str, str]:
+    try:
+        mode = path.stat().st_mode
+    except OSError as error:
+        raise Error(f"cannot read subscription headers {path}: {error}") from None
+    if mode & 0o077:
+        raise Error(f"{path} is group/world accessible; chmod 600 it")
+    headers: dict[str, str] = {}
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as error:
+        raise Error(f"cannot read subscription headers {path}: {error}") from None
+    for line in text.splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        name, separator, value = line.partition(":")
+        if not separator:
+            raise Error(f"{path}: expected 'Name: value'")
+        headers[name.strip()] = value.strip()
+    if not any(name.casefold() == "cookie" for name in headers):
+        raise Error(f"{path}: a Cookie header is required")
+    return headers
+
+
+def subscription_headers(
+    url: str,
+    subscriptions: dict[str, Path],
+    cache: dict[Path, dict[str, str]],
+) -> dict[str, str] | None:
+    host = (urllib.parse.urlsplit(url).hostname or "").casefold()
+    for domain, path in subscriptions.items():
+        if host == domain or host.endswith("." + domain):
+            if path not in cache:
+                cache[path] = load_subscription_headers(path)
+            return cache[path]
+    return None
+
+
+def subscription_lookup(
+    url: str,
+    saved_title: str,
+    headers: dict[str, str],
+    timeout: float,
+    pacer: Pacer,
+) -> dict[str, Any]:
+    pacer.wait()
+    result = fetch(url, timeout, headers)
+    score, seen = snapshot_score(saved_title, result["body"], result["content_type"])
+    match = (
+        result["status"] == 200
+        and bool(seen)
+        and score >= TITLE_MATCH
+        and not is_login_url(result["final"])
+    )
+    return {
+        "source": "subscription",
+        "match": match,
+        "snapshot": result["final"] if match else "",
+        "sha256": hashlib.sha256(result["body"]).hexdigest() if result["body"] else "",
+        "score": round(score, 4),
+        "http": result["status"],
+        "error": result["error"],
+    }
+
+
+def origin_of(url: str) -> str:
+    parts = urllib.parse.urlsplit(url)
+    return f"{parts.scheme}://{parts.netloc}/"
 
 
 # --- Commands ----------------------------------------------------------------
@@ -2906,6 +3317,357 @@ def cmd_audit_bump(ctx: Any, args: argparse.Namespace) -> int:
         commit_mirror(repo, records, changed, push=True)
     print(f"renamed {args.old} to {args.new} on {changed} bookmarks")
     return 0
+
+
+def cmd_audit_fallbacks_check(ctx: Any, args: argparse.Namespace) -> int:
+    root = Path(args.state).expanduser() if args.state else default_root()
+    run = Pass(root, pass_id(args))
+    targets = fallback_targets(run, fallback_years(args.year))
+    if not targets:
+        print("no dead, blocked or changed bookmarks to check")
+        return 0
+    sources = list(dict.fromkeys(args.source or ["wayback"]))
+    if "all" in sources:
+        sources = list(FALLBACK_SOURCES)
+    if "subscription" in sources:
+        subscriptions = load_subscriptions(args.subscription_config, args.subscription)
+        if not subscriptions:
+            note("no subscription domains configured; skipping this source")
+            sources.remove("subscription")
+    else:
+        subscriptions = {}
+    if args.dry_run:
+        print(f"would check {len(targets)} bookmarks against {', '.join(sources)}")
+        for item in targets[:10]:
+            print(item["url"])
+        return 0
+    pacer = Pacer(args.interval)
+    if "archive-today" in sources:
+        base = os.environ.get("PINBOARD_ARCHIVE_TODAY") or DEFAULT_ARCHIVE_TODAY
+        pacer.wait()
+        probe = fetch(origin_of(base), min(args.timeout, 5))
+        if probe["status"] is None:
+            note("archive.today is unreachable; skipping this source")
+            sources.remove("archive-today")
+    if not sources:
+        print("no fallback sources available")
+        return 0
+
+    seen = fallback_events(run)
+    pending = []
+    for item in targets:
+        missing = [
+            source for source in sources if source not in seen.get(item["url"], {})
+        ]
+        if args.recheck:
+            missing = list(sources)
+        if missing:
+            pending.append((item, missing))
+    if args.limit:
+        pending = pending[: args.limit]
+    if not pending:
+        print("nothing to check")
+        return 0
+
+    headers: dict[Path, dict[str, str]] = {}
+    done = matches = 0
+    for item, missing in pending:
+        url = item["url"]
+        if not valid_url(url):
+            note(f"skipping invalid URL: {url!r}")
+            continue
+        for source in missing:
+            if source == "wayback":
+                result = wayback_lookup(
+                    url, item["title"], args.timeout, pacer, args.cdx_tries
+                )
+            elif source == "archive-today":
+                result = archive_today_lookup(url, item["title"], args.timeout, pacer)
+            else:
+                selected = subscription_headers(url, subscriptions, headers)
+                if selected is None:
+                    continue
+                result = subscription_lookup(
+                    url, item["title"], selected, args.timeout, pacer
+                )
+            run.journal.append(
+                "fallback",
+                url=url,
+                source=source,
+                match=result["match"],
+                snapshot=result["snapshot"],
+                sha256=result["sha256"],
+                score=result["score"],
+                http=result["http"],
+                error=result["error"],
+            )
+            done += 1
+            matches += 1 if result["match"] else 0
+            if args.verbose:
+                state = "match" if result["match"] else "miss"
+                print(f"{state:5} {source:12} {result['score']:.2f} {url}")
+                if result["snapshot"]:
+                    print(f"      {result['snapshot']}")
+        if done and done % 100 == 0:
+            note(f"checked {done} source lookups")
+    print(f"checked {done} lookups: {matches} matched")
+    return 0
+
+
+def cmd_audit_fallbacks_apply(ctx: Any, args: argparse.Namespace) -> int:
+    repo = ctx.require_clone()
+    recover_dirty(repo)
+    catch_up(repo, ctx.local)
+    run = Pass(
+        Path(args.state).expanduser() if args.state else default_root(), pass_id(args)
+    )
+    records = load_committed(repo)
+    state = run.state()
+    results = fallback_events(run)
+
+    repaired = False
+    for url, row in state.items():
+        if "alt-done" not in row or url not in records:
+            continue
+        target = row["alt-done"]["target"]
+        if {tag_key(tag) for tag in records[url]["tags"]} != {
+            tag_key(tag) for tag in target
+        }:
+            repaired = True
+        records[url]["tags"] = target
+
+    if not args.dry_run:
+        ctx.api.require_online()
+        for url, row in state.items():
+            if "alt-intent" in row and "alt-done" not in row:
+                target = row["alt-intent"]["target"]
+                live = ctx.api.get(url)
+                if live is not None and {tag_key(tag) for tag in live["tags"]} == {
+                    tag_key(tag) for tag in target
+                }:
+                    run.journal.append(
+                        "alt-done",
+                        url=url,
+                        target=target,
+                        noop=False,
+                        recovered=True,
+                    )
+                    if url in records:
+                        records[url]["tags"] = target
+                        records[url]["meta"] = live.get(
+                            "meta", records[url].get("meta", "")
+                        )
+                    note(f"recovered fallback write for {url}")
+                else:
+                    note(f"replaying unconfirmed fallback write for {url}")
+                break
+        state = run.state()
+
+    pending: list[tuple[dict[str, Any], list[str]]] = []
+    skipped = 0
+    for item in run.plan:
+        url = item["url"]
+        if url not in results:
+            continue
+        record = records.get(url)
+        if record is None:
+            if not args.dry_run and "alt-skip" not in state.get(url, {}):
+                run.journal.append("alt-skip", url=url, reason="not in mirror")
+                skipped += 1
+            continue
+        sources = [
+            source for source, event in results[url].items() if event.get("match")
+        ]
+        target = alt_target_tags(record["tags"], sources)
+        if {tag_key(tag) for tag in target} != {tag_key(tag) for tag in record["tags"]}:
+            pending.append((item, target))
+    total = len(pending)
+    if args.limit:
+        pending = pending[: args.limit]
+    if not pending:
+        if repaired and not args.dry_run:
+            commit_mirror(repo, records, 1, push=True)
+        print("nothing to apply")
+        return 0
+
+    if args.dry_run:
+        for item, target in pending:
+            sources = [tag for tag in target if ALT_RE.match(tag)]
+            print(f"{item['url']}\n  {' '.join(sources) or '(remove .alt tags)'}")
+            print(f"  -> {' '.join(target)}")
+        print(f"would apply {total} fallback tag changes")
+        if total > len(pending):
+            print(f"  ({len(pending)} shown; raise --limit for more)")
+        return 0
+
+    applied = 0
+    for item, target in pending:
+        url = item["url"]
+        record = records.get(url)
+        if record is None:
+            continue
+        try:
+            validate_fields(record["title"], record["notes"], target)
+        except Error as error:
+            run.journal.append("alt-skip", url=url, reason=str(error))
+            skipped += 1
+            continue
+        run.journal.append(
+            "alt-intent", url=url, base_meta=record.get("meta", ""), target=target
+        )
+        params = post_params({**record, "tags": target}, replace=True, keep_time=True)
+        try:
+            code = ctx.api.add(params)
+        except NetworkError:
+            live = ctx.api.get(url)
+            if live is not None and {tag_key(tag) for tag in live["tags"]} == {
+                tag_key(tag) for tag in target
+            }:
+                code = "done"
+            else:
+                raise
+        if code != "done":
+            raise Error(f"posts/add for {url}: {code}")
+        run.journal.append("alt-done", url=url, target=target, noop=False)
+        record["tags"] = target
+        applied += 1
+        if args.commit_every and applied % args.commit_every == 0:
+            commit_mirror(
+                repo,
+                records,
+                applied,
+                message=f"audit: apply {applied} fallback tags",
+            )
+        if applied % 100 == 0:
+            note(f"applied {applied}/{len(pending)}")
+    if applied or repaired:
+        commit_mirror(
+            repo,
+            records,
+            applied or 1,
+            push=True,
+            message=f"audit: apply {applied} fallback tags",
+        )
+    print(f"applied {applied}, skipped {skipped}")
+    return 0
+
+
+def cmd_audit_fallbacks_status(ctx: Any, args: argparse.Namespace) -> int:
+    run = Pass(
+        Path(args.state).expanduser() if args.state else default_root(), pass_id(args)
+    )
+    years = fallback_years(args.year)
+    targets = fallback_targets(run, years)
+    target_urls = {item["url"] for item in targets}
+    results = {
+        url: by_source
+        for url, by_source in fallback_events(run).items()
+        if url in target_urls
+    }
+    state = run.state()
+    counts = {source: {"checked": 0, "matched": 0} for source in FALLBACK_SOURCES}
+    for by_source in results.values():
+        for source, event in by_source.items():
+            row = counts.setdefault(source, {"checked": 0, "matched": 0})
+            row["checked"] += 1
+            row["matched"] += 1 if event.get("match") else 0
+    matched = sum(
+        1
+        for by_source in results.values()
+        if any(e.get("match") for e in by_source.values())
+    )
+    applied = sum(
+        1 for url, row in state.items() if url in target_urls and "alt-done" in row
+    )
+    ambiguous = sum(
+        1
+        for url, row in state.items()
+        if url in target_urls and "alt-intent" in row and "alt-done" not in row
+    )
+    payload = {
+        "pass": run.manifest["pass"],
+        "years": sorted(years),
+        "targets": len(targets),
+        "checked": len(results),
+        "matched": matched,
+        "sources": counts,
+        "applied": applied,
+        "remaining": sum(1 for item in targets if item["url"] not in results),
+        "ambiguous": ambiguous,
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(
+            f"pass {payload['pass']}: {payload['targets']} dead/blocked/changed, "
+            f"{payload['checked']} checked, {payload['matched']} with a fallback"
+        )
+        for source, row in counts.items():
+            print(f"  {source:13} {row['checked']} checked, {row['matched']} matched")
+        print(f"applied {applied}, remaining {payload['remaining']}")
+        if ambiguous:
+            print(f"ambiguous writes: {ambiguous} (run 'apply' to resolve)")
+    return 0
+
+
+def cmd_audit_fallbacks_verify(ctx: Any, args: argparse.Namespace) -> int:
+    repo = ctx.require_clone()
+    run = Pass(
+        Path(args.state).expanduser() if args.state else default_root(), pass_id(args)
+    )
+    records = load_committed(repo)
+    state = run.state()
+    years = fallback_years(args.year)
+    targets = fallback_targets(run, years)
+    target_urls = {item["url"] for item in targets}
+    applied = [
+        (item, state[item["url"]]["alt-done"])
+        for item in run.plan
+        if item["url"] in target_urls and "alt-done" in state.get(item["url"], {})
+    ]
+    checked = set(fallback_events(run))
+    remaining = [item["url"] for item in targets if item["url"] not in checked]
+    problems = []
+    for item, row in applied:
+        record = records.get(item["url"])
+        if record is None:
+            problems.append({"url": item["url"], "problem": "not in mirror"})
+            continue
+        if {tag_key(tag) for tag in record["tags"]} != {
+            tag_key(tag) for tag in row["target"]
+        }:
+            problems.append(
+                {
+                    "url": item["url"],
+                    "problem": "mirror tags differ",
+                    "expected": row["target"],
+                    "actual": record["tags"],
+                }
+            )
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "pass": run.manifest["pass"],
+                    "years": sorted(years),
+                    "applied": len(applied),
+                    "unchecked": len(remaining),
+                    "problems": problems,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+    else:
+        print(
+            f"{len(applied) - len(problems)}/{len(applied)} applied verified; "
+            f"{len(remaining)} targets unchecked"
+        )
+        for problem in problems[:20]:
+            print(f"  {problem['url']}: {problem['problem']}")
+        if remaining and args.require_complete:
+            print(f"  {len(remaining)} targets have no fallback result")
+    return 1 if problems or (remaining and args.require_complete) else 0
 
 
 # --- Domain tags -------------------------------------------------------------
@@ -3767,6 +4529,126 @@ def add_audit_commands(sub: Any) -> None:
         help="Per-request timeout (default 15)",
     )
     q.set_defaults(func=cmd_audit_titles)
+
+    q = audit.add_parser(
+        "fallbacks",
+        prog=f"{PROG} audit fallbacks",
+        description="Record verified archive and subscription copies for dead,\n"
+        "blocked or changed bookmarks. The live .status:* tags never change;\n"
+        "availability goes in the private .alt:* namespace.",
+        help="Record archive and subscription fallbacks",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    fallbacks = q.add_subparsers(
+        dest="fallbacks_command",
+        required=True,
+        metavar="COMMAND",
+        parser_class=Parser,
+    )
+
+    def fallback_command(name: str, description: str) -> Parser:
+        r = fallbacks.add_parser(
+            name,
+            prog=f"{PROG} audit fallbacks {name}",
+            description=description,
+            help=description,
+        )
+        add_common(r)
+        return r
+
+    r = fallback_command("check", "Query fallback sources and journal every result.")
+    r.add_argument(
+        "--source",
+        action="append",
+        choices=[*FALLBACK_SOURCES, "all"],
+        help="Source to query (repeatable; default: wayback)",
+    )
+    r.add_argument("--limit", type=int, metavar="N")
+    r.add_argument(
+        "--interval",
+        type=float,
+        default=10.0,
+        metavar="SEC",
+        help="Seconds between upstream requests (default 10)",
+    )
+    r.add_argument(
+        "--timeout",
+        type=float,
+        default=30,
+        metavar="SEC",
+        help="Per-request timeout (default 30)",
+    )
+    r.add_argument(
+        "--cdx-tries",
+        type=int,
+        default=2,
+        metavar="N",
+        help="CDX captures to try after the closest (default 2)",
+    )
+    r.add_argument(
+        "--subscription",
+        action="append",
+        default=[],
+        metavar="DOMAIN=FILE",
+        help="Opt DOMAIN in with a header file (repeatable)",
+    )
+    r.add_argument(
+        "--subscription-config",
+        metavar="FILE",
+        help="Subscription config (default: ~/.local/state/pinboard/fallbacks.json)",
+    )
+    r.add_argument(
+        "--recheck",
+        action="store_true",
+        help="Redo sources that already have a result",
+    )
+    r.add_argument("--verbose", action="store_true")
+    r.add_argument(
+        "--year",
+        action="append",
+        default=[],
+        metavar="YYYY",
+        help="Only bookmarks created in this year (repeatable)",
+    )
+    r.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="List the work; make no requests or journal writes",
+    )
+    r.set_defaults(func=cmd_audit_fallbacks_check)
+
+    r = fallback_command("apply", "Add .alt:* tags through the API.")
+    r.add_argument("--limit", type=int, metavar="N")
+    r.add_argument("--commit-every", type=int, default=20, metavar="N")
+    r.add_argument("--dry-run", action="store_true")
+    r.set_defaults(func=cmd_audit_fallbacks_apply)
+
+    r = fallback_command("status", "Show fallback progress.")
+    r.add_argument("--json", action="store_true")
+    r.add_argument(
+        "--year",
+        action="append",
+        default=[],
+        metavar="YYYY",
+        help="Only bookmarks created in this year (repeatable)",
+    )
+    r.set_defaults(func=cmd_audit_fallbacks_status)
+
+    r = fallback_command("verify", "Check the mirror agrees with the fallback journal.")
+    r.add_argument("--json", action="store_true")
+    r.add_argument(
+        "--year",
+        action="append",
+        default=[],
+        metavar="YYYY",
+        help="Only bookmarks created in this year (repeatable)",
+    )
+    r.add_argument(
+        "--require-complete",
+        action="store_true",
+        help="Fail if any target has no fallback result",
+    )
+    r.set_defaults(func=cmd_audit_fallbacks_verify)
 
 
 def mcp_args(argv: list[str]) -> list[str] | None:

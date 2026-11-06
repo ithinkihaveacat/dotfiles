@@ -3,12 +3,13 @@ name: technical-writing
 description: >-
   Guidelines and structural standards for authoring, reviewing, and editing
   engineering documents with a factual, collegial, and constructive tone. Covers
-  bug reports, known issues, friction logs, PR descriptions, commit message prose,
-  TODO/task lists, Getting Started guides, and Agent Skills (SKILL.md), both
-  capability skills and knowledge skills that record facts about systems,
-  people, and places. Use when drafting or reviewing technical documentation,
-  friction logs, issue reports, PR descriptions, onboarding guides, or agent
-  skill files, or when reorganizing a knowledge skill.
+  analytical reports, bug reports, known issues, friction logs, PR descriptions,
+  commit message prose, TODO/task lists, Getting Started guides, and Agent
+  Skills (SKILL.md), both capability skills and knowledge skills that record
+  facts about systems, people, and places. Use when drafting or reviewing
+  technical documentation, empirical analyses or position memos, friction logs,
+  issue reports, PR descriptions, onboarding guides, or agent skill files, or
+  when reorganizing a knowledge skill.
 ---
 
 # Technical Writing Style Guidelines
@@ -49,6 +50,9 @@ structural principles:
 Depending on the specific document you are authoring or reviewing, consult the
 relevant reference guide:
 
+- **[Analytical Reports](references/analytical-reports.md)** — Structuring
+  data-backed analyses, UX and telemetry studies, and persuasive engineering
+  reports with neutral prose and controlled comparisons.
 - **[Friction Logs](references/friction-logs.md)** — Documenting first-time user
   journeys, setup hurdles, and CLI walkthroughs.
 - **[Bug Reports](references/bug-reports.md)** — Documenting defects, crashes,

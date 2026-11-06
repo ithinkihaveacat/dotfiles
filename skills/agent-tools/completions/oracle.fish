@@ -1,5 +1,7 @@
 # Fish completion for oracle
 complete -c oracle -l force -d "Bypass context size limits (1MB text, 20MB media)"
+complete -c oracle -l search -d "Enable Google Search grounding for external context (default)"
+complete -c oracle -l no-search -d "Disable Google Search grounding"
 complete -c oracle -l maps -d "Use Google Maps grounding instead of Google Search"
 complete -c oracle -l code -d "Enable Python code execution sandbox"
 complete -c oracle -l dry-run -d "Output summary of payload without calling API"

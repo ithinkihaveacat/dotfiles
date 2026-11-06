@@ -393,6 +393,8 @@ Input:
 
 Options:
   --force               Bypass context size limits (1MB for text, 20MB per media file).
+  --search, --no-search
+                        Google Search grounding for external context (default: on).
   --maps                Use Google Maps grounding instead of Google Search. (Cannot be combined with --code).
   --code                Enable Code Execution for Python.
   --dry-run             Output a summary of the payload (resolved files, sizes, and prompt) without calling the Gemini API.
@@ -404,7 +406,7 @@ Options:
   --serialize           Save the request payload and the answer to files in the state
                         directory (~/.local/state/oracle/). (Default: on).
   --no-serialize        Disable saving the payload and answer to the state directory.
-  --help                Display this help message and exit.
+  -h, --help            Display this help message and exit.
 
 Environment:
   GEMINI_API_KEY        Required. Your Gemini API key.

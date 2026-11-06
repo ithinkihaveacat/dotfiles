@@ -121,6 +121,64 @@ pinboard audit verify                  # the mirror agrees with the journal
   original page bytes; `changed` and `blocked` are deliberately conservative.
   Review the first small pass before running the full account.
 
+### Archive and Subscription Fallbacks
+
+`pinboard audit fallbacks` looks for a verified copy of every bookmark whose
+verdict is `.status:dead`, `.status:blocked` or `.status:changed`. It never
+changes the live verdict. Results are journaled beside the audit pass, and
+availability is written in a separate private namespace:
+
+| Source          | Tag                  |
+| --------------- | -------------------- |
+| Wayback Machine | `.alt:wayback`       |
+| archive.today   | `.alt:archive-today` |
+| Owner's session | `.alt:subscription`  |
+
+```bash
+pinboard audit fallbacks check --pass 2026   # query sources, journal results
+pinboard audit fallbacks apply --dry-run     # preview the .alt:* changes
+pinboard audit fallbacks apply --limit 50    # write them through the API
+pinboard audit fallbacks status              # progress by source
+pinboard audit fallbacks verify              # the mirror agrees with the journal
+```
+
+- Wayback is the default source. It asks the availability API for the closest
+  capture, fetches the raw snapshot (`.../<timestamp>id_/<url>`) and compares
+  its title with the saved title; a capture that exists but has the wrong title
+  does not count. If the closest capture misses, it tries a few CDX captures.
+  The journal records the source, snapshot URL, fetch time, content hash
+  (`sha256`) and match score.
+
+- archive.today is optional (`--source archive-today`) and is skipped with a
+  warning when its origin is unreachable.
+
+- Subscription access is opt-in per domain and inert until configured. Put a
+  header file outside the repositories, mode 600, and name it in
+  `~/.local/state/pinboard/fallbacks.json`:
+
+  ```json
+  {"subscriptions": {"nytimes.com": "~/.local/state/pinboard/sessions/nytimes.com.headers"}}
+  ```
+
+  A header file has `Name: value` lines and must include a `Cookie`. Its
+  contents are never journaled, committed or logged. Use
+  `--subscription DOMAIN=FILE` to opt in for one run. A page is accepted only
+  when its title matches and it is not a login page.
+
+- `--year YYYY` (repeatable) narrows `check`, `status` and `verify` to bookmarks
+  created in those years, for sampling old versus new links.
+
+- Checks are paced (`--interval`, default 10 s) and resumable; a source already
+  journaled for a URL is not queried again unless `--recheck` is given. A
+  throttled or timed-out response is not recorded as a miss: it is retried on
+  the next run, and a persistently throttled source stops the pass with advice
+  to raise `--interval`. Apply is resumable through `alt-intent`/`alt-done` and
+  replaces the whole `.alt:*` namespace, so a later run can add a source or
+  remove a stale one. It never changes `.status:*` or deletes anything.
+
+- `apply --dry-run` prints the proposed tags and writes nothing. Review it
+  before the first real apply.
+
 ## Domain Tags
 
 `pinboard domain-tags` gives every frequent site one consistent tag, derived

@@ -16,6 +16,7 @@
 - [suggest](#suggest)
 - [doctor](#doctor)
 - [audit](#audit)
+- [audit fallbacks](#audit-fallbacks)
 - [domain-tags](#domain-tags)
 - [mcp](#mcp)
 
@@ -426,13 +427,38 @@ Resumable: state lives under ~/.local/state/pinboard/audit/<pass>/.
 
 Arguments:
   COMMAND
-    plan      Freeze a work list from the mirror.
-    check     Check planned URLs over HTTP.
-    apply     Apply verdict tags through the API.
-    status    Show pass progress.
-    verify    Check the mirror agrees with the journal.
-    bump      Move a cohort tag after a complete pass.
-    titles    Fill empty bookmark titles before tagging.
+    plan       Freeze a work list from the mirror.
+    check      Check planned URLs over HTTP.
+    apply      Apply verdict tags through the API.
+    status     Show pass progress.
+    verify     Check the mirror agrees with the journal.
+    bump       Move a cohort tag after a complete pass.
+    titles     Fill empty bookmark titles before tagging.
+    fallbacks  Record archive and subscription fallbacks
+
+Options:
+  -h, --help   Display this help message and exit
+```
+
+<!-- /generated -->
+
+## audit fallbacks
+
+<!-- generated: ../scripts/pinboard audit fallbacks --help -->
+
+```text
+Usage: pinboard audit fallbacks [-h] COMMAND ...
+
+Record verified archive and subscription copies for dead,
+blocked or changed bookmarks. The live .status:* tags never change;
+availability goes in the private .alt:* namespace.
+
+Arguments:
+  COMMAND
+    check     Query fallback sources and journal every result.
+    apply     Add .alt:* tags through the API.
+    status    Show fallback progress.
+    verify    Check the mirror agrees with the fallback journal.
 
 Options:
   -h, --help  Display this help message and exit

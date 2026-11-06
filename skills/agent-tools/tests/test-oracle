@@ -12,7 +12,7 @@ WORK=$(cd "$(mktemp -d)" && pwd -P)
 export ORACLE_STATE_DIR="$WORK/state"
 trap 'rm -rf "$OUTPUT" "$WORK"' EXIT
 
-echo "1..17"
+echo "1..21"
 
 # Test 1: oracle --help outputs valid help and exits 0
 if "$BIN" --help >"$OUTPUT" 2>&1; then
@@ -397,4 +397,183 @@ else
   if [[ -f "$STALL_TEL" ]]; then
     sed 's/^/# /' "$STALL_TEL"
   fi
+fi
+
+# Test 18: --no-search disables Google Search in dry-run, telemetry, and serialized system_instruction
+DEFAULT_OUT="$WORK/default_search.out"
+DEFAULT_TEL="$WORK/default_search.json"
+NOSEARCH_OUT="$WORK/no_search.out"
+NOSEARCH_TEL="$WORK/no_search.json"
+
+if env AGENT_TELEMETRY_JSON="$DEFAULT_TEL" "$BIN" --dry-run "Default search prompt" >"$DEFAULT_OUT" 2>&1 &&
+  env AGENT_TELEMETRY_JSON="$NOSEARCH_TEL" "$BIN" --dry-run --no-search "Closed world prompt" >"$NOSEARCH_OUT" 2>&1; then
+  DEFAULT_PAYLOAD=$(grep -o '[^ ]*payload_[^ ]*\.xml' "$DEFAULT_OUT" 2>/dev/null || true)
+  NOSEARCH_PAYLOAD=$(grep -o '[^ ]*payload_[^ ]*\.xml' "$NOSEARCH_OUT" 2>/dev/null || true)
+  if grep -q "Tools:          search" "$DEFAULT_OUT" &&
+    grep -q '"tools": "search"' "$DEFAULT_TEL" &&
+    [[ -n "$DEFAULT_PAYLOAD" && -f "$DEFAULT_PAYLOAD" ]] &&
+    grep -q "Use the Google Search tool" "$DEFAULT_PAYLOAD" &&
+    grep -q "formulating search queries" "$DEFAULT_PAYLOAD" &&
+    grep -q "Tools:          none" "$NOSEARCH_OUT" &&
+    grep -q '"tools": "none"' "$NOSEARCH_TEL" &&
+    [[ -n "$NOSEARCH_PAYLOAD" && -f "$NOSEARCH_PAYLOAD" ]] &&
+    grep -q "External web grounding is disabled" "$NOSEARCH_PAYLOAD" &&
+    ! grep -q "Google Search" "$NOSEARCH_PAYLOAD" &&
+    ! grep -q "formulating search queries" "$NOSEARCH_PAYLOAD"; then
+    echo "ok 18 - --no-search updates tools summary, telemetry, and serialized system_instruction"
+  else
+    echo "not ok 18 - --no-search vs default payload or summary mismatch"
+    sed 's/^/# /' "$DEFAULT_OUT" "$NOSEARCH_OUT"
+  fi
+else
+  echo "not ok 18 - Dry run failed for default or --no-search"
+  sed 's/^/# /' "$DEFAULT_OUT" "$NOSEARCH_OUT"
+fi
+
+# Test 19: --search / --no-search last-flag-wins precedence, --no-search --code, and --maps --no-search
+REENABLE_OUT="$WORK/reenable_search.out"
+DISABLE_OUT="$WORK/disable_search.out"
+CODE_ONLY_OUT="$WORK/code_only.out"
+CODE_ONLY_TEL="$WORK/code_only.json"
+MAPS_NOSEARCH_OUT="$WORK/maps_nosearch.out"
+
+if "$BIN" --dry-run --no-search --search "Re-enable search" >"$REENABLE_OUT" 2>&1 &&
+  "$BIN" --dry-run --search --no-search "Disable search" >"$DISABLE_OUT" 2>&1 &&
+  env AGENT_TELEMETRY_JSON="$CODE_ONLY_TEL" "$BIN" --dry-run --no-search --code "Compute only" >"$CODE_ONLY_OUT" 2>&1 &&
+  "$BIN" --dry-run --maps --no-search "Maps query" >"$MAPS_NOSEARCH_OUT" 2>&1; then
+  REENABLE_PAYLOAD=$(grep -o '[^ ]*payload_[^ ]*\.xml' "$REENABLE_OUT" 2>/dev/null || true)
+  DISABLE_PAYLOAD=$(grep -o '[^ ]*payload_[^ ]*\.xml' "$DISABLE_OUT" 2>/dev/null || true)
+  MAPS_PAYLOAD=$(grep -o '[^ ]*payload_[^ ]*\.xml' "$MAPS_NOSEARCH_OUT" 2>/dev/null || true)
+  if grep -q "Tools:          search" "$REENABLE_OUT" &&
+    [[ -n "$REENABLE_PAYLOAD" && -f "$REENABLE_PAYLOAD" ]] &&
+    grep -q "Use the Google Search tool" "$REENABLE_PAYLOAD" &&
+    grep -q "Tools:          none" "$DISABLE_OUT" &&
+    [[ -n "$DISABLE_PAYLOAD" && -f "$DISABLE_PAYLOAD" ]] &&
+    ! grep -q "Google Search" "$DISABLE_PAYLOAD" &&
+    grep -q "Tools:          code" "$CODE_ONLY_OUT" &&
+    grep -q '"tools": "code"' "$CODE_ONLY_TEL" &&
+    grep -q "Tools:          maps" "$MAPS_NOSEARCH_OUT" &&
+    [[ -n "$MAPS_PAYLOAD" && -f "$MAPS_PAYLOAD" ]] &&
+    grep -q "Google Maps tool" "$MAPS_PAYLOAD"; then
+    echo "ok 19 - Flag override order (--no-search/--search), --no-search --code, and --maps interaction work"
+  else
+    echo "not ok 19 - Flag precedence or tool combination output did not match expectations"
+    sed 's/^/# /' "$REENABLE_OUT" "$DISABLE_OUT" "$CODE_ONLY_OUT" "$MAPS_NOSEARCH_OUT"
+  fi
+else
+  echo "not ok 19 - Dry run failed during flag precedence test"
+  sed 's/^/# /' "$REENABLE_OUT" "$DISABLE_OUT" "$CODE_ONLY_OUT" "$MAPS_NOSEARCH_OUT"
+fi
+
+# Test 20: '-' positional stdin works with --no-search while unknown '-*' flags are rejected
+STDIN_OUT="$WORK/stdin_nosearch.out"
+UNKNOWN_OUT="$WORK/unknown_flag.out"
+stdin_ok=0
+printf 'Piped stdin reference text\n' |
+  "$BIN" --dry-run --no-search "Summarize stdin only" - >"$STDIN_OUT" 2>&1 || stdin_ok=$?
+STDIN_PAYLOAD=$(grep -o '[^ ]*payload_[^ ]*\.xml' "$STDIN_OUT" 2>/dev/null || true)
+
+if [[ $stdin_ok -eq 0 ]] &&
+  grep -q "<stdin>" "$STDIN_OUT" &&
+  [[ -n "$STDIN_PAYLOAD" && -f "$STDIN_PAYLOAD" ]] &&
+  grep -q "Piped stdin reference text" "$STDIN_PAYLOAD" &&
+  ! "$BIN" --dry-run --unknown-option "Prompt" >"$UNKNOWN_OUT" 2>&1 &&
+  grep -q "oracle: error: unrecognized option: --unknown-option" "$UNKNOWN_OUT"; then
+  echo "ok 20 - Preserves '-' stdin positional argument and rejects unrecognized options"
+else
+  echo "not ok 20 - '-' stdin handling or unknown option rejection failed"
+  sed 's/^/# /' "$STDIN_OUT" "$UNKNOWN_OUT"
+fi
+
+# Test 21: Wire API requests attach exact expected tools for default, --no-search, and --no-search --code
+CAPTURE_PORT_FILE="$WORK/capture.port"
+CAPTURE_LOG="$WORK/capture.jsonl"
+cat >"$WORK/capture_server.py" <<'PYEOF'
+import http.server
+import sys
+
+
+class CaptureHandler(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        with open(sys.argv[2], "ab") as f:
+            f.write(body.replace(b"\n", b" ") + b"\n")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.end_headers()
+        payload = (
+            b'data: {"candidates": [{"content": {"parts": [{"text":'
+            b' "Stub answer"}], "role": "model"}}],'
+            b' "usageMetadata": {"promptTokenCount": 10,'
+            b' "candidatesTokenCount": 2}}\r\n\r\n'
+        )
+        self.wfile.write(payload)
+        self.wfile.flush()
+
+    def log_message(self, *args):
+        pass
+
+
+server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), CaptureHandler)
+server.daemon_threads = True
+with open(sys.argv[1], "w") as f:
+    f.write(str(server.server_address[1]))
+server.serve_forever()
+PYEOF
+python3 "$WORK/capture_server.py" "$CAPTURE_PORT_FILE" "$CAPTURE_LOG" &
+CAPTURE_PID=$!
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  [[ -s "$CAPTURE_PORT_FILE" ]] && break
+  sleep 0.5
+done
+CAPTURE_URL="http://127.0.0.1:$(cat "$CAPTURE_PORT_FILE" 2>/dev/null)"
+CAP_OUT1="$WORK/cap1.out"
+CAP_OUT2="$WORK/cap2.out"
+CAP_OUT3="$WORK/cap3.out"
+cap_status=0
+GEMINI_API_KEY=stub GOOGLE_GEMINI_BASE_URL="$CAPTURE_URL" \
+  "$BIN" --no-serialize "Default run" >"$CAP_OUT1" 2>&1 || cap_status=$?
+GEMINI_API_KEY=stub GOOGLE_GEMINI_BASE_URL="$CAPTURE_URL" \
+  "$BIN" --no-serialize --no-search "Closed run" >"$CAP_OUT2" 2>&1 || cap_status=$?
+GEMINI_API_KEY=stub GOOGLE_GEMINI_BASE_URL="$CAPTURE_URL" \
+  "$BIN" --no-serialize --no-search --code "Code run" >"$CAP_OUT3" 2>&1 || cap_status=$?
+kill "$CAPTURE_PID" 2>/dev/null || true
+wait "$CAPTURE_PID" 2>/dev/null || true
+
+VERIFY_OUT="$WORK/verify_capture.out"
+python3 - "$CAPTURE_LOG" >"$VERIFY_OUT" 2>&1 <<'PYEOF' || true
+import json
+import sys
+from pathlib import Path
+
+lines = Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
+assert len(lines) == 3, f"expected 3 requests, got {len(lines)}"
+reqs = [json.loads(line) for line in lines]
+
+# 1. Default: googleSearch present, codeExecution absent
+t1 = json.dumps(reqs[0].get("tools"))
+assert "googleSearch" in t1 or "google_search" in t1, t1
+assert "codeExecution" not in t1 and "code_execution" not in t1, t1
+
+# 2. --no-search: no tools attached, no Google Search in systemInstruction
+assert not reqs[1].get("tools"), reqs[1].get("tools")
+si2 = json.dumps(reqs[1].get("systemInstruction", ""))
+assert "Google Search" not in si2, si2
+
+# 3. --no-search --code: codeExecution present, googleSearch absent
+t3 = json.dumps(reqs[2].get("tools"))
+assert "codeExecution" in t3 or "code_execution" in t3, t3
+assert "googleSearch" not in t3 and "google_search" not in t3, t3
+print("WIRE_OK")
+PYEOF
+
+if [[ $cap_status -eq 0 ]] &&
+  grep -q "^WIRE_OK$" "$VERIFY_OUT" &&
+  grep -q "| search | thinking=high |" "$CAP_OUT1" &&
+  grep -q "| none | thinking=high |" "$CAP_OUT2" &&
+  grep -q "| code | thinking=high |" "$CAP_OUT3"; then
+  echo "ok 21 - Sends expected wire tools config and status lines for search, none, and code"
+else
+  echo "not ok 21 - Wire tools config or stderr status lines did not match"
+  sed 's/^/# /' "$VERIFY_OUT" "$CAP_OUT1" "$CAP_OUT2" "$CAP_OUT3"
 fi
