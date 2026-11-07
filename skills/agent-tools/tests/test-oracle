@@ -12,7 +12,7 @@ WORK=$(cd "$(mktemp -d)" && pwd -P)
 export ORACLE_STATE_DIR="$WORK/state"
 trap 'rm -rf "$OUTPUT" "$WORK"' EXIT
 
-echo "1..21"
+echo "1..23"
 
 # Test 1: oracle --help outputs valid help and exits 0
 if "$BIN" --help >"$OUTPUT" 2>&1; then
@@ -485,7 +485,7 @@ else
   sed 's/^/# /' "$STDIN_OUT" "$UNKNOWN_OUT"
 fi
 
-# Test 21: Wire API requests attach exact expected tools for default, --no-search, and --no-search --code
+# Test 21: Wire API requests attach exact expected tools and thinking level for default, --no-search, --no-search --code, and --thinking
 CAPTURE_PORT_FILE="$WORK/capture.port"
 CAPTURE_LOG="$WORK/capture.jsonl"
 cat >"$WORK/capture_server.py" <<'PYEOF'
@@ -530,6 +530,7 @@ CAPTURE_URL="http://127.0.0.1:$(cat "$CAPTURE_PORT_FILE" 2>/dev/null)"
 CAP_OUT1="$WORK/cap1.out"
 CAP_OUT2="$WORK/cap2.out"
 CAP_OUT3="$WORK/cap3.out"
+CAP_OUT4="$WORK/cap4.out"
 cap_status=0
 GEMINI_API_KEY=stub GOOGLE_GEMINI_BASE_URL="$CAPTURE_URL" \
   "$BIN" --no-serialize "Default run" >"$CAP_OUT1" 2>&1 || cap_status=$?
@@ -537,6 +538,8 @@ GEMINI_API_KEY=stub GOOGLE_GEMINI_BASE_URL="$CAPTURE_URL" \
   "$BIN" --no-serialize --no-search "Closed run" >"$CAP_OUT2" 2>&1 || cap_status=$?
 GEMINI_API_KEY=stub GOOGLE_GEMINI_BASE_URL="$CAPTURE_URL" \
   "$BIN" --no-serialize --no-search --code "Code run" >"$CAP_OUT3" 2>&1 || cap_status=$?
+GEMINI_API_KEY=stub GOOGLE_GEMINI_BASE_URL="$CAPTURE_URL" \
+  "$BIN" --no-serialize --thinking medium "Medium run" >"$CAP_OUT4" 2>&1 || cap_status=$?
 kill "$CAPTURE_PID" 2>/dev/null || true
 wait "$CAPTURE_PID" 2>/dev/null || true
 
@@ -547,7 +550,7 @@ import sys
 from pathlib import Path
 
 lines = Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
-assert len(lines) == 3, f"expected 3 requests, got {len(lines)}"
+assert len(lines) == 4, f"expected 4 requests, got {len(lines)}"
 reqs = [json.loads(line) for line in lines]
 
 # 1. Default: googleSearch present, codeExecution absent
@@ -564,6 +567,16 @@ assert "Google Search" not in si2, si2
 t3 = json.dumps(reqs[2].get("tools"))
 assert "codeExecution" in t3 or "code_execution" in t3, t3
 assert "googleSearch" not in t3 and "google_search" not in t3, t3
+
+
+# 4. Thinking level: high by default, medium with --thinking medium
+def level(req):
+    cfg = req.get("generationConfig", {}).get("thinkingConfig", {})
+    return str(cfg.get("thinkingLevel", cfg.get("thinking_level", ""))).upper()
+
+
+assert level(reqs[0]) == "HIGH", reqs[0].get("generationConfig")
+assert level(reqs[3]) == "MEDIUM", reqs[3].get("generationConfig")
 print("WIRE_OK")
 PYEOF
 
@@ -571,9 +584,67 @@ if [[ $cap_status -eq 0 ]] &&
   grep -q "^WIRE_OK$" "$VERIFY_OUT" &&
   grep -q "| search | thinking=high |" "$CAP_OUT1" &&
   grep -q "| none | thinking=high |" "$CAP_OUT2" &&
-  grep -q "| code | thinking=high |" "$CAP_OUT3"; then
-  echo "ok 21 - Sends expected wire tools config and status lines for search, none, and code"
+  grep -q "| code | thinking=high |" "$CAP_OUT3" &&
+  grep -q "| search | thinking=medium |" "$CAP_OUT4"; then
+  echo "ok 21 - Sends expected wire tools and thinking config and status lines"
 else
   echo "not ok 21 - Wire tools config or stderr status lines did not match"
-  sed 's/^/# /' "$VERIFY_OUT" "$CAP_OUT1" "$CAP_OUT2" "$CAP_OUT3"
+  sed 's/^/# /' "$VERIFY_OUT" "$CAP_OUT1" "$CAP_OUT2" "$CAP_OUT3" "$CAP_OUT4"
+fi
+
+# Test 22: --thinking defaults to high, honors ORACLE_THINKING, and the flag wins over the env
+THINK_DEFAULT_OUT="$WORK/think_default.out"
+THINK_DEFAULT_TEL="$WORK/think_default.json"
+THINK_FLAG_OUT="$WORK/think_flag.out"
+THINK_FLAG_TEL="$WORK/think_flag.json"
+THINK_ENV_OUT="$WORK/think_env.out"
+THINK_BOTH_OUT="$WORK/think_both.out"
+THINK_EQ_OUT="$WORK/think_eq.out"
+
+if env -u ORACLE_THINKING AGENT_TELEMETRY_JSON="$THINK_DEFAULT_TEL" \
+  "$BIN" --dry-run "Default thinking" >"$THINK_DEFAULT_OUT" 2>&1 &&
+  env -u ORACLE_THINKING AGENT_TELEMETRY_JSON="$THINK_FLAG_TEL" \
+    "$BIN" --dry-run --thinking medium "Medium thinking" >"$THINK_FLAG_OUT" 2>&1 &&
+  ORACLE_THINKING=low "$BIN" --dry-run "Env thinking" >"$THINK_ENV_OUT" 2>&1 &&
+  ORACLE_THINKING=low "$BIN" --dry-run --thinking medium "Flag beats env" >"$THINK_BOTH_OUT" 2>&1 &&
+  env -u ORACLE_THINKING "$BIN" --dry-run --thinking=low "Equals form" >"$THINK_EQ_OUT" 2>&1; then
+  if grep -q "Thinking:       high" "$THINK_DEFAULT_OUT" &&
+    grep -q '"thinking_level": "high"' "$THINK_DEFAULT_TEL" &&
+    grep -q "Thinking:       medium" "$THINK_FLAG_OUT" &&
+    grep -q '"thinking_level": "medium"' "$THINK_FLAG_TEL" &&
+    grep -q "Thinking:       low" "$THINK_ENV_OUT" &&
+    grep -q "Thinking:       medium" "$THINK_BOTH_OUT" &&
+    grep -q "Thinking:       low" "$THINK_EQ_OUT"; then
+    echo "ok 22 - --thinking default, flag, --thinking=LEVEL, ORACLE_THINKING, and flag-over-env precedence"
+  else
+    echo "not ok 22 - --thinking level not reflected in dry-run summary or telemetry"
+    sed 's/^/# /' "$THINK_DEFAULT_OUT" "$THINK_FLAG_OUT" "$THINK_ENV_OUT" "$THINK_BOTH_OUT" "$THINK_EQ_OUT"
+  fi
+else
+  echo "not ok 22 - Dry run failed during --thinking test"
+  sed 's/^/# /' "$THINK_DEFAULT_OUT" "$THINK_FLAG_OUT" "$THINK_ENV_OUT" "$THINK_BOTH_OUT" "$THINK_EQ_OUT"
+fi
+
+# Test 23: --thinking rejects invalid levels (flag and env) and a missing argument, recording error telemetry
+THINK_BAD_OUT="$WORK/think_bad.out"
+THINK_BAD_TEL="$WORK/think_bad.json"
+THINK_BADENV_OUT="$WORK/think_badenv.out"
+THINK_MISSING_OUT="$WORK/think_missing.out"
+THINK_EMPTY_OUT="$WORK/think_empty.out"
+
+if ! env AGENT_TELEMETRY_JSON="$THINK_BAD_TEL" \
+  "$BIN" --dry-run --thinking extreme "Bad level" >"$THINK_BAD_OUT" 2>&1 &&
+  grep -q "oracle: error: --thinking: invalid level: 'extreme' (choose from high, medium, low)" "$THINK_BAD_OUT" &&
+  grep -q '"status": "Error"' "$THINK_BAD_TEL" &&
+  grep -q '"error": "--thinking: invalid level' "$THINK_BAD_TEL" &&
+  ! ORACLE_THINKING=none "$BIN" --dry-run "Bad env level" >"$THINK_BADENV_OUT" 2>&1 &&
+  grep -q "oracle: error: --thinking: invalid level: 'none'" "$THINK_BADENV_OUT" &&
+  ! "$BIN" --dry-run "Missing level" --thinking >"$THINK_MISSING_OUT" 2>&1 &&
+  grep -q "oracle: error: --thinking requires an argument" "$THINK_MISSING_OUT" &&
+  ! "$BIN" --dry-run --thinking= "Empty level" >"$THINK_EMPTY_OUT" 2>&1 &&
+  grep -q "oracle: error: --thinking requires an argument" "$THINK_EMPTY_OUT"; then
+  echo "ok 23 - --thinking rejects invalid levels and missing arguments with error telemetry"
+else
+  echo "not ok 23 - --thinking validation did not fail as expected"
+  sed 's/^/# /' "$THINK_BAD_OUT" "$THINK_BADENV_OUT" "$THINK_MISSING_OUT" "$THINK_EMPTY_OUT"
 fi

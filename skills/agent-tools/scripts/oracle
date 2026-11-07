@@ -216,6 +216,8 @@ def extract_retry_delay(exc: Exception) -> float | None:
     return None
 
 
+THINKING_LEVELS = ("high", "medium", "low")
+
 # A response to a large prompt with thinking on can take minutes, so a request
 # is given a floor plus time in proportion to its input before it is abandoned.
 REQUEST_TIMEOUT_FLOOR = 180.0
@@ -429,7 +431,7 @@ def wants_help(argv: list[str]) -> bool:
             return False
         if token in ("-h", "--help"):
             return True
-        if token in ("--model", "--request-timeout"):
+        if token in ("--model", "--thinking", "--request-timeout"):
             skip_next = True
     return False
 
@@ -505,6 +507,7 @@ Options:
   --code                Enable Code Execution for Python.
   --dry-run             Output a summary of the payload (resolved files, sizes, and prompt) without calling the Gemini API.
   --model MODEL         Gemini model to use (default: gemini-4-argon).
+  --thinking LEVEL      Thinking level: 'high', 'medium', 'low' (default: 'high').
   --request-timeout SECONDS
                         Abandon and retry an API request with no response after
                         SECONDS; 0 waits indefinitely. (default: 180, plus 1 per
@@ -517,11 +520,18 @@ Options:
 Environment:
   GEMINI_API_KEY        Required. Your Gemini API key.
   GEMINI_MODEL          Optional. Default model if --model is not given.
+  ORACLE_THINKING       Optional. Default for --thinking.
   ORACLE_REQUEST_TIMEOUT
                         Optional. Default for --request-timeout.
   AGENT_TELEMETRY_JSON  Optional. Destination path for structured JSON execution telemetry.
   ORACLE_STATE_DIR      Optional. State directory for serialized payloads and answers
                         (default: ${{XDG_STATE_HOME:-~/.local/state}}/oracle).
+
+Thinking Level:
+  With very large contexts at 'high', the API can return 504 DEADLINE_EXCEEDED
+  after roughly five minutes of thinking. A 504 is retried within the 300-second
+  retry budget, so one failure typically costs about ten minutes of wall time.
+  'medium' usually finishes in a few minutes; lower the level if 504s recur.
 
 Examples:
   cat codebase.md | {os.path.basename(sys.argv[0])} "Propose a refactoring plan" -
@@ -561,6 +571,7 @@ def main():
     serialize = True
     tools_str = "search"
     model_id = os.environ.get("GEMINI_MODEL", "gemini-4-argon")
+    thinking_level = os.environ.get("ORACLE_THINKING") or "high"
     raw_request_timeout = os.environ.get("ORACLE_REQUEST_TIMEOUT") or None
     parts: list[types.Part] = []
     manifest_str = ""
@@ -583,6 +594,7 @@ def main():
                 "success": status_label == "Succeeded",
                 "elapsed_seconds": round(elapsed, 3),
                 "tools": tools_str,
+                "thinking_level": thinking_level,
                 "prompt_tokens": prompt_tokens,
                 "candidate_tokens": candidate_tokens,
                 "thinking_tokens": thinking_tokens,
@@ -663,6 +675,27 @@ def main():
                     telemetry_status = "Error"
                     telemetry_error = "--model requires an argument"
                     sys.exit(1)
+            elif arg == "--thinking":
+                if i + 1 >= len(argv):
+                    print(
+                        f"{os.path.basename(sys.argv[0])}: error: --thinking requires an argument",
+                        file=sys.stderr,
+                    )
+                    telemetry_status = "Error"
+                    telemetry_error = "--thinking requires an argument"
+                    sys.exit(1)
+                thinking_level = argv[i + 1]
+                i += 1
+            elif arg.startswith("--thinking="):
+                thinking_level = arg.split("=", 1)[1]
+                if not thinking_level:
+                    print(
+                        f"{os.path.basename(sys.argv[0])}: error: --thinking requires an argument",
+                        file=sys.stderr,
+                    )
+                    telemetry_status = "Error"
+                    telemetry_error = "--thinking requires an argument"
+                    sys.exit(1)
             elif arg == "--request-timeout":
                 if i + 1 >= len(argv):
                     print(
@@ -690,6 +723,19 @@ def main():
             i += 1
 
         tools_str = resolve_tools_label(use_search, use_maps, use_code)
+
+        if thinking_level not in THINKING_LEVELS:
+            err = (
+                f"--thinking: invalid level: {thinking_level!r}"
+                f" (choose from {', '.join(THINKING_LEVELS)})"
+            )
+            print(
+                f"{os.path.basename(sys.argv[0])}: error: {err}",
+                file=sys.stderr,
+            )
+            telemetry_status = "Error"
+            telemetry_error = err
+            sys.exit(1)
 
         request_timeout_override: int | None = None
         if raw_request_timeout is not None:
@@ -933,6 +979,7 @@ def main():
 
             print("Payload Summary:", file=sys.stdout)
             print(f"  Tools:          {tools_str}", file=sys.stdout)
+            print(f"  Thinking:       {thinking_level}", file=sys.stdout)
             print(
                 f"  Text Context:   {text_files_count} file(s){stdin_note} ({total_text_size / 1024:.2f} KB, ~{total_text_size / 4 / 1000:.0f}k tokens)",
                 file=sys.stdout,
@@ -1025,7 +1072,7 @@ def main():
         context_str = ", ".join(context_parts) if context_parts else "no context"
 
         print(
-            f"{os.path.basename(sys.argv[0])}: {model_id} | {tools_str} | thinking=high | {context_str}",
+            f"{os.path.basename(sys.argv[0])}: {model_id} | {tools_str} | thinking={thinking_level} | {context_str}",
             file=sys.stderr,
         )
         if total_text_size < SMALL_PAYLOAD_SIZE and total_media_count == 0:
@@ -1130,7 +1177,7 @@ def main():
                         system_instruction=system_instruction,
                         tools=tools_config or None,
                         thinking_config=types.ThinkingConfig(
-                            thinking_level="high", include_thoughts=True
+                            thinking_level=thinking_level, include_thoughts=True
                         ),
                         temperature=1.0,
                         http_options=http_options,
