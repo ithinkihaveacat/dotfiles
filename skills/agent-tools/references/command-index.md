@@ -399,6 +399,7 @@ Options:
   --code                Enable Code Execution for Python.
   --dry-run             Output a summary of the payload (resolved files, sizes, and prompt) without calling the Gemini API.
   --model MODEL         Gemini model to use (default: gemini-4-argon).
+  --thinking LEVEL      Thinking level: 'high', 'medium', 'low' (default: 'high').
   --request-timeout SECONDS
                         Abandon and retry an API request with no response after
                         SECONDS; 0 waits indefinitely. (default: 180, plus 1 per
@@ -411,11 +412,18 @@ Options:
 Environment:
   GEMINI_API_KEY        Required. Your Gemini API key.
   GEMINI_MODEL          Optional. Default model if --model is not given.
+  ORACLE_THINKING       Optional. Default for --thinking.
   ORACLE_REQUEST_TIMEOUT
                         Optional. Default for --request-timeout.
   AGENT_TELEMETRY_JSON  Optional. Destination path for structured JSON execution telemetry.
   ORACLE_STATE_DIR      Optional. State directory for serialized payloads and answers
                         (default: ${XDG_STATE_HOME:-~/.local/state}/oracle).
+
+Thinking Level:
+  With very large contexts at 'high', the API can return 504 DEADLINE_EXCEEDED
+  after roughly five minutes of thinking. A 504 is retried within the 300-second
+  retry budget, so one failure typically costs about ten minutes of wall time.
+  'medium' usually finishes in a few minutes; lower the level if 504s recur.
 
 Examples:
   cat codebase.md | oracle "Propose a refactoring plan" -
