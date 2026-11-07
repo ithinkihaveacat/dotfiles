@@ -4,27 +4,27 @@ set -euo pipefail
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [OPTIONS] [-] PROMPT
+Usage: $(basename "$0") [-] "QUESTION"
 
-Asks a question to the Gemini Flash model and prints a short, paragraph-style
-response (wrapped to 80 columns).
+Ask a question and print a short, paragraph-style answer wrapped to 80 columns.
+Uses the gemini-flash-latest model by default.
 
 Arguments:
-  -           Read context from stdin and include it with the question.
-              Without a leading '-', stdin is ignored.
-  PROMPT      The question to ask.
+  -           Read additional context from stdin.
+  QUESTION    The question to answer.
 
 Options:
   --help         Display this help message and exit
   --model MODEL  Gemini model to use (default: gemini-flash-latest)
 
 Environment:
-  GEMINI_API_KEY  Required. Your Gemini API key.
-  GEMINI_MODEL    Optional. Default model if --model is not given.
+  GEMINI_API_KEY   Optional. Read by gemini-api; a key stored with
+                   "gemini-api configure" is also accepted.
+  GEMINI_MODEL     Optional. Default model if --model is not given.
 
 Exit Codes:
   0    Success
-  1    General error (usage, API error)
+  1    General error (usage, no input, API error)
   127  Missing required dependency
 
 Examples:
@@ -81,15 +81,8 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-require curl
-require jq
 require fmt
-
-GEMINI_API_KEY="${GEMINI_API_KEY:-}"
-if [[ -z "${GEMINI_API_KEY:-}" ]]; then
-  echo "$(basename "$0"): GEMINI_API_KEY environment variable not set" >&2
-  exit 1
-fi
+require gemini-text
 
 if [[ ${#USER_PROMPT_PARTS[@]} -lt 1 ]]; then
   echo "Usage: $(basename "$0") PROMPT [OPTIONS]" >&2
@@ -104,113 +97,41 @@ if { [ -p /dev/stdin ] || [ -s /dev/stdin ]; } && ! ${READ_STDIN}; then
   echo "$(basename "$0"): warning: stdin contains piped input, but '-' was not specified. Stdin is ignored." >&2
 fi
 
-URL="https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent"
-
 # System Instruction
 SYSTEM_INSTRUCTION="You are a helpful assistant. Provide a short, direct answer (less than 300 characters) in a single full paragraph. Do not use point form, lists, or markdown formatting (like bold or headers). Just plain text."
 
-# Construct the JSON payload
+BODY='{"generation_config":{"temperature":1.0,"max_output_tokens":2048,"thinking_level":"low"}}'
+
 if $READ_STDIN; then
-  # Read stdin into a temp file and use --rawfile to avoid ARG_MAX limits on
-  # large inputs (see shell.md "Handling Large Inputs with jq").
+  # Read stdin into a temp file so the context never travels through a command
+  # line.
   STDIN_FILE=$(mktemp)
   trap 'rm -f "$STDIN_FILE"' EXIT
   cat >"$STDIN_FILE"
-  REQUEST_BODY=$(jq -n \
-    --arg system_instruction "$SYSTEM_INSTRUCTION" \
-    --arg user_prompt "$USER_PROMPT" \
-    --rawfile stdin_content "$STDIN_FILE" \
-    '{
-      system_instruction: {
-        parts: [{ text: $system_instruction }]
-      },
-      contents: [
-        {
-          role: "user",
-          parts: [{ text: ("Context:\n" + $stdin_content + "\n\nQuestion:\n" + $user_prompt) }]
-        }
-      ],
-      generationConfig: {
-        temperature: 1.0,
-        maxOutputTokens: 2048,
-        thinkingConfig: {
-          thinkingLevel: "low"
-        }
-      }
-    }')
+  CONTEXT_FILE=$(mktemp)
+  trap 'rm -f "$STDIN_FILE" "$CONTEXT_FILE"' EXIT
+  {
+    printf 'Context:\n'
+    cat "$STDIN_FILE"
+  } >"$CONTEXT_FILE"
+  if ! TEXT=$(gemini-text \
+    --model "$MODEL" \
+    --system "$SYSTEM_INSTRUCTION" \
+    --body "$BODY" \
+    --context "$CONTEXT_FILE" \
+    "Question:
+$USER_PROMPT"); then
+    exit 1
+  fi
 else
-  REQUEST_BODY=$(jq -n \
-    --arg system_instruction "$SYSTEM_INSTRUCTION" \
-    --arg user_prompt "$USER_PROMPT" \
-    '{
-      system_instruction: {
-        parts: [{ text: $system_instruction }]
-      },
-      contents: [
-        {
-          role: "user",
-          parts: [{ text: $user_prompt }]
-        }
-      ],
-      generationConfig: {
-        temperature: 1.0,
-        maxOutputTokens: 2048,
-        thinkingConfig: {
-          thinkingLevel: "low"
-        }
-      }
-    }')
-fi
-
-# Execute the request
-# Read the status via -w '%{http_code}' rather than trusting curl's exit code:
-# it is "000" only when no HTTP response arrived at all, which is what separates
-# a blocked or absent network from an API that answered with an error. Capturing
-# the exit code also stops a failed curl from killing the script silently under
-# `set -e`, before any of the handling below can run.
-CURL_STATUS=0
-RAW=$(echo "${REQUEST_BODY}" | curl -sS -X POST \
-  -H "x-goog-api-key: $GEMINI_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d @- -w '\n%{http_code}' \
-  "${URL}" 2>/dev/null) || CURL_STATUS=$?
-
-HTTP_STATUS="${RAW##*$'\n'}"
-RESPONSE="${RAW%$'\n'*}"
-
-# Classify by status first: -w emits a three-digit code whenever a response
-# arrived, and "000" when none did, which is the only reliable way to separate
-# a blocked or absent network from an API that answered. The exit code is
-# reported here for diagnosis only; it becomes meaningful on the 2xx path below.
-if [[ ! "$HTTP_STATUS" =~ ^[0-9]{3}$ || "$HTTP_STATUS" == "000" ]]; then
-  echo "$(basename "$0"): could not reach $URL (curl exit $CURL_STATUS, http ${HTTP_STATUS:-none}: network unreachable, DNS failure, or blocked egress)" >&2
-  exit 1
-fi
-
-# Only on a 2xx does the exit code say something the status cannot: whether the
-# body finished arriving. A response truncated mid-transfer still reads as HTTP
-# 200, and would otherwise reach the parser below and be reported as the model
-# returning nothing -- a refusal, rather than the transport failure it is.
-if [[ "$HTTP_STATUS" == 2?? && $CURL_STATUS -ne 0 ]]; then
-  echo "$(basename "$0"): $URL returned HTTP $HTTP_STATUS but the body did not finish transferring (curl exit $CURL_STATUS)" >&2
-  exit 1
-fi
-
-if [[ "$HTTP_STATUS" != 2?? ]]; then
-  ERROR_MSG=$(echo "$RESPONSE" | jq -r '.error.message // empty' 2>/dev/null || true)
-  echo "$(basename "$0"): API error (HTTP $HTTP_STATUS): ${ERROR_MSG:-no error message in response}" >&2
-  exit 1
-fi
-
-# Extract and output the text response
-TEXT=$(echo "$RESPONSE" | jq -r '.candidates[0].content.parts[0].text // empty')
-
-if [[ -z "$TEXT" ]]; then
-  # Fallback: sometimes the model might block content or return explicit refusal
-  FINISH_REASON=$(echo "$RESPONSE" | jq -r '.candidates[0].finishReason // "UNKNOWN"')
-  echo "$(basename "$0"): no response text received (finish reason: $FINISH_REASON)" >&2
-  exit 1
+  if ! TEXT=$(gemini-text \
+    --model "$MODEL" \
+    --system "$SYSTEM_INSTRUCTION" \
+    --body "$BODY" \
+    "$USER_PROMPT"); then
+    exit 1
+  fi
 fi
 
 # Wrap to 80 chars
-echo "$TEXT" | fmt -w 80
+printf '%s\n' "$TEXT" | fmt -w 80

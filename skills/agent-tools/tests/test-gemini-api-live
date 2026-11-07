@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+#
+# Live smoke tests for the Gemini Interactions path the wrappers now use.
+#
+# These hit the real API, cost a little quota, and are the only tests that can
+# notice the *service* changing shape (the hermetic contract test can only
+# notice the CLI changing behaviour). They skip when no key is available, which
+# is how CI runs them.
+#
+
+set -u
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+HELPER="$DIR/../libexec/gemini-text"
+CLI="${GEMINI_API_BIN:-$(command -v gemini-api || true)}"
+
+if [[ -z "${GEMINI_API_KEY:-}" || "${AGENT_OFFLINE:-}" == "1" ]]; then
+  echo "1..0 # SKIP GEMINI_API_KEY not set or AGENT_OFFLINE=1"
+  exit 0
+fi
+if [[ -z "$CLI" || ! -x "$CLI" ]]; then
+  echo "1..0 # SKIP gemini-api not installed"
+  exit 0
+fi
+
+MODEL="${GEMINI_LIVE_MODEL:-gemini-flash-lite-latest}"
+WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT
+
+echo "1..4"
+
+# 1. The helper returns text from the live service.
+if OUT=$("$HELPER" --model "$MODEL" "Reply with exactly: pong" 2>"$WORK/err") &&
+  [[ "$OUT" == *"pong"* ]]; then
+  echo "ok 1 - helper returns live text"
+else
+  echo "not ok 1 - helper did not return live text"
+  sed 's/^/# /' "$WORK/err"
+fi
+
+# 2. The live interaction still carries text in .steps[], the path the helper
+#    extracts. This is the assertion a service-side change breaks.
+if "$CLI" generate "Reply with exactly: pong" --model "$MODEL" --stream=false \
+  --output-format json >"$WORK/response.json" 2>"$WORK/err" &&
+  [[ "$(jq -r '.status' "$WORK/response.json")" == "completed" ]] &&
+  [[ "$(jq -r '[.steps[]? | select(.type == "model_output") | .content[]?
+    | select(.type == "text") | .text] | join("")' "$WORK/response.json")" == *"pong"* ]]; then
+  echo "ok 2 - live responses expose text under .steps[]"
+else
+  echo "not ok 2 - live response shape changed or the request failed"
+  sed 's/^/# /' "$WORK/err"
+  head -c 2000 "$WORK/response.json" | sed 's/^/# /'
+fi
+
+# 3. store:false keeps the interaction off the server: the response has no id
+#    to retrieve it by. This is what stops emerson from filing every document
+#    it reads.
+if "$CLI" generate "Reply with exactly: pong" --model "$MODEL" --stream=false \
+  --body '{"store":false}' --output-format json >"$WORK/unstored.json" 2>"$WORK/err"; then
+  if [[ "$(jq -r 'has("id")' "$WORK/unstored.json")" == "false" ]]; then
+    echo "ok 3 - store:false returns no interaction id"
+  else
+    echo "not ok 3 - store:false still returned an id; the interaction may be retrievable"
+    jq -r '.id' "$WORK/unstored.json" | sed 's/^/# /'
+  fi
+else
+  echo "not ok 3 - store:false request failed"
+  sed 's/^/# /' "$WORK/err"
+fi
+
+# 4. The default is the opposite: an interaction without store:false can be
+#    fetched back. If this ever stops being true, the helper's override is no
+#    longer necessary (and this test says so).
+if "$CLI" generate "Reply with exactly: pong" --model "$MODEL" --stream=false \
+  --output-format json >"$WORK/stored.json" 2>"$WORK/err"; then
+  id=$(jq -r '.id // empty' "$WORK/stored.json")
+  if [[ -n "$id" ]] && "$CLI" agent status "$id" --stream=false >/dev/null 2>&1; then
+    echo "ok 4 - default generate stores the interaction (helper must override)"
+  else
+    echo "not ok 4 - default interaction was not retrievable; review store handling"
+  fi
+else
+  echo "not ok 4 - default generate failed"
+  sed 's/^/# /' "$WORK/err"
+fi

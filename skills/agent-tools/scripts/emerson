@@ -9,7 +9,7 @@ Usage: $(basename "$0") [OPTIONS] "PROMPT" < INPUT_FILE
 Generates an essay-length answer (approx. 3000 words) to the PROMPT based
 strictly on the text provided via standard input. Operates as a closed-book,
 sandboxed analyst with zero external search, treating the input as the sole
-source of truth to prevent hallucination. Uses the Gemini Pro model by
+source of truth to prevent hallucination. Uses the gemini-4-argon model by
 default.
 
 Arguments:
@@ -23,7 +23,8 @@ Options:
   --model MODEL  Gemini model to use (default: gemini-4-argon)
 
 Environment:
-  GEMINI_API_KEY   Required. Your Gemini API key.
+  GEMINI_API_KEY   Optional. Read by gemini-api; a key stored with
+                   "gemini-api configure" is also accepted.
   GEMINI_MODEL     Optional. Default model if --model is not given.
 
 Exit Codes:
@@ -87,8 +88,8 @@ if [[ -z "$USER_PROMPT" ]]; then
   exit 1
 fi
 
-# Read stdin into a temp file and use --rawfile to avoid ARG_MAX limits on
-# large inputs (see shell.md "Handling Large Inputs with jq").
+# Read stdin into a temp file so the reference material never travels through a
+# command line, and so an empty stdin is reported as such rather than sent.
 STDIN_FILE=$(mktemp)
 trap 'rm -f "$STDIN_FILE"' EXIT
 cat >"$STDIN_FILE"
@@ -98,15 +99,7 @@ if [[ ! -s "$STDIN_FILE" ]]; then
   exit 1
 fi
 
-require curl
-require jq
-
-GEMINI_API_KEY="${GEMINI_API_KEY:-}"
-if [[ -z "${GEMINI_API_KEY:-}" ]]; then
-  echo "$(basename "$0"): GEMINI_API_KEY environment variable not set" >&2
-  exit 1
-fi
-URL="https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent"
+require gemini-text
 
 # System Instruction: A detailed guide for the model
 # Choice Explanation: I have chosen to place the core behavioral directives in the
@@ -157,91 +150,31 @@ If the provided text does not contain the answer to a specific part of the user'
 EOF
 SYSTEM_INSTRUCTION="${SYSTEM_INSTRUCTION%$'\n'}"
 
-# Construct the JSON payload using jq for safety
-# We pass the input data as the first part (read from stdin), and the user prompt as the second part.
-REQUEST_BODY=$(jq -n \
-  --arg system_instruction "$SYSTEM_INSTRUCTION" \
-  --arg user_prompt "$USER_PROMPT" \
-  --rawfile stdin_content "$STDIN_FILE" \
-  '{
-                    system_instruction: { 
-                      parts: [{ text: $system_instruction }] 
-                    }, 
-                    contents: [ 
-                      { 
-                        role: "user", 
-                        parts: [ 
-                          { text: ("Reference Material:\n\n" + $stdin_content) }, 
-                          { text: ("\n\nTask/Question:\n" + $user_prompt) } 
-                        ] 
-                      } 
-                    ], 
-                    generationConfig: { 
-                      temperature: 1.0, 
-                      thinkingConfig: {
-                        thinkingLevel: "high"
-                      }
-                    } 
-                  }')
+# Keep the labelling the prompt was tuned against: the reference material is
+# sent first, then the question, with the same headings as before.
+CONTEXT_FILE=$(mktemp)
+trap 'rm -f "$STDIN_FILE" "$CONTEXT_FILE"' EXIT
+{
+  printf 'Reference Material:\n\n'
+  cat "$STDIN_FILE"
+} >"$CONTEXT_FILE"
 
-# Execute the request
-# Read the status via -w '%{http_code}' rather than trusting curl's exit code:
-# it is "000" only when no HTTP response arrived at all, which is what separates
-# a blocked or absent network from an API that answered with an error. Capturing
-# the exit code also stops a failed curl from killing the script silently under
-# `set -e`, before any of the handling below can run.
-CURL_STATUS=0
-RAW=$(echo "${REQUEST_BODY}" | curl -sS -X POST \
-  -H "x-goog-api-key: $GEMINI_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d @- -w '\n%{http_code}' \
-  "${URL}" 2>/dev/null) || CURL_STATUS=$?
+BODY='{"generation_config":{"temperature":1.0,"thinking_level":"high"}}'
 
-HTTP_STATUS="${RAW##*$'\n'}"
-RESPONSE="${RAW%$'\n'*}"
-
-# Classify by status first: -w emits a three-digit code whenever a response
-# arrived, and "000" when none did, which is the only reliable way to separate
-# a blocked or absent network from an API that answered. The exit code is
-# reported here for diagnosis only; it becomes meaningful on the 2xx path below.
-if [[ ! "$HTTP_STATUS" =~ ^[0-9]{3}$ || "$HTTP_STATUS" == "000" ]]; then
-  echo "$(basename "$0"): could not reach $URL (curl exit $CURL_STATUS, http ${HTTP_STATUS:-none}: network unreachable, DNS failure, or blocked egress)" >&2
+if ! TEXT=$(gemini-text \
+  --model "$MODEL" \
+  --system "$SYSTEM_INSTRUCTION" \
+  --body "$BODY" \
+  --context "$CONTEXT_FILE" \
+  "Task/Question:
+$USER_PROMPT"); then
   exit 1
-fi
-
-# Only on a 2xx does the exit code say something the status cannot: whether the
-# body finished arriving. A response truncated mid-transfer still reads as HTTP
-# 200, and would otherwise reach the parser below and be reported as the model
-# returning nothing -- a refusal, rather than the transport failure it is.
-if [[ "$HTTP_STATUS" == 2?? && $CURL_STATUS -ne 0 ]]; then
-  echo "$(basename "$0"): $URL returned HTTP $HTTP_STATUS but the body did not finish transferring (curl exit $CURL_STATUS)" >&2
-  exit 1
-fi
-
-if [[ "$HTTP_STATUS" != 2?? ]]; then
-  ERROR_MSG=$(echo "$RESPONSE" | jq -r '.error.message // empty' 2>/dev/null || true)
-  echo "$(basename "$0"): API error (HTTP $HTTP_STATUS): ${ERROR_MSG:-no error message in response}" >&2
-  exit 1
-fi
-
-# Extract and output the text response
-TEXT=$(echo "$RESPONSE" | jq -r '[.candidates[0].content.parts[]?.text // empty] | join("")')
-FINISH_REASON=$(echo "$RESPONSE" | jq -r '.candidates[0].finishReason // empty')
-
-if [[ -z "$TEXT" ]]; then
-  # Fallback: sometimes the model might block content or return explicit refusal
-  echo "$(basename "$0"): No response text received. Finish Reason: ${FINISH_REASON:-UNKNOWN}" >&2
-  exit 1
-fi
-
-if [[ "$FINISH_REASON" == "MAX_TOKENS" ]]; then
-  echo "$(basename "$0"): warning: output was truncated (finish reason: MAX_TOKENS)" >&2
 fi
 
 # Prefer formatted output, but never discard the generated text if
 # markdown-format is missing or fails.
-if FORMATTED=$(echo "$TEXT" | markdown-format 2>/dev/null); then
-  echo "$FORMATTED"
+if FORMATTED=$(printf '%s\n' "$TEXT" | markdown-format 2>/dev/null); then
+  printf '%s\n' "$FORMATTED"
 else
-  echo "$TEXT"
+  printf '%s\n' "$TEXT"
 fi
