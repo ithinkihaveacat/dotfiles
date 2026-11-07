@@ -63,6 +63,12 @@ starts on its own (a scheduled sync). A field with no value is left out.
 | `refused`    | Declined before it ran: authentication, HTTP method, rate limit |
 | `error`      | No answer could be given                                        |
 
+`probe` is not a record outcome: the reader groups a `GET` answered 405 under it
+in summaries. That is a client checking for a server-initiated stream, which the
+transport lets the server decline. Raw lines and `--json` keep the server's
+`refused` outcome; the live page hides probe rows unless **Show protocol
+probes** is ticked.
+
 ## Never Content
 
 A record says what a call was about, never what it carried: no titles, bodies,

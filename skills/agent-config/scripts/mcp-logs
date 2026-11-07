@@ -238,6 +238,17 @@ def client(rec: dict[str, Any]) -> str:
     return str(rec.get("agent") or rec.get("transport") or "-")
 
 
+def is_probe(rec: dict[str, Any]) -> bool:
+    """True for a client's GET probe for a server-initiated stream: our
+    stateless servers offer none, so they answer 405, as the MCP transport
+    allows. It is protocol negotiation, not a failed request."""
+    return (
+        rec.get("http") == "GET"
+        and rec.get("status") == 405
+        and rec.get("outcome") == "refused"
+    )
+
+
 def group(records: list[dict[str, Any]], *keys: str) -> list[dict[str, Any]]:
     """Requests, failures, latency and result size per value of KEYS, most
     requests first. A record without a value for the last key is left out."""
@@ -254,7 +265,9 @@ def group(records: list[dict[str, Any]], *keys: str) -> list[dict[str, Any]]:
             dict(zip(keys, name, strict=True))
             | {
                 "requests": len(recs),
-                "failed": sum(r.get("outcome") != "ok" for r in recs),
+                "failed": sum(
+                    r.get("outcome") != "ok" and not is_probe(r) for r in recs
+                ),
                 "p50_ms": percentile(ms, 50),
                 "p95_ms": percentile(ms, 95),
                 "p50_bytes": percentile(sizes, 50),
@@ -309,11 +322,12 @@ def summary(records: list[dict[str, Any]], gap: float) -> dict[str, Any]:
     """Descriptive statistics over RECORDS, oldest first."""
     outcomes: dict[str, int] = {}
     for rec in records:
-        outcome = str(rec.get("outcome"))
+        outcome = "probe" if is_probe(rec) else str(rec.get("outcome"))
         outcomes[outcome] = outcomes.get(outcome, 0) + 1
     chains, common = sequences(records, gap, SUMMARY_TOP)
     return {
         "requests": len(records),
+        "probes": sum(is_probe(rec) for rec in records),
         "first": records[0]["ts"] if records else None,
         "last": records[-1]["ts"] if records else None,
         "outcomes": dict(sorted(outcomes.items(), key=lambda kv: (-kv[1], kv[0]))),
@@ -615,13 +629,15 @@ class Store:
 # buffering proxy holds a stream back). The script is pinned by its hash in
 # the page's CSP.
 PAGE_SCRIPT = """
-const state = { seq: "", servers: new URLSearchParams(location.search).getAll("server") };
+const params = new URLSearchParams(location.search);
+const state = { seq: "", servers: params.getAll("server"), probes: params.get("probes") === "1" };
 const $ = (id) => document.getElementById(id);
 
 function cell(tr, value, cls) {
   const td = tr.insertCell();
   td.textContent = value == null ? "" : String(value);
   if (cls) td.className = cls;
+  return td;
 }
 
 // A timestamp as yyyy-mm-dd hh:mm:ss in local time, independent of locale.
@@ -630,6 +646,18 @@ function stamp(value) {
   const p = (n) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ` +
     `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
+// True for a client's GET probe for a server-initiated stream: our servers
+// answer 405 because they offer none. It is negotiation, not a failure.
+function isProbe(rec) {
+  return rec.http === "GET" && rec.status === 405 && rec.outcome === "refused";
+}
+
+function syncUrl() {
+  const q = new URLSearchParams(state.servers.map((s) => ["server", s]));
+  if (state.probes) q.set("probes", "1");
+  history.replaceState(null, "", "?" + q);
 }
 
 function table(id, rows, keys) {
@@ -655,8 +683,7 @@ function filters(names) {
     input.addEventListener("change", () => {
       state.servers = state.servers.filter((s) => s !== name);
       if (input.checked) state.servers.push(name);
-      const q = new URLSearchParams(state.servers.map((s) => ["server", s]));
-      history.replaceState(null, "", "?" + q);
+      syncUrl();
       state.seq = "";
       poll(false);
     });
@@ -668,8 +695,14 @@ function filters(names) {
 function render(data) {
   filters(data.servers);
   const s = data.summary;
+  $("probe-filter").hidden = s.probes === 0;
+  $("probe-count").textContent = s.probes;
+  $("show-probes").checked = state.probes;
+  const probeNote = s.probes && !state.probes
+    ? ` \\u00b7 ${s.probes} protocol probe${s.probes === 1 ? "" : "s"} hidden`
+    : "";
   $("totals").textContent = s.requests
-    ? `${s.requests} requests, ${stamp(s.first)} to ${stamp(s.last)}` + (data.since ? ` (since ${data.since})` : "")
+    ? `${s.requests} requests, ${stamp(s.first)} to ${stamp(s.last)}` + (data.since ? ` (since ${data.since})` : "") + probeNote
     : "No requests";
   $("outcomes").textContent = Object.entries(s.outcomes).map(([k, v]) => `${k} ${v}`).join(", ");
   table("by-server", s.servers, ["server"]);
@@ -685,16 +718,26 @@ function render(data) {
   const rows = $("rows");
   rows.replaceChildren();
   for (const rec of data.records.slice().reverse()) {
+    const probe = isProbe(rec);
+    if (probe && !state.probes) continue;
     const tr = rows.insertRow();
-    if (rec.outcome !== "ok") tr.className = "fail";
+    if (probe) tr.className = "probe";
+    else if (rec.outcome !== "ok") tr.className = "fail";
     const rest = { ...rec.args };
     for (const [k, v] of Object.entries(rec))
       if (!(k in rest) && !["server", "ts", "method", "event", "tool", "args", "outcome", "ms", "version"].includes(k))
         rest[k] = typeof v === "object" ? JSON.stringify(v) : v;
     cell(tr, stamp(rec.ts));
     cell(tr, rec.server); cell(tr, rec.method || rec.event); cell(tr, rec.tool);
-    cell(tr, rec.outcome); cell(tr, rec.ms, "n");
+    const outcome = cell(tr, probe ? "probe" : rec.outcome);
+    if (probe) outcome.title = "GET 405: no server-initiated stream (expected)";
+    cell(tr, rec.ms, "n");
     cell(tr, Object.entries(rest).map(([k, v]) => `${k}=${v}`).join(" "));
+  }
+  if (!rows.rows.length) {
+    const text = s.requests ? "No requests match the filters." : "No requests.";
+    const td = cell(rows.insertRow(), text);
+    td.colSpan = 7;
   }
 }
 
@@ -713,6 +756,14 @@ async function poll(again = true) {
   }
   if (again) setTimeout(poll, delay);
 }
+
+$("show-probes").addEventListener("change", (e) => {
+  state.probes = e.target.checked;
+  syncUrl();
+  state.seq = "";
+  poll(false);
+});
+$("show-probes").checked = state.probes;
 
 poll();
 """
@@ -741,11 +792,12 @@ def page_html() -> tuple[str, str]:
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>MCP requests</title><link rel="icon" href="data:,">
 <style>
-:root {{ color-scheme: light dark; --line: #8884; --fail: #d334; }}
+:root {{ color-scheme: light dark; --line: #8884; --fail: #d334; --probe: #8882; }}
 body {{ margin: 0; padding: 16px; font: 14px/1.4 system-ui, sans-serif; }}
 h1 {{ font-size: 18px; margin: 0 0 8px; }} h2 {{ font-size: 15px; margin: 20px 0 6px; }}
 #status {{ font-weight: normal; opacity: .7; }}
 #servers label {{ margin-right: 12px; white-space: nowrap; }}
+#probe-filter {{ margin-top: 4px; font-size: 12px; }}
 .grid {{ display: flex; flex-wrap: wrap; gap: 0 24px; }} .grid > div {{ min-width: 0; }}
 .wrap {{ overflow-x: auto; }}
 table {{ border-collapse: collapse; font: 12px/1.4 ui-monospace, monospace; }}
@@ -753,10 +805,13 @@ table {{ border-collapse: collapse; font: 12px/1.4 ui-monospace, monospace; }}
 td {{ padding: 3px 8px 3px 0; border-bottom: 1px solid var(--line); vertical-align: top; }}
 td.n {{ text-align: right; }} thead td {{ font-weight: 600; }}
 tr.fail td {{ background: var(--fail); }}
+tr.probe td {{ background: var(--probe); }}
 #rows td:first-child {{ white-space: nowrap; }}
 </style></head><body>
 <h1>MCP requests <span id="status">connecting</span></h1>
 <div id="servers"></div>
+<div id="probe-filter" hidden><label><input type="checkbox" id="show-probes">
+Show protocol probes (<span id="probe-count">0</span>)</label></div>
 <p><span id="totals"></span><br><span id="outcomes"></span></p>
 <div class="grid">
 <div><h2>Servers</h2><div class="wrap"><table><thead>{stats_head.format("Server")}</thead>
@@ -968,7 +1023,10 @@ commonest runs of two or three tool calls in one caller's chains, by server
 and client. A chain is one caller's tool calls to one server, each no more
 than --gap seconds after the one before; records with no caller key (HTTP
 without authentication) form no chains. It reads every record unless --tail
-or --since limits them.
+or --since limits them. A GET answered 405 is a client probing for a
+server-initiated stream, which the transport lets the server decline:
+summaries count it as a probe rather than a failure, and the live page hides
+these rows unless "Show protocol probes" is ticked.
 
 --serve serves one live page instead: the latest records, newest first, and
 the summary, for every log or the servers ticked on it. The page polls the
