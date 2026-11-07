@@ -171,6 +171,7 @@ SINGLE_VALUE_OPTIONS = {
     "--timeout",
     "--tpm",
     "--max-input-tokens",
+    "--max-output-tokens",
     "--request-timeout",
     "--read-from",
     "--edit-from",
@@ -852,6 +853,10 @@ Options:
                       Abandon and retry an API request with no response after
                       SECONDS; 0 waits indefinitely. (default: 180, plus 1 per
                       1k input tokens)
+  --max-output-tokens N
+                      Ceiling on thinking plus output tokens for each model
+                      turn, e.g. 256k (default: 131072). Above 65536 a turn is
+                      generated in continuation hops of up to 32k tokens.
   -h, --help          Display this help message and exit.
 
 Environment:
@@ -863,6 +868,8 @@ Environment:
                       Optional. Default for --max-input-tokens.
   CAXTON_REQUEST_TIMEOUT
                       Optional. Default for --request-timeout.
+  CAXTON_MAX_OUTPUT_TOKENS
+                      Optional. Default for --max-output-tokens.
   CAXTON_STATE_DIR    Optional. State directory for serialized payloads and responses
                       (default: ${{XDG_STATE_HOME:-~/.local/state}}/caxton).
 
@@ -891,7 +898,11 @@ Examples:
 Notes:
   {prog_name} runs only inside a git worktree. Mutation runs require a clean
   worktree, allowing 'git checkout' and 'git clean' to provide safe undo.
-  Secret files, symlinks, and submodules are always excluded for safety.\
+  Secret files, symlinks, and submodules are always excluded for safety.
+
+  A model turn that reaches --max-output-tokens (thinking included) before
+  making a tool call ends the run with exit status 1; any text it produced is
+  still printed and saved as a partial report.\
 """,
         file=file,
     )
@@ -1110,6 +1121,24 @@ class Telemetry:
     wait_seconds: float = 0.0
     rate_limit_events: list = dataclasses.field(default_factory=list)
     request_timeouts: list = dataclasses.field(default_factory=list)
+    long_decode_turns: int = 0
+    last_finish_reason: str = ""
+
+
+# max_output_tokens caps thinking and output together for each model turn.
+# Without it a turn stops at the per-request cap (32k tokens for non-streaming
+# generateContent), and thinking at 'high' plus a long complete_task report
+# can exceed that. Above 65,536 the API ends each hop with finish reason
+# CONTINUATION and a continuation token, and google-genai
+# (automatic_continuation, on by default) resends the request with that token
+# and merges the hops into one response, function calls included.
+DEFAULT_MAX_OUTPUT_TOKENS = 131072
+
+
+def finish_reason_name(reason) -> str:
+    """The bare name of a finish reason, e.g. 'MAX_TOKENS' or 'STOP'."""
+    name = getattr(reason, "name", None) or str(reason)
+    return name.rsplit(".", 1)[-1]
 
 
 def ensure_state_dir(state_dir: str) -> None:
@@ -1194,6 +1223,7 @@ def save_session_response(
         f"- **Rate-Limit Waits:** {telemetry.wait_seconds:.1f}s,"
         f" {len(telemetry.rate_limit_events)} rate-limit response(s)\n"
         f"- **Request Timeouts:** {len(telemetry.request_timeouts)}\n"
+        f"- **Long-Decode Turns:** {telemetry.long_decode_turns}\n"
         f"- **Files Modified:** {len(telemetry.modified_files)}\n"
         f"- **Files Created:** {len(telemetry.created_files)}\n"
         f"- **Files Deleted:** {len(telemetry.deleted_files)}\n"
@@ -1279,6 +1309,11 @@ def main():
         default=os.environ.get("CAXTON_REQUEST_TIMEOUT") or None,
         metavar="SECONDS",
     )
+    parser.add_argument(
+        "--max-output-tokens",
+        default=os.environ.get("CAXTON_MAX_OUTPUT_TOKENS") or None,
+        metavar="N",
+    )
     parser.add_argument("-h", "--help", action="help", default=argparse.SUPPRESS)
 
     args = parser.parse_args()
@@ -1300,7 +1335,7 @@ def main():
         print_short_usage(prog_name)
         sys.exit(1)
 
-    for option in ("tpm", "max_input_tokens"):
+    for option in ("tpm", "max_input_tokens", "max_output_tokens"):
         value = getattr(args, option)
         if value is not None:
             try:
@@ -1309,6 +1344,9 @@ def main():
                 flag = "--" + option.replace("_", "-")
                 print(f"{prog_name}: error: {flag}: {e}", file=sys.stderr)
                 sys.exit(1)
+
+    if args.max_output_tokens is None:
+        args.max_output_tokens = DEFAULT_MAX_OUTPUT_TOKENS
 
     if args.request_timeout is not None:
         value = args.request_timeout
@@ -1959,6 +1997,7 @@ def main():
             )
         )
         print(f"  Model:         {args.model} (thinking: {args.thinking})")
+        print(f"  Max output:    {args.max_output_tokens} tokens per turn")
         print(
             "  Pacing:        "
             + (
@@ -2614,6 +2653,10 @@ Once your work is complete, you MUST call complete_task(success=True, report="..
         ),
         automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
         thinking_config=thinking_config,
+        max_output_tokens=args.max_output_tokens,
+        # The default, stated because the output ceiling relies on it: merge
+        # CONTINUATION hops into one response.
+        automatic_continuation=True,
     )
 
     chat = client.chats.create(model=args.model, config=config)
@@ -2763,16 +2806,25 @@ Once your work is complete, you MUST call complete_task(success=True, report="..
                 # times out can be resent as it is.
                 resp = chat.send_message(message, config=request_config)
                 prompt_tokens = estimate
-                if resp.usage_metadata:
-                    prompt_tokens = resp.usage_metadata.prompt_token_count or estimate
-                    telemetry.candidate_tokens += (
-                        resp.usage_metadata.candidates_token_count or 0
+                billed_tokens = estimate
+                usage = resp.usage_metadata
+                if usage:
+                    # Continuation hops each resend the prompt, and the merged
+                    # usage sums them; the first hop's count is the size of
+                    # the conversation.
+                    billed_tokens = usage.prompt_token_count or estimate
+                    prompt_tokens = (
+                        getattr(usage, "initial_prompt_token_count", None)
+                        or billed_tokens
                     )
-                    last_call["reply"] = resp.usage_metadata.candidates_token_count or 0
+                    if billed_tokens > prompt_tokens:
+                        telemetry.long_decode_turns += 1
+                    telemetry.candidate_tokens += usage.candidates_token_count or 0
+                    last_call["reply"] = usage.candidates_token_count or 0
                 telemetry.prompt_tokens = prompt_tokens
-                telemetry.input_tokens_total += prompt_tokens
+                telemetry.input_tokens_total += billed_tokens
                 last_call["prompt"] = prompt_tokens
-                limiter.record(prompt_tokens, time.monotonic())
+                limiter.record(billed_tokens, time.monotonic())
                 return resp
             except Exception as e:
                 timed_out = isinstance(
@@ -2873,6 +2925,8 @@ Once your work is complete, you MUST call complete_task(success=True, report="..
     current_message = initial_prompt
     telemetry_reported = False
     response_saved = False
+    # Text from a final turn that made no tool call, kept as a partial report.
+    partial_report = ""
 
     def print_telemetry_report():
         nonlocal telemetry_reported, response_saved
@@ -2948,7 +3002,9 @@ Once your work is complete, you MUST call complete_task(success=True, report="..
         if caxton_state_dir and not response_saved:
             response_saved = True
             try:
-                report_text = (task_result.get("report") if task_result else "") or ""
+                report_text = (
+                    task_result.get("report") if task_result else partial_report
+                ) or ""
                 response_file_path = save_session_response(
                     state_dir=caxton_state_dir,
                     session_id=session_id,
@@ -2989,6 +3045,10 @@ Once your work is complete, you MUST call complete_task(success=True, report="..
                     "wait_seconds": round(telemetry.wait_seconds, 3),
                     "rate_limit_events": telemetry.rate_limit_events,
                     "request_timeouts": telemetry.request_timeouts,
+                    "max_output_tokens": args.max_output_tokens,
+                    "long_decode_turns": telemetry.long_decode_turns,
+                    "finish_reason": telemetry.last_finish_reason or None,
+                    "partial_report": partial_report or None,
                     "tools": {
                         "search_replace": {
                             "attempts": telemetry.search_replace_attempts,
@@ -3017,6 +3077,10 @@ Once your work is complete, you MUST call complete_task(success=True, report="..
             response = send_with_retry(current_message)
 
             candidate = response.candidates[0] if response.candidates else None
+            if candidate is not None and candidate.finish_reason:
+                telemetry.last_finish_reason = finish_reason_name(
+                    candidate.finish_reason
+                )
             parts = (
                 candidate.content.parts
                 if candidate is not None and candidate.content is not None
@@ -3042,6 +3106,26 @@ Once your work is complete, you MUST call complete_task(success=True, report="..
                     f"[caxton] Error: model returned no tool call{detail}",
                     file=sys.stderr,
                 )
+                if telemetry.last_finish_reason == "MAX_TOKENS":
+                    print(
+                        "[caxton] The turn reached --max-output-tokens"
+                        f" ({args.max_output_tokens}, thinking included);"
+                        " raise it or lower --thinking",
+                        file=sys.stderr,
+                    )
+                partial_report = "".join(
+                    part.text for part in parts if part.text and not part.thought
+                ).strip()
+                print_telemetry_report()
+                if partial_report:
+                    print(
+                        "[caxton] Printing the text the model wrote before it"
+                        " stopped as a partial report",
+                        file=sys.stderr,
+                    )
+                    sys.stderr.flush()
+                    print(f"\n{partial_report}", file=sys.stdout)
+                    sys.stdout.flush()
                 sys.exit(1)
 
             # Log any server-side code execution invocations

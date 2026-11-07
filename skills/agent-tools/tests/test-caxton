@@ -48,7 +48,7 @@ commit_all() {
   fi
 }
 
-echo "1..75"
+echo "1..78"
 
 # Test 1: caxton --help outputs valid GNU-style help and exits 0
 if "$BIN" --help >"$OUTPUT" 2>&1; then
@@ -1758,4 +1758,160 @@ if [[ $stall_status -eq 2 && $stall_logs -ge 2 && $stall_posts -ge 2 ]] &&
 else
   echo "not ok 75 - Stalled request was not timed out and retried (exit $stall_status, $stall_logs logged, $stall_posts sent)"
   sed 's/^/# /' "$OUTPUT"
+fi
+
+# Tests 76-77 share a stub that answers the model lookup with a 404 and each
+# generate call with the next line of a response script, logging every
+# request body. A line is a JSON candidate; the last line repeats.
+LIMIT_PORT_FILE="$WORK/limit.port"
+LIMIT_LOG="$WORK/limit.jsonl"
+LIMIT_SCRIPT="$WORK/limit.script"
+cat >"$WORK/limit.py" <<'PYEOF'
+import http.server
+import json
+import sys
+
+
+class Scripted(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(404)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(b'{"error": {"code": 404, "message": "stub"}}')
+
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        with open(sys.argv[2], "a", encoding="utf-8") as f:
+            f.write(json.dumps(json.loads(body)) + "\n")
+        with open(sys.argv[2], encoding="utf-8") as f:
+            count = sum(1 for _ in f)
+        with open(sys.argv[3], encoding="utf-8") as f:
+            script = f.read().splitlines()
+        candidate = json.loads(script[min(count, len(script)) - 1])
+        payload = {
+            "candidates": [candidate],
+            "usageMetadata": {"promptTokenCount": 100, "candidatesTokenCount": 10},
+        }
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps(payload).encode())
+
+    def log_message(self, *args):
+        pass
+
+
+server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Scripted)
+server.daemon_threads = True
+with open(sys.argv[1], "w") as f:
+    f.write(str(server.server_address[1]))
+server.serve_forever()
+PYEOF
+: >"$LIMIT_SCRIPT"
+python3 "$WORK/limit.py" "$LIMIT_PORT_FILE" "$LIMIT_LOG" "$LIMIT_SCRIPT" &
+LIMIT_PID=$!
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  [[ -s "$LIMIT_PORT_FILE" ]] && break
+  sleep 0.5
+done
+LIMIT_REPO=$(make_repo limit)
+printf '# Notes\n' >"$LIMIT_REPO/notes.md"
+commit_all "$LIMIT_REPO"
+
+# Runs caxton read-only against the stub with the given response script
+# lines; sets limit_status and leaves output and telemetry in $WORK/limit.*.
+run_limited() {
+  printf '%s\n' "$@" >"$LIMIT_SCRIPT"
+  : >"$LIMIT_LOG"
+  rm -rf "$WORK/limit.tel" "$WORK/limit-state"
+  limit_status=0
+  (cd "$LIMIT_REPO" && env -u CAXTON_MAX_OUTPUT_TOKENS AGENT_OFFLINE=0 \
+    GEMINI_API_KEY=stub \
+    GOOGLE_GEMINI_BASE_URL="http://127.0.0.1:$(cat "$LIMIT_PORT_FILE" 2>/dev/null)" \
+    CAXTON_STATE_DIR="$WORK/limit-state" AGENT_TELEMETRY_JSON="$WORK/limit.tel" \
+    "$BIN" "Audit the notes" --no-search --timeout 60) \
+    >"$WORK/limit.out" 2>"$WORK/limit.err" || limit_status=$?
+}
+
+# Test 76: max_output_tokens is sent (131072 by default), and a turn the API
+# ends with CONTINUATION is resumed with its continuation token and merged
+# into one response, so a complete_task call in the second hop finishes the
+# run. Usage counts the conversation once but bills both hops.
+run_limited \
+  '{"content": {"role": "model", "parts": [{"text": "Planning.", "thought": true}]}, "finishReason": "CONTINUATION", "continuationToken": "dG9rZW4tMQ=="}' \
+  '{"content": {"role": "model", "parts": [{"functionCall": {"name": "complete_task", "args": {"success": true, "report": "Long report."}}}]}, "finishReason": "STOP"}'
+VERIFY_LIMIT="$WORK/verify_limit.out"
+python3 - "$LIMIT_LOG" "$WORK/limit.tel" >"$VERIFY_LIMIT" 2>&1 <<'PYEOF' || true
+import json
+import sys
+from pathlib import Path
+
+reqs = [json.loads(x) for x in Path(sys.argv[1]).read_text().splitlines()]
+assert len(reqs) == 2, f"expected 2 requests, got {len(reqs)}"
+for req in reqs:
+    assert req["generationConfig"]["maxOutputTokens"] == 131072, req["generationConfig"]
+assert "continuationToken" not in reqs[0], reqs[0].keys()
+assert reqs[1].get("continuationToken") == "dG9rZW4tMQ==", reqs[1].keys()
+assert reqs[1]["contents"] == reqs[0]["contents"], "a hop must resend the same turn"
+tel = json.loads(Path(sys.argv[2]).read_text())
+assert tel["status"] == "Succeeded", tel
+assert tel["max_output_tokens"] == 131072, tel
+assert tel["long_decode_turns"] == 1, tel
+assert tel["finish_reason"] == "STOP", tel
+assert tel["prompt_tokens"] == 100 and tel["input_tokens_total"] == 200, tel
+assert tel["partial_report"] is None, tel
+print("LIMIT_OK")
+PYEOF
+if [[ $limit_status -eq 0 ]] &&
+  grep -q "^LIMIT_OK$" "$VERIFY_LIMIT" &&
+  grep -q "^Long report\.$" "$WORK/limit.out" &&
+  grep -q "complete_task(success=True) -> OK" "$WORK/limit.err"; then
+  echo "ok 76 - Sends max_output_tokens and merges CONTINUATION hops into one turn"
+else
+  echo "not ok 76 - Long-decode continuation was not followed (exit $limit_status)"
+  sed 's/^/# /' "$VERIFY_LIMIT" "$WORK/limit.out" "$WORK/limit.err"
+fi
+
+# Test 77: a turn that reaches the output ceiling without a tool call ends
+# the run with exit 1 and says so, but the text it wrote is kept: printed on
+# stdout, saved in the response file, and in telemetry.
+run_limited \
+  '{"content": {"role": "model", "parts": [{"text": "Thinking.", "thought": true}, {"text": "## Partial findings"}]}, "finishReason": "MAX_TOKENS"}'
+LIMIT_RESPONSE=$(find "$WORK/limit-state" -name 'response_*.md' 2>/dev/null | head -n 1)
+if [[ $limit_status -eq 1 ]] &&
+  grep -q "^## Partial findings$" "$WORK/limit.out" &&
+  ! grep -q "Thinking\." "$WORK/limit.out" &&
+  grep -q "Error: model returned no tool call (finish_reason: .*MAX_TOKENS)" "$WORK/limit.err" &&
+  grep -q "The turn reached --max-output-tokens (131072, thinking included); raise it or lower --thinking" "$WORK/limit.err" &&
+  [[ -n "$LIMIT_RESPONSE" ]] && grep -q "^## Partial findings$" "$LIMIT_RESPONSE" &&
+  grep -q "Status: Incomplete" "$LIMIT_RESPONSE" &&
+  grep -q '"partial_report": "## Partial findings"' "$WORK/limit.tel" &&
+  grep -q '"finish_reason": "MAX_TOKENS"' "$WORK/limit.tel"; then
+  echo "ok 77 - Reports an output-ceiling stop and keeps the partial text"
+else
+  echo "not ok 77 - Output-ceiling stop was not reported or its text was lost (exit $limit_status)"
+  sed 's/^/# /' "$WORK/limit.out" "$WORK/limit.err"
+fi
+kill "$LIMIT_PID" 2>/dev/null || true
+wait "$LIMIT_PID" 2>/dev/null || true
+
+# Test 78: --max-output-tokens accepts token counts like 256k and its
+# environment default, the flag wins, and a malformed count is a usage error
+MO_REPO=$(make_repo max-output)
+printf '# Notes\n' >"$MO_REPO/notes.md"
+commit_all "$MO_REPO"
+mo_default=$(cd "$MO_REPO" && env -u CAXTON_MAX_OUTPUT_TOKENS "$BIN" --dry-run "Audit" 2>&1 || true)
+mo_env=$(cd "$MO_REPO" && CAXTON_MAX_OUTPUT_TOKENS=256k "$BIN" --dry-run "Audit" 2>&1 || true)
+mo_flag=$(cd "$MO_REPO" && CAXTON_MAX_OUTPUT_TOKENS=256k "$BIN" --dry-run "Audit" --max-output-tokens 65536 2>&1 || true)
+mo_bad_status=0
+mo_bad=$(cd "$MO_REPO" && "$BIN" --dry-run "Audit" --max-output-tokens lots 2>&1) || mo_bad_status=$?
+if grep -q "Max output:    131072 tokens per turn" <<<"$mo_default" &&
+  grep -q "Max output:    256000 tokens per turn" <<<"$mo_env" &&
+  grep -q "Max output:    65536 tokens per turn" <<<"$mo_flag" &&
+  [[ $mo_bad_status -eq 1 ]] &&
+  grep -q "error: --max-output-tokens: invalid token count: 'lots'" <<<"$mo_bad"; then
+  echo "ok 78 - --max-output-tokens default, environment, precedence, and validation"
+else
+  echo "not ok 78 - --max-output-tokens handling did not match expectations"
+  printf '%s\n' "$mo_default" "$mo_env" "$mo_flag" "$mo_bad" | sed 's/^/# /'
 fi
