@@ -301,6 +301,7 @@ class PinboardMcpTests(unittest.TestCase):
                 "suggest_tags",
                 "add_bookmark",
                 "update_bookmark",
+                "delete_bookmark",
                 "sync",
             },
         )
@@ -309,6 +310,8 @@ class PinboardMcpTests(unittest.TestCase):
         for name in ("add_bookmark", "update_bookmark", "sync"):
             self.assertFalse(tools[name].annotations.read_only_hint, name)
             self.assertFalse(tools[name].annotations.destructive_hint, name)
+        self.assertFalse(tools["delete_bookmark"].annotations.read_only_hint)
+        self.assertTrue(tools["delete_bookmark"].annotations.destructive_hint)
         for tool in tools.values():
             self.assertNotIn("full-text", (tool.description or "").lower())
 
@@ -469,6 +472,69 @@ class PinboardMcpTests(unittest.TestCase):
             [{k: r.get(k) for k in ("reason", "outcome")} for r in records],
         )
         self.assert_log_format(records)
+
+    async def test_delete_removes_bookmark(self, client):
+        url = "https://example.com/lemon"
+        deleted = await self.tool(client, "delete_bookmark", {"url": url})
+        self.assertTrue(deleted["deleted"])
+        self.assertEqual(deleted["bookmark"]["url"], url)
+        self.assertEqual(deleted["bookmark"]["title"], "Lemon tart")
+        self.assertEqual(deleted["mirror_commit"]["state"], "pushed")
+        with FAKE.lock:
+            self.assertNotIn(url, FAKE.posts)
+            self.assertEqual(FAKE.count("posts/delete"), 1)
+
+        # The mirror drops it at once, in the commit that reads see.
+        gone = await self.tool(client, "get_bookmark", {"url": url}, error=True)
+        self.assertEqual(gone["error"], "not_found")
+        found = await self.tool(client, "search_bookmarks", {"query": "lemon"})
+        self.assertEqual(found["bookmarks"], [])
+        for path in (self.clone / "bookmarks").glob("*.jsonl"):
+            self.assertNotIn(url, path.read_text())
+        self.assertEqual(self.git("-C", str(self.clone), "status", "--porcelain"), "")
+
+        # Pinboard has nothing to delete: a structured not_found, no commit.
+        commits = self.git("-C", str(self.clone), "rev-list", "--count", "HEAD")
+        missing = await self.tool(
+            client, "delete_bookmark", {"url": "https://example.com/gone"}, error=True
+        )
+        self.assertEqual(missing["error"], "not_found")
+        self.assertEqual(
+            self.git("-C", str(self.clone), "rev-list", "--count", "HEAD"), commits
+        )
+
+        # A failed API call leaves the bookmark in Pinboard and the mirror.
+        with FAKE.lock:
+            FAKE.delete_mode = "error"
+        failed = await self.tool(
+            client, "delete_bookmark", {"url": "https://example.com/kotlin"}, error=True
+        )
+        self.assertEqual(failed["error"], "failed")
+        still = await self.tool(
+            client, "get_bookmark", {"url": "https://example.com/kotlin"}
+        )
+        self.assertEqual(still["bookmark"]["url"], "https://example.com/kotlin")
+
+        # A response lost after the deletion is re-read, never re-sent.
+        with FAKE.lock:
+            FAKE.delete_mode = "vanish-after"
+        lost = await self.tool(
+            client, "delete_bookmark", {"url": "https://example.com/rust"}
+        )
+        self.assertTrue(lost["deleted"])
+        with FAKE.lock:
+            self.assertNotIn("https://example.com/rust", FAKE.posts)
+
+        # With the mirror level, a sync finds nothing to change or re-add.
+        synced = await self.tool(client, "sync")
+        self.assertEqual(
+            (synced["added"], synced["updated"], synced["deleted"]), (0, 0, 0)
+        )
+        deletes = [r for r in self.records() if r.get("tool") == "delete_bookmark"]
+        self.assertEqual(len(deletes), 4)
+        self.assertEqual({r["args"]["host"] for r in deletes}, {"example.com"})
+        self.assertNotIn("lemon", self.log.read_text())
+        self.assert_log_format(self.records())
 
     async def test_sync_gate(self):
         env = {"PINBOARD_TIME_SCALE": "0.01"}  # posts/all once every 3 s
