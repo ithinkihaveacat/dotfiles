@@ -221,6 +221,21 @@ def extract_retry_delay(exc: Exception) -> float | None:
 
 THINKING_LEVELS = ("high", "medium", "low")
 
+# max_output_tokens caps thinking and answer together. Without it a response
+# stops at the per-request cap (64k tokens streamed), which thinking at 'high'
+# on a large prompt can nearly exhaust. Above 65,536 the API ends each 64k hop
+# with finish reason CONTINUATION and a continuation token, and google-genai
+# (automatic_continuation, on by default) resends the request with that token
+# and streams the next hop as part of the same response.
+DEFAULT_MAX_OUTPUT_TOKENS = 131072
+
+
+def finish_reason_name(reason: Any) -> str:
+    """The bare name of a finish reason, e.g. 'MAX_TOKENS' or 'STOP'."""
+    name = getattr(reason, "name", None) or str(reason)
+    return name.rsplit(".", 1)[-1]
+
+
 # A response to a large prompt with thinking on can take minutes, so a request
 # is given a floor plus time in proportion to its input before it is abandoned.
 REQUEST_TIMEOUT_FLOOR = 180.0
@@ -440,7 +455,12 @@ def wants_help(argv: list[str]) -> bool:
             return False
         if token in ("-h", "--help"):
             return True
-        if token in ("--model", "--thinking", "--request-timeout"):
+        if token in (
+            "--model",
+            "--thinking",
+            "--request-timeout",
+            "--max-output-tokens",
+        ):
             skip_next = True
     return False
 
@@ -521,6 +541,10 @@ Options:
                         Abandon and retry an API request with no response after
                         SECONDS; 0 waits indefinitely. (default: 180, plus 1 per
                         1k input tokens).
+  --max-output-tokens N
+                        Ceiling on thinking plus answer tokens for the response
+                        (default: 131072). Above 65536 the response is generated
+                        in continuation hops of up to 64k tokens.
   --serialize           Save the request payload and the answer to files in the state
                         directory (~/.local/state/oracle/). (Default: on).
   --no-serialize        Disable saving the payload and answer to the state directory.
@@ -532,6 +556,8 @@ Environment:
   ORACLE_THINKING       Optional. Default for --thinking.
   ORACLE_REQUEST_TIMEOUT
                         Optional. Default for --request-timeout.
+  ORACLE_MAX_OUTPUT_TOKENS
+                        Optional. Default for --max-output-tokens.
   AGENT_TELEMETRY_JSON  Optional. Destination path for structured JSON execution telemetry.
   ORACLE_STATE_DIR      Optional. State directory for serialized payloads and answers
                         (default: ${{XDG_STATE_HOME:-~/.local/state}}/oracle).
@@ -541,6 +567,19 @@ Thinking Level:
   'medium' typically finishes in 3-4 minutes with comparable depth. Use
   --thinking medium (or ORACLE_THINKING=medium) when faster turnaround is
   preferred.
+
+Output Limit:
+  Thinking and answer share --max-output-tokens. Past 65536 tokens the API
+  continues the response in further requests that the client issues
+  automatically, appending to the same answer. If the ceiling is reached
+  before the answer is complete (finish reason MAX_TOKENS), or no answer text
+  is produced, the partial answer is still printed and saved, a warning is
+  printed, and the exit status is 1. Raise --max-output-tokens or lower
+  --thinking to avoid it.
+
+Exit Status:
+  0 on success; 1 on error, including an incomplete or empty answer; 130 on
+  interrupt.
 
 Examples:
   cat codebase.md | {os.path.basename(sys.argv[0])} "Propose a refactoring plan" -
@@ -569,6 +608,9 @@ def main():
     total_text_size = 0
     answer_chunks = []
     request_timeouts = []
+    finish_reason = ""
+    continuation_tokens: set[bytes] = set()
+    max_output_tokens = DEFAULT_MAX_OUTPUT_TOKENS
     telemetry_status = "Failed"
     telemetry_error = None
 
@@ -582,6 +624,7 @@ def main():
     model_id = os.environ.get("GEMINI_MODEL", "gemini-4-argon")
     thinking_level = os.environ.get("ORACLE_THINKING") or "high"
     raw_request_timeout = os.environ.get("ORACLE_REQUEST_TIMEOUT") or None
+    raw_max_output_tokens = os.environ.get("ORACLE_MAX_OUTPUT_TOKENS") or None
     parts: list[types.Part] = []
     manifest_str = ""
     formatted_docs: list[str] = []
@@ -619,6 +662,10 @@ def main():
                 "media_bytes": sum(s for _, _, s in media_files_to_inline)
                 + sum(s for _, _, s in media_files_to_upload),
                 "request_timeouts": request_timeouts,
+                "max_output_tokens": max_output_tokens,
+                "finish_reason": finish_reason or None,
+                "continuation_tokens": len(continuation_tokens),
+                "truncated": finish_reason == "MAX_TOKENS",
                 "session_id": str(session_id),
             }
             if error_msg:
@@ -718,6 +765,19 @@ def main():
                 i += 1
             elif arg.startswith("--request-timeout="):
                 raw_request_timeout = arg.split("=", 1)[1]
+            elif arg == "--max-output-tokens":
+                if i + 1 >= len(argv):
+                    print(
+                        f"{os.path.basename(sys.argv[0])}: error: --max-output-tokens requires an argument",
+                        file=sys.stderr,
+                    )
+                    telemetry_status = "Error"
+                    telemetry_error = "--max-output-tokens requires an argument"
+                    sys.exit(1)
+                raw_max_output_tokens = argv[i + 1]
+                i += 1
+            elif arg.startswith("--max-output-tokens="):
+                raw_max_output_tokens = arg.split("=", 1)[1]
             elif arg.startswith("-") and arg != "-":
                 err = f"unrecognized option: {arg}"
                 print(
@@ -761,6 +821,21 @@ def main():
                 telemetry_error = err
                 sys.exit(1)
             request_timeout_override = int(raw_request_timeout)
+
+        if raw_max_output_tokens is not None:
+            if not raw_max_output_tokens.isdigit() or int(raw_max_output_tokens) < 1:
+                err = (
+                    "--max-output-tokens: invalid token count:"
+                    f" {raw_max_output_tokens!r}"
+                )
+                print(
+                    f"{os.path.basename(sys.argv[0])}: error: {err}",
+                    file=sys.stderr,
+                )
+                telemetry_status = "Error"
+                telemetry_error = err
+                sys.exit(1)
+            max_output_tokens = int(raw_max_output_tokens)
 
         if not args:
             print(
@@ -989,6 +1064,7 @@ def main():
             print("Payload Summary:", file=sys.stdout)
             print(f"  Tools:          {tools_str}", file=sys.stdout)
             print(f"  Thinking:       {thinking_level}", file=sys.stdout)
+            print(f"  Max Output:     {max_output_tokens} tokens", file=sys.stdout)
             print(
                 f"  Text Context:   {text_files_count} file(s){stdin_note} ({total_text_size / 1024:.2f} KB, ~{total_text_size / 4 / 1000:.0f}k tokens)",
                 file=sys.stdout,
@@ -1198,6 +1274,10 @@ def main():
                             thinking_level=thinking_level, include_thoughts=True
                         ),
                         temperature=1.0,
+                        max_output_tokens=max_output_tokens,
+                        # The default, stated because the output ceiling
+                        # relies on it: follow CONTINUATION hops in-stream.
+                        automatic_continuation=True,
                         http_options=http_options,
                     ),
                 )
@@ -1216,6 +1296,10 @@ def main():
                     if not chunk.candidates:
                         continue
                     cand = chunk.candidates[0]
+                    if cand.finish_reason:
+                        finish_reason = finish_reason_name(cand.finish_reason)
+                    if cand.continuation_token:
+                        continuation_tokens.add(cand.continuation_token)
                     if not cand.content or not cand.content.parts:
                         continue
                     for part in cand.content.parts:
@@ -1244,7 +1328,6 @@ def main():
                 if in_thought:
                     print("\033[0m\n", end="", file=sys.stderr, flush=True)
                 print(flush=True)  # Final newline
-                telemetry_status = "Succeeded"
                 break
 
             except Exception as e:
@@ -1331,12 +1414,28 @@ def main():
                 )
                 time.sleep(sleep_sec)
 
+        incomplete = None
+        if finish_reason == "MAX_TOKENS":
+            incomplete = (
+                "answer is incomplete: the response reached --max-output-tokens"
+                f" ({max_output_tokens}, thinking included) before it finished;"
+                " raise --max-output-tokens or lower --thinking"
+            )
+        elif not answer_chunks:
+            incomplete = (
+                "the model returned no answer text"
+                f" (finish reason: {finish_reason or 'none'})"
+            )
+
         if oracle_state_dir and answer_chunks:
             try:
                 answer_file_path = os.path.join(
                     oracle_state_dir, f"answer_{session_id}.md"
                 )
-                write_private_text(answer_file_path, "".join(answer_chunks))
+                answer_text = "".join(answer_chunks)
+                if incomplete:
+                    answer_text += f"\n\n<!-- oracle: {incomplete} -->\n"
+                write_private_text(answer_file_path, answer_text)
                 print(
                     f"{os.path.basename(sys.argv[0])}: saved answer to {answer_file_path} (attach it as context to follow up)",
                     file=sys.stderr,
@@ -1348,6 +1447,16 @@ def main():
                     f"{os.path.basename(sys.argv[0])}: warning: failed to save answer to state directory: {e}",
                     file=sys.stderr,
                 )
+
+        if incomplete:
+            print(
+                f"{os.path.basename(sys.argv[0])}: warning: {incomplete}",
+                file=sys.stderr,
+            )
+            telemetry_status = "Error"
+            telemetry_error = incomplete
+            sys.exit(1)
+        telemetry_status = "Succeeded"
 
     except SystemExit as e:
         if e.code == 0:
