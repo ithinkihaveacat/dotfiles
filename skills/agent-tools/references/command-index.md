@@ -420,10 +420,10 @@ Environment:
                         (default: ${XDG_STATE_HOME:-~/.local/state}/oracle).
 
 Thinking Level:
-  With very large contexts at 'high', the API can return 504 DEADLINE_EXCEEDED
-  after roughly five minutes of thinking. A 504 is retried within the 300-second
-  retry budget, so one failure typically costs about ten minutes of wall time.
-  'medium' usually finishes in a few minutes; lower the level if 504s recur.
+  On large contexts (~100k+ tokens), 'high' can take 8-15 minutes while
+  'medium' typically finishes in 3-4 minutes with comparable depth. Use
+  --thinking medium (or ORACLE_THINKING=medium) when faster turnaround is
+  preferred.
 
 Examples:
   cat codebase.md | oracle "Propose a refactoring plan" -

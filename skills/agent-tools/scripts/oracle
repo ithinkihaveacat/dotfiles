@@ -2,8 +2,9 @@
 # /// script
 # requires-python = ">=3.11"
 # dependencies = [
-#     "google-genai",
+#     "google-genai>=2.31.0",
 #     "httpx",
+#     "httpx2",
 # ]
 # [tool.uv.sources]
 # google-genai = { index = "pypi" }
@@ -18,6 +19,7 @@ import asyncio
 import datetime
 import fnmatch
 import json
+import math
 import mimetypes
 import os
 import re
@@ -29,6 +31,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import httpx2
 from google import genai
 from google.genai import errors as genai_errors
 from google.genai import types
@@ -222,6 +225,12 @@ THINKING_LEVELS = ("high", "medium", "low")
 # is given a floor plus time in proportion to its input before it is abandoned.
 REQUEST_TIMEOUT_FLOOR = 180.0
 REQUEST_SECONDS_PER_1K_TOKENS = 1.0
+# google-genai copies HttpOptions.timeout into the X-Server-Timeout header
+# unless the caller sets it, and the server enforces X-Server-Timeout as a
+# wall-clock deadline on the whole stream rather than an inter-chunk stall
+# timeout. Give the stream a generous server deadline while keeping the
+# tighter client read timeout to detect stalled connections.
+SERVER_TIMEOUT_FLOOR = 1800
 
 
 def request_timeout(estimate: int, override: int | None = None) -> float | None:
@@ -528,10 +537,10 @@ Environment:
                         (default: ${{XDG_STATE_HOME:-~/.local/state}}/oracle).
 
 Thinking Level:
-  With very large contexts at 'high', the API can return 504 DEADLINE_EXCEEDED
-  after roughly five minutes of thinking. A 504 is retried within the 300-second
-  retry budget, so one failure typically costs about ten minutes of wall time.
-  'medium' usually finishes in a few minutes; lower the level if 504s recur.
+  On large contexts (~100k+ tokens), 'high' can take 8-15 minutes while
+  'medium' typically finishes in 3-4 minutes with comparable depth. Use
+  --thinking medium (or ORACLE_THINKING=medium) when faster turnaround is
+  preferred.
 
 Examples:
   cat codebase.md | {os.path.basename(sys.argv[0])} "Propose a refactoring plan" -
@@ -1165,7 +1174,16 @@ def main():
         estimate = approx_tokens(system_instruction) + approx_tokens(parts)
         timeout_sec = request_timeout(estimate, request_timeout_override)
         http_options = types.HttpOptions(
-            timeout=int(timeout_sec * 1000) if timeout_sec else None
+            timeout=int(timeout_sec * 1000) if timeout_sec else None,
+            headers=(
+                {
+                    "X-Server-Timeout": str(
+                        max(math.ceil(timeout_sec), SERVER_TIMEOUT_FLOOR)
+                    )
+                }
+                if timeout_sec
+                else None
+            ),
         )
 
         while True:
@@ -1234,7 +1252,9 @@ def main():
                     print("\033[0m\n", end="", file=sys.stderr, flush=True)
                     in_thought = False
 
-                timed_out = isinstance(e, httpx.TimeoutException)
+                timed_out = isinstance(
+                    e, (httpx.TimeoutException, httpx2.TimeoutException)
+                )
                 delay = extract_retry_delay(e)
                 # Retry 429 only if a deterministic retry delay is provided (transient rate limit).
                 # Hard quota errors (plan/billing limits without a retry window) fail immediately.
