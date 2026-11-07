@@ -348,8 +348,8 @@ Usage: pinboard mcp [-h] [--repo DIR] [--http] [--host HOST] [--port PORT]
                     [--allow-host HOST] [--access-team HOST]
                     [--access-aud AUD] [--sync-every HOURS] [--log FILE]
 
-Serve the Pinboard mirror to agents over MCP: search it, and add
-or update bookmarks through the API.
+Serve the Pinboard mirror to agents over MCP: search it, and
+add, update or delete bookmarks through the API.
 
 Options:
   -h, --help          Display this help message and exit
@@ -372,6 +372,7 @@ Tools:
   search_bookmarks, get_bookmark, list_tags   read the mirror; never the API
   suggest_tags                                a live Pinboard call
   add_bookmark, update_bookmark               write to Pinboard, then the mirror
+  delete_bookmark                             delete from Pinboard, then the mirror
   sync                                        bring the mirror up to date
 
 Environment:
