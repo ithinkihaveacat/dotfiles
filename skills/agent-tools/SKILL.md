@@ -241,10 +241,9 @@ scripts/oracle [OPTIONS] "PROMPT" [FILE_OR_DIR ...]
 - `--dry-run`: Output a summary of the payload (resolved files, sizes, and
   prompt) without calling the Gemini API.
 - `--thinking LEVEL`: Thinking level: `high`, `medium`, or `low` (default:
-  `high`; env `ORACLE_THINKING`). With very large contexts at `high`, the API
-  can return `504 DEADLINE_EXCEEDED` after roughly five minutes of thinking;
-  because 504s are retried within the 300-second retry budget, one failure
-  typically costs about ten minutes. `medium` usually finishes in a few minutes.
+  `high`; env `ORACLE_THINKING`). On large contexts (~100k+ tokens), `high` can
+  take 8–15 minutes while `medium` typically finishes in 3–4 minutes with
+  comparable depth.
 - `--request-timeout SECONDS`: Abandon and retry an API request with no response
   after `SECONDS`; `0` waits indefinitely (env `ORACLE_REQUEST_TIMEOUT`). The
   default is 180 s plus 1 s per 1k input tokens.
