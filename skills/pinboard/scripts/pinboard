@@ -113,6 +113,10 @@ class GuardError(Error):
     """A sync the deletion guard stopped; nothing was committed."""
 
 
+class NotFoundError(Error):
+    """A bookmark that Pinboard does not have."""
+
+
 # --- Output ------------------------------------------------------------------
 
 
@@ -496,6 +500,13 @@ class Api:
         code = data.get("result_code") if isinstance(data, dict) else None
         if not isinstance(code, str):
             raise Error("posts/add: unexpected response")
+        return code
+
+    def delete(self, url: str) -> str:
+        data = self.call("posts/delete", {"url": url})
+        code = data.get("result_code") if isinstance(data, dict) else None
+        if not isinstance(code, str):
+            raise Error("posts/delete: unexpected response")
         return code
 
 
@@ -908,6 +919,15 @@ def patch_mirror(repo: Repo, record: dict[str, Any], verb: str) -> Outcome:
     )
 
 
+def remove_from_mirror(repo: Repo, url: str) -> Outcome:
+    def apply() -> None:
+        records = load_mirror(repo.path)
+        records.pop(url, None)
+        write_mirror(repo.path, records)
+
+    return commit_change(repo, apply, subject("delete", url), url, retry=True)
+
+
 # --- Context -----------------------------------------------------------------
 
 
@@ -1289,6 +1309,35 @@ def cmd_update(ctx: Context, args: argparse.Namespace) -> int:
     note(f"{'unchanged' if same_content(before, after) else 'updated'} {after['url']}")
     print_record(after, full=True)
     return report_outcome(outcome, "mirror update")
+
+
+def run_delete(
+    ctx: Context, url: str, dry_run: bool = False
+) -> tuple[dict[str, Any], Outcome | None]:
+    """Deletes a live bookmark; returns (the deleted record, outcome)."""
+    repo = ctx.require_clone()
+    ctx.api.require_online()
+    with locked(repo):
+        ctx.local.reload()
+        if not dry_run:
+            catch_up(repo, ctx.local)
+        current = ctx.api.get(url)
+        if current is None:
+            raise NotFoundError(f"Pinboard has no bookmark for {url}")
+        if dry_run:
+            return current, None
+        try:
+            code = ctx.api.delete(url)
+        except NetworkError as e:
+            # Without a response, the deletion may have happened: a bookmark
+            # posts/get no longer finds was deleted, and is never re-sent.
+            if ctx.api.get(url) is not None:
+                raise Error(f"{e}; Pinboard still has the bookmark") from None
+            code = "done"
+        if code not in ("done", "item not found"):
+            raise Error(f"posts/delete: {code}")
+        outcome = remove_from_mirror(repo, current["url"])
+    return current, outcome
 
 
 @dataclass

@@ -490,6 +490,8 @@ def as_tool_error(e: Exception) -> ToolError:
         return ToolError("rate_limited", str(e), retry_after=e.retry_after)
     if isinstance(e, pb.GuardError):
         return ToolError("sync_refused", str(e))
+    if isinstance(e, pb.NotFoundError):
+        return ToolError("not_found", str(e))
     if isinstance(e, pb.NetworkError):
         return ToolError("network", str(e))
     if isinstance(e, pb.Error):
@@ -734,6 +736,17 @@ class Service:
             "mirror": self.mirror(ctx),
         }
 
+    def delete_bookmark(self, args: dict[str, Any]) -> dict[str, Any]:
+        url = text_arg(args, "url", required=True)
+        ctx = self.context()
+        record, outcome = pb.run_delete(ctx, url)
+        return {
+            "bookmark": view(record, full=True),
+            "deleted": True,
+            "mirror_commit": outcome_view(outcome),
+            "mirror": self.mirror(ctx),
+        }
+
     def sync(self, args: dict[str, Any]) -> dict[str, Any]:
         if not self.sync_lock.acquire(blocking=False):
             raise ToolError(
@@ -758,7 +771,14 @@ class Service:
     # Dispatch and logging.
 
     READS = ("search_bookmarks", "get_bookmark", "list_tags")
-    TOOLS = (*READS, "suggest_tags", "add_bookmark", "update_bookmark", "sync")
+    TOOLS = (
+        *READS,
+        "suggest_tags",
+        "add_bookmark",
+        "update_bookmark",
+        "delete_bookmark",
+        "sync",
+    )
 
     def call(
         self, name: str, args: dict[str, Any], event: Event
@@ -768,9 +788,12 @@ class Service:
         event.tool = name
         event.args = log_args(args)
         url = args.get("url")
-        if name in ("add_bookmark", "update_bookmark", "suggest_tags") and isinstance(
-            url, str
-        ):
+        if name in (
+            "add_bookmark",
+            "update_bookmark",
+            "delete_bookmark",
+            "suggest_tags",
+        ) and isinstance(url, str):
             event.args["host"] = pb.host_of(url)
         if name == "search_bookmarks":
             digest = search_hash(args)
@@ -866,10 +889,12 @@ def instructions(svc: Service, scheduled: bool) -> str:
         f"can lag behind Pinboard by {lag}. Every result gives the mirror's "
         "last sync (mirror.synced_at); call sync first when the user needs "
         "something saved in the last day.\n\n"
-        "add_bookmark and update_bookmark change Pinboard, then the mirror, so "
-        "the next search sees them. New bookmarks are private unless private is "
-        "false. update_bookmark's tags replaces every tag; use add_tags and "
-        "remove_tags to change some. There is no way to delete a bookmark here."
+        "add_bookmark, update_bookmark and delete_bookmark change Pinboard, then "
+        "the mirror, so the next search sees them. New bookmarks are private "
+        "unless private is false. update_bookmark's tags replaces every tag; use "
+        "add_tags and remove_tags to change some. delete_bookmark is permanent: "
+        "Pinboard keeps no history, and only the pinboard CLI's restore command "
+        "can re-add a deleted bookmark."
     )
 
 
@@ -1033,6 +1058,28 @@ def tool_listing() -> list[dict[str, Any]]:
                 "additionalProperties": False,
             },
             "annotations": {**write, "title": "Update a bookmark"},
+        },
+        {
+            "name": "delete_bookmark",
+            "description": (
+                "Delete a bookmark from Pinboard permanently, then from the "
+                "mirror. Pinboard keeps no history: the bookmark cannot be "
+                "undeleted here, and only the pinboard CLI's restore command can "
+                "re-add it. A URL Pinboard does not have is an error."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {"url": url},
+                "required": ["url"],
+                "additionalProperties": False,
+            },
+            "annotations": {
+                "readOnlyHint": False,
+                "destructiveHint": True,
+                "idempotentHint": True,
+                "openWorldHint": True,
+                "title": "Delete a bookmark",
+            },
         },
         {
             "name": "sync",
@@ -1244,6 +1291,7 @@ Tools:
   search_bookmarks, get_bookmark, list_tags   read the mirror; never the API
   suggest_tags                                a live Pinboard call
   add_bookmark, update_bookmark               write to Pinboard, then the mirror
+  delete_bookmark                             delete from Pinboard, then the mirror
   sync                                        bring the mirror up to date
 
 Environment:
@@ -1314,8 +1362,8 @@ class Parser(argparse.ArgumentParser):
 def build_parser() -> argparse.ArgumentParser:
     parser = Parser(
         prog=PROG,
-        description="Serve the Pinboard mirror to agents over MCP: search it, and add\n"
-        "or update bookmarks through the API.",
+        description="Serve the Pinboard mirror to agents over MCP: search it, and\n"
+        "add, update or delete bookmarks through the API.",
         epilog=EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )

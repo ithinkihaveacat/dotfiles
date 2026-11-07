@@ -3,9 +3,9 @@ name: pinboard
 description: >-
   Searches and edits a Pinboard (pinboard.in) bookmark account through a local
   Git mirror: full-text search over titles, notes, tags and URLs, tag counts,
-  adding and updating bookmarks through the API, version history and restoring
-  deleted bookmarks. Use when finding, saving, tagging or recovering bookmarks,
-  or when syncing or checking the Pinboard mirror.
+  adding, updating and deleting bookmarks through the API, version history and
+  restoring deleted bookmarks. Use when finding, saving, tagging, deleting or
+  recovering bookmarks, or when syncing or checking the Pinboard mirror.
 compatibility: Requires Python 3.11+ (via uv), git, and a Pinboard API token.
 ---
 
@@ -237,13 +237,17 @@ pinboard mcp --http                          # loopback only, no authentication
 
 - Tools: `search_bookmarks` (words, tags, dates, to-read, private, paged),
   `get_bookmark` and `list_tags` read the mirror and never call the API;
-  `suggest_tags` is live; `add_bookmark`, `update_bookmark` and `sync` write.
-  `get_bookmark` reports a URL the mirror lacks as `not_found`. There is no
-  delete. Bookmarks are shown with `private` (the inverse of Pinboard's
-  `shared`), and every read says when the mirror last synced.
-- Writes behave as `add` and `update` do, and take the same lock on the clone,
-  so the server and the CLI can share one mirror. `sync` runs one at a time and
-  refuses inside the `posts/all` window with `retry_after` in seconds.
+  `suggest_tags` is live; `add_bookmark`, `update_bookmark`, `delete_bookmark`
+  and `sync` write. `get_bookmark` reports a URL the mirror lacks as
+  `not_found`. `delete_bookmark` removes the bookmark from Pinboard permanently
+  (Pinboard keeps no history; re-add it with the CLI's `restore`) and from the
+  mirror; a URL Pinboard lacks is a `not_found` error. Bookmarks are shown with
+  `private` (the inverse of Pinboard's `shared`), and every read says when the
+  mirror last synced.
+- Writes go to Pinboard and then the mirror, as the CLI's `add` and `update` do,
+  and take the same lock on the clone, so the server and the CLI can share one
+  mirror. `sync` runs one at a time and refuses inside the `posts/all` window
+  with `retry_after` in seconds.
 - Over HTTP the server also syncs whenever the last sync is older than
   `--sync-every` hours (24 by default), checking at startup and then hourly. A
   stdio server never syncs on its own.

@@ -31,6 +31,7 @@ class Fake:
         self.rate_limit = 0
         self.rate_limit_only = ""  # an endpoint, to rate limit only that one
         self.add_mode = ""  # vanish-after (apply, no response), vanish-before
+        self.delete_mode = ""  # error, vanish-after (delete, no response)
         self.post_calls: list[str] = []
 
     def put(
@@ -178,6 +179,18 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(
                     200, [{"popular": ["web"]}, {"recommended": ["reading", "web"]}]
                 )
+            if endpoint == "posts/delete":
+                if FAKE.delete_mode == "error":
+                    return self.send(500, b"")
+                url = q.get("url", "")
+                gone = FAKE.posts.pop(url, None)
+                if FAKE.delete_mode == "vanish-after":
+                    FAKE.delete_mode = ""
+                    return
+                if gone is None:
+                    return self.send(200, {"result_code": "item not found"})
+                FAKE.touch()
+                return self.send(200, {"result_code": "done"})
         self.send(404, b"")
 
 
