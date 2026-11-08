@@ -11,6 +11,7 @@
 - [tags](#tags)
 - [add](#add)
 - [update](#update)
+- [delete](#delete)
 - [restore](#restore)
 - [history](#history)
 - [suggest](#suggest)
@@ -41,6 +42,7 @@ Commands:
   tags              List tags in the mirror, most used first
   add URL           Add a bookmark (private, never replacing one)
   update URL        Change a bookmark's title, notes, tags or flags
+  delete URL        Delete a bookmark from Pinboard and the mirror
   restore URL       Re-add a deleted bookmark from the mirror's history
   history URL       List the mirror's versions of a bookmark
   suggest URL       Ask Pinboard for tag suggestions
@@ -66,6 +68,7 @@ Examples:
   pinboard search rust async --tag programming
   pinboard add https://example.com/post --title "A post" --tags "reading web"
   pinboard update https://example.com/post --add-tag later --remove-tag reading
+  pinboard delete https://example.com/post --dry-run
 
 Reads never call the API, so results are as fresh as the last sync; search,
 get and tags say when that was. sync calls posts/update, then posts/all only
@@ -241,6 +244,34 @@ Examples:
   pinboard update https://example.com/post --add-tag later
   pinboard update https://example.com/post --tags "web rust" --private
   pinboard update https://example.com/post --title "Better title" --dry-run
+```
+
+<!-- /generated -->
+
+## delete
+
+<!-- generated: ../scripts/pinboard delete --help -->
+
+```text
+Usage: pinboard delete [-h] [--yes] [--dry-run] URL
+
+Delete a bookmark through the API, then remove it from the mirror in one
+commit. Asks for confirmation, showing the title and URL, unless --yes;
+a declined prompt changes nothing. Pinboard keeps no history, though the
+mirror's Git history does, so 'history' and 'restore' still work.
+
+Arguments:
+  URL         The bookmark's exact URL
+
+Options:
+  -h, --help  Display this help message and exit
+  --yes       Delete without asking for confirmation
+  --dry-run   Show the bookmark without deleting it
+
+Examples:
+  pinboard delete https://example.com/post
+  pinboard delete --yes https://example.com/post
+  pinboard delete --dry-run https://example.com/post
 ```
 
 <!-- /generated -->
