@@ -92,6 +92,7 @@ FEATURES=(
   'app-host|-|cloudflared, for a host serving apps through a Cloudflare Tunnel'
   'skills|workstation cloud|Link skill and permission plugins; apply default skills'
   'agents|workstation|Link agent context and hooks, and synchronize permissions'
+  'browse|workstation|Install browse, the browser-control MCP server, for OpenCode'
   'upgrades|workstation|Daily: upgrade packages, uv, ruby-build, Android and agent CLIs'
   'overlay-hooks|workstation|Run each overlay'"'"'s update hook'
 )
@@ -2046,6 +2047,49 @@ function feature_agents {
           echo "warning: failed to apply permissions in $ws" >&2
       fi
     done
+  fi
+}
+
+function feature_browse {
+  local browse_bin="${XDG_BIN_HOME:-$HOME/.local/bin}/browse"
+  local args=(--no-open --no-wait --no-modify-path -y -a opencode)
+  local relay=0
+
+  # browse is useful only to an agent that can call it, and this repository
+  # configures it for OpenCode only. Browsers on other computers reach the
+  # relay when there is no local browser to pair (a headless machine), and are
+  # paired once by hand with `browse pair`.
+  is_opencode_agent || return 0
+  heading "browse"
+
+  if [ "$PLATFORM" = linux ] && [ -z "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then
+    relay=1
+    args=(--remote "${args[@]}")
+  fi
+
+  if [ ! -x "$browse_bin" ]; then
+    if is_offline; then
+      skip_offline "browse"
+      return 0
+    fi
+    # -a opencode keeps browse's installer from adding the MCP server to every
+    # agent it detects (Claude Code, Codex, Gemini CLI, Antigravity). --no-open
+    # and --no-wait keep an unattended install from opening a browser or
+    # waiting for the extension; --no-modify-path leaves PATH to the dotfiles.
+    run_installer https://opencode.ai/browse/install "${args[@]}" || return 1
+  fi
+
+  # OpenCode's entry carries OPENCODE_BROWSER_RUNTIME=auto-update, so browse
+  # updates itself while OpenCode runs; do not run `browse update` here, which
+  # reruns the full installer and may reconfigure agents. Add or refresh the
+  # entry when a separately installed browse is present, and open the relay on
+  # a headless machine that was set up before this feature existed.
+  if ! jq -e '.mcp.servers.browse.environment.OPENCODE_BROWSER_RUNTIME == "auto-update"' \
+    "$XDG_CONFIG_HOME/opencode/opencode.json" >/dev/null 2>&1; then
+    x "$browse_bin" install "${args[@]}" || return 1
+  elif [ "$relay" = 1 ] &&
+    [ "$(jq -r '.hostname // empty' "$XDG_CONFIG_HOME/browse/config.json" 2>/dev/null)" != "0.0.0.0" ]; then
+    x "$browse_bin" set hostname 0.0.0.0 || return 1
   fi
 }
 
