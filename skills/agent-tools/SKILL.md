@@ -240,16 +240,35 @@ scripts/oracle [OPTIONS] "PROMPT" [FILE_OR_DIR ...]
   a sandboxed environment.
 - `--dry-run`: Output a summary of the payload (resolved files, sizes, and
   prompt) without calling the Gemini API.
+- `--thinking LEVEL`: Thinking level: `high`, `medium`, or `low` (default:
+  `high`; env `ORACLE_THINKING`). On large contexts (~100k+ tokens), `high` can
+  take 8–15 minutes while `medium` typically finishes in 3–4 minutes with
+  comparable depth.
 - `--request-timeout SECONDS`: Abandon and retry an API request with no response
   after `SECONDS`; `0` waits indefinitely (env `ORACLE_REQUEST_TIMEOUT`). The
   default is 180 s plus 1 s per 1k input tokens.
+- `--max-output-tokens N`: Ceiling on thinking plus answer tokens (default:
+  131072; env `ORACLE_MAX_OUTPUT_TOKENS`). See "Output limit" below.
 - `--serialize` / `--no-serialize`: Save request payload and answer to files in
   the state directory (`~/.local/state/oracle/`) (default: on).
 
-**Environment:** `GEMINI_API_KEY` (Required), `ORACLE_REQUEST_TIMEOUT`
-(Optional), `ORACLE_STATE_DIR` (Optional)
+**Output limit:** Thinking tokens count toward `max_output_tokens`, and without
+it a streamed response stops at the 64k per-request cap. Oracle sets it to
+131072 by default. Above 65,536 the API ends each 64k hop with finish reason
+`CONTINUATION` and a continuation token, and `google-genai`'s automatic
+continuation resends the request with that token and streams the next hop as
+part of the same answer (the request timeout applies to each hop). If the
+ceiling is still reached (finish reason `MAX_TOKENS`), or there is no answer
+text at all, the partial answer is printed and saved, a warning is printed, and
+the exit status is 1; raise `--max-output-tokens` or lower `--thinking`.
+Telemetry records `max_output_tokens`, `finish_reason`, `continuation_tokens`,
+and `truncated`.
 
-**Exit codes:** 0 success, 1 error
+**Environment:** `GEMINI_API_KEY` (Required), `ORACLE_THINKING` (Optional),
+`ORACLE_REQUEST_TIMEOUT` (Optional), `ORACLE_MAX_OUTPUT_TOKENS` (Optional),
+`ORACLE_STATE_DIR` (Optional)
+
+**Exit codes:** 0 success, 1 error (including an incomplete or empty answer)
 
 **Examples:**
 
@@ -335,6 +354,15 @@ initial prompt — is controlled by `--inline`/`--no-inline`.
   5xx (env `CAXTON_REQUEST_TIMEOUT`; `0` waits indefinitely). The default is 180
   s plus 1 s per 1k input tokens, so a single stalled request cannot use the
   whole `--timeout`.
+- `--max-output-tokens N`: Ceiling on thinking plus output tokens for each model
+  turn (e.g. `256k`; default 131072; env `CAXTON_MAX_OUTPUT_TOKENS`). Without
+  it, a turn stops at the 32k non-streaming per-request cap, which thinking plus
+  a long `complete_task` report can exceed. Above 65,536 the API ends each hop
+  with finish reason `CONTINUATION`, and `google-genai`'s automatic continuation
+  resends the turn with the continuation token and merges the hops (function
+  calls included) into one response. A turn that still reaches the ceiling
+  without a tool call ends the run with exit status 1; any text it wrote is
+  printed and saved as a partial report.
 
 `PROMPT` is the only positional argument and must come before the path options,
 which each consume every following path.

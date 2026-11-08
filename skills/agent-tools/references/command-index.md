@@ -399,10 +399,15 @@ Options:
   --code                Enable Code Execution for Python.
   --dry-run             Output a summary of the payload (resolved files, sizes, and prompt) without calling the Gemini API.
   --model MODEL         Gemini model to use (default: gemini-4-argon).
+  --thinking LEVEL      Thinking level: 'high', 'medium', 'low' (default: 'high').
   --request-timeout SECONDS
                         Abandon and retry an API request with no response after
                         SECONDS; 0 waits indefinitely. (default: 180, plus 1 per
                         1k input tokens).
+  --max-output-tokens N
+                        Ceiling on thinking plus answer tokens for the response
+                        (default: 131072). Above 65536 the response is generated
+                        in continuation hops of up to 64k tokens.
   --serialize           Save the request payload and the answer to files in the state
                         directory (~/.local/state/oracle/). (Default: on).
   --no-serialize        Disable saving the payload and answer to the state directory.
@@ -411,11 +416,33 @@ Options:
 Environment:
   GEMINI_API_KEY        Required. Your Gemini API key.
   GEMINI_MODEL          Optional. Default model if --model is not given.
+  ORACLE_THINKING       Optional. Default for --thinking.
   ORACLE_REQUEST_TIMEOUT
                         Optional. Default for --request-timeout.
+  ORACLE_MAX_OUTPUT_TOKENS
+                        Optional. Default for --max-output-tokens.
   AGENT_TELEMETRY_JSON  Optional. Destination path for structured JSON execution telemetry.
   ORACLE_STATE_DIR      Optional. State directory for serialized payloads and answers
                         (default: ${XDG_STATE_HOME:-~/.local/state}/oracle).
+
+Thinking Level:
+  On large contexts (~100k+ tokens), 'high' can take 8-15 minutes while
+  'medium' typically finishes in 3-4 minutes with comparable depth. Use
+  --thinking medium (or ORACLE_THINKING=medium) when faster turnaround is
+  preferred.
+
+Output Limit:
+  Thinking and answer share --max-output-tokens. Past 65536 tokens the API
+  continues the response in further requests that the client issues
+  automatically, appending to the same answer. If the ceiling is reached
+  before the answer is complete (finish reason MAX_TOKENS), or no answer text
+  is produced, the partial answer is still printed and saved, a warning is
+  printed, and the exit status is 1. Raise --max-output-tokens or lower
+  --thinking to avoid it.
+
+Exit Status:
+  0 on success; 1 on error, including an incomplete or empty answer; 130 on
+  interrupt.
 
 Examples:
   cat codebase.md | oracle "Propose a refactoring plan" -
@@ -501,6 +528,10 @@ Options:
                       Abandon and retry an API request with no response after
                       SECONDS; 0 waits indefinitely. (default: 180, plus 1 per
                       1k input tokens)
+  --max-output-tokens N
+                      Ceiling on thinking plus output tokens for each model
+                      turn, e.g. 256k (default: 131072). Above 65536 a turn is
+                      generated in continuation hops of up to 32k tokens.
   -h, --help          Display this help message and exit.
 
 Environment:
@@ -512,6 +543,8 @@ Environment:
                       Optional. Default for --max-input-tokens.
   CAXTON_REQUEST_TIMEOUT
                       Optional. Default for --request-timeout.
+  CAXTON_MAX_OUTPUT_TOKENS
+                      Optional. Default for --max-output-tokens.
   CAXTON_STATE_DIR    Optional. State directory for serialized payloads and responses
                       (default: ${XDG_STATE_HOME:-~/.local/state}/caxton).
 
@@ -541,6 +574,10 @@ Notes:
   caxton runs only inside a git worktree. Mutation runs require a clean
   worktree, allowing 'git checkout' and 'git clean' to provide safe undo.
   Secret files, symlinks, and submodules are always excluded for safety.
+
+  A model turn that reaches --max-output-tokens (thinking included) before
+  making a tool call ends the run with exit status 1; any text it produced is
+  still printed and saved as a partial report.
 ```
 
 <!-- /generated -->

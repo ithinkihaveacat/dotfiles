@@ -22,4 +22,5 @@ complete -c caxton -l timeout -x -d "Maximum execution time in seconds (default:
 complete -c caxton -l tpm -x -d "Input tokens per minute to stay under (e.g. 1M)"
 complete -c caxton -l max-input-tokens -x -d "Stop before total input tokens pass N (e.g. 20M)"
 complete -c caxton -l request-timeout -x -d "Seconds to wait for one API response (0: no limit)"
+complete -c caxton -l max-output-tokens -x -d "Ceiling on thinking plus output tokens per turn (default: 131072)"
 complete -c caxton -s h -l help -d "Display help message and exit"

@@ -12,7 +12,7 @@ WORK=$(cd "$(mktemp -d)" && pwd -P)
 export ORACLE_STATE_DIR="$WORK/state"
 trap 'rm -rf "$OUTPUT" "$WORK"' EXIT
 
-echo "1..21"
+echo "1..27"
 
 # Test 1: oracle --help outputs valid help and exits 0
 if "$BIN" --help >"$OUTPUT" 2>&1; then
@@ -485,19 +485,22 @@ else
   sed 's/^/# /' "$STDIN_OUT" "$UNKNOWN_OUT"
 fi
 
-# Test 21: Wire API requests attach exact expected tools for default, --no-search, and --no-search --code
+# Test 21: Wire API requests attach exact expected tools and thinking level for default, --no-search, --no-search --code, and --thinking
 CAPTURE_PORT_FILE="$WORK/capture.port"
 CAPTURE_LOG="$WORK/capture.jsonl"
 cat >"$WORK/capture_server.py" <<'PYEOF'
 import http.server
+import json
 import sys
 
 
 class CaptureHandler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
-        with open(sys.argv[2], "ab") as f:
-            f.write(body.replace(b"\n", b" ") + b"\n")
+        obj = json.loads(body)
+        obj["_x_server_timeout"] = self.headers.get("X-Server-Timeout")
+        with open(sys.argv[2], "a", encoding="utf-8") as f:
+            f.write(json.dumps(obj) + "\n")
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.end_headers()
@@ -530,6 +533,7 @@ CAPTURE_URL="http://127.0.0.1:$(cat "$CAPTURE_PORT_FILE" 2>/dev/null)"
 CAP_OUT1="$WORK/cap1.out"
 CAP_OUT2="$WORK/cap2.out"
 CAP_OUT3="$WORK/cap3.out"
+CAP_OUT4="$WORK/cap4.out"
 cap_status=0
 GEMINI_API_KEY=stub GOOGLE_GEMINI_BASE_URL="$CAPTURE_URL" \
   "$BIN" --no-serialize "Default run" >"$CAP_OUT1" 2>&1 || cap_status=$?
@@ -537,6 +541,8 @@ GEMINI_API_KEY=stub GOOGLE_GEMINI_BASE_URL="$CAPTURE_URL" \
   "$BIN" --no-serialize --no-search "Closed run" >"$CAP_OUT2" 2>&1 || cap_status=$?
 GEMINI_API_KEY=stub GOOGLE_GEMINI_BASE_URL="$CAPTURE_URL" \
   "$BIN" --no-serialize --no-search --code "Code run" >"$CAP_OUT3" 2>&1 || cap_status=$?
+GEMINI_API_KEY=stub GOOGLE_GEMINI_BASE_URL="$CAPTURE_URL" \
+  "$BIN" --no-serialize --thinking medium --request-timeout 2400 "Medium run" >"$CAP_OUT4" 2>&1 || cap_status=$?
 kill "$CAPTURE_PID" 2>/dev/null || true
 wait "$CAPTURE_PID" 2>/dev/null || true
 
@@ -547,7 +553,7 @@ import sys
 from pathlib import Path
 
 lines = Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
-assert len(lines) == 3, f"expected 3 requests, got {len(lines)}"
+assert len(lines) == 4, f"expected 4 requests, got {len(lines)}"
 reqs = [json.loads(line) for line in lines]
 
 # 1. Default: googleSearch present, codeExecution absent
@@ -564,6 +570,20 @@ assert "Google Search" not in si2, si2
 t3 = json.dumps(reqs[2].get("tools"))
 assert "codeExecution" in t3 or "code_execution" in t3, t3
 assert "googleSearch" not in t3 and "google_search" not in t3, t3
+
+
+# 4. Thinking level: high by default, medium with --thinking medium
+def level(req):
+    cfg = req.get("generationConfig", {}).get("thinkingConfig", {})
+    return str(cfg.get("thinkingLevel", cfg.get("thinking_level", ""))).upper()
+
+
+assert level(reqs[0]) == "HIGH", reqs[0].get("generationConfig")
+assert level(reqs[3]) == "MEDIUM", reqs[3].get("generationConfig")
+
+# 5. X-Server-Timeout uses the 1800s floor by default and scales above 1800s
+assert reqs[0].get("_x_server_timeout") == "1800", reqs[0].get("_x_server_timeout")
+assert reqs[3].get("_x_server_timeout") == "2400", reqs[3].get("_x_server_timeout")
 print("WIRE_OK")
 PYEOF
 
@@ -571,9 +591,256 @@ if [[ $cap_status -eq 0 ]] &&
   grep -q "^WIRE_OK$" "$VERIFY_OUT" &&
   grep -q "| search | thinking=high |" "$CAP_OUT1" &&
   grep -q "| none | thinking=high |" "$CAP_OUT2" &&
-  grep -q "| code | thinking=high |" "$CAP_OUT3"; then
-  echo "ok 21 - Sends expected wire tools config and status lines for search, none, and code"
+  grep -q "| code | thinking=high |" "$CAP_OUT3" &&
+  grep -q "| search | thinking=medium |" "$CAP_OUT4"; then
+  echo "ok 21 - Sends expected wire tools and thinking config and status lines"
 else
   echo "not ok 21 - Wire tools config or stderr status lines did not match"
-  sed 's/^/# /' "$VERIFY_OUT" "$CAP_OUT1" "$CAP_OUT2" "$CAP_OUT3"
+  sed 's/^/# /' "$VERIFY_OUT" "$CAP_OUT1" "$CAP_OUT2" "$CAP_OUT3" "$CAP_OUT4"
+fi
+
+# Test 22: --thinking defaults to high, honors ORACLE_THINKING, and the flag wins over the env
+THINK_DEFAULT_OUT="$WORK/think_default.out"
+THINK_DEFAULT_TEL="$WORK/think_default.json"
+THINK_FLAG_OUT="$WORK/think_flag.out"
+THINK_FLAG_TEL="$WORK/think_flag.json"
+THINK_ENV_OUT="$WORK/think_env.out"
+THINK_BOTH_OUT="$WORK/think_both.out"
+THINK_EQ_OUT="$WORK/think_eq.out"
+
+if env -u ORACLE_THINKING AGENT_TELEMETRY_JSON="$THINK_DEFAULT_TEL" \
+  "$BIN" --dry-run "Default thinking" >"$THINK_DEFAULT_OUT" 2>&1 &&
+  env -u ORACLE_THINKING AGENT_TELEMETRY_JSON="$THINK_FLAG_TEL" \
+    "$BIN" --dry-run --thinking medium "Medium thinking" >"$THINK_FLAG_OUT" 2>&1 &&
+  ORACLE_THINKING=low "$BIN" --dry-run "Env thinking" >"$THINK_ENV_OUT" 2>&1 &&
+  ORACLE_THINKING=low "$BIN" --dry-run --thinking medium "Flag beats env" >"$THINK_BOTH_OUT" 2>&1 &&
+  env -u ORACLE_THINKING "$BIN" --dry-run --thinking=low "Equals form" >"$THINK_EQ_OUT" 2>&1; then
+  if grep -q "Thinking:       high" "$THINK_DEFAULT_OUT" &&
+    grep -q '"thinking_level": "high"' "$THINK_DEFAULT_TEL" &&
+    grep -q "Thinking:       medium" "$THINK_FLAG_OUT" &&
+    grep -q '"thinking_level": "medium"' "$THINK_FLAG_TEL" &&
+    grep -q "Thinking:       low" "$THINK_ENV_OUT" &&
+    grep -q "Thinking:       medium" "$THINK_BOTH_OUT" &&
+    grep -q "Thinking:       low" "$THINK_EQ_OUT"; then
+    echo "ok 22 - --thinking default, flag, --thinking=LEVEL, ORACLE_THINKING, and flag-over-env precedence"
+  else
+    echo "not ok 22 - --thinking level not reflected in dry-run summary or telemetry"
+    sed 's/^/# /' "$THINK_DEFAULT_OUT" "$THINK_FLAG_OUT" "$THINK_ENV_OUT" "$THINK_BOTH_OUT" "$THINK_EQ_OUT"
+  fi
+else
+  echo "not ok 22 - Dry run failed during --thinking test"
+  sed 's/^/# /' "$THINK_DEFAULT_OUT" "$THINK_FLAG_OUT" "$THINK_ENV_OUT" "$THINK_BOTH_OUT" "$THINK_EQ_OUT"
+fi
+
+# Test 23: --thinking rejects invalid levels (flag and env) and a missing argument, recording error telemetry
+THINK_BAD_OUT="$WORK/think_bad.out"
+THINK_BAD_TEL="$WORK/think_bad.json"
+THINK_BADENV_OUT="$WORK/think_badenv.out"
+THINK_MISSING_OUT="$WORK/think_missing.out"
+THINK_EMPTY_OUT="$WORK/think_empty.out"
+
+if ! env AGENT_TELEMETRY_JSON="$THINK_BAD_TEL" \
+  "$BIN" --dry-run --thinking extreme "Bad level" >"$THINK_BAD_OUT" 2>&1 &&
+  grep -q "oracle: error: --thinking: invalid level: 'extreme' (choose from high, medium, low)" "$THINK_BAD_OUT" &&
+  grep -q '"status": "Error"' "$THINK_BAD_TEL" &&
+  grep -q '"error": "--thinking: invalid level' "$THINK_BAD_TEL" &&
+  ! ORACLE_THINKING=none "$BIN" --dry-run "Bad env level" >"$THINK_BADENV_OUT" 2>&1 &&
+  grep -q "oracle: error: --thinking: invalid level: 'none'" "$THINK_BADENV_OUT" &&
+  ! "$BIN" --dry-run "Missing level" --thinking >"$THINK_MISSING_OUT" 2>&1 &&
+  grep -q "oracle: error: --thinking requires an argument" "$THINK_MISSING_OUT" &&
+  ! "$BIN" --dry-run --thinking= "Empty level" >"$THINK_EMPTY_OUT" 2>&1 &&
+  grep -q "oracle: error: --thinking requires an argument" "$THINK_EMPTY_OUT"; then
+  echo "ok 23 - --thinking rejects invalid levels and missing arguments with error telemetry"
+else
+  echo "not ok 23 - --thinking validation did not fail as expected"
+  sed 's/^/# /' "$THINK_BAD_OUT" "$THINK_BADENV_OUT" "$THINK_MISSING_OUT" "$THINK_EMPTY_OUT"
+fi
+
+# Tests 24-26 share a stub that answers each streamed request from a script,
+# one line per request, and logs every request body. A line is
+# "TEXT|FINISH_REASON|CONTINUATION_TOKEN" (TEXT empty for a thought-only
+# response, token optional and base64).
+LIMIT_PORT_FILE="$WORK/limit.port"
+LIMIT_LOG="$WORK/limit.jsonl"
+LIMIT_SCRIPT="$WORK/limit.script"
+cat >"$WORK/limit_server.py" <<'PYEOF'
+import http.server
+import json
+import sys
+
+
+class ScriptedHandler(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        with open(sys.argv[2], "a", encoding="utf-8") as f:
+            f.write(json.dumps(json.loads(body)) + "\n")
+        with open(sys.argv[2], encoding="utf-8") as f:
+            count = sum(1 for _ in f)
+        with open(sys.argv[3], encoding="utf-8") as f:
+            script = f.read().splitlines()
+        text, reason, token = script[min(count, len(script)) - 1].split("|")
+        parts = [{"text": "Planning the answer.", "thought": True}]
+        if text:
+            parts.append({"text": text})
+        candidate = {"content": {"parts": parts, "role": "model"}, "finishReason": reason}
+        if token:
+            candidate["continuationToken"] = token
+        chunk = {
+            "candidates": [candidate],
+            "usageMetadata": {
+                "promptTokenCount": 10,
+                "candidatesTokenCount": 5,
+                "thoughtsTokenCount": 7,
+            },
+        }
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.end_headers()
+        self.wfile.write(b"data: " + json.dumps(chunk).encode() + b"\r\n\r\n")
+        self.wfile.flush()
+
+    def log_message(self, *args):
+        pass
+
+
+server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), ScriptedHandler)
+server.daemon_threads = True
+with open(sys.argv[1], "w") as f:
+    f.write(str(server.server_address[1]))
+server.serve_forever()
+PYEOF
+: >"$LIMIT_SCRIPT"
+python3 "$WORK/limit_server.py" "$LIMIT_PORT_FILE" "$LIMIT_LOG" "$LIMIT_SCRIPT" &
+LIMIT_PID=$!
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  [[ -s "$LIMIT_PORT_FILE" ]] && break
+  sleep 0.5
+done
+LIMIT_URL="http://127.0.0.1:$(cat "$LIMIT_PORT_FILE" 2>/dev/null)"
+
+# Runs oracle against the stub with the given response script; sets
+# limit_status and leaves stdout, stderr and telemetry in $WORK/limit.*.
+run_limited() {
+  printf '%s\n' "$1" >"$LIMIT_SCRIPT"
+  shift
+  : >"$LIMIT_LOG"
+  rm -f "$WORK/limit.tel"
+  limit_status=0
+  env -u ORACLE_MAX_OUTPUT_TOKENS GEMINI_API_KEY=stub \
+    GOOGLE_GEMINI_BASE_URL="$LIMIT_URL" \
+    AGENT_TELEMETRY_JSON="$WORK/limit.tel" \
+    ORACLE_STATE_DIR="$WORK/limit-state" \
+    "$BIN" "$@" "Write a long report" >"$WORK/limit.out" 2>"$WORK/limit.err" ||
+    limit_status=$?
+}
+
+# Test 24: max_output_tokens is sent (131072 by default), and a response the
+# API ends with CONTINUATION is resumed with its continuation token and
+# streamed as one answer
+run_limited "$(printf 'Part one, |CONTINUATION|dG9rZW4tMQ==\npart two.|STOP|')"
+LIMIT_ANSWER=$(grep -o '[^ ]*answer_[^ ]*\.md' "$WORK/limit.err" 2>/dev/null || true)
+VERIFY_LIMIT="$WORK/verify_limit.out"
+python3 - "$LIMIT_LOG" "$WORK/limit.tel" >"$VERIFY_LIMIT" 2>&1 <<'PYEOF' || true
+import json
+import sys
+from pathlib import Path
+
+reqs = [json.loads(x) for x in Path(sys.argv[1]).read_text().splitlines()]
+assert len(reqs) == 2, f"expected 2 requests, got {len(reqs)}"
+for req in reqs:
+    assert req["generationConfig"]["maxOutputTokens"] == 131072, req["generationConfig"]
+    assert len(req["contents"]) == 1, req["contents"]
+assert "continuationToken" not in reqs[0], reqs[0].keys()
+assert reqs[1].get("continuationToken") == "dG9rZW4tMQ==", reqs[1].keys()
+tel = json.loads(Path(sys.argv[2]).read_text())
+assert tel["status"] == "Succeeded", tel
+assert tel["max_output_tokens"] == 131072, tel
+assert tel["finish_reason"] == "STOP", tel
+assert tel["continuation_tokens"] == 1, tel
+assert tel["truncated"] is False, tel
+assert tel["candidate_tokens"] == 10 and tel["thinking_tokens"] == 14, tel
+print("LIMIT_OK")
+PYEOF
+if [[ $limit_status -eq 0 ]] &&
+  grep -q "^LIMIT_OK$" "$VERIFY_LIMIT" &&
+  grep -q "^Part one, part two\.$" "$WORK/limit.out" &&
+  [[ -n "$LIMIT_ANSWER" && -f "$LIMIT_ANSWER" ]] &&
+  [[ "$(cat "$LIMIT_ANSWER")" == "Part one, part two." ]]; then
+  echo "ok 24 - Sends max_output_tokens and streams CONTINUATION hops as one answer"
+else
+  echo "not ok 24 - Long-decode continuation was not followed (exit $limit_status)"
+  sed 's/^/# /' "$VERIFY_LIMIT" "$WORK/limit.out" "$WORK/limit.err"
+fi
+
+# Test 25: a response that reaches the output ceiling (MAX_TOKENS) keeps the
+# partial answer on stdout and in the saved answer, warns, records the
+# truncation in telemetry, and exits 1
+run_limited "Cut off mid-sent|MAX_TOKENS|" --max-output-tokens 70000
+LIMIT_ANSWER=$(grep -o '[^ ]*answer_[^ ]*\.md' "$WORK/limit.err" 2>/dev/null || true)
+if [[ $limit_status -eq 1 ]] &&
+  grep -q '"maxOutputTokens": 70000' "$LIMIT_LOG" &&
+  grep -q "^Cut off mid-sent$" "$WORK/limit.out" &&
+  grep -q "warning: answer is incomplete: the response reached --max-output-tokens (70000, thinking included)" "$WORK/limit.err" &&
+  grep -q '"truncated": true' "$WORK/limit.tel" &&
+  grep -q '"finish_reason": "MAX_TOKENS"' "$WORK/limit.tel" &&
+  grep -q '"status": "Error"' "$WORK/limit.tel" &&
+  grep -q '"error": "answer is incomplete' "$WORK/limit.tel" &&
+  [[ -n "$LIMIT_ANSWER" && -f "$LIMIT_ANSWER" ]] &&
+  grep -q "^Cut off mid-sent$" "$LIMIT_ANSWER" &&
+  grep -q "<!-- oracle: answer is incomplete" "$LIMIT_ANSWER"; then
+  echo "ok 25 - Warns, keeps the partial answer, and exits 1 when the output ceiling is reached"
+else
+  echo "not ok 25 - Truncated answer was not reported (exit $limit_status)"
+  sed 's/^/# /' "$WORK/limit.out" "$WORK/limit.err"
+fi
+
+# Test 26: a response with no answer text at all is an error, not an empty
+# success
+empty_ok=0
+run_limited "|MAX_TOKENS|"
+if [[ $limit_status -eq 1 ]] &&
+  grep -q "warning: answer is incomplete" "$WORK/limit.err" &&
+  ! grep -q "saved answer" "$WORK/limit.err"; then
+  empty_ok=1
+fi
+run_limited "|STOP|"
+if [[ $empty_ok -eq 1 && $limit_status -eq 1 ]] &&
+  grep -q "warning: the model returned no answer text (finish reason: STOP)" "$WORK/limit.err" &&
+  grep -q '"error": "the model returned no answer text' "$WORK/limit.tel"; then
+  echo "ok 26 - An empty answer exits 1 with a warning"
+else
+  echo "not ok 26 - Empty answer was not reported (exit $limit_status)"
+  sed 's/^/# /' "$WORK/limit.out" "$WORK/limit.err"
+fi
+kill "$LIMIT_PID" 2>/dev/null || true
+wait "$LIMIT_PID" 2>/dev/null || true
+
+# Test 27: --max-output-tokens defaults to 131072, honors
+# ORACLE_MAX_OUTPUT_TOKENS, the flag wins over the env, and a malformed count
+# is rejected
+MO_DEFAULT_OUT="$WORK/mo_default.out"
+MO_DEFAULT_TEL="$WORK/mo_default.json"
+MO_ENV_OUT="$WORK/mo_env.out"
+MO_BOTH_OUT="$WORK/mo_both.out"
+MO_BAD_OUT="$WORK/mo_bad.out"
+MO_BADENV_OUT="$WORK/mo_badenv.out"
+MO_MISSING_OUT="$WORK/mo_missing.out"
+if env -u ORACLE_MAX_OUTPUT_TOKENS AGENT_TELEMETRY_JSON="$MO_DEFAULT_TEL" \
+  "$BIN" --dry-run "Default" >"$MO_DEFAULT_OUT" 2>&1 &&
+  ORACLE_MAX_OUTPUT_TOKENS=262144 "$BIN" --dry-run "Env" >"$MO_ENV_OUT" 2>&1 &&
+  ORACLE_MAX_OUTPUT_TOKENS=262144 "$BIN" --dry-run --max-output-tokens=65536 "Both" >"$MO_BOTH_OUT" 2>&1 &&
+  grep -q "Max Output:     131072 tokens" "$MO_DEFAULT_OUT" &&
+  grep -q '"max_output_tokens": 131072' "$MO_DEFAULT_TEL" &&
+  grep -q "Max Output:     262144 tokens" "$MO_ENV_OUT" &&
+  grep -q "Max Output:     65536 tokens" "$MO_BOTH_OUT" &&
+  ! "$BIN" --dry-run --max-output-tokens 128k "Bad" >"$MO_BAD_OUT" 2>&1 &&
+  grep -q "oracle: error: --max-output-tokens: invalid token count: '128k'" "$MO_BAD_OUT" &&
+  ! ORACLE_MAX_OUTPUT_TOKENS=0 "$BIN" --dry-run "Bad env" >"$MO_BADENV_OUT" 2>&1 &&
+  grep -q "oracle: error: --max-output-tokens: invalid token count: '0'" "$MO_BADENV_OUT" &&
+  ! "$BIN" --dry-run "Missing" --max-output-tokens >"$MO_MISSING_OUT" 2>&1 &&
+  grep -q "oracle: error: --max-output-tokens requires an argument" "$MO_MISSING_OUT"; then
+  echo "ok 27 - --max-output-tokens default, ORACLE_MAX_OUTPUT_TOKENS, precedence, and validation"
+else
+  echo "not ok 27 - --max-output-tokens handling did not match expectations"
+  sed 's/^/# /' "$MO_DEFAULT_OUT" "$MO_ENV_OUT" "$MO_BOTH_OUT" "$MO_BAD_OUT" "$MO_BADENV_OUT" "$MO_MISSING_OUT"
 fi

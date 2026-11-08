@@ -307,7 +307,10 @@ commonest runs of two or three tool calls in one caller's chains, by server
 and client. A chain is one caller's tool calls to one server, each no more
 than --gap seconds after the one before; records with no caller key (HTTP
 without authentication) form no chains. It reads every record unless --tail
-or --since limits them.
+or --since limits them. A GET answered 405 is a client probing for a
+server-initiated stream, which the transport lets the server decline:
+summaries count it as a probe rather than a failure, and the live page hides
+these rows unless "Show protocol probes" is ticked.
 
 --serve serves one live page instead: the latest records, newest first, and
 the summary, for every log or the servers ticked on it. The page polls the
