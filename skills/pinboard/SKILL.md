@@ -60,19 +60,25 @@ and committed to the mirror, so the next search sees it.
 ```bash
 pinboard add https://example.com/post --title "A post" --tags "web reading"
 pinboard update https://example.com/post --add-tag later --remove-tag reading
-pinboard restore https://example.com/post   # re-add a deleted bookmark
-pinboard suggest https://example.com/post   # live tag suggestions
+pinboard delete https://example.com/post      # asks first; --yes skips the prompt
+pinboard restore https://example.com/post     # re-add a deleted bookmark
+pinboard suggest https://example.com/post     # live tag suggestions
 ```
 
 - `add` makes the bookmark private unless `--public`, and never replaces an
   existing bookmark: if Pinboard has the URL, it reports the bookmark unchanged.
 - `update` reads the bookmark live, changes only the given fields and keeps its
   date. `--tags` replaces every tag; `--add-tag` and `--remove-tag` change some.
+- `delete` removes the bookmark from Pinboard and then the mirror in one commit.
+  It shows the title and URL and asks for confirmation; `--yes` skips the
+  prompt, and a declined prompt changes nothing. `--dry-run` shows the bookmark
+  without deleting it. Pinboard keeps no history, but the mirror does, so
+  `history` and `restore` still have the old version.
 - `restore` re-adds the last version the mirror recorded, with its original
   date; `--title` supplies a title when the recorded one is empty, which
-  Pinboard refuses.
-- `--dry-run` on `add`, `update`, `restore` and `sync` shows what would be sent
-  or changed.
+  Pinboard refuses. It is the inverse of `delete`.
+- `--dry-run` on `add`, `update`, `delete`, `restore` and `sync` shows what
+  would be sent or changed.
 
 ## Syncing
 

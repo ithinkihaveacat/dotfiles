@@ -40,6 +40,7 @@ complete -f -c pinboard -n __fish_pinboard_needs_command -a get -d 'Show one boo
 complete -f -c pinboard -n __fish_pinboard_needs_command -a tags -d 'List tags in the mirror'
 complete -f -c pinboard -n __fish_pinboard_needs_command -a add -d 'Add a bookmark'
 complete -f -c pinboard -n __fish_pinboard_needs_command -a update -d "Change a bookmark"
+complete -f -c pinboard -n __fish_pinboard_needs_command -a delete -d 'Delete a bookmark'
 complete -f -c pinboard -n __fish_pinboard_needs_command -a restore -d 'Re-add a deleted bookmark'
 complete -f -c pinboard -n __fish_pinboard_needs_command -a history -d "List a bookmark's versions"
 complete -f -c pinboard -n __fish_pinboard_needs_command -a suggest -d 'Ask Pinboard for tag suggestions'
@@ -55,7 +56,8 @@ complete -f -c pinboard -s h -l help -d 'Display help message and exit'
 # Command options
 complete -f -c pinboard -n '__fish_pinboard_using_command sync' -l full -d 'Fetch posts/all even if nothing changed'
 complete -f -c pinboard -n '__fish_pinboard_using_command sync' -l force -d 'Delete without confirming each'
-complete -f -c pinboard -n '__fish_pinboard_using_command sync add update restore' -l dry-run -d 'Change nothing'
+complete -f -c pinboard -n '__fish_pinboard_using_command sync add update delete restore' -l dry-run -d 'Change nothing'
+complete -f -c pinboard -n '__fish_pinboard_using_command delete' -l yes -d 'Delete without confirmation'
 complete -f -c pinboard -n '__fish_pinboard_using_command search' -l tag -x -d 'Only bookmarks with TAG'
 complete -f -c pinboard -n '__fish_pinboard_using_command search' -l limit -x -d 'Results per page'
 complete -f -c pinboard -n '__fish_pinboard_using_command search' -l cursor -x -d 'Continue from a previous page'

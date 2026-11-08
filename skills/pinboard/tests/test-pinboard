@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import pty
 import shutil
 import subprocess
 import sys
@@ -78,6 +79,26 @@ def pb(
         stdin=subprocess.DEVNULL,
         check=False,
     )
+
+
+def pb_confirm(repo: Path, answer: str, *args: str) -> subprocess.CompletedProcess[str]:
+    """Run pinboard with a pseudo-terminal on stdin so it can ask to confirm."""
+    master, slave = pty.openpty()
+    proc = subprocess.Popen(
+        [str(BIN), "--repo", str(repo), *args],
+        stdin=slave,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=ENV,
+    )
+    os.close(slave)
+    try:
+        os.write(master, answer.encode())
+        out, err = proc.communicate(timeout=120)
+    finally:
+        os.close(master)
+    return subprocess.CompletedProcess(proc.args, proc.returncode, out, err)
 
 
 def git(*args: str, cwd: Path | None = None) -> str:
@@ -486,6 +507,110 @@ def main() -> None:
         "add never replaces",
         diag(p),
     )
+
+    # --- Delete ---
+    target = "https://example.net/delete-me"
+    FAKE.put(target, "Delete me", "2024-05-05T10:00:00Z", "gone notes", "gone")
+    pb(A, "sync")
+    deletes = FAKE.count("posts/delete")
+    p = pb(A, "delete", target, "--dry-run")
+    ok(
+        p.returncode == 0
+        and target in p.stdout
+        and "Delete me" in p.stdout
+        and FAKE.count("posts/delete") == deletes
+        and target in FAKE.posts,
+        "delete --dry-run shows the bookmark and sends no deletion",
+        diag(p),
+    )
+    p = pb(A, "delete", target)
+    ok(
+        p.returncode == 1
+        and "--yes" in p.stderr
+        and FAKE.count("posts/delete") == deletes
+        and target in FAKE.posts,
+        "delete without --yes on a non-interactive input fails",
+        diag(p),
+    )
+    p = pb(A, "delete", target, "--yes")
+    ok(
+        p.returncode == 0
+        and target not in FAKE.posts
+        and target not in {r["url"] for r in lines(A)},
+        "delete removes the bookmark from Pinboard and the mirror",
+        diag(p),
+    )
+    p = pb(A, "search", "delete-me")
+    p2 = pb(A, "get", target)
+    p3 = pb(A, "history", "--json", target)
+    ok(
+        p.returncode == 1
+        and p2.returncode == 1
+        and [v["status"] for v in json.loads(p3.stdout)] == ["deleted", "added"],
+        "a deleted bookmark leaves search and get, and history shows the deletion",
+        diag(p) + diag(p2) + diag(p3),
+    )
+    ok(
+        git("-C", str(A), "log", "-1", "--format=%s") == "delete: example.net"
+        and head(A) == remote_head(),
+        "delete commits and pushes the mirror",
+        git("-C", str(A), "log", "-1", "--format=%s"),
+    )
+
+    confirmed = "https://example.net/confirm-me"
+    FAKE.put(confirmed, "Confirm me", "2024-05-06T10:00:00Z")
+    pb(A, "sync")
+    p = pb_confirm(A, "n\n", "delete", confirmed)
+    ok(
+        p.returncode == 0
+        and "Confirm me" in p.stderr
+        and confirmed in FAKE.posts
+        and confirmed in {r["url"] for r in lines(A)},
+        "a declined confirmation deletes nothing",
+        diag(p),
+    )
+    p = pb_confirm(A, "y\n", "delete", confirmed)
+    ok(
+        p.returncode == 0
+        and confirmed not in FAKE.posts
+        and confirmed not in {r["url"] for r in lines(A)},
+        "delete prompts on a TTY and deletes when confirmed",
+        diag(p),
+    )
+
+    h = head(A)
+    p = pb(A, "delete", "https://example.net/absent", "--yes")
+    ok(
+        p.returncode == 1 and "no bookmark" in p.stderr and head(A) == h,
+        "delete of an unknown URL leaves the mirror unchanged",
+        diag(p),
+    )
+    FAKE.delete_mode = "error"
+    h = head(A)
+    p = pb(A, "delete", "https://example.com/post/6", "--yes")
+    ok(
+        p.returncode == 1
+        and "HTTP 500" in p.stderr
+        and "https://example.com/post/6" in FAKE.posts
+        and head(A) == h,
+        "an API error leaves Pinboard and the mirror unchanged",
+        diag(p),
+    )
+    FAKE.delete_mode = "vanish-after"
+    deletes = FAKE.count("posts/delete")
+    h = head(A)
+    p = pb(A, "delete", "https://example.com/post/6", "--yes")
+    ok(
+        p.returncode == 0
+        and FAKE.count("posts/delete") == deletes + 1
+        and "https://example.com/post/6" not in FAKE.posts
+        and "https://example.com/post/6" not in {r["url"] for r in lines(A)}
+        and head(A) != h,
+        "a lost delete response is confirmed with posts/get and not re-sent",
+        diag(p),
+    )
+    FAKE.reset_knobs()
+
     p = pb(
         A,
         "update",
@@ -851,6 +976,22 @@ def main() -> None:
         "doctor passes a clone level with origin",
         diag(p),
     )
+    marker_delete = TMP / "once-delete"
+    hook(
+        B,
+        f'[ -e "{marker_delete}" ] || {{ touch "{marker_delete}"; "{BIN}" --repo "{C}" add https://example.net/race-delete --title Race >/dev/null 2>&1; }}\n',
+    )
+    p = pb(B, "delete", "https://example.net/b5", "--yes")
+    tree = git("--git-dir", str(REMOTE), "show", f"main:bookmarks/{YEAR}.jsonl")
+    ok(
+        p.returncode == 0
+        and "push rejected" in p.stderr
+        and "example.net/b5" not in tree
+        and "example.net/race-delete" in tree,
+        "a rejected push re-applies a delete on the new head",
+        diag(p),
+    )
+    (B / ".git" / "hooks" / "pre-push").unlink()
     (B / "bookmarks" / f"{YEAR}.jsonl").write_text("{}\n")
     p = pb(B, "add", "https://example.net/b6", "--title", "B6")
     p2 = pb(B, "doctor")
