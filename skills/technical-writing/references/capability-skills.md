@@ -57,20 +57,6 @@ collection**.
   `~/.private/skills/...`). Always resolve skill resources dynamically relative
   to `SKILL.md` or the script's own location.
 
-### Structure, Progressive Disclosure & Publication Safety
-
-- **Trigger-Structured Frontmatter Descriptions:** End the YAML `description`
-  with explicit `Use when ...` and `Don't use for ...` clauses so agents can
-  route to (or skip) the skill from the catalog entry alone.
-- **Single-Source Decision Tables & Caveats:** Keep `SKILL.md` decision-matrix
-  cells concise (one or two sentences) and state full benchmark caveats once in
-  the relevant section rather than repeating the same multi-line caveat block
-  across `SKILL.md` and `references/`.
-- **Public Safety Across `SKILL.md` and `references/`:** Distributable skills
-  and all files in their `references/` subdirectories must not contain internal
-  bug or task IDs, internal shortlinks, unlaunched hardware codenames, internal
-  test-harness jargon, or proprietary monorepo paths.
-
 ## Capability-First Authoring & Exemplar Mentions
 
 While skills must not be tightly coupled, skills often operate in ecosystems
@@ -141,19 +127,22 @@ external evidence repository):
   write latency from 142.38 ms to 31.14–38.92 ms, with -64.2% to -71.8% on fsync
   calls and -28.4% on journal commits"*). Overly granular numbers invite
   unnecessary debate about experimental setup and distract from sound general
-  principles.
+  principles. An additional sub-metric figure is appropriate when it is the
+  shortest way to prevent a misreading of the headline (for example, noting that
+  a 40% subsystem saving translates to only a `~6%` change in total system
+  power).
 - **Approximate Faithfully (Round Outward and Keep Meaning-Changing
   Qualifiers):** Round outward so the stated range still encloses what was
-  measured, and never shift or narrow it (for example, `13–24%` rounds to
-  `"roughly 13–25%"` or `"about an eighth to a quarter"`, never `"15–20%"` or
-  `"15–25%"`). Keep any qualifier that changes how a reader would act: sample
-  size (*"in one overnight run"*), conditions that differ from production use
-  (*"phone on USB power"*), and what was not measured. Label figures that are
-  projections rather than direct measurements.
+  measured, and never shift or narrow it (for example, `62–71%` rounds to
+  `"roughly 60–75%"`, never `"65–70%"`). Keep any qualifier that changes how a
+  reader would act: sample size (*"in a single cold-cache benchmark"*),
+  conditions that differ from production use (*"on an in-memory dataset"*), and
+  what was not measured.
 - **Label Projections and Mechanisms Under Study:** In capability skills, causal
   mechanisms under active study and model-based projections are permitted when
   explicitly labeled (*"model estimate"*, *"projected"*, *"under
-  investigation"*) and kept distinct from measured headline figures.
+  investigation"*) and kept distinct from direct measurements and measured
+  headline figures.
 - **Record Detailed Sourcing and Evidence in Associated Persistent Storage (When
   Available):** Whenever a skill change is backed by substantial direct
   research, benchmark runs, or document audits—and an associated project
@@ -329,10 +318,6 @@ Before publishing or committing a reusable skill, verify that:
   meaning-changing qualifiers, and explicitly label projections or mechanisms
   under study, while detailed raw benchmark tables are recorded in associated
   persistent project/git storage when available.
-- [ ] Frontmatter `description` includes trigger clauses (`Use when...` /
-  `Don't use for...`), decision tables are single-sourced without repeating
-  multi-line caveats, and no internal IDs, codenames, or proprietary paths leak
-  into distributable skill files.
 - [ ] If the skill bundles helper tools in `scripts/`, an auto-generated
   `references/command-index.md` is provided, refreshed via
   `command-index-format`, and linked from `SKILL.md`.
