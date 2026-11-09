@@ -160,6 +160,22 @@ skill <command> [arguments]
   pre-approve; a copy or hardlink outside the skill tree must set
   `SKILL_MCP_SKILL_DIR` to the skill root. See `skill mcp --help`.
 
+### Git-backed MCP edits
+
+With `--push`, edits target the checked-out branch's configured remote upstream.
+The normal path is commit then push, with no fetch. A rejected branch update
+triggers fetch, merge and retry; each recovery cycle allows at most three push
+attempts. Merges preserve the original edit commits; the reply's blob describes
+the final merged file.
+
+Unfinished Git operations and uncommitted repository changes are refused. Writes
+hold a cross-process repository lock, and any earlier unpublished commits must
+be pushed or reconciled before another edit is accepted. Authentication,
+transport and hook failures do not trigger a merge. Failed pushes return an MCP
+tool error, record `push=failed`, and preserve local commits. A conflicting
+recovery merge is aborted; the caller must resolve the divergence before
+retrying. No rebase, reset or force push is used.
+
 ### Choosing Skills (Workspace vs. Session)
 
 Choosing skills is the calling agent's job. `skill` enumerates what exists and

@@ -39,9 +39,12 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import TYPE_CHECKING, Any, NoReturn
 
 import tomllib
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 PROG = "skill mcp"
 VERSION = "1"
@@ -63,6 +66,8 @@ LOG_ENV = "SKILL_MCP_LOG"
 # never text, content or edits. A search pattern is kept as a hash.
 LOG_ARGS = ("name", "uri", "skill", "ignore_case", "replace_all")
 LOG_HASHED = ("pattern",)
+PUSH_ATTEMPTS = 3
+GIT_REMOTE_TIMEOUT = 30
 
 
 class SkillError(Exception):
@@ -92,12 +97,16 @@ def git_blob(data: bytes) -> str:
     return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
 
 
-def run_git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
+def run_git(
+    cwd: Path, *args: str, timeout: int | None = None
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["git", "-C", str(cwd), *args],
         capture_output=True,
         text=True,
         check=False,
+        timeout=timeout,
+        env={**os.environ, "LC_ALL": "C"},
     )
 
 
@@ -456,7 +465,196 @@ def tool_search(cat: Catalog, args: dict[str, Any]) -> str:
     return "\n".join(matches) if matches else "no matches"
 
 
+@contextlib.contextmanager
+def repository_lock(repo: Path) -> Iterator[None]:
+    """One edit transaction across scopes, processes and linked worktrees."""
+    import fcntl
+
+    common = run_git(repo, "rev-parse", "--git-common-dir")
+    if common.returncode != 0:
+        raise SkillError("cannot locate the repository lock")
+    path = (repo / common.stdout.strip() / "skill-mcp.lock").resolve()
+    with path.open("a") as handle:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise SkillError(
+                "the repository is busy with another edit; retry shortly"
+            ) from None
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def git_operation(repo: Path) -> bool:
+    directory = run_git(repo, "rev-parse", "--absolute-git-dir")
+    if directory.returncode != 0:
+        raise SkillError("cannot locate the repository state")
+    return any(
+        (Path(directory.stdout.strip()) / name).exists()
+        for name in (
+            "MERGE_HEAD",
+            "rebase-merge",
+            "rebase-apply",
+            "CHERRY_PICK_HEAD",
+            "REVERT_HEAD",
+        )
+    )
+
+
+def push_target(repo: Path) -> tuple[str, str, str]:
+    """Use the current branch's upstream, not push.default or pushRemote."""
+    if git_operation(repo):
+        raise SkillError(
+            "the repository has an unfinished Git operation; resolve it before editing"
+        )
+    status = run_git(repo, "status", "--porcelain")
+    if status.returncode != 0 or status.stdout:
+        raise SkillError("the repository has uncommitted changes; no edit was made")
+    branch = run_git(repo, "symbolic-ref", "--quiet", "HEAD")
+    if branch.returncode != 0:
+        raise SkillError("--push requires a checked-out branch")
+    upstream = run_git(
+        repo,
+        "for-each-ref",
+        "--format=%(upstream:remotename)%00%(upstream:remoteref)%00%(upstream)",
+        branch.stdout.strip(),
+    )
+    fields = upstream.stdout.strip().split("\0")
+    if (
+        upstream.returncode != 0
+        or len(fields) != 3
+        or not all(fields)
+        or fields[0] == "."
+        or not fields[1].startswith("refs/heads/")
+        or run_git(repo, "rev-parse", "--verify", fields[2]).returncode != 0
+    ):
+        raise SkillError("--push requires a remote branch upstream")
+    return fields[0], fields[1], fields[2]
+
+
+def push_commits(repo: Path, remote: str, ref: str) -> None:
+    """Push first; only a branch-update rejection pays for fetch and merge."""
+    original = run_git(repo, "rev-parse", "--short", "HEAD").stdout.strip()
+    event = EVENT.get()
+    if event is not None:
+        event.extra["push"] = "failed"
+
+    def failed(detail: str) -> SkillError:
+        return SkillError(
+            f"git push failed; local commit {original} is preserved. {detail}",
+            "git push failed; local commit preserved",
+        )
+
+    for attempt in range(PUSH_ATTEMPTS):
+        try:
+            push = run_git(
+                repo,
+                "push",
+                "--porcelain",
+                "--",
+                remote,
+                f"HEAD:{ref}",
+                timeout=GIT_REMOTE_TIMEOUT,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            raise failed(
+                "The push could not finish; remote persistence is unconfirmed."
+            ) from None
+        if push.returncode == 0:
+            if event is not None:
+                event.extra["push"] = "ok"
+            return
+        # Porcelain distinguishes ref races from hook/auth/transport failures.
+        # A remote can also advance after advertisement but before receive-pack
+        # updates its ref, reported as 'failed to update ref'.
+        conflict = any(
+            line.startswith("!\t")
+            and line.split("\t")[-1]
+            in (
+                "[rejected] (fetch first)",
+                "[rejected] (non-fast-forward)",
+                "[remote rejected] (failed to update ref)",
+            )
+            for line in push.stdout.splitlines()
+        )
+        if not conflict or attempt == PUSH_ATTEMPTS - 1:
+            raise failed((push.stderr or push.stdout).strip())
+        try:
+            fetch = run_git(
+                repo,
+                "fetch",
+                "--quiet",
+                "--",
+                remote,
+                ref,
+                timeout=GIT_REMOTE_TIMEOUT,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            raise failed(
+                "Recovery fetch failed; retry after restoring remote access."
+            ) from None
+        if fetch.returncode != 0:
+            raise failed(f"Recovery fetch failed: {fetch.stderr.strip()}")
+        head = run_git(repo, "rev-parse", "--verify", "FETCH_HEAD")
+        if head.returncode != 0:
+            raise failed("Recovery fetch did not produce a commit.")
+        # Never autostash, rebase, reset or use a configured merge.ff=only.
+        merge = run_git(
+            repo,
+            "-c",
+            "merge.autoStash=false",
+            "-c",
+            "merge.ff=true",
+            "merge",
+            "--no-edit",
+            "--no-gpg-sign",
+            head.stdout.strip(),
+        )
+        if merge.returncode != 0:
+            if git_operation(repo):
+                abort = run_git(repo, "merge", "--abort")
+                if abort.returncode != 0:
+                    raise failed(
+                        "Automatic merge failed and could not be aborted; inspect the checkout."
+                    )
+            raise failed(
+                "Automatic merge failed; the merge was aborted where needed. Resolve the divergence before retrying."
+            )
+
+
 def tool_edit_file(cat: Catalog, args: dict[str, Any]) -> str:
+    old, new = args.get("old_string"), args.get("new_string")
+    if not isinstance(old, str) or not old or not isinstance(new, str):
+        raise SkillError("old_string (non-empty) and new_string are required")
+    if old == new:
+        raise SkillError("old_string and new_string are the same")
+    skill, _ = cat.locate(str(args.get("uri", "")))
+    if skill.repo is None:
+        raise SkillError(
+            f"{skill.uri()} is not in a git work tree, so it cannot be edited"
+        )
+    with repository_lock(skill.repo):
+        target = push_target(skill.repo) if cat.push else None
+        if target is not None:
+            remote, ref, tracking = target
+            # Recover earlier unpublished commits before accepting another edit.
+            # The cached tracking ref is enough for this check: no fetch on the
+            # normal path. A lost push acknowledgement is safe to retry too.
+            if (
+                run_git(
+                    skill.repo, "merge-base", "--is-ancestor", "HEAD", tracking
+                ).returncode
+                != 0
+            ):
+                push_commits(skill.repo, remote, ref)
+        return edit_file_locked(cat, args, target)
+
+
+def edit_file_locked(
+    cat: Catalog, args: dict[str, Any], target: tuple[str, str, str] | None
+) -> str:
     skill, rel = cat.locate(str(args.get("uri", "")))
     old = args.get("old_string")
     new = args.get("new_string")
@@ -527,15 +725,9 @@ def tool_edit_file(cat: Catalog, args: dict[str, Any]) -> str:
     if event is not None:
         event.commit = sha
     note = ""
-    if cat.push:
-        push = run_git(skill.root, "push", "--quiet")
-        note = (
-            "; pushed"
-            if push.returncode == 0
-            else f"; push failed: {push.stderr.strip()}"
-        )
-        if event is not None:
-            event.extra["push"] = "ok" if push.returncode == 0 else "failed"
+    if target is not None:
+        push_commits(skill.root, target[0], target[1])
+        note = "; pushed"
     new_blob = git_blob(path.read_bytes())
     return f"Edited {skill.uri(rel)} in commit {sha}{note}; it is now blob {new_blob}."
 

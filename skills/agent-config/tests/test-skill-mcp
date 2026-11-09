@@ -15,11 +15,13 @@
 
 import asyncio
 import contextlib
+import fcntl
 import hashlib
 import inspect
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import socket
@@ -58,9 +60,9 @@ UV_DIRS = {
 
 
 def git(cwd, *args):
-    subprocess.run(
+    return subprocess.run(
         ["git", "-C", str(cwd), *args], check=True, capture_output=True, text=True
-    )
+    ).stdout.strip()
 
 
 def log_format() -> tuple[set[str], set[str]]:
@@ -195,6 +197,330 @@ class SkillMcpTests(unittest.TestCase):
 
     async def rpc(self, client, method, params):
         return await client.send_request(RawRequest(method=method, params=params), ANY)
+
+    def push_fixture(self):
+        self.remote = self.tmp / "remote.git"
+        git(self.tmp, "init", "--bare", str(self.remote))
+        self.branch = git(self.repo, "branch", "--show-current")
+        git(self.repo, "remote", "add", "origin", str(self.remote))
+        git(self.repo, "push", "-u", "origin", self.branch)
+        git(self.remote, "symbolic-ref", "HEAD", f"refs/heads/{self.branch}")
+        self.writer = self.tmp / "writer"
+        git(self.tmp, "clone", str(self.remote), str(self.writer))
+        git(self.writer, "config", "user.name", "Test")
+        git(self.writer, "config", "user.email", "test@example.com")
+        git(self.writer, "config", "commit.gpgsign", "false")
+
+    @contextlib.asynccontextmanager
+    async def push_client(self):
+        with tempfile.TemporaryFile(mode="w+") as errlog:
+            async with (
+                stdio_client(
+                    StdioServerParameters(
+                        command=str(SCRIPT), args=["mcp", "all", "--push"], env=self.env
+                    ),
+                    errlog=errlog,
+                ) as streams,
+                ClientSession(*streams, read_timeout_seconds=30) as client,
+            ):
+                await client.initialize()
+                yield client
+
+    def edit_args(self):
+        return {
+            "uri": "skill://alpha/references/notes.md",
+            "old_string": "Likes trains.",
+            "new_string": "Likes boats.",
+            "expected_blob": blob(
+                (self.repo / "skills/alpha/references/notes.md").read_bytes()
+            ),
+        }
+
+    def writer_commit(self, rel="unrelated.md", text="External update.\n"):
+        (self.writer / rel).write_text(text)
+        git(self.writer, "add", rel)
+        git(self.writer, "commit", "-m", "External update")
+        return git(self.writer, "rev-parse", "HEAD")
+
+    def write_hook(self, repo, name, text):
+        hook = repo / ".git" / "hooks" / name
+        if repo == self.remote:
+            hook = repo / "hooks" / name
+        hook.write_text("#!/bin/sh\nset -eu\n" + text)
+        hook.chmod(0o755)
+        return hook
+
+    def edit_records(self):
+        return [
+            r
+            for line in (self.tmp / "log/mcp.jsonl").read_text().splitlines()
+            if (r := json.loads(line)).get("tool") == "edit_file"
+        ]
+
+    async def test_push_merges_remote_after_rejection(self):
+        self.push_fixture()
+        args = self.edit_args()
+        external = self.writer_commit()
+        git(self.writer, "push")
+        async with self.push_client() as client:
+            out = await self.tool(client, "edit_file", args)
+        self.assertIn("; pushed", out)
+        git(self.repo, "merge-base", "--is-ancestor", external, "HEAD")
+        self.assertEqual(
+            git(self.remote, "rev-parse", self.branch),
+            git(self.repo, "rev-parse", "HEAD"),
+        )
+        self.assertIn(
+            "Likes boats.",
+            git(self.remote, "show", f"{self.branch}:skills/alpha/references/notes.md"),
+        )
+        rec = self.edit_records()[-1]
+        self.assertEqual((rec["outcome"], rec["push"]), ("ok", "ok"))
+        self.assertEqual(
+            len(git(self.repo, "rev-list", "--parents", "-1", "HEAD").split()), 3
+        )
+
+    async def test_push_merge_conflict_preserves_edit(self):
+        self.push_fixture()
+        args = self.edit_args()
+        external = self.writer_commit(
+            "skills/alpha/references/notes.md",
+            "Prefers window seats.\nLikes ferries.\n",
+        )
+        git(self.writer, "push")
+        async with self.push_client() as client:
+            out = await self.tool(client, "edit_file", args, error=True)
+            self.assertIn("merge", out)
+            self.assertIn("preserved", out)
+        self.assertEqual(git(self.remote, "rev-parse", self.branch), external)
+        self.assertEqual(git(self.repo, "status", "--porcelain"), "")
+        self.assertFalse((self.repo / ".git/MERGE_HEAD").exists())
+        self.assertIn(
+            "Likes boats.",
+            git(self.repo, "show", "HEAD:skills/alpha/references/notes.md"),
+        )
+
+    async def test_push_fast_path_does_not_fetch(self):
+        self.push_fixture()
+        fetched = self.tmp / "fetch-count"
+        upload = self.tmp / "upload-pack"
+        upload.write_text(
+            "#!/bin/sh\n"
+            f"echo fetch >> {shlex.quote(str(fetched))}\n"
+            'exec git-upload-pack "$@"\n'
+        )
+        upload.chmod(0o755)
+        git(self.repo, "config", "remote.origin.uploadpack", str(upload))
+        pushed = self.tmp / "push-count"
+        self.write_hook(
+            self.repo, "pre-push", f"echo push >> {shlex.quote(str(pushed))}\n"
+        )
+        async with self.push_client() as client:
+            await self.tool(client, "edit_file", self.edit_args())
+            await self.tool(
+                client,
+                "edit_file",
+                {
+                    **self.edit_args(),
+                    "old_string": "Likes boats.",
+                    "new_string": "Likes ships.",
+                },
+            )
+        self.assertFalse(fetched.exists())
+        self.assertEqual(pushed.read_text().splitlines(), ["push", "push"])
+
+    async def test_push_failure_preserves_commit_and_blocks_more_edits(self):
+        self.push_fixture()
+        initial = git(self.repo, "rev-parse", "HEAD")
+        self.write_hook(self.remote, "pre-receive", "exit 1\n")
+        async with self.push_client() as client:
+            out = await self.tool(client, "edit_file", self.edit_args(), error=True)
+            self.assertIn("push failed", out)
+            self.assertIn("preserved", out)
+            pending = git(self.repo, "rev-parse", "HEAD")
+            self.assertNotEqual(pending, initial)
+            self.assertIn(pending[:7], out)
+            self.assertEqual(git(self.remote, "rev-parse", self.branch), initial)
+            out = await self.tool(
+                client,
+                "edit_file",
+                {
+                    **self.edit_args(),
+                    "old_string": "Likes boats.",
+                    "new_string": "Likes ships.",
+                },
+                error=True,
+            )
+            self.assertIn("push failed", out)
+            self.assertEqual(git(self.repo, "rev-parse", "HEAD"), pending)
+        first = self.edit_records()[0]
+        self.assertEqual((first["outcome"], first["push"]), ("tool-error", "failed"))
+        self.assertEqual(
+            first["commit"], git(self.repo, "rev-parse", "--short", "HEAD")
+        )
+        self.assertNotIn("Likes boats", json.dumps(self.edit_records()))
+        self.assert_log_format(self.edit_records())
+
+    async def test_push_race_preserves_both_writers(self):
+        self.push_fixture()
+        external = self.writer_commit()
+        # Advance the remote only after the server has fetched and committed.
+        self.write_hook(
+            self.repo,
+            "pre-push",
+            "unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE\n"
+            f"git -C {shlex.quote(str(self.writer))} push\n",
+        )
+        async with self.push_client() as client:
+            out = await self.tool(client, "edit_file", self.edit_args())
+        self.assertIn("; pushed", out)
+        git(self.repo, "merge-base", "--is-ancestor", external, "HEAD")
+        self.assertEqual(
+            git(self.remote, "rev-parse", self.branch),
+            git(self.repo, "rev-parse", "HEAD"),
+        )
+        self.assertIn(
+            "Likes boats.",
+            git(self.repo, "show", "HEAD:skills/alpha/references/notes.md"),
+        )
+        self.assertEqual(self.edit_records()[-1]["outcome"], "ok")
+
+    async def test_push_recovery_has_bounded_attempts(self):
+        self.push_fixture()
+        hook = self.write_hook(
+            self.repo,
+            "pre-push",
+            "unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE\n"
+            f"cd {shlex.quote(str(self.writer))}\n"
+            "echo race >> unrelated.md\n"
+            "git add unrelated.md\n"
+            "git commit -qm 'External race'\n"
+            "git push\n",
+        )
+        initial = git(self.remote, "rev-parse", self.branch)
+        async with self.push_client() as client:
+            out = await self.tool(client, "edit_file", self.edit_args(), error=True)
+        self.assertIn("preserved", out)
+        self.assertEqual(
+            git(self.remote, "rev-list", "--count", f"{initial}..{self.branch}"), "3"
+        )
+        self.assertEqual(git(self.repo, "status", "--porcelain"), "")
+        # Once contention stops, recover the original edit before accepting a
+        # new write. The successful merge must not rewrite that edit's ID.
+        original = self.edit_records()[-1]["commit"]
+        hook.unlink()
+        async with self.push_client() as client:
+            await self.tool(
+                client,
+                "edit_file",
+                {
+                    **self.edit_args(),
+                    "old_string": "Likes boats.",
+                    "new_string": "Likes ships.",
+                },
+            )
+        git(self.remote, "merge-base", "--is-ancestor", original, self.branch)
+
+    async def test_push_merged_reply_names_final_blob(self):
+        self.push_fixture()
+        path = "skills/alpha/references/notes.md"
+        data = "Likes trains.\n" + "Filler.\n" * 20 + "Prefers window seats.\n"
+        (self.repo / path).write_text(data)
+        git(self.repo, "commit", "-am", "Longer fixture")
+        git(self.repo, "push")
+        git(self.writer, "pull", "--ff-only")
+        self.writer_commit(path, data.replace("window seats", "aisle seats"))
+        git(self.writer, "push")
+        async with self.push_client() as client:
+            out = await self.tool(client, "edit_file", self.edit_args())
+        expected = data.replace("trains", "boats").replace(
+            "window seats", "aisle seats"
+        )
+        self.assertEqual((self.repo / path).read_text(), expected)
+        self.assertIn(f"it is now blob {blob(expected.encode())}", out)
+
+    async def test_push_refuses_unfinished_git_operation(self):
+        self.push_fixture()
+        marker = self.repo / ".git/MERGE_HEAD"
+        marker.write_text(git(self.repo, "rev-parse", "HEAD") + "\n")
+        async with self.push_client() as client:
+            out = await self.tool(client, "edit_file", self.edit_args(), error=True)
+        self.assertIn("unfinished", out)
+        self.assertTrue(marker.exists())
+
+    async def test_push_fetch_failure_preserves_edit(self):
+        self.push_fixture()
+        initial = git(self.repo, "rev-parse", "HEAD")
+        external = self.writer_commit()
+        git(self.writer, "push")
+        git(self.repo, "config", "remote.origin.uploadpack", "/bin/false")
+        async with self.push_client() as client:
+            out = await self.tool(client, "edit_file", self.edit_args(), error=True)
+        self.assertIn("fetch failed", out)
+        self.assertIn("preserved", out)
+        self.assertNotEqual(git(self.repo, "rev-parse", "HEAD"), initial)
+        self.assertEqual(git(self.remote, "rev-parse", self.branch), external)
+        self.assertEqual(git(self.repo, "status", "--porcelain"), "")
+
+    async def test_push_recovers_pending_commits_before_next_edit(self):
+        self.push_fixture()
+        pending_file = self.repo / "pending.md"
+        pending_file.write_text("Unpublished work.\n")
+        git(self.repo, "add", "pending.md")
+        git(self.repo, "commit", "-m", "Pending work")
+        pending = git(self.repo, "rev-parse", "HEAD")
+        external = self.writer_commit()
+        git(self.writer, "push")
+        async with self.push_client() as client:
+            await self.tool(client, "edit_file", self.edit_args())
+        git(self.repo, "merge-base", "--is-ancestor", pending, "HEAD")
+        git(self.repo, "merge-base", "--is-ancestor", external, "HEAD")
+        self.assertEqual(
+            git(self.remote, "rev-parse", self.branch),
+            git(self.repo, "rev-parse", "HEAD"),
+        )
+        self.assertEqual(pending_file.read_text(), "Unpublished work.\n")
+        self.assertEqual(git(self.repo, "status", "--porcelain"), "")
+
+    async def test_push_refuses_dirty_repository(self):
+        self.push_fixture()
+        initial = git(self.repo, "rev-parse", "HEAD")
+        async with self.push_client() as client:
+            for staged in (False, True):
+                with self.subTest(staged=staged):
+                    draft = self.repo / "draft.md"
+                    draft.write_text("Keep this draft.\n")
+                    if staged:
+                        git(self.repo, "add", "draft.md")
+                    out = await self.tool(
+                        client, "edit_file", self.edit_args(), error=True
+                    )
+                    self.assertIn("uncommitted", out)
+                    self.assertEqual(draft.read_text(), "Keep this draft.\n")
+                    self.assertEqual(git(self.repo, "rev-parse", "HEAD"), initial)
+                    if staged:
+                        git(self.repo, "restore", "--staged", "draft.md")
+                    draft.unlink()
+
+    async def test_push_refuses_missing_upstream_and_detached_head(self):
+        self.push_fixture()
+        git(self.repo, "branch", "--unset-upstream")
+        async with self.push_client() as client:
+            out = await self.tool(client, "edit_file", self.edit_args(), error=True)
+            self.assertIn("upstream", out)
+            git(self.repo, "checkout", "--detach")
+            out = await self.tool(client, "edit_file", self.edit_args(), error=True)
+            self.assertIn("branch", out)
+
+    async def test_edit_repository_lock_is_cross_process(self, client):
+        common = git(self.repo, "rev-parse", "--git-common-dir")
+        lock = (self.repo / common / "skill-mcp.lock").resolve()
+        with lock.open("a") as fh:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            out = await self.tool(client, "edit_file", self.edit_args(), error=True)
+            self.assertIn("busy", out)
+        # Releasing the other process's lock permits the edit.
+        await self.tool(client, "edit_file", self.edit_args())
 
     def test_list_scopes(self):
         out = self.cli("--list")
