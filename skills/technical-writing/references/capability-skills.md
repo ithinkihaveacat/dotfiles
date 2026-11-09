@@ -120,12 +120,12 @@ experimental evidence** that backs them:
   is often helpful to ground the rule.
 - **Use Approximate, Order-of-Magnitude Performance Figures in the Skill:**
   Avoid packing `SKILL.md` with hyper-specific measurement ranges, per-rail
-  breakdowns, or estimator comparisons (for example, prefer *"reduces phone
-  power by around 30–50% and watch drain by roughly 80–90% (depending on model
-  and workload)"* over *"cuts ODPM power from 205.19 mW to 91.88–121.67 mW, with
-  -55% to -72% on the `wifi.bt` rail and -26% to -33% on fuel-gauge
-  discharge"*). Overly granular numbers invite unnecessary debate about
-  experimental setup and distract from sound general principles.
+  breakdowns, or estimator comparisons (for example, prefer *"batching writes
+  reduces disk I/O overhead by roughly 70–80% (depending on payload size and
+  storage medium)"* over *"cuts write latency from 142.38 ms to 31.14–38.92 ms,
+  with -64.2% to -71.8% on fsync calls and -28.4% on journal commits"*). Overly
+  granular numbers invite unnecessary debate about experimental setup and
+  distract from sound general principles.
 - **Record Detailed Sourcing and Evidence in Associated Persistent Storage (When
   Available):** Whenever a skill change is backed by substantial direct
   research, benchmark runs, or document audits—and an associated project
