@@ -93,11 +93,3 @@ rg --files ./skills | grep zipline
   ambiguities, or questionable assumptions, message that session if it is
   reachable. If it is no longer running, consider checking its transcript for
   the missing rationale rather than guessing.
-
-## Mid-Task User Interruptions
-
-- **Zero tool calls on status or interruption queries**: When the user
-  interrupts or questions active execution (e.g., *"what are you looking for?"*,
-  *"why are you running commands?"*, *"are you stuck?"*, *"what is the current
-  status?"*), respond immediately from existing conversation context with **zero
-  tool calls**. Do not run new searches, reads, or probes before answering.
