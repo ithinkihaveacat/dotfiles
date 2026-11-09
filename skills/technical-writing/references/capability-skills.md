@@ -109,23 +109,40 @@ repository, not how to pass a specific test case:
 When an agent conducts direct empirical research, benchmarks, code audits, or
 document reviews and updates a skill based on that evidence, separate the
 **actionable engineering facts** that belong in the skill from the **raw
-experimental evidence** that backs them:
+experimental evidence** that backs them (these rules apply equally to `SKILL.md`
+and to all `references/` files inside the skill; exact raw tables belong in the
+external evidence repository):
 
 - **State Concrete Engineering Facts Directly in the Skill:** Write the skill
   around clear decision rules, mechanisms, and practical guidelines rather than
   narrating how an experiment was run. A reader with only the skill does not
   need to be able to reproduce the underlying benchmark from the skill text
   alone, though briefly hinting at the empirical basis (for example, *"in
-  multi-hour untethered benchmarks"* or *"observed in kernel suspend traces"*)
-  is often helpful to ground the rule.
-- **Use Approximate, Order-of-Magnitude Performance Figures in the Skill:**
-  Avoid packing `SKILL.md` with hyper-specific measurement ranges, per-rail
-  breakdowns, or estimator comparisons (for example, prefer *"batching writes
-  reduces disk I/O overhead by roughly 70–80% (depending on payload size and
-  storage medium)"* over *"cuts write latency from 142.38 ms to 31.14–38.92 ms,
-  with -64.2% to -71.8% on fsync calls and -28.4% on journal commits"*). Overly
-  granular numbers invite unnecessary debate about experimental setup and
-  distract from sound general principles.
+  repeated benchmark runs"* or *"observed in kernel suspend traces"*) is often
+  helpful to ground the rule.
+- **Use Approximate, Outward-Rounded Performance Figures in the Skill:** Avoid
+  packing `SKILL.md` or `references/` with hyper-specific measurement ranges,
+  per-rail breakdowns, or estimator comparisons (for example, prefer *"batching
+  writes cut write latency by roughly 70–80% in one benchmark"* over *"cuts
+  write latency from 142.38 ms to 31.14–38.92 ms, with -64.2% to -71.8% on fsync
+  calls and -28.4% on journal commits"*). Overly granular numbers invite
+  unnecessary debate about experimental setup and distract from sound general
+  principles. An additional sub-metric figure is appropriate when it is the
+  shortest way to prevent a misreading of the headline (for example, noting that
+  a 50% cache-hit gain translates to only a `~5%` reduction in end-to-end
+  request latency).
+- **Approximate Faithfully (Round Outward and Keep Meaning-Changing
+  Qualifiers):** Round outward so the stated range still encloses what was
+  measured, and never shift or narrow it (for example, `62–71%` rounds to
+  `"roughly 60–75%"`, never `"65–70%"`). Keep any qualifier that changes how a
+  reader would act: sample size (*"in a single cold-cache benchmark"*),
+  conditions that differ from production use (*"on an in-memory dataset"*), and
+  what was not measured.
+- **Label Projections and Mechanisms Under Study:** In capability skills, causal
+  mechanisms under active study and model-based projections are permitted when
+  explicitly labeled (*"model estimate"*, *"projected"*, *"under
+  investigation"*) and kept distinct from direct measurements and measured
+  headline figures.
 - **Record Detailed Sourcing and Evidence in Associated Persistent Storage (When
   Available):** Whenever a skill change is backed by substantial direct
   research, benchmark runs, or document audits—and an associated project
@@ -296,10 +313,11 @@ Before publishing or committing a reusable skill, verify that:
   benchmark tasks (no leaked grader metrics, container quirks, or fixture
   literals) and explain API asymmetries once with their *why* instead of
   repeating `NEVER`/`MUST` bans.
-- [ ] Empirical performance claims in the skill use approximate,
-  order-of-magnitude figures rather than hyper-specific lab numbers, while any
-  substantial underlying research or benchmark evidence is recorded in
-  associated persistent project/git storage when available.
+- [ ] Empirical performance claims in `SKILL.md` and `references/` use
+  approximate, outward-rounded figures that enclose the measured range, preserve
+  meaning-changing qualifiers, and explicitly label projections or mechanisms
+  under study, while detailed raw benchmark tables are recorded in associated
+  persistent project/git storage when available.
 - [ ] If the skill bundles helper tools in `scripts/`, an auto-generated
   `references/command-index.md` is provided, refreshed via
   `command-index-format`, and linked from `SKILL.md`.
