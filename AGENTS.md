@@ -28,11 +28,34 @@ underlying tools directly. Where this file is more opinionated, follow it.
 
 ## Branches and Pull Requests
 
-`main` is protected: GitHub refuses direct pushes, force pushes, and deletion,
-because machines install and run code from it. To publish a change, push a topic
-branch and open a pull request with `gh pr create` (a draft unless the owner
-asks otherwise); the owner reviews and merges it. Never try to work around the
-protection, and do not ask for a bypass.
+The default branch (`main`, or `master` in `~/.ssh`) is protected: GitHub
+refuses direct pushes, force pushes, and deletion, because machines install and
+run code from it.
+
+To keep local skills and tools immediately usable on agent hosts without leaving
+stale `[origin/...: gone]` branches behind, **never run `git checkout -b`** in
+`~/.dotfiles`, `~/.private`, or `~/.ssh`. Commit directly to your local default
+branch (`main`, or `master` in `~/.ssh`) and publish with
+`git push-pr [-f] [BRANCH]` (defined in `~/.gitconfig`), which pushes
+`HEAD:refs/heads/<topic>` and opens a draft PR (`gh pr create --draft`) without
+switching branches (bare `git push` is also disabled by
+`etc/git/pr-only.gitconfig` in `~/.dotfiles`, `~/.private`, and `~/.ssh`).
+Prefer single-commit PRs: default branch name `pr/<slug>` is derived from the
+first local commit's subject ahead of upstream, so after `git commit --amend`,
+re-running `git push-pr -f` updates the same PR cleanly as long as that subject
+stays the same (if you change the subject, pass the previous branch explicitly
+with `git push-pr -f <branch>`). Use Squash/Rebase and merge on GitHub, never
+work around branch protection or ask for a bypass, and do not self-merge PRs.
+
+Because PRs squash- or rebase-merge onto GitHub while your local default branch
+holds the pre-merge commit(s), `./install.sh` interactive runs show incoming
+commits and prompt `[y/N/d]` (`d` prints the full `git diff`), warning loudly if
+local commits sit ahead of upstream before rebasing them onto the merged
+upstream. Non-interactive runs (`--no-input` or non-TTY) strictly enforce
+`--ff-only` and will fail after upstream PR merges unless `[pull] rebase = true`
+is configured in `~/.gitconfig.local` (also set `ff = true` if invoking
+`git pull` directly). `./install.sh` intentionally does not pull `~/.ssh`;
+inspect and pull `~/.ssh` manually.
 
 ## Privacy and Information Control
 
