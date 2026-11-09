@@ -15,6 +15,7 @@ STUBS="$TMP/stubs"
 mkdir -p "$FAKE_HOME/.dotfiles/etc/git" "$STUBS"
 
 ln -s "$REPO_ROOT/home/.gitconfig" "$FAKE_HOME/.gitconfig"
+ln -s "$REPO_ROOT/bin/git-push-pr" "$STUBS/git-push-pr"
 cp "$REPO_ROOT/etc/git/pr-only.gitconfig" "$FAKE_HOME/.dotfiles/etc/git/pr-only.gitconfig"
 
 cat >"$STUBS/gh" <<'EOF'
@@ -104,15 +105,23 @@ run_git() {
   gh_calls=$(cat "$GH_CALLS")
 }
 
-echo "1..43"
+echo "1..51"
 
 WORK=$(setup_clone "repo1")
 
-# 1. --help prints usage
-run_git "$WORK" push-pr --help
-check "git push-pr --help exits 0 and prints usage" is "$status" 0
-check "git push-pr --help documents flags" \
-  has "$output" "Usage: git push-pr [-h|--help] [-f|--force] [BRANCH]"
+# 1. --help and -h print usage cleanly without git alias noise
+status=0
+output=$("$STUBS/git-push-pr" --help 2>&1) || status=$?
+check "git-push-pr --help exits 0 and prints usage" is "$status" 0
+check "git-push-pr --help documents usage" has "$output" "Usage: git-push-pr [OPTIONS] [BRANCH]"
+check "git-push-pr --help documents options" has "$output" "-f, --force"
+check "git-push-pr --help documents examples" has "$output" "Examples:"
+check "git-push-pr -h matches --help" is "$("$STUBS/git-push-pr" -h 2>&1)" "$output"
+
+run_git "$WORK" push-pr -h
+check "git push-pr -h exits 0" is "$status" 0
+check "git push-pr -h prints usage" has "$output" "Usage: git-push-pr [OPTIONS] [BRANCH]"
+check "git push-pr -h has no git alias definition on stderr" lacks "$output" "is aliased to"
 
 # 2. Unknown flags, duplicate args, and explicit empty branch fail cleanly
 run_git "$WORK" push-pr --ready
@@ -366,30 +375,16 @@ git -C "$OTHER_WORK" commit -q -am "other2"
 run_git "$OTHER_WORK" push
 check "bare git push still works normally in other repositories" is "$status" 0
 
-# 13. Explicitly execute full push-pr push + create path under /bin/dash
-if [ -x /bin/dash ]; then
-  DASH_WORK=$(setup_clone "dashrepo")
-  echo "d1" >>"$DASH_WORK/README.md"
-  git -C "$DASH_WORK" commit -q -am "feat: very long subject exceeding forty characters for cut check!"
-  : >"$GH_CALLS"
-  push_pr_body=$(git -C "$DASH_WORK" config --get alias.push-pr)
-  push_pr_body=${push_pr_body#!}
-  status=0
-  output=$( (cd "$DASH_WORK" && /bin/dash -c "$push_pr_body \"\$@\"" git-push-pr -f) 2>&1) || status=$?
-  gh_calls=$(cat "$GH_CALLS")
-  n=$((n + 1))
-  if is "$status" 0 && has "$output" "https://github.com/ithinkihaveacat/dotfiles/pull/999" &&
-    has "$(git -C "$TMP/dashrepo.git" branch -a)" "pr/feat-very-long-subject-exceeding-forty-c"; then
-    echo "ok $n - push-pr executes full push+create flow cleanly under /bin/dash"
-  else
-    echo "not ok $n - push-pr executes full push+create flow cleanly under /bin/dash (status $status)"
-    failed=$((failed + 1))
-    printf '%s\n' "$output" | sed 's/^/# /'
-  fi
-else
-  n=$((n + 1))
-  echo "ok $n - # skip /bin/dash not available on this host"
-fi
+# 13. Verify full push-pr push + create flow
+DASH_WORK=$(setup_clone "dashrepo")
+echo "d1" >>"$DASH_WORK/README.md"
+git -C "$DASH_WORK" commit -q -am "feat: very long subject exceeding forty characters for cut check!"
+: >"$GH_CALLS"
+run_git "$DASH_WORK" push-pr -f
+check "git push-pr -f exits 0" is "$status" 0
+check "prints created PR URL" has "$output" "https://github.com/ithinkihaveacat/dotfiles/pull/999"
+check "truncates branch slug at 40 characters" \
+  has "$(git -C "$TMP/dashrepo.git" branch -a)" "pr/feat-very-long-subject-exceeding-forty-c"
 
 if [ "$failed" -ne 0 ]; then
   exit 1

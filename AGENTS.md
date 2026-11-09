@@ -36,7 +36,7 @@ To keep local skills and tools immediately usable on agent hosts without leaving
 stale `[origin/...: gone]` branches behind, **never run `git checkout -b`** in
 `~/.dotfiles`, `~/.private`, or `~/.ssh`. Commit directly to your local default
 branch (`main`, or `master` in `~/.ssh`) and publish with
-`git push-pr [-f] [BRANCH]` (defined in `~/.gitconfig`), which pushes
+`git push-pr [-f] [BRANCH]` (`bin/git-push-pr`), which pushes
 `HEAD:refs/heads/<topic>` and opens a draft PR (`gh pr create --draft`) without
 switching branches (bare `git push` is also disabled by
 `etc/git/pr-only.gitconfig` in `~/.dotfiles`, `~/.private`, and `~/.ssh`).
