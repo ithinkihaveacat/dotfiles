@@ -4,12 +4,12 @@ description: >-
   Guidelines and structural standards for authoring, reviewing, and editing
   engineering documents with a factual, collegial, and constructive tone. Covers
   analytical reports, bug reports, known issues, friction logs, PR descriptions,
-  commit message prose, TODO/task lists, Getting Started guides, and Agent
-  Skills (SKILL.md), both capability skills and knowledge skills that record
-  facts about systems, people, and places. Use when drafting or reviewing
-  technical documentation, empirical analyses or position memos, friction logs,
-  issue reports, PR descriptions, onboarding guides, or agent skill files, or
-  when reorganizing a knowledge skill.
+  commit message prose, comments, emails, TODO/task lists, Getting Started
+  guides, and Agent Skills (SKILL.md), both capability skills and knowledge
+  skills that record facts about systems, people, and places. Use when drafting
+  or reviewing technical documentation, empirical analyses or position memos,
+  friction logs, issue reports, PR descriptions, emails, onboarding guides, or
+  agent skill files, or when reorganizing a knowledge skill.
 ---
 
 # Technical Writing Style Guidelines
@@ -67,6 +67,9 @@ relevant reference guide:
   justifying trade-offs, and guiding reviewers through diffs.
 - **[Comments](references/comments.md)** — Writing collegial, understated, and
   empirically grounded code review and issue tracker comments.
+- **[Emails](references/email.md)** — Writing technical outreach, follow-up, and
+  partner communication emails with appropriate humility and conversational
+  hooks.
 - **[TODO Items](references/todos.md)** — Capturing tasks with Goal, Criteria,
   and Sketch fields without hardening into premature plans.
 - **[Getting Started Guides](references/getting-started-guides.md)** — Building
