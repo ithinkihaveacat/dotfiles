@@ -104,6 +104,40 @@ repository, not how to pass a specific test case:
   removing a task-specific hint causes a severe regression, clarify the general
   domain concept or fix the benchmark task/assertion itself.
 
+## Empirical Claims, Approximate Figures & External Evidence Logging
+
+When an agent conducts direct empirical research, benchmarks, code audits, or
+document reviews and updates a skill based on that evidence, separate the
+**actionable engineering facts** that belong in the skill from the **raw
+experimental evidence** that backs them:
+
+- **State Concrete Engineering Facts Directly in the Skill:** Write the skill
+  around clear decision rules, mechanisms, and practical guidelines rather than
+  narrating how an experiment was run. A reader with only the skill does not
+  need to be able to reproduce the underlying benchmark from the skill text
+  alone, though briefly hinting at the empirical basis (for example, *"in
+  multi-hour untethered benchmarks"* or *"observed in kernel suspend traces"*)
+  is often helpful to ground the rule.
+- **Use Approximate, Order-of-Magnitude Performance Figures in the Skill:**
+  Avoid packing `SKILL.md` with hyper-specific measurement ranges, per-rail
+  breakdowns, or estimator comparisons (for example, prefer *"reduces phone
+  power by around 30–50% and watch drain by roughly 80–90% (depending on model
+  and workload)"* over *"cuts ODPM power from 205.19 mW to 91.88–121.67 mW, with
+  -55% to -72% on the `wifi.bt` rail and -26% to -33% on fuel-gauge
+  discharge"*). Overly granular numbers invite unnecessary debate about
+  experimental setup and distract from sound general principles.
+- **Record Detailed Sourcing and Evidence in Associated Persistent Storage (When
+  Available):** Whenever a skill change is backed by substantial direct
+  research, benchmark runs, or document audits—and an associated project
+  tracker, benchmark repository, or commit log exists—record the full
+  methodology, raw data, exact numbers, and commit/artifact trail in that
+  external persistent storage so the rationale behind any skill claim can be
+  reconstructed from the combination of the skill, git history, and project
+  records. (Do not treat this as an absolute prerequisite when updating a skill
+  from lightweight observations or imperfect sources where no separate research
+  log is warranted, and never hardcode links to private tracker paths inside a
+  reusable skill.)
+
 ## Anti-Patterns & Corrected Examples
 
 ### Example 1: Direct Skill Mandate vs. Capability-First with Exemplar
@@ -262,6 +296,10 @@ Before publishing or committing a reusable skill, verify that:
   benchmark tasks (no leaked grader metrics, container quirks, or fixture
   literals) and explain API asymmetries once with their *why* instead of
   repeating `NEVER`/`MUST` bans.
+- [ ] Empirical performance claims in the skill use approximate,
+  order-of-magnitude figures rather than hyper-specific lab numbers, while any
+  substantial underlying research or benchmark evidence is recorded in
+  associated persistent project/git storage when available.
 - [ ] If the skill bundles helper tools in `scripts/`, an auto-generated
   `references/command-index.md` is provided, refreshed via
   `command-index-format`, and linked from `SKILL.md`.
