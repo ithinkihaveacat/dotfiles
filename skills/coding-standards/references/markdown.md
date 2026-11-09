@@ -21,8 +21,14 @@ cat README.md | scripts/markdown-format > formatted.md
 
 ## Heading Style
 
-When creating or updating Markdown, use standard heading styles (e.g., "##
-Introduction") without additional formatting (like bolding), ALL CAPS, or
-numbers. Maintain consistency with existing styles in a document, but do not
-introduce numbers or extra formatting into documents that don't already have
-them.
+When creating or updating Markdown, use clean ATX headings (e.g.,
+`## Introduction`) without manual bolding, ALL CAPS, or section numbers on
+topical headings (numbering topical sections adds renumbering churn when
+sections move or are edited). Two exceptions apply:
+
+- **Existing documents:** Maintain consistency with existing styles in a
+  document, and do not introduce numbers or extra formatting into documents that
+  don't already have them.
+- **Sequential steps:** Numbered headings (e.g., `### 1. ...` or
+  `### Step 1: ...`) are acceptable when headings denote strictly ordered steps
+  rather than general topic sections (keep `TODO.md` item headings unnumbered).

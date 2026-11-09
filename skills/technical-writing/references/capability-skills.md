@@ -190,18 +190,20 @@ scripts/adb-tile-switch 0
 
 **DO (Self-Contained Primaries with Optional Helper Hints):**
 
-```markdown
+````markdown
 ### 1. Carousel Setup
 
 Add the tile component to the carousel and focus its display. You can execute
 raw ADB commands or use high-level ADB tile helpers if available in your
 workspace:
 
+```bash
 # Standard ADB broadcast command:
 adb shell am broadcast -a com.google.android.wearable.app.DEBUG_SURFACE --es operation add-tile --ecn component com.example/.MyTileService --ei type 0
 
 # (Or run workspace tile helpers like `adb-tile-add com.example/.MyTileService` if present)
 ```
+````
 
 > [!NOTE] **Active Experiment — Bundled Script Discovery (`taskgo`):** A new
 > approach to referencing bundled scripts across heterogeneous environments is
