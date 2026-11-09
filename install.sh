@@ -826,7 +826,7 @@ git_up() {
 
   if [ "$branch" = "master" ] &&
     git -C "$dir" rev-parse --verify --quiet "refs/remotes/$remote/main" >/dev/null 2>&1 &&
-    [ "$(git -C "$dir" rev-parse --verify "refs/remotes/$remote/main")" != "$(git -C "$dir" rev-parse --verify "$upstream")" ]; then
+    [ "$(git -C "$dir" rev-list --count "$upstream..refs/remotes/$remote/main" 2>/dev/null || echo 0)" -gt 0 ]; then
     echo "warning: $dir is on legacy '$branch', while '$remote/main' has newer commits; consider switching to main" >&2
   fi
 
