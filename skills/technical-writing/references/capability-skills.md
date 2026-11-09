@@ -129,8 +129,8 @@ external evidence repository):
   unnecessary debate about experimental setup and distract from sound general
   principles. An additional sub-metric figure is appropriate when it is the
   shortest way to prevent a misreading of the headline (for example, noting that
-  a 40% subsystem saving translates to only a `~6%` change in total system
-  power).
+  a 50% cache-hit gain translates to only a `~5%` reduction in end-to-end
+  request latency).
 - **Approximate Faithfully (Round Outward and Keep Meaning-Changing
   Qualifiers):** Round outward so the stated range still encloses what was
   measured, and never shift or narrow it (for example, `62–71%` rounds to

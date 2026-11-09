@@ -43,10 +43,9 @@ structural principles:
   or attach qualitative judgment to behavior. Describe observable symptoms and
   factual outcomes. Save technical reasoning, hypotheses, and root cause
   analysis for dedicated "Analysis" or "Rationale" sections (or, in TODO items,
-  the "Sketch" field). In capability skills, causal mechanisms under active
-  study and model-based projections are permitted when explicitly labeled
-  (*"model estimate"*, *"projected"*, *"under investigation"*) and kept distinct
-  from measured headline figures.
+  the "Sketch" field; for labeled projections and mechanisms under study in
+  capability skills, see
+  [Capability Skills](references/capability-skills.md#empirical-claims-approximate-figures--external-evidence-logging)).
 
 ## Document Types & Reference Material
 
