@@ -1,0 +1,441 @@
+#!/usr/bin/env bash
+
+# Tests: tests/test-install-git-pull (install.sh git_up, feature_git_pull, self-reexec)
+
+set -euo pipefail
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+REPO_ROOT="$(cd "$DIR/.." && pwd)"
+INSTALL_SH="$REPO_ROOT/install.sh"
+
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
+
+export GIT_CONFIG_GLOBAL=/dev/null
+export GIT_CONFIG_SYSTEM=/dev/null
+export GIT_AUTHOR_NAME="Test User"
+export GIT_AUTHOR_EMAIL="test@example.com"
+export GIT_COMMITTER_NAME="Test User"
+export GIT_COMMITTER_EMAIL="test@example.com"
+
+# Extract git_up and feature_git_pull from install.sh so every branch runs
+# directly against real bare git repos without touching network remotes.
+git_up_src=$(awk '/^git_up\(\) \{/,/^\}/' "$INSTALL_SH")
+feature_src=$(awk '/^function feature_git_pull \{/,/^\}/' "$INSTALL_SH")
+if [[ -z "$git_up_src" || -z "$feature_src" ]]; then
+  echo "Bail out! git_up or feature_git_pull not found in install.sh"
+  exit 1
+fi
+eval "$git_up_src"
+eval "$feature_src"
+
+# shellcheck disable=SC2034 # referenced by eval'd git_up / feature_git_pull
+GIT_NET_OPTS=()
+# shellcheck disable=SC2034
+SRCDIRS=()
+# shellcheck disable=SC2034
+INSTALL_REEXEC=0
+# shellcheck disable=SC2034
+INSTALL_REEXEC_PULL_STATUS=0
+x() { "$@"; }
+heading() { :; }
+is_offline() { return 1; }
+skip_offline() { :; }
+
+n=0
+failed=0
+check() {
+  local desc=$1
+  shift
+  n=$((n + 1))
+  if "$@"; then
+    echo "ok $n - $desc"
+  else
+    echo "not ok $n - $desc (status $status)"
+    failed=$((failed + 1))
+    printf '%s\n' "$output" | sed 's/^/# /'
+  fi
+}
+is() { [[ "$1" == "$2" ]]; }
+has() { [[ "$1" == *"$2"* ]]; }
+
+make_remote_and_clone() {
+  local name=$1
+  local remote_name=${2:-origin}
+  local bare="$TMP/$name-origin.git"
+  local clone="$TMP/$name"
+  local admin="$TMP/$name-admin"
+  git init --bare -q --initial-branch=main "$bare"
+  git clone -q -o "$remote_name" "$bare" "$clone"
+  echo "base" >"$clone/file.txt"
+  git -C "$clone" add file.txt
+  git -C "$clone" commit -q -m "chore: initial"
+  git -C "$clone" push -q -u "$remote_name" main >/dev/null 2>&1
+  git clone -q -o "$remote_name" "$bare" "$admin"
+}
+
+run_git_up() {
+  local dir=$1 non_inter=$2 reply=${3:-}
+  status=0
+  output=$(NON_INTERACTIVE="$non_inter" git_up "$dir" 2>&1 <<<"$reply") || status=$?
+}
+
+echo "1..48"
+
+# 1. Fails loudly on detached HEAD
+make_remote_and_clone "detached"
+git -C "$TMP/detached" checkout -q --detach HEAD
+run_git_up "$TMP/detached" 1
+check "detached HEAD returns non-zero" is "$status" 1
+check "detached HEAD prints clear error" has "$output" "detached HEAD"
+
+# 2. Fails loudly on unfinished git operations (REVERT_HEAD and BISECT_LOG)
+make_remote_and_clone "revert-wip"
+rev_head=$(git -C "$TMP/revert-wip" rev-parse HEAD)
+git_dir="$TMP/revert-wip/.git"
+printf '%s\n' "$rev_head" >"$git_dir/REVERT_HEAD"
+run_git_up "$TMP/revert-wip" 1
+check "unfinished REVERT_HEAD fails cleanly" is "$status" 1
+rm -f "$git_dir/REVERT_HEAD"
+: >"$git_dir/BISECT_LOG"
+run_git_up "$TMP/revert-wip" 1
+check "unfinished BISECT_LOG fails cleanly" is "$status" 1
+rm -f "$git_dir/BISECT_LOG"
+
+# 3. Fails loudly when upstream branch is gone after remote prune (the 2026-11-09 bug)
+make_remote_and_clone "gone"
+git -C "$TMP/gone" checkout -q -b topic-foo
+echo "topic" >>"$TMP/gone/file.txt"
+git -C "$TMP/gone" commit -q -am "feat: topic"
+git -C "$TMP/gone" push -q -u origin topic-foo >/dev/null 2>&1
+git -C "$TMP/gone-origin.git" branch -D topic-foo >/dev/null
+run_git_up "$TMP/gone" 1
+check "gone upstream exits 1 instead of silently returning 0" is "$status" 1
+check "gone upstream error explains what happened" has "$output" "upstream 'origin/topic-foo' is gone"
+
+# 4. Fails loudly on non-default branch or mismatched local branch tracking origin/main
+make_remote_and_clone "nondefault"
+git -C "$TMP/nondefault" checkout -q -b stray-branch
+echo "stray" >>"$TMP/nondefault/file.txt"
+git -C "$TMP/nondefault" commit -q -am "feat: stray"
+git -C "$TMP/nondefault" push -q -u origin stray-branch >/dev/null 2>&1
+run_git_up "$TMP/nondefault" 1
+check "non-default branch fails" is "$status" 1
+check "non-default branch error identifies branch" has "$output" "instead of 'origin/main'"
+
+make_remote_and_clone "mismatch"
+git -C "$TMP/mismatch" checkout -q -b local-topic --track origin/main
+run_git_up "$TMP/mismatch" 1
+check "mismatched local branch tracking origin/main fails" is "$status" 1
+
+# 5. Tolerates stale refs/remotes/<remote>/HEAD -> <remote>/master when main tracks <remote>/main,
+#    and works cleanly with non-origin remote names.
+make_remote_and_clone "stalehead"
+git -C "$TMP/stalehead" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/master
+echo "up" >>"$TMP/stalehead-admin/file.txt"
+git -C "$TMP/stalehead-admin" commit -q -am "feat: upstream on main"
+git -C "$TMP/stalehead-admin" push -q origin main >/dev/null 2>&1
+run_git_up "$TMP/stalehead" 1
+check "stale origin/HEAD -> origin/master succeeds when local main tracks origin/main" is "$status" 0
+
+make_remote_and_clone "upremote" "upstream"
+echo "up2" >>"$TMP/upremote-admin/file.txt"
+git -C "$TMP/upremote-admin" commit -q -am "feat: non-origin remote"
+git -C "$TMP/upremote-admin" push -q upstream main >/dev/null 2>&1
+git -C "$TMP/upremote" remote add broken "$TMP/no-such-remote.git"
+run_git_up "$TMP/upremote" 1
+check "non-origin remote (upstream/main) succeeds despite broken secondary remote" is "$status" 0
+
+# Warn loudly when a legacy checkout is still on master while origin/main moved ahead
+LEGACY_BARE="$TMP/legacy-origin.git"
+git init --bare -q --initial-branch=master "$LEGACY_BARE"
+git clone -q "$LEGACY_BARE" "$TMP/legacy"
+echo "m1" >"$TMP/legacy/file.txt"
+git -C "$TMP/legacy" add file.txt
+git -C "$TMP/legacy" commit -q -m "chore: master init"
+git -C "$TMP/legacy" push -q -u origin master >/dev/null 2>&1
+git clone -q "$LEGACY_BARE" "$TMP/legacy-admin"
+git -C "$TMP/legacy-admin" checkout -q -b main
+git -C "$TMP/legacy-admin" push -q origin main >/dev/null 2>&1
+run_git_up "$TMP/legacy" 1
+case "$output" in *warning:*) legacy_same_warn=1 ;; *) legacy_same_warn=0 ;; esac
+check "does not warn on legacy master when origin/main is at same commit" \
+  is "$legacy_same_warn" 0
+git -C "$TMP/legacy-admin" checkout -q master
+echo "m-master" >"$TMP/legacy-admin/master.txt"
+git -C "$TMP/legacy-admin" add master.txt
+git -C "$TMP/legacy-admin" commit -q -m "chore: master ahead of main"
+git -C "$TMP/legacy-admin" push -q origin master >/dev/null 2>&1
+run_git_up "$TMP/legacy" 1
+case "$output" in *warning:*) legacy_ahead_warn=1 ;; *) legacy_ahead_warn=0 ;; esac
+check "does not warn on legacy master when master is ahead of origin/main" \
+  is "$legacy_ahead_warn" 0
+git -C "$TMP/legacy-admin" checkout -q main
+echo "m2" >"$TMP/legacy-admin/file.txt"
+git -C "$TMP/legacy-admin" commit -q -am "feat: main moved ahead"
+git -C "$TMP/legacy-admin" push -q origin main >/dev/null 2>&1
+run_git_up "$TMP/legacy" 1
+check "warns loudly when on legacy master while origin/main has newer commits" \
+  has "$output" "warning:"
+
+# 6. feature_git_pull propagates git_up failures cleanly (errexit is suppressed in `if !`)
+make_remote_and_clone "badremote"
+git -C "$TMP/badremote" remote set-url origin "$TMP/does-not-exist.git"
+# shellcheck disable=SC2034
+SRCDIRS=("$TMP/badremote")
+status=0
+output=$(NON_INTERACTIVE=1 feature_git_pull 2>&1) || status=$?
+check "feature_git_pull fails when remote update errors instead of swallowing status" is "$status" 1
+
+# 7. Interactive [y/N/d] gate: preview on prompt, full diff on d, fast-forward on y
+make_remote_and_clone "inter"
+echo "remote line" >>"$TMP/inter-admin/file.txt"
+git -C "$TMP/inter-admin" commit -q -am "feat: remote update"
+git -C "$TMP/inter-admin" push -q origin main >/dev/null 2>&1
+
+before_head=$(git -C "$TMP/inter" rev-parse HEAD)
+run_git_up "$TMP/inter" 0 "n"
+check "declining interactive prompt skips cleanly (status 0)" is "$status" 0
+check "shows incoming commit subject in preview" has "$output" "feat: remote update"
+check "shows incoming diffstat in preview" has "$output" "file.txt | 1 +"
+check "declining leaves HEAD unchanged" is "$(git -C "$TMP/inter" rev-parse HEAD)" "$before_head"
+
+run_git_up "$TMP/inter" 0 $'d\nn'
+check "entering d then n prints full diff and leaves HEAD unchanged" \
+  is "$status:$(git -C "$TMP/inter" rev-parse HEAD)" "0:$before_head"
+check "d then n outputs full added diff line" has "$output" "+remote line"
+
+run_git_up "$TMP/inter" 0 $'d\ny'
+check "entering d then y fast-forwards cleanly" is "$status" 0
+check "d prints added lines from full git diff" has "$output" "+remote line"
+check "HEAD advances to remote commit after d then y" \
+  is "$(git -C "$TMP/inter" rev-parse HEAD)" "$(git -C "$TMP/inter-admin" rev-parse HEAD)"
+
+# 8. Shallow clone with no merge-base handles diff preview without failing
+SHALLOW_BARE="$TMP/shallow-origin.git"
+SHALLOW_ADMIN="$TMP/shallow-admin"
+SHALLOW_CLONE="$TMP/shallow"
+git init --bare -q --initial-branch=main "$SHALLOW_BARE"
+git clone -q "$SHALLOW_BARE" "$SHALLOW_ADMIN"
+echo "s1" >"$SHALLOW_ADMIN/file.txt"
+git -C "$SHALLOW_ADMIN" add file.txt
+git -C "$SHALLOW_ADMIN" commit -q -m "feat: s1"
+echo "s2" >>"$SHALLOW_ADMIN/file.txt"
+git -C "$SHALLOW_ADMIN" commit -q -am "feat: s2"
+git -C "$SHALLOW_ADMIN" push -q -u origin main >/dev/null 2>&1
+git clone -q --depth 1 "file://$SHALLOW_BARE" "$SHALLOW_CLONE"
+echo "s2-amended" >"$SHALLOW_ADMIN/file.txt"
+git -C "$SHALLOW_ADMIN" commit -q --amend -am "feat: amended shallow base"
+git -C "$SHALLOW_ADMIN" push -q --force origin main >/dev/null 2>&1
+run_git_up "$SHALLOW_CLONE" 0 "n"
+check "shallow clone interactive preview succeeds despite missing merge-base" is "$status" 0
+
+# 9. Interactive ahead > 0 warns loudly listing local commits and rebases cleanly on y
+make_remote_and_clone "inter-ahead"
+echo "local only" >"$TMP/inter-ahead/local.txt"
+git -C "$TMP/inter-ahead" add local.txt
+git -C "$TMP/inter-ahead" commit -q -m "feat: local wip"
+echo "remote only" >"$TMP/inter-ahead/remote.txt"
+echo "remote only" >"$TMP/inter-ahead-admin/remote.txt"
+rm -f "$TMP/inter-ahead/remote.txt"
+git -C "$TMP/inter-ahead-admin" add remote.txt
+git -C "$TMP/inter-ahead-admin" commit -q -m "feat: remote parallel"
+git -C "$TMP/inter-ahead-admin" push -q origin main >/dev/null 2>&1
+run_git_up "$TMP/inter-ahead" 0 $'d\ny'
+check "interactive ahead > 0 warns loudly listing local commits" has "$output" "WARNING:"
+check "interactive ahead > 0 shows full diff on d" has "$output" "+remote only"
+check "interactive ahead > 0 shows rebase prompt" \
+  has "$output" "Rebase 1 local commit(s) and pull inter-ahead? [y/N/d]"
+is_anc=0
+git -C "$TMP/inter-ahead" merge-base --is-ancestor origin/main HEAD || is_anc=$?
+check "interactive ahead > 0 rebases cleanly on y without pull.rebase" is "$status:$is_anc" "0:0"
+
+# 10. Dirty working tree: allowed when nothing incoming (behind=0), fails when updates arrive
+make_remote_and_clone "dirty"
+echo "wip" >>"$TMP/dirty/file.txt"
+run_git_up "$TMP/dirty" 1
+check "dirty working tree with nothing incoming still exits 0" is "$status" 0
+echo "upstream" >"$TMP/dirty-admin/other.txt"
+git -C "$TMP/dirty-admin" add other.txt
+git -C "$TMP/dirty-admin" commit -q -m "feat: incoming change"
+git -C "$TMP/dirty-admin" push -q origin main >/dev/null 2>&1
+run_git_up "$TMP/dirty" 1
+check "dirty working tree fails when updates are incoming" is "$status" 1
+check "reports uncommitted changes" has "$output" "uncommitted changes"
+
+# 11. Diverged local commit in non-interactive mode: refused unless pull.rebase opts in
+make_remote_and_clone "div"
+echo "local A" >"$TMP/div/a.txt"
+git -C "$TMP/div" add a.txt
+git -C "$TMP/div" commit -q -m "feat: add A"
+git -C "$TMP/div" push -q origin HEAD:refs/heads/pr-a >/dev/null 2>&1
+git -C "$TMP/div-admin" fetch -q origin pr-a:pr-a
+git -C "$TMP/div-admin" merge -q --squash pr-a
+git -C "$TMP/div-admin" commit -q -m "feat: add A (#1)"
+git -C "$TMP/div-admin" push -q origin main >/dev/null 2>&1
+
+run_git_up "$TMP/div" 1
+check "diverged local main fails in non-interactive mode when pull.rebase is false" is "$status" 1
+
+git -C "$TMP/div" config --local pull.rebase true
+run_git_up "$TMP/div" 1
+check "diverged local main reconciles via rebase when pull.rebase=true" is "$status" 0
+
+make_remote_and_clone "div-merges"
+echo "local B" >"$TMP/div-merges/b.txt"
+git -C "$TMP/div-merges" add b.txt
+git -C "$TMP/div-merges" commit -q -m "feat: add B"
+git -C "$TMP/div-merges" push -q origin HEAD:refs/heads/pr-b >/dev/null 2>&1
+git -C "$TMP/div-merges-admin" fetch -q origin pr-b:pr-b
+git -C "$TMP/div-merges-admin" merge -q --squash pr-b
+git -C "$TMP/div-merges-admin" commit -q -m "feat: add B (#2)"
+git -C "$TMP/div-merges-admin" push -q origin main >/dev/null 2>&1
+git -C "$TMP/div-merges" config --local pull.rebase merges
+run_git_up "$TMP/div-merges" 1
+check "diverged local main reconciles via rebase when pull.rebase=merges" is "$status" 0
+check "reconciled HEAD matches squashed origin/main" \
+  is "$(git -C "$TMP/div-merges" rev-parse HEAD)" "$(git -C "$TMP/div-merges" rev-parse origin/main)"
+
+# Verify pull.rebase=merges preserves actual local merge commits instead of flattening
+make_remote_and_clone "preserve-merge"
+git -C "$TMP/preserve-merge" checkout -q -b topic-side
+echo "side" >"$TMP/preserve-merge/side.txt"
+git -C "$TMP/preserve-merge" add side.txt
+git -C "$TMP/preserve-merge" commit -q -m "feat: side work"
+git -C "$TMP/preserve-merge" checkout -q main
+git -C "$TMP/preserve-merge" merge -q --no-ff topic-side -m "Merge branch 'topic-side'"
+echo "remote-u" >"$TMP/preserve-merge-admin/upstream.txt"
+git -C "$TMP/preserve-merge-admin" add upstream.txt
+git -C "$TMP/preserve-merge-admin" commit -q -m "feat: upstream change"
+git -C "$TMP/preserve-merge-admin" push -q origin main >/dev/null 2>&1
+git -C "$TMP/preserve-merge" config --local pull.rebase merges
+run_git_up "$TMP/preserve-merge" 1
+merge_rev=$(git -C "$TMP/preserve-merge" rev-list --merges -n 1 HEAD)
+check "pull.rebase=merges preserves local merge commits via --rebase-merges" \
+  is "$status:$([ -n "$merge_rev" ] && echo yes || echo no)" "0:yes"
+
+# 12. Multi-commit squash conflict aborts rebase cleanly without leaving detached HEAD
+make_remote_and_clone "conflict"
+echo "step1" >>"$TMP/conflict/file.txt"
+git -C "$TMP/conflict" commit -q -am "feat: step 1"
+echo "step2" >>"$TMP/conflict/file.txt"
+git -C "$TMP/conflict" commit -q -am "feat: step 2"
+git -C "$TMP/conflict" push -q origin HEAD:refs/heads/pr-multi >/dev/null 2>&1
+git -C "$TMP/conflict-admin" fetch -q origin pr-multi:pr-multi
+git -C "$TMP/conflict-admin" merge -q --squash pr-multi
+git -C "$TMP/conflict-admin" commit -q -m "feat: squashed steps (#2)"
+git -C "$TMP/conflict-admin" push -q origin main >/dev/null 2>&1
+git -C "$TMP/conflict" config --local pull.rebase true
+run_git_up "$TMP/conflict" 1
+check "conflicting multi-commit squash exits non-zero" is "$status" 1
+check "conflict triggers git rebase --abort so HEAD stays on main" \
+  is "$(git -C "$TMP/conflict" branch --show-current)" "main"
+
+# 13. End-to-end self-reexec: when git-pull updates install.sh, remaining features
+#     execute from the newly updated install.sh on disk without re-running git-pull.
+setup_e2e_repo() {
+  local prefix=$1 restrict_zero_arg=${2:-0}
+  local home="$TMP/$prefix-home"
+  local bare="$TMP/$prefix-origin.git"
+  local admin="$TMP/$prefix-admin"
+  mkdir -p "$home/.dotfiles"
+  git init --bare -q --initial-branch=main "$bare"
+  git clone -q "$bare" "$home/.dotfiles"
+  cp "$INSTALL_SH" "$home/.dotfiles/install.sh"
+  if [ "$restrict_zero_arg" = 1 ]; then
+    python3 - "$home/.dotfiles/install.sh" <<'PY'
+import pathlib, sys
+p = pathlib.Path(sys.argv[1])
+src = p.read_text()
+anchor = "# Ask for sudo upfront, but only if a selected feature will use it on Linux:"
+assert anchor in src
+p.write_text(src.replace(anchor, 'SELECTED="git-pull links"\n' + anchor, 1))
+PY
+  fi
+  chmod +x "$home/.dotfiles/install.sh"
+  mkdir -p "$home/.dotfiles/home" "$home/.dotfiles/fish"
+  echo "# test" >"$home/.dotfiles/home/.testrc"
+  git -C "$home/.dotfiles" add install.sh home/.testrc fish
+  git -C "$home/.dotfiles" commit -q -m "chore: initial installer"
+  git -C "$home/.dotfiles" push -q -u origin main >/dev/null 2>&1
+
+  git clone -q "$bare" "$admin"
+  python3 - "$admin/install.sh" "$restrict_zero_arg" <<'PY'
+import pathlib, sys
+p = pathlib.Path(sys.argv[1])
+src = p.read_text()
+if sys.argv[2] == "1":
+    anchor = "# Ask for sudo upfront, but only if a selected feature will use it on Linux:"
+    assert anchor in src
+    src = src.replace(anchor, 'SELECTED="git-pull links"\n' + anchor, 1)
+old = '  heading "links"'
+new = '  heading "links"\n  echo "MARKER_FROM_UPDATED_INSTALL_SH"'
+assert old in src
+p.write_text(src.replace(old, new, 1))
+PY
+  chmod +x "$admin/install.sh"
+  git -C "$admin" commit -q -am "feat: add updated links marker"
+  git -C "$admin" push -q origin main >/dev/null 2>&1
+}
+
+setup_e2e_repo "e2e" 0
+status=0
+output=$(env -i HOME="$TMP/e2e-home" PATH="/usr/bin:/bin" \
+  "$TMP/e2e-home/.dotfiles/install.sh" --only git-pull,links --no-input 2>&1 </dev/null) || status=$?
+check "end-to-end self-reexec --only git-pull,links exits 0" is "$status" 0
+check "runs links from newly pulled install.sh on disk" \
+  has "$output" "MARKER_FROM_UPDATED_INSTALL_SH"
+
+# 14. End-to-end 0-arg self-reexec & guarantee install.sh leaves ~/.ssh untouched.
+setup_e2e_repo "e2e0" 1
+mkdir -p "$TMP/e2e0-home/.ssh"
+git -C "$TMP/e2e0-home/.ssh" init -q --initial-branch=main
+echo "id" >"$TMP/e2e0-home/.ssh/config"
+git -C "$TMP/e2e0-home/.ssh" add config
+git -C "$TMP/e2e0-home/.ssh" commit -q -m "ssh init"
+git -C "$TMP/e2e0-home/.ssh" checkout -q --detach HEAD
+status=0
+output=$(env -i HOME="$TMP/e2e0-home" PATH="/usr/bin:/bin" \
+  "$TMP/e2e0-home/.dotfiles/install.sh" 2>&1 </dev/null) || status=$?
+check "end-to-end 0-arg self-reexec exits 0" is "$status" 0
+check "0-arg self-reexec runs links from updated install.sh" \
+  has "$output" "MARKER_FROM_UPDATED_INSTALL_SH"
+check "0-arg install.sh leaves ~/.ssh detached repo untouched" \
+  is "$(git -C "$TMP/e2e0-home/.ssh" branch --show-current)" ""
+
+# 15. End-to-end --dry-run exits 0 without modifying checkout
+setup_e2e_repo "e2e-dry" 0
+dry_before=$(git -C "$TMP/e2e-dry-home/.dotfiles" rev-parse HEAD)
+status=0
+output=$(env -i HOME="$TMP/e2e-dry-home" PATH="/usr/bin:/bin" \
+  "$TMP/e2e-dry-home/.dotfiles/install.sh" -n --only git-pull,links --no-input 2>&1 </dev/null) || status=$?
+check "end-to-end --dry-run exits 0 without advancing HEAD" \
+  is "$status:$(git -C "$TMP/e2e-dry-home/.dotfiles" rev-parse HEAD)" "0:$dry_before"
+
+# 16. End-to-end self-reexec propagates partial overlay failure while still running updated features
+setup_e2e_repo "e2e-partial" 0
+mkdir -p "$TMP/e2e-partial-home/.private"
+git -C "$TMP/e2e-partial-home/.private" init -q --initial-branch=main
+echo "p" >"$TMP/e2e-partial-home/.private/secret.txt"
+git -C "$TMP/e2e-partial-home/.private" add secret.txt
+git -C "$TMP/e2e-partial-home/.private" commit -q -m "priv init"
+git -C "$TMP/e2e-partial-home/.private" checkout -q --detach HEAD
+status=0
+output=$(env -i HOME="$TMP/e2e-partial-home" PATH="/usr/bin:/bin" \
+  "$TMP/e2e-partial-home/.dotfiles/install.sh" --only git-pull,links --no-input 2>&1 </dev/null) || status=$?
+check "end-to-end self-reexec propagates detached .private pull failure (exit 1)" is "$status" 1
+check "partial pull failure across reexec still runs updated links" \
+  has "$output" "MARKER_FROM_UPDATED_INSTALL_SH"
+
+# 17. feature_git_pull propagates failed pre-reexec status when INSTALL_REEXEC=1
+status=0
+# shellcheck disable=SC2034
+INSTALL_REEXEC=1
+# shellcheck disable=SC2034
+INSTALL_REEXEC_PULL_STATUS=1
+output=$(feature_git_pull 2>&1) || status=$?
+check "feature_git_pull returns INSTALL_REEXEC_PULL_STATUS=1 on reexec" is "$status" 1
+
+if [ "$failed" -ne 0 ]; then
+  exit 1
+fi

@@ -4,6 +4,7 @@
 
 # Tests: tests/test-install-only (--only), tests/test-install-prune (--prune),
 # tests/test-install-profiles (--profile, --with, --without, --dry-run),
+# tests/test-install-git-pull (git_up, interactive gating, self-reexec),
 # tests/test-install-node (the per-user default Node.js),
 # tests/test-install-fish-completions (generated fish completions)
 
@@ -75,7 +76,7 @@ fi
 # reach no host beyond GitHub and uv's package index; "ci" is just what CI jobs
 # need.
 FEATURES=(
-  'git-pull|workstation|Fast-forward ~/.dotfiles and its overlays'
+  'git-pull|workstation|Pull updates in ~/.dotfiles and its overlays'
   'links|workstation cloud|Symlink dotfiles into the home directory, fish and tool configs'
   'macos|workstation|Key bindings, system defaults, colors, git keychain (macOS)'
   'fish-completions|workstation|Regenerate fish completions'
@@ -135,7 +136,7 @@ Usage: $(basename "$0") [OPTIONS]
 
 Sets up and updates this machine from ~/.dotfiles: symlinks dotfiles into
 place, installs packages, and wires up tool-specific config. Safe to run
-repeatedly; an existing checkout is fast-forwarded first.
+repeatedly; an existing checkout is updated first.
 
 Can also be run directly from the network, which clones the repo to ~/.dotfiles
 (if absent) before installing:
@@ -243,6 +244,9 @@ PROFILE=""
 ONLY=""
 WITH=""
 WITHOUT=""
+INSTALL_REEXEC=${_DOTFILES_INSTALL_REEXEC:-0}
+INSTALL_REEXEC_PULL_STATUS=${_DOTFILES_GIT_PULL_STATUS:-0}
+unset _DOTFILES_INSTALL_REEXEC _DOTFILES_GIT_PULL_STATUS
 
 # XDG Base Directory specification defaults
 export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
@@ -257,6 +261,8 @@ function option_value {
     usage 1 >&2
   fi
 }
+
+INSTALL_ARGS=("$@")
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -750,29 +756,184 @@ link_overlay_path() {
   fi
 }
 
-# Pull each source repo to its upstream before applying. Mirrors the `git up`
-# alias in ~/.gitconfig. Non-fast-forward or detached states are surfaced as
-# errors via --ff-only so they can't be silently skipped.
+# Pull each source repo to its upstream before applying. Fails loudly on detached
+# HEAD, dirty tracked files when updates are incoming, missing/gone upstreams,
+# non-default branches, or diverged local commits in non-interactive runs unless
+# pull.rebase opts in. Interactive runs show incoming commits, diffstat, any
+# local commits to rebase, and prompt [y/N/d] (where d prints the full diff).
 git_up() {
   local dir=$1
-  [ -d "$dir/.git" ] || return 0
-  if ! git -C "$dir" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' >/dev/null 2>&1; then
+  local name git_dir state branch upstream remote default_ref counts behind ahead
+  local rebase_opt rebase_allowed diff_range prompt reply
+  [ -e "$dir/.git" ] || return 0
+  name=$(basename "$dir")
+
+  git_dir=$(git -C "$dir" rev-parse --git-dir 2>/dev/null) || {
+    echo "error: $dir is not a valid git repository" >&2
+    return 1
+  }
+  case "$git_dir" in
+    /*) ;;
+    *) git_dir="$dir/$git_dir" ;;
+  esac
+  for state in MERGE_HEAD rebase-merge rebase-apply CHERRY_PICK_HEAD REVERT_HEAD BISECT_LOG; do
+    if [ -e "$git_dir/$state" ]; then
+      echo "error: $dir has an unfinished git operation ($state); resolve or abort it first" >&2
+      return 1
+    fi
+  done
+
+  branch=$(git -C "$dir" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+  if [ -z "$branch" ]; then
+    echo "error: $dir is in detached HEAD state; check out main and retry" >&2
+    return 1
+  fi
+
+  upstream=$(git -C "$dir" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null || true)
+  if [ -z "$upstream" ]; then
+    echo "error: $dir (on branch '$branch') has no upstream tracking branch" >&2
+    return 1
+  fi
+
+  remote=$(git -C "$dir" config --get "branch.$branch.remote" 2>/dev/null || true)
+  [ -n "$remote" ] || remote=${upstream%%/*}
+
+  if ! x git "${GIT_NET_OPTS[@]}" -C "$dir" fetch -p "$remote"; then
+    return 1
+  fi
+
+  if ! git -C "$dir" rev-parse --verify --quiet '@{upstream}' >/dev/null 2>&1; then
+    echo "error: $dir upstream '$upstream' is gone (deleted on remote?); check out main and retry" >&2
+    return 1
+  fi
+
+  if [ "$upstream" != "$remote/$branch" ]; then
+    echo "error: $dir is on branch '$branch' tracking '$upstream' instead of '$remote/$branch'" >&2
+    return 1
+  fi
+
+  default_ref=$(git -C "$dir" symbolic-ref --quiet --short "refs/remotes/$remote/HEAD" 2>/dev/null || true)
+  if [ -n "$default_ref" ]; then
+    if [ "$upstream" != "$default_ref" ] &&
+      ! { [ "$default_ref" = "$remote/master" ] && [ "$branch" = "main" ]; }; then
+      echo "error: $dir is on branch '$branch' tracking '$upstream' instead of '$default_ref'" >&2
+      return 1
+    fi
+  elif [ "$branch" != "main" ] && [ "$branch" != "master" ]; then
+    echo "error: $dir is on non-default branch '$branch' (expected main or master)" >&2
+    return 1
+  fi
+
+  if [ "$branch" = "master" ] &&
+    git -C "$dir" rev-parse --verify --quiet "refs/remotes/$remote/main" >/dev/null 2>&1 &&
+    [ "$(git -C "$dir" rev-list --count "$upstream..refs/remotes/$remote/main" 2>/dev/null || echo 0)" -gt 0 ]; then
+    echo "warning: $dir is on legacy '$branch', while '$remote/main' has newer commits; consider switching to main" >&2
+  fi
+
+  if ! counts=$(git -C "$dir" rev-list --left-right --count "$upstream...HEAD"); then
+    echo "error: failed to compare $dir ($branch) against $upstream" >&2
+    return 1
+  fi
+  read -r behind ahead <<<"$counts"
+
+  if [ "$behind" -eq 0 ]; then
+    if [ "$ahead" -gt 0 ]; then
+      echo "note: $dir ($branch) is ahead of $upstream by $ahead local commit(s); nothing incoming"
+    fi
     return 0
   fi
-  x git "${GIT_NET_OPTS[@]}" -C "$dir" remote update -p
-  x git -C "$dir" merge --ff-only '@{upstream}'
+
+  if ! git -C "$dir" -c diff.relative=false diff --quiet ||
+    ! git -C "$dir" -c diff.relative=false diff --cached --quiet; then
+    echo "error: $dir has uncommitted changes and $behind incoming commit(s); commit or stash before updating" >&2
+    return 1
+  fi
+
+  rebase_opt=$(git -C "$dir" config --get pull.rebase 2>/dev/null | LC_ALL=C tr '[:upper:]' '[:lower:]' || true)
+  case "$rebase_opt" in
+    true | yes | on | 1 | merges | interactive | preserve)
+      rebase_allowed=1
+      ;;
+    *)
+      rebase_allowed=0
+      ;;
+  esac
+  if [ "$ahead" -gt 0 ] && [ "$NON_INTERACTIVE" = 1 ] && [ "$rebase_allowed" != 1 ]; then
+    echo "error: $dir ($branch) has $ahead local commit(s) diverged from $upstream (--ff-only enforced; pull.rebase is not enabled)" >&2
+    return 1
+  fi
+
+  if git -C "$dir" merge-base HEAD "$upstream" >/dev/null 2>&1; then
+    diff_range="HEAD...$upstream"
+  else
+    diff_range="HEAD..$upstream"
+  fi
+
+  if [ "$NON_INTERACTIVE" != 1 ]; then
+    echo "Incoming updates for $name ($upstream):" >&2
+    git -C "$dir" --no-pager log --oneline "HEAD..$upstream" >&2
+    git -C "$dir" --no-pager -c diff.relative=false diff --stat "$diff_range" >&2
+    if [ "$ahead" -gt 0 ]; then
+      echo "WARNING: $name ($branch) has $ahead local commit(s) ahead of $upstream that will be rebased:" >&2
+      git -C "$dir" --no-pager log --oneline "$upstream..HEAD" >&2
+      prompt="Rebase $ahead local commit(s) and pull $name? [y/N/d] "
+    else
+      prompt="Pull $name? [y/N/d] "
+    fi
+    while true; do
+      printf '%s' "$prompt" >&2
+      reply=""
+      read -r reply || reply=""
+      case "$reply" in
+        [yY] | [yY][eE][sS])
+          break
+          ;;
+        [dD] | [dD][iI][fF][fF])
+          git -C "$dir" --no-pager -c diff.relative=false diff "$diff_range" >&2
+          ;;
+        *)
+          echo "Skipping update for $name." >&2
+          return 0
+          ;;
+      esac
+    done
+  fi
+
+  if [ "$ahead" -gt 0 ]; then
+    if [ "$rebase_opt" = "merges" ] || [ "$rebase_opt" = "preserve" ]; then
+      if ! x git -C "$dir" rebase --rebase-merges "$upstream"; then
+        git -C "$dir" rebase --abort >/dev/null 2>&1 || true
+        echo "error: $dir rebase onto '$upstream' failed and was aborted" >&2
+        return 1
+      fi
+    elif ! x git -C "$dir" rebase "$upstream"; then
+      git -C "$dir" rebase --abort >/dev/null 2>&1 || true
+      echo "error: $dir rebase onto '$upstream' failed and was aborted" >&2
+      return 1
+    fi
+  else
+    if ! x git -C "$dir" merge --ff-only "$upstream"; then
+      return 1
+    fi
+  fi
 }
 
 function feature_git_pull {
-  local src
+  local src status=0
+  if [ "$INSTALL_REEXEC" = 1 ]; then
+    return "$INSTALL_REEXEC_PULL_STATUS"
+  fi
   if is_offline; then
     skip_offline "git pull"
     return 0
   fi
   for src in "${SRCDIRS[@]}"; do
     heading "git pull ($(basename "$src"))"
-    git_up "$src"
+    if ! git_up "$src"; then
+      status=1
+    fi
   done
+  return "$status"
 }
 
 # "dotfiles" that will end up in $HOME
@@ -2151,6 +2312,11 @@ function run_step {
   fi
 }
 
+DOTFILES_HEAD_BEFORE=""
+if [ "$INSTALL_REEXEC" != 1 ] && selected git-pull && [ -e "$SRCDIR/.git" ]; then
+  DOTFILES_HEAD_BEFORE=$(git -C "$SRCDIR" rev-parse --verify --quiet HEAD 2>/dev/null || true)
+fi
+
 PACKAGES_DONE=0
 for name in $SELECTED; do
   if [ "$PACKAGES_DONE" = 0 ] && [[ " $PACKAGE_FEATURES " == *" $name "* ]]; then
@@ -2159,6 +2325,17 @@ for name in $SELECTED; do
   fi
   if declare -F "feature_${name//-/_}" >/dev/null; then
     run_step "$name" "feature_${name//-/_}"
+  fi
+  if [ "$name" = git-pull ] && [ -n "$DOTFILES_HEAD_BEFORE" ] && [ "$SELECTED" != git-pull ]; then
+    DOTFILES_HEAD_AFTER=$(git -C "$SRCDIR" rev-parse --verify --quiet HEAD 2>/dev/null || true)
+    if [ -n "$DOTFILES_HEAD_AFTER" ] && [ "$DOTFILES_HEAD_AFTER" != "$DOTFILES_HEAD_BEFORE" ]; then
+      pull_status=0
+      if [[ " $FAILED " == *" git-pull "* ]]; then
+        pull_status=1
+      fi
+      _DOTFILES_INSTALL_REEXEC=1 _DOTFILES_GIT_PULL_STATUS="$pull_status" \
+        exec "${BASH:-bash}" "$SRCDIR/install.sh" ${INSTALL_ARGS[@]+"${INSTALL_ARGS[@]}"}
+    fi
   fi
 done
 

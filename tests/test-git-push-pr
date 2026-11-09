@@ -1,0 +1,396 @@
+#!/usr/bin/env bash
+
+# Tests: tests/test-git-push-pr (home/.gitconfig push-pr alias and pr-only includeIf rules)
+
+set -euo pipefail
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+REPO_ROOT="$(cd "$DIR/.." && pwd)"
+
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
+
+FAKE_HOME="$TMP/home"
+STUBS="$TMP/stubs"
+mkdir -p "$FAKE_HOME/.dotfiles/etc/git" "$STUBS"
+
+ln -s "$REPO_ROOT/home/.gitconfig" "$FAKE_HOME/.gitconfig"
+cp "$REPO_ROOT/etc/git/pr-only.gitconfig" "$FAKE_HOME/.dotfiles/etc/git/pr-only.gitconfig"
+
+cat >"$STUBS/gh" <<'EOF'
+#!/bin/sh
+exec python3 - "$@" <<'PY'
+import json
+import os
+import sys
+
+argv = sys.argv[1:]
+with open(os.environ["GH_CALLS"], "a", encoding="utf-8") as f:
+    f.write(json.dumps(argv) + "\n")
+
+if "--fill" in argv:
+    sys.stderr.write("gh: --fill requires a local branch and must not be used by push-pr\n")
+    sys.exit(1)
+
+if os.environ.get("FAKE_GH_FAIL_LIST") == "1" and argv[:2] == ["pr", "list"]:
+    sys.stderr.write("gh: simulated network failure\n")
+    sys.exit(1)
+
+if argv[:2] == ["pr", "list"]:
+    jq_expr = argv[argv.index("--jq") + 1] if "--jq" in argv else ""
+    cross_pr = os.environ.get("FAKE_CROSS_REPO_PR", "")
+    # Simulate ignoring cross-repository fork PRs when jq filters them out
+    if cross_pr and "isCrossRepository | not" not in jq_expr and "headRepositoryOwner.login" not in jq_expr:
+        print(cross_pr)
+        sys.exit(0)
+    val = os.environ.get("FAKE_EXISTING_PR", "")
+    if val:
+        print(val)
+    sys.exit(0)
+
+print("https://github.com/ithinkihaveacat/dotfiles/pull/999")
+PY
+EOF
+chmod +x "$STUBS/gh"
+
+export HOME="$FAKE_HOME"
+export GIT_CONFIG_SYSTEM=/dev/null
+export GIT_AUTHOR_NAME="Test User"
+export GIT_AUTHOR_EMAIL="test@example.com"
+export GIT_COMMITTER_NAME="Test User"
+export GIT_COMMITTER_EMAIL="test@example.com"
+export GH_CALLS="$TMP/gh-calls"
+export PATH="$STUBS:$PATH"
+
+n=0
+failed=0
+check() {
+  local desc=$1
+  shift
+  n=$((n + 1))
+  if "$@"; then
+    echo "ok $n - $desc"
+  else
+    echo "not ok $n - $desc (status $status)"
+    failed=$((failed + 1))
+    printf '%s\n' "$output" | sed 's/^/# /'
+  fi
+}
+is() { [[ "$1" == "$2" ]]; }
+has() { [[ "$1" == *"$2"* ]]; }
+lacks() { [[ "$1" != *"$2"* ]]; }
+
+setup_clone() {
+  local name=$1
+  local remote_name=${2:-origin}
+  local bare="$TMP/$name.git"
+  local work="$FAKE_HOME/$name"
+  git init --bare -q --initial-branch=main "$bare"
+  git clone -q -o "$remote_name" "$bare" "$work"
+  mkdir -p "$work/sub"
+  echo "base" >"$work/README.md"
+  git -C "$work" add README.md
+  git -C "$work" commit -q -m "chore: initial commit"
+  git -C "$work" push -q -u "$remote_name" main >/dev/null 2>&1
+  printf '%s\n' "$work"
+}
+
+run_git() {
+  local work=$1
+  shift
+  : >"$GH_CALLS"
+  status=0
+  output=$(git -C "$work" "$@" 2>&1) || status=$?
+  gh_calls=$(cat "$GH_CALLS")
+}
+
+echo "1..43"
+
+WORK=$(setup_clone "repo1")
+
+# 1. --help prints usage
+run_git "$WORK" push-pr --help
+check "git push-pr --help exits 0 and prints usage" is "$status" 0
+check "git push-pr --help documents flags" \
+  has "$output" "Usage: git push-pr [-h|--help] [-f|--force] [BRANCH]"
+
+# 2. Unknown flags, duplicate args, and explicit empty branch fail cleanly
+run_git "$WORK" push-pr --ready
+check "unknown flag --ready is rejected" is "$status" 1
+check "unknown flag error identifies option" has "$output" "unknown option: --ready"
+
+run_git "$WORK" push-pr branch-one branch-two
+check "duplicate positional arguments are rejected" is "$status" 1
+
+# 3. Fails with no commits ahead
+run_git "$WORK" push-pr
+check "fails when no commits ahead of origin/main" is "$status" 1
+check "reports no commits ahead" has "$output" "no commits on 'main' ahead of 'origin/main'"
+
+# 4. Fails on dirty working tree even when invoked from a subdirectory (diff.relative=false)
+echo "edit" >>"$WORK/README.md"
+status=0
+output=$(cd "$WORK/sub" && git push-pr 2>&1) || status=$?
+check "fails from subdirectory when root files have uncommitted edits" is "$status" 1
+check "reports uncommitted changes" has "$output" "uncommitted changes present"
+git -C "$WORK" checkout -q -- README.md
+
+# 5. Fails in detached HEAD state
+git -C "$WORK" checkout -q --detach HEAD
+run_git "$WORK" push-pr
+check "fails in detached HEAD state" is "$status" 1
+git -C "$WORK" checkout -q main
+
+# 6. Rejects empty branch strings and target branch matching base (main)
+echo "one" >>"$WORK/README.md"
+git -C "$WORK" commit -q -a -m "feat: add one line!" -m "Body paragraph line 1."
+run_git "$WORK" push-pr ""
+check "rejects empty branch argument" is "$status" 1
+check "reports empty target branch" has "$output" "empty target branch"
+run_git "$WORK" push-pr "refs/heads/"
+check "rejects refs/heads/ stripping to empty branch" is "$status" 1
+
+run_git "$WORK" push-pr main
+check "rejects targeting base branch main" is "$status" 1
+check "explains target branch cannot be base" has "$output" "target branch cannot be 'main'"
+
+# 7. Propagates gh pr list failures instead of creating duplicate PRs
+FAKE_GH_FAIL_LIST=1 run_git "$WORK" push-pr
+check "fails cleanly when gh pr list errors" is "$status" 1
+check "does not invoke gh pr create after gh pr list error" \
+  lacks "$gh_calls" '"create"'
+
+# 8. Single-commit PR: pr/<slug> without hash suffix, passes --title and --body (no --fill),
+#    and ignores cross-repository fork PRs on the same branch name.
+git -C "$TMP/repo1.git" branch -D pr/feat-add-one-line >/dev/null
+FAKE_CROSS_REPO_PR="https://github.com/stranger/dotfiles/pull/888" \
+  run_git "$WORK" push-pr
+expected_branch="pr/feat-add-one-line"
+single_ok=$(
+  python3 - "$GH_CALLS" <<'PY'
+import json, sys
+calls = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8")]
+create = next((c for c in calls if c[:2] == ["pr", "create"]), None)
+ok = (
+    create is not None
+    and "--draft" in create
+    and "--fill" not in create
+    and create[create.index("--head") + 1] == "pr/feat-add-one-line"
+    and create[create.index("--base") + 1] == "main"
+    and create[create.index("--title") + 1] == "feat: add one line!"
+    and create[create.index("--body") + 1].strip() == "Body paragraph line 1."
+)
+print("yes" if ok else "no")
+PY
+)
+check "auto-generated single-commit push-pr exits 0" is "$status" 0
+check "pushes pr/<slug> topic branch without hash suffix" \
+  has "$(git -C "$TMP/repo1.git" branch -a)" "$expected_branch"
+check "single-commit PR passes explicit --title/--body and avoids --fill" \
+  is "$single_ok" "yes"
+check "leaves local HEAD on main" \
+  is "$(git -C "$WORK" branch --show-current)" "main"
+check "keeps local main upstream on origin/main despite push.autoSetupRemote" \
+  is "$(git -C "$WORK" rev-parse --abbrev-ref '@{upstream}')" "origin/main"
+
+# 9. git commit --amend && git push-pr -f force-pushes to the same pr/<slug> and updates open PR
+echo "one-v2" >>"$WORK/README.md"
+git -C "$WORK" add README.md
+git -C "$WORK" commit -q --amend -m "feat: add one line!" -m "Amended body."
+FAKE_EXISTING_PR="https://github.com/ithinkihaveacat/dotfiles/pull/42" \
+  run_git "$WORK" push-pr -f
+check "git commit --amend && git push-pr -f exits 0" is "$status" 0
+check "force-pushes amended HEAD to same remote pr/<slug>" \
+  is "$(git -C "$TMP/repo1.git" rev-parse "refs/heads/$expected_branch")" "$(git -C "$WORK" rev-parse HEAD)"
+check "does not call gh pr create when open PR exists" \
+  lacks "$gh_calls" '"create"'
+check "prints existing PR URL" \
+  has "$output" "https://github.com/ithinkihaveacat/dotfiles/pull/42"
+
+# 10. Multi-commit PR with auto-branch and with BRANCH before -f uses FIRST commit's
+#     subject for both default branch name and --title, preserving multiline --body.
+echo "two" >>"$WORK/README.md"
+git -C "$WORK" commit -q -am "fix: add second line"
+FAKE_EXISTING_PR="https://github.com/ithinkihaveacat/dotfiles/pull/42" \
+  run_git "$WORK" push-pr -f
+check "multi-commit auto-branch reuses first commit pr/<slug>" \
+  is "$(git -C "$TMP/repo1.git" rev-parse "refs/heads/$expected_branch")" "$(git -C "$WORK" rev-parse HEAD)"
+
+run_git "$WORK" push-pr custom/two-commits -f
+multiline_ok=$(
+  python3 - "$GH_CALLS" <<'PY'
+import json, sys
+calls = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8")]
+create = next((c for c in calls if c[:2] == ["pr", "create"]), None)
+expected_body = "- feat: add one line!\n- fix: add second line"
+ok = (
+    create is not None
+    and "--draft" in create
+    and "--fill" not in create
+    and create[create.index("--head") + 1] == "custom/two-commits"
+    and create[create.index("--base") + 1] == "main"
+    and create[create.index("--title") + 1] == "feat: add one line!"
+    and create[create.index("--body") + 1] == expected_body
+)
+print("yes" if ok else "no")
+PY
+)
+check "handles BRANCH before -f flag order" is "$status" 0
+check "pushes explicit branch name with -f" \
+  has "$(git -C "$TMP/repo1.git" branch -a)" "custom/two-commits"
+check "multi-commit PR uses first commit title and preserves exact multiline --body" \
+  is "$multiline_ok" "yes"
+
+# 11. Honors fork workflow (remote.pushDefault != upstream): pushes to fork and
+#     qualifies -R upstreamorg/repo and --head forkuser:branch cleanly.
+FORK_BARE="$TMP/fork.git"
+git init --bare -q --initial-branch=main "$FORK_BARE"
+git -C "$WORK" remote add fork "git@github.com:forkuser/repo.git"
+git -C "$WORK" remote set-url --push fork "$FORK_BARE"
+git -C "$WORK" remote set-url origin "git@github.com:upstreamorg/repo.git"
+git -C "$WORK" config --local remote.pushDefault fork
+run_git "$WORK" push-pr custom/to-fork
+fork_ok=$(
+  python3 - "$GH_CALLS" <<'PY'
+import json, sys
+calls = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8")]
+lst = next((c for c in calls if c[:2] == ["pr", "list"]), None)
+create = next((c for c in calls if c[:2] == ["pr", "create"]), None)
+ok = (
+    lst is not None
+    and "-R" in lst and lst[lst.index("-R") + 1] == "upstreamorg/repo"
+    and "--jq" in lst and 'forkuser' in lst[lst.index("--jq") + 1]
+    and create is not None
+    and "-R" in create and create[create.index("-R") + 1] == "upstreamorg/repo"
+    and create[create.index("--head") + 1] == "forkuser:custom/to-fork"
+)
+print("yes" if ok else "no")
+PY
+)
+check "honors remote.pushDefault when pushRemote target exists" \
+  has "$(git -C "$FORK_BARE" branch -a)" "custom/to-fork"
+check "qualifies upstream repo (-R) and fork owner (--head) in fork workflow" \
+  is "$fork_ok" "yes"
+
+git -C "$WORK" remote set-url fork "gh:ForkUser/repo.git/"
+git -C "$WORK" remote set-url origin "https://github.com/upstreamorg/repo.git/"
+run_git "$WORK" push-pr -f custom/to-fork-alias
+fork_alias_ok=$(
+  python3 - "$GH_CALLS" <<'PY'
+import json, sys
+calls = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8")]
+lst = next((c for c in calls if c[:2] == ["pr", "list"]), None)
+create = next((c for c in calls if c[:2] == ["pr", "create"]), None)
+jq_expr = lst[lst.index("--jq") + 1] if lst and "--jq" in lst else ""
+ok = (
+    lst is not None
+    and "-R" in lst and lst[lst.index("-R") + 1] == "upstreamorg/repo"
+    and "ascii_downcase" in jq_expr and "ForkUser" in jq_expr
+    and create is not None
+    and "-R" in create and create[create.index("-R") + 1] == "upstreamorg/repo"
+    and create[create.index("--head") + 1] == "ForkUser:custom/to-fork-alias"
+)
+print("yes" if ok else "no")
+PY
+)
+check "handles custom SCP alias, trailing .git/, and case-insensitive owner filter" \
+  is "$fork_alias_ok" "yes"
+git -C "$WORK" config --local --unset remote.pushDefault
+git -C "$WORK" remote set-url origin "$TMP/repo1.git"
+
+UPONLY_WORK=$(setup_clone "uponly" "upstream")
+echo "up1" >>"$UPONLY_WORK/README.md"
+git -C "$UPONLY_WORK" commit -q -am "feat: upstream commit"
+run_git "$UPONLY_WORK" push-pr
+check "falls back to upstream remote when global remote.pushDefault (origin) is absent in repo" \
+  has "$(git -C "$TMP/uponly.git" branch -a)" "pr/feat-upstream-commit"
+
+# 12. Conditional includeIf disables bare `git push` in ~/.dotfiles, ~/.private, ~/.ssh,
+#     AND symlinked/alternate clones via hasconfig:remote.*.url:, while other repos stay simple.
+DOT_BARE="$TMP/dot-bare.git"
+git init --bare -q --initial-branch=main "$DOT_BARE"
+git -C "$FAKE_HOME/.dotfiles" init -q --initial-branch=main
+git -C "$FAKE_HOME/.dotfiles" remote add origin "$DOT_BARE"
+echo "d" >"$FAKE_HOME/.dotfiles/f"
+git -C "$FAKE_HOME/.dotfiles" add f
+git -C "$FAKE_HOME/.dotfiles" commit -q -m "dot"
+git -C "$FAKE_HOME/.dotfiles" push -q -u origin main >/dev/null 2>&1
+echo "d2" >"$FAKE_HOME/.dotfiles/f"
+git -C "$FAKE_HOME/.dotfiles" commit -q -am "dot2"
+run_git "$FAKE_HOME/.dotfiles" push
+check "bare git push is blocked in ~/.dotfiles by pr-only.gitconfig" \
+  has "$output" 'push.default is "nothing"'
+
+PRIV_WORK=$(setup_clone ".private")
+echo "p2" >>"$PRIV_WORK/README.md"
+git -C "$PRIV_WORK" commit -q -am "priv2"
+run_git "$PRIV_WORK" push
+check "bare git push is blocked in ~/.private by pr-only.gitconfig" \
+  has "$output" 'push.default is "nothing"'
+
+SSH_WORK=$(setup_clone ".ssh")
+echo "s2" >>"$SSH_WORK/README.md"
+git -C "$SSH_WORK" commit -q -am "ssh2"
+run_git "$SSH_WORK" push
+check "bare git push is blocked in ~/.ssh by pr-only.gitconfig" \
+  has "$output" 'push.default is "nothing"'
+
+REAL_PRIV="$TMP/real-sym-priv"
+git init -q --initial-branch=main "$REAL_PRIV"
+git -C "$REAL_PRIV" remote add origin "git@github.com:ithinkihaveacat/private"
+ln -s "$REAL_PRIV" "$FAKE_HOME/sym-private"
+check "hasconfig:remote.*.url: guards symlinked private clone too" \
+  is "$(git -C "$FAKE_HOME/sym-private" config --get push.default)" "nothing"
+
+ALIAS_SSH="$TMP/alias-ssh"
+git init -q --initial-branch=main "$ALIAS_SSH"
+git -C "$ALIAS_SSH" remote add origin "gh:ithinkihaveacat/ssh.git"
+check "hasconfig:remote.*.url: guards custom ssh host alias without git@" \
+  is "$(git -C "$ALIAS_SSH" config --get push.default)" "nothing"
+
+ALIAS_SSH_OTHER="$TMP/alias-ssh-other"
+git init -q --initial-branch=main "$ALIAS_SSH_OTHER"
+git -C "$ALIAS_SSH_OTHER" remote add origin "gh:ithinkihaveacat/ssh-other.git"
+check "hasconfig custom host alias does not match similarly named ssh-other repo" \
+  is "$(git -C "$ALIAS_SSH_OTHER" config --get push.default)" "simple"
+
+OTHER_GH="$TMP/other-gh"
+git init -q --initial-branch=main "$OTHER_GH"
+git -C "$OTHER_GH" remote add origin "https://github.com/ithinkihaveacat/private-other.git"
+check "hasconfig does not match similarly named private-other repo" \
+  is "$(git -C "$OTHER_GH" config --get push.default)" "simple"
+
+OTHER_WORK=$(setup_clone "other")
+echo "o2" >>"$OTHER_WORK/README.md"
+git -C "$OTHER_WORK" commit -q -am "other2"
+run_git "$OTHER_WORK" push
+check "bare git push still works normally in other repositories" is "$status" 0
+
+# 13. Explicitly execute full push-pr push + create path under /bin/dash
+if [ -x /bin/dash ]; then
+  DASH_WORK=$(setup_clone "dashrepo")
+  echo "d1" >>"$DASH_WORK/README.md"
+  git -C "$DASH_WORK" commit -q -am "feat: very long subject exceeding forty characters for cut check!"
+  : >"$GH_CALLS"
+  push_pr_body=$(git -C "$DASH_WORK" config --get alias.push-pr)
+  push_pr_body=${push_pr_body#!}
+  status=0
+  output=$( (cd "$DASH_WORK" && /bin/dash -c "$push_pr_body \"\$@\"" git-push-pr -f) 2>&1) || status=$?
+  gh_calls=$(cat "$GH_CALLS")
+  n=$((n + 1))
+  if is "$status" 0 && has "$output" "https://github.com/ithinkihaveacat/dotfiles/pull/999" &&
+    has "$(git -C "$TMP/dashrepo.git" branch -a)" "pr/feat-very-long-subject-exceeding-forty-c"; then
+    echo "ok $n - push-pr executes full push+create flow cleanly under /bin/dash"
+  else
+    echo "not ok $n - push-pr executes full push+create flow cleanly under /bin/dash (status $status)"
+    failed=$((failed + 1))
+    printf '%s\n' "$output" | sed 's/^/# /'
+  fi
+else
+  n=$((n + 1))
+  echo "ok $n - # skip /bin/dash not available on this host"
+fi
+
+if [ "$failed" -ne 0 ]; then
+  exit 1
+fi
