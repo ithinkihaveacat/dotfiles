@@ -1,0 +1,280 @@
+#!/usr/bin/env bash
+
+# Tests: tests/test-git-push-pr
+
+set -euo pipefail
+
+trap 'echo >&2 || true; exit 130' INT TERM
+
+require() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo >&2 "$(basename "$0"): $1 not found"
+    exit 127
+  }
+}
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") [OPTIONS] [BRANCH]
+
+Push local commits on the current branch to a remote topic branch and open a draft PR.
+
+Pushes HEAD to a remote topic branch (defaulting to pr/<slug> derived from
+the first commit's subject) without switching local branches, and creates a
+draft pull request via GitHub CLI ('gh'). If an open PR already exists for
+the target branch, prints its URL.
+
+Arguments:
+  BRANCH         Target remote topic branch (default: pr/<slug>)
+
+Options:
+  -f, --force    Force push to the remote topic branch (+HEAD:refs/heads/BRANCH)
+  --help, -h     Display this help message and exit
+
+Examples:
+  # Push local commits and open a draft PR with an auto-generated branch name
+  $(basename "$0")
+
+  # Push to a specific remote topic branch
+  $(basename "$0") feat/my-topic
+
+  # Update an existing PR after amending local commits
+  $(basename "$0") -f
+
+Notes:
+  When invoked via 'git push-pr', note that 'git push-pr --help' is
+  intercepted by Git (which looks for a man page); use 'git push-pr -h'
+  or 'git-push-pr --help' for command-line help.
+EOF
+  exit 0
+}
+
+require git
+require gh
+
+force=0
+has_branch=0
+branch=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --help | -h)
+      usage
+      ;;
+    -f | --force)
+      force=1
+      shift
+      ;;
+    --)
+      shift
+      if [ $# -gt 0 ] && [ "$has_branch" = 0 ]; then
+        branch=$1
+        has_branch=1
+        shift
+      fi
+      if [ $# -gt 0 ]; then
+        echo "$(basename "$0"): unexpected argument: $1" >&2
+        exit 1
+      fi
+      ;;
+    -*)
+      echo "$(basename "$0"): unknown option: $1" >&2
+      exit 1
+      ;;
+    *)
+      if [ "$has_branch" = 1 ]; then
+        echo "$(basename "$0"): unexpected argument: $1" >&2
+        exit 1
+      fi
+      branch=$1
+      has_branch=1
+      shift
+      ;;
+  esac
+done
+
+cur=$(git symbolic-ref --quiet --short HEAD 2>/dev/null) || {
+  echo "$(basename "$0"): detached HEAD" >&2
+  exit 1
+}
+
+up=$(git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null) || {
+  echo "$(basename "$0"): current branch has no upstream" >&2
+  exit 1
+}
+
+git rev-parse --verify --quiet '@{upstream}' >/dev/null 2>&1 || {
+  echo "$(basename "$0"): upstream '$up' cannot be resolved" >&2
+  exit 1
+}
+
+up_remote=$(git config --get "branch.$cur.remote" 2>/dev/null || true)
+[ -n "$up_remote" ] || up_remote=${up%%/*}
+
+base=$(git config --get "branch.$cur.merge" 2>/dev/null || true)
+base=${base#refs/heads/}
+[ -n "$base" ] || base=${up#"$up_remote"/}
+
+push_remote=$(git config --get "branch.$cur.pushRemote" 2>/dev/null || true)
+if [ -z "$push_remote" ]; then
+  push_remote=$(git config --get remote.pushDefault 2>/dev/null || true)
+  if [ -n "$push_remote" ] && ! git remote get-url "$push_remote" >/dev/null 2>&1; then
+    push_remote=""
+  fi
+fi
+remote=${push_remote:-$up_remote}
+
+if ! git -c diff.relative=false diff --quiet || ! git -c diff.relative=false diff --cached --quiet; then
+  echo "$(basename "$0"): uncommitted changes present; commit them first" >&2
+  exit 1
+fi
+
+ahead=$(git rev-list --count "$up..HEAD")
+[ "$ahead" -gt 0 ] || {
+  echo "$(basename "$0"): no commits on '$cur' ahead of '$up'" >&2
+  exit 1
+}
+
+if [ -n "$(git ls-files --others --exclude-standard)" ]; then
+  echo "$(basename "$0"): note: untracked files present (not included in PR)" >&2
+fi
+
+first_sha=$(git rev-list --reverse "$up..HEAD" | sed -n '1p')
+title=$(git log -1 --format=%s "$first_sha")
+
+if [ "$has_branch" = 0 ]; then
+  slug=$(printf '%s\n' "$title" | LC_ALL=C tr '[:upper:]' '[:lower:]' | LC_ALL=C tr -cs 'a-z0-9\n' '-' | sed 's/^-*//; s/-*$//' | cut -c1-40 | sed 's/-*$//')
+  branch="pr/${slug:-update}"
+else
+  branch=${branch#refs/heads/}
+  branch=${branch#"$remote/"}
+  branch=${branch#"$up_remote/"}
+fi
+
+[ -n "$branch" ] || {
+  echo "$(basename "$0"): empty target branch" >&2
+  exit 1
+}
+
+[ "$branch" != "$base" ] || {
+  echo "$(basename "$0"): target branch cannot be '$base'" >&2
+  exit 1
+}
+
+up_slug=""
+head_owner=""
+
+if [ "$remote" != "$up_remote" ]; then
+  u=$(git remote get-url "$up_remote" 2>/dev/null || true)
+  case "$u" in
+    https://*/*/* | http://*/*/* | ssh://*/*/*)
+      s=${u#*://}
+      p=${s#*/}
+      p=${p#/}
+      p=${p%/}
+      p=${p%.git}
+      p=${p%/}
+      case "$p" in
+        */*)
+          case "${p#*/}" in
+            '' | */*) ;;
+            *) up_slug=$p ;;
+          esac
+          ;;
+      esac
+      ;;
+    *://*) ;;
+    *:*/*)
+      p=${u#*:}
+      p=${p#/}
+      p=${p%/}
+      p=${p%.git}
+      p=${p%/}
+      case "$p" in
+        */*)
+          case "${p#*/}" in
+            '' | */*) ;;
+            *) up_slug=$p ;;
+          esac
+          ;;
+      esac
+      ;;
+  esac
+
+  u=$(git remote get-url "$remote" 2>/dev/null || true)
+  case "$u" in
+    https://*/*/* | http://*/*/* | ssh://*/*/*)
+      s=${u#*://}
+      p=${s#*/}
+      p=${p#/}
+      p=${p%/}
+      p=${p%.git}
+      p=${p%/}
+      case "$p" in
+        */*)
+          case "${p#*/}" in
+            '' | */*) ;;
+            *) head_owner=${p%%/*} ;;
+          esac
+          ;;
+      esac
+      ;;
+    *://*) ;;
+    *:*/*)
+      p=${u#*:}
+      p=${p#/}
+      p=${p%/}
+      p=${p%.git}
+      p=${p%/}
+      case "$p" in
+        */*)
+          case "${p#*/}" in
+            '' | */*) ;;
+            *) head_owner=${p%%/*} ;;
+          esac
+          ;;
+      esac
+      ;;
+  esac
+fi
+
+if [ "$force" = 1 ]; then
+  refspec="+HEAD:refs/heads/$branch"
+else
+  refspec="HEAD:refs/heads/$branch"
+fi
+
+git push "$remote" "$refspec"
+
+if [ "$remote" = "$up_remote" ]; then
+  existing=$(gh pr list --head "$branch" --state open --json url,isCrossRepository --jq 'map(select(.isCrossRepository | not)) | .[0].url // empty')
+  pr_head=$branch
+  set --
+else
+  if [ -n "$up_slug" ]; then
+    set -- -R "$up_slug"
+  else
+    set --
+  fi
+
+  if [ -n "$head_owner" ]; then
+    existing=$(gh pr list "$@" --head "$branch" --state open --json url,headRepositoryOwner --jq 'map(select((.headRepositoryOwner.login | ascii_downcase) == ("'"$head_owner"'" | ascii_downcase))) | .[0].url // empty')
+    pr_head="$head_owner:$branch"
+  else
+    existing=$(gh pr list "$@" --head "$branch" --state open --json url,isCrossRepository --jq 'map(select(.isCrossRepository)) | .[0].url // empty')
+    pr_head=$branch
+  fi
+fi
+
+if [ -n "$existing" ]; then
+  printf '%s\n' "$existing"
+  exit 0
+fi
+
+if [ "$ahead" -eq 1 ]; then
+  body=$(git log -1 --format=%b "$first_sha")
+else
+  body=$(git log --reverse --format='- %s' "$up..HEAD")
+fi
+
+gh pr create "$@" --draft --head "$pr_head" --base "$base" --title "$title" --body "$body"
