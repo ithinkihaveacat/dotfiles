@@ -43,7 +43,9 @@ structural principles:
   or attach qualitative judgment to behavior. Describe observable symptoms and
   factual outcomes. Save technical reasoning, hypotheses, and root cause
   analysis for dedicated "Analysis" or "Rationale" sections (or, in TODO items,
-  the "Sketch" field).
+  the "Sketch" field; for labeled projections and mechanisms under study in
+  capability skills, see
+  [Capability Skills](references/capability-skills.md#empirical-claims-approximate-figures--external-evidence-logging)).
 
 ## Document Types & Reference Material
 
