@@ -45,9 +45,10 @@ guarantee consistent repository formatting rules.
 ### Markdown Quality
 
 All Markdown files must be formatted and linted with `scripts/markdown-format`.
-Headings must use clean, unadorned ATX styles (`## Heading`) without numbers,
-manual bolding, or ALL CAPS. See
-**[references/markdown.md](references/markdown.md)**.
+Headings default to clean, unadorned ATX style (`## Heading`) without manual
+bolding, ALL CAPS, or section numbers on topical headings; see
+**[references/markdown.md](references/markdown.md)** for existing-document and
+sequential-step rules.
 
 ### Python Development
 
