@@ -1,10 +1,12 @@
 # Agent Operational Guidelines
 
+**Precedence:** Explicit user instructions > activated skills > general training
+knowledge.
+
 ## Agent Skills
 
 Available skills are curated for this environment and provide high-signal
-workflows, helper scripts, and local conventions. **Precedence:** Explicit user
-instructions > activated skills > general training knowledge.
+workflows, helper scripts, and local conventions.
 
 - **Use pre-loaded skills liberally**: Review your active skills before starting
   a task. When a task touches a skill's domain—or when in doubt—read its
@@ -38,6 +40,20 @@ instructions > activated skills > general training knowledge.
     Local git hooks strictly enforce subject-line length and body-wrapping
     limits and will reject non-compliant commits.
 
+## Writing Style
+
+Default to whatever register suits the task; the styles below apply only when
+triggered.
+
+- **Plain English**: When asked to write or rephrase in "plain English", follow
+  the principles behind the Plain English Campaign's Crystal Mark—short
+  sentences, active voice, everyday words, clear layout—and say so in the
+  response, e.g. "Plain English (Crystal Mark principles)".
+- **Explain Like I'm Five (ELI5)**: When the user asks for ELI5 (even a bare
+  "ELI5"), wants a simpler explanation, or seems confused, switch to an
+  exaggerated, Reddit-style "Explain Like I'm Five" register and flag it the
+  same way.
+
 ## Path and Link Portability
 
 - **Committed files and distributable artifacts**: When writing or editing
@@ -52,14 +68,11 @@ instructions > activated skills > general training knowledge.
 
 ## Command Safety and Bounded Search
 
-- **No unbounded searches**: Never run broad `find`, `grep`, or recursive file
-  listings on monorepos (`/google`), system roots (`/`, `/usr`, `/var`), or home
-  directories (`~`).
-- **Scope and bound every search**:
-  - Prefer indexed or targeted tools (`rg`, `fd`, `CodeSearch`) scoped to a
-    specific project subdirectory.
-  - When using `find`, always bound depth (`-maxdepth N`) or wrap with a timeout
-    (`timeout 30s find ...`).
+Never run broad `find`, `grep`, or recursive file listings on monorepos
+(`/google`), system roots (`/`, `/usr`, `/var`), or home directories (`~`).
+Prefer indexed tools (`rg`, `fd`, `CodeSearch`) scoped to a project
+subdirectory, and bound every `find` with `-maxdepth N` or a timeout
+(`timeout 30s find ...`):
 
 ```bash
 # BAD: hangs on monorepos or root directories
@@ -75,9 +88,8 @@ rg --files ./skills | grep zipline
 - **Stage silently, notify only on explicit command**: Separate creating or
   uploading work (pushing a branch, opening a **draft** PR, uploading a change)
   from actions that notify other people (marking ready-for-review, publishing,
-  or requesting reviewers).
-- **Never bundle staging and notifying**: When proposing next steps, keep silent
-  staging and external notification as separate options.
+  or requesting reviewers). Keep silent staging and notification as separate
+  options when proposing next steps.
 - **Echoes are not authorization**: Never treat an echoed summary, a pasted task
   plan, or a blanket "yes" to a multi-step proposal as permission to notify
   others. Require an unmistakable, user-originated instruction naming who to
