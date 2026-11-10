@@ -909,9 +909,8 @@ else
   echo 'not ok 23 - search root dot, -j aliases, MCP edit path trim, ADR validation, and post-format spans'
 fi
 
-# The request log rotates at its size bound and keeps four old files; 'taskgo
-# requests' reads a log with its rotated files, from --days ago on, and counts
-# runs of calls within each caller's chains.
+# The request log rotates at its size bound and keeps four old files, and a
+# record keeps short identifying arguments, never text or links.
 REQ_DIR="$TEST_ROOT/requests"
 if REQ_PY=$("$MCP_PY" -c '
 import importlib.machinery, importlib.util, json, pathlib, sys, time
@@ -924,9 +923,8 @@ spec.loader.exec_module(tg)
 tg.mcp_log = lambda message: None
 root = pathlib.Path(sys.argv[2])
 
-def event(tool, at, caller=None):
-    e = tg.McpEvent("http", time.monotonic(), method="tools/call", tool=tool,
-                    agent=caller and "client/" + caller, caller=caller)
+def event(tool, at):
+    e = tg.McpEvent("http", time.monotonic(), method="tools/call", tool=tool)
     e.at = at
     return e
 
@@ -949,46 +947,18 @@ for i in range(8):
     rotating.emit(event(f"tool{i}", 1000.0 + i))
 files = sorted(p.name for p in root.iterdir())
 assert files == ["rotating.jsonl", *(f"rotating.jsonl.{i}" for i in range(1, 5))], files
-tools = [r["tool"] for r in tg.mcp_log_read(root / "rotating.jsonl")]
+tools = [
+    json.loads(line)["tool"]
+    for name in reversed(files)
+    for line in (root / name).read_text().splitlines()
+]
 assert tools == ["tool3", "tool4", "tool5", "tool6", "tool7"], tools
-
-# Two callers each run handoff > read_file > search_files twice, ten
-# minutes apart; a record 30 days old is out of range.
-tg.MCP_LOG_ROTATE_BYTES = 8 * 1024 * 1024
-log = tg.McpLog(root / "mcp.jsonl")
-now = time.time()
-log.emit(event("get_task", now - 30 * 86400, "aaaa"))
-for run in range(2):
-    for caller in ("aaaa", "bbbb"):
-        for i, tool in enumerate(("handoff", "read_file", "search_files")):
-            log.emit(event(tool, now - 3600 + run * 600 + i, caller))
 print("ok")
-' "$BIN" "$REQ_DIR" 2>&1) && [[ $REQ_PY == ok ]] &&
-  REQ_JSON=$("$BIN" requests --log "$REQ_DIR/mcp.jsonl" --json) &&
-  REQ_TEXT=$("$BIN" requests --log "$REQ_DIR/mcp.jsonl" --days 1) &&
-  "$MCP_PY" -c '
-import json, sys
-got = json.loads(sys.argv[1])
-assert got["requests"] == 12 and got["chains"] == 4, got
-seq = [(s["agent"], s["calls"], s["count"]) for s in got["sequences"]]
-assert seq[:2] == [
-    ("client/aaaa", ["handoff", "read_file", "search_files"], 2),
-    ("client/bbbb", ["handoff", "read_file", "search_files"], 2),
-], seq
-assert [t["tool"] for t in got["tools"]] == ["handoff", "read_file", "search_files"]
-' "$REQ_JSON" &&
-  [[ $REQ_TEXT == *"Requests: 12,"*"2  client/aaaa  handoff > read_file > search_files"* ]] &&
-  ! "$BIN" requests --log "$REQ_DIR/none.jsonl" 2>/dev/null &&
-  REQ_DAYS0=$("$BIN" requests --log "$REQ_DIR/mcp.jsonl" --days 0 2>&1 >/dev/null || true) &&
-  [[ $(grep '^taskgo ' <<<"$REQ_DAYS0") == "taskgo requests: --days must be more than 0, not 0" ]] &&
-  printf '{"ts":"%s","transport":"http","outcome":"ok","agent":"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"}\n' \
-    "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" >"$REQ_DIR/long.jsonl" &&
-  REQ_LONG=$("$BIN" requests --log "$REQ_DIR/long.jsonl") &&
-  [[ $REQ_LONG == *"Mozilla/5.0 (Macint…  "* && $REQ_LONG != *"Intel Mac"* ]]; then
-  echo 'ok 24 - request log rotates, and requests summarises it'
+' "$BIN" "$REQ_DIR" 2>&1) && [[ $REQ_PY == ok ]]; then
+  echo 'ok 24 - request log rotates and keeps four old files'
 else
-  echo 'not ok 24 - request log rotates, and requests summarises it'
-  printf '# %s\n' "$REQ_PY" "${REQ_JSON:-}" "${REQ_TEXT:-}"
+  echo 'not ok 24 - request log rotates and keeps four old files'
+  printf '# %s\n' "$REQ_PY"
 fi
 
 # Test 25: handover and dispatch (the former name) are aliases of handoff

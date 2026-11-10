@@ -241,15 +241,11 @@ statelessly: each POST carries one JSON-RPC message and gets one JSON response.
 There is no server-initiated stream and no session, so `GET` and `DELETE` on the
 endpoint get 405. A POST whose `Accept` header does not admit `application/json`
 (`*/*` does) gets 406. `GET /up` answers 200 without authentication and without
-reading the repository, for a reverse proxy's health check. `GET /favicon.ico`
-and `GET /apple-touch-icon*.png`, which browsers ask for on their own, get 404
-without authentication and are not logged. `GET /logs` is a page of the server's
-latest requests (see [Logging](#logging)), behind the same check as the
-endpoint. `--stdio` serves one local client on standard input and output
-instead, without authentication. A stdio server for agents on the same machine
-as the user's checkout is usually started with `--local` (see
-[Writing to a checkout](#writing-to-a-checkout)), so that their writes land on
-the checkout's branch without a remote in between:
+reading the repository, for a reverse proxy's health check. `--stdio` serves one
+local client on standard input and output instead, without authentication. A
+stdio server for agents on the same machine as the user's checkout is usually
+started with `--local` (see [Writing to a checkout](#writing-to-a-checkout)), so
+that their writes land on the checkout's branch without a remote in between:
 
 ```json
 {"command": "taskgo", "args": ["--root", "/home/me/projects", "mcp", "--local", "--stdio"]}
@@ -257,9 +253,9 @@ the checkout's branch without a remote in between:
 
 ## Logging
 
-Every request, except the health check and the log page's own, is logged twice
-once it is answered: as a line on standard error, and as a JSON record appended
-to the request log. The line:
+Every request, except the health check, is logged twice: as a line on standard
+error, and as a JSON record appended to the request log, once it is answered.
+The line:
 
 ```text
 taskgo mcp: request transport=http http=POST method=tools/call tool=get_task outcome=ok status=200 ms=41 commit=1a2b3c4d5e6f agent=example-client/1.0
@@ -322,30 +318,15 @@ under [Writes](#writes) first. The first request with each kind of valid Access
 token (a browser's, a client's) also logs the names, not the values, of its
 claims, which say what a caller key could be built from.
 
-**The log page.** Over HTTP, `GET /logs` is a page of the latest 500 requests,
-newest first, with requests, failures, and latency per client and per tool, and
-the commonest runs of tool calls. It polls `GET /logs/records?after=N` every
-second for the records after its cursor and the stats over those kept, so a
-request shows within about a second. The server loads the latest records from
-the request log when it starts, so the page survives a restart. Both routes are
-plain HTTP, not MCP: no tool, resource, or instruction mentions them. They need
-what the endpoint needs (an Access token, or a loopback name with
-`--auth none`), so any client that can call the tools can read them too: the log
-is less sensitive than the tracker they already read. Their refusals are logged;
-the page's polling is not.
-
-**Summaries.** `taskgo requests` reads the request log and its rotated files
-(`--log`, else as for the server) and prints requests by outcome, then requests,
-failures, latency, and median result size per client and per tool, then the
-commonest runs of two or three tool calls by client. A run counts within one
-caller's chain: its tool calls, each at most `--gap` seconds (120) after the one
-before, since stateless HTTP has no session to group them by. `--days` (7)
-limits the records read, and `--json` prints the same as JSON, with client names
-in full; the text cuts them at 20 characters, as the page does. The records are
-JSON lines, so `jq` reads them too:
+**Reading the log.** `mcp logs` reads these records: lines by default, `--json`,
+`--summary` for statistics, `--since` to limit the window, `--server taskgo` for
+this server alone, and `--serve` for one live page across servers; on app1 that
+page is <https://logs.hupsista.com/>. The record format is kept in
+`skills/agent-config/references/mcp-logs.md`. The records are JSON lines, so
+`jq` reads them too:
 
 ```sh
-taskgo requests --days 1
+mcp logs --summary --since 1d
 jq -r 'select(.outcome != "ok") | [.ts, .agent, .tool, .reason] | @tsv' ~/.local/state/taskgo/mcp.jsonl
 ```
 
@@ -401,10 +382,9 @@ dirty touched file or a detached HEAD, and is applied again after a CLI commit
 gets in first; one write goes over `--stdio`); run it again with `--fetch-ttl 0`
 to check the servers without a cache. `protocol-check` connects the SDK's own
 client as a 2026-07-28 client and as a 2025-11-25 one, over HTTP and over
-`--stdio`. `auth-check` also checks the log page and its records, with and
-without a token, and that the request log holds one record per request and no
-token. The test suite (`prove skills/taskgo/tests/test-*`) runs `compare-cli`
-and `protocol-check` on a synthetic tracker, `auth-check`, and
+`--stdio`. `auth-check` also checks that the request log holds one record per
+request and no token. The test suite (`prove skills/taskgo/tests/test-*`) runs
+`compare-cli` and `protocol-check` on a synthetic tracker, `auth-check`, and
 `test-taskgo-mcp-write` both ways.
 
 The MCP Inspector works against a local server:

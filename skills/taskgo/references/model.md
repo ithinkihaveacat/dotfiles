@@ -529,7 +529,6 @@ unhyphenated verbs:
   tasks, decisions, and `STATUS.md`.
 - `taskgo mcp [...]`: Serve the control repository's committed state and
   change-set writes over MCP.
-- `taskgo requests [...]`: Summarise the MCP server's request log.
 
 ## Root Landing Page (`README.md`)
 
