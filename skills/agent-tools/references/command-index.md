@@ -398,7 +398,7 @@ Options:
   --maps                Use Google Maps grounding instead of Google Search. (Cannot be combined with --code).
   --code                Enable Code Execution for Python.
   --dry-run             Output a summary of the payload (resolved files, sizes, and prompt) without calling the Gemini API.
-  --model MODEL         Gemini model to use (default: gemini-4-argon).
+  --model MODEL         Gemini model to use (default: gemini-4-carbon).
   --thinking LEVEL      Thinking level: 'high', 'medium', 'low' (default: 'high').
   --request-timeout SECONDS
                         Abandon and retry an API request with no response after
@@ -508,7 +508,7 @@ Options:
   --no-inline         Inline nothing; the model reads files on demand.
   -n, --dry-run       Print the resolved policy and payload, then exit.
   --force             Bypass safety checks (dirty worktree, 1MB limit, etc.).
-  --model MODEL       Gemini model to use (default: gemini-4-argon).
+  --model MODEL       Gemini model to use (default: gemini-4-carbon).
   --thinking LEVEL    Thinking level: 'high', 'low', 'none' (default: 'high').
   --search, --no-search
                       Google Search grounding for external context (default: on).
@@ -656,7 +656,7 @@ Input:
 
 Options:
   --help         Display this help message and exit
-  --model MODEL  Gemini model to use (default: gemini-4-argon)
+  --model MODEL  Gemini model to use (default: gemini-4-carbon)
 
 Environment:
   GEMINI_API_KEY   Required. Your Gemini API key.
@@ -683,7 +683,7 @@ PROMPT="Summarize the key points"
 
 # --rawfile avoids ARG_MAX limits on large inputs
 curl -s -X POST \
-  "https://generativelanguage.googleapis.com/v1beta/models/gemini-4-argon:generateContent" \
+  "https://generativelanguage.googleapis.com/v1beta/models/gemini-4-carbon:generateContent" \
   -H "x-goog-api-key: $GEMINI_API_KEY" \
   -H "Content-Type: application/json" \
   -d "$(jq -n \
