@@ -25,7 +25,6 @@
 - [commit](#commit)
 - [schema](#schema)
 - [mcp](#mcp)
-- [requests](#requests)
 
 ## Help
 
@@ -708,10 +707,8 @@ appended to the request log (rotated at 8 MiB, keeping 4 old
 files); a record keeps a tool call's short identifying arguments
 (project, task, path, search), never text such as titles, bodies,
 or file content, and notes a fetch that failed behind it and a
-read served a stale head. 'taskgo requests' summarises the log.
-Over HTTP, GET /logs is a live page of the latest requests, behind
-the same check as the endpoint; GET /up is an unauthenticated
-health check that reports the server's version and commit.
+read served a stale head. GET /up is an unauthenticated health
+check that reports the server's version and commit.
 
 Environment:
   TASKGO_MCP_ACCESS_TEAM  Default for --access-team
@@ -740,37 +737,6 @@ Options:
   --log FILE            Request log to append to (default
                         $XDG_STATE_HOME/taskgo/mcp.jsonl, or
                         ~/.local/state/taskgo/mcp.jsonl)
-```
-
-<!-- /generated -->
-
-## requests
-
-<!-- generated: ../scripts/taskgo requests --help -->
-
-```text
-Usage: taskgo requests [-h] [--log FILE] [--days N] [--gap SECS] [--json]
-
-Summarise the request log of 'taskgo mcp': requests by outcome,
-then requests, failures, latency, and result size per client and
-per tool, then the commonest runs of two or three tool calls in
-one caller's chains. A chain is a caller's tool calls, each no
-more than --gap seconds after the one before.
-
-Environment:
-  TASKGO_MCP_LOG  Default for --log
-
-Options:
-  -h, --help  Display this help message and exit
-  --log FILE  Request log to read, with its rotated files (default as for mcp)
-  --days N    Read the last N days of records (default 7)
-  --gap SECS  Longest pause within a chain (default 120)
-  --json, -j  Output as JSON
-
-Examples:
-  taskgo requests
-  taskgo requests --days 1 --gap 60
-  taskgo requests --log /data/log/mcp.jsonl --json | jq '.sequences[:3]'
 ```
 
 <!-- /generated -->

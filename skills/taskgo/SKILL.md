@@ -292,7 +292,6 @@ taskgo checkpoint TASK_ID SUBJECT [--conv ID] [--all] [--path PATH]... [--body T
 taskgo commit SUBJECT [--conv ID] [--body TEXT] [--ref REF]...
 taskgo schema [--json]
 taskgo mcp [--host HOST] [--port PORT] [--path PATH] [--remote REMOTE] [--branch BRANCH] [--no-fetch | --local] [--fetch-ttl SECS] [--auth access|none] [--access-team DOMAIN] [--access-aud TAG] [--stdio] [--log FILE]
-taskgo requests [--log FILE] [--days N] [--gap SECS] [--json]
 ```
 
 - `create`: Allocate ID, write record, sync STATUS, optionally commit.
@@ -350,12 +349,9 @@ taskgo requests [--log FILE] [--days N] [--gap SECS] [--json]
 - `mcp`: Serve committed state to MCP clients and write their change sets as
   commits: by default from and to a remote, for cloud agents without a checkout
   of the control repository; with `--local`, on a checkout's own branch, for
-  agents in other workspaces on the same machine. See
-  [MCP Server](references/mcp.md).
-- `requests`: Summarise the MCP server's request log (requests per client and
-  tool, failures, latency, and the commonest runs of tool calls). Over HTTP the
-  server also shows its latest requests live at `/logs`. See
-  [Logging](references/mcp.md#logging).
+  agents in other workspaces on the same machine. The server writes a request
+  record for each call; `mcp logs` reads them, and on app1 the shared page is at
+  <https://logs.hupsista.com/>. See [MCP Server](references/mcp.md).
 
 ## Reference Material
 
