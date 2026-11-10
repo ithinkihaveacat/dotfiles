@@ -329,7 +329,7 @@ initial prompt — is controlled by `--inline`/`--no-inline`.
   calling the API.
 - `--force`: Bypass safety checks — the 1MB inlined-text threshold, the
   dirty-worktree guard, and the refusal to write paths git cannot restore.
-- `--model MODEL`: Gemini model to use (default: `gemini-4-argon`).
+- `--model MODEL`: Gemini model to use (default: `gemini-4-carbon`).
 - `--thinking LEVEL`: Thinking level: `high`, `low`, `none` (default: `high`).
 - `--search` / `--no-search`: Google Search grounding for live external context
   (default: on).

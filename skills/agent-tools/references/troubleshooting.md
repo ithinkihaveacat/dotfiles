@@ -321,7 +321,7 @@ scripts/photo-smart-crop --ratio 1:1 input.jpg output.jpg
 
 **Solution for emerson:** `emerson` leaves output tokens unconstrained so models
 can use their full native output token capacity (e.g. 32k tokens on
-`gemini-4-argon`). If an extraordinarily large output still produces a
+`gemini-4-carbon`). If an extraordinarily large output still produces a
 truncation warning:
 
 1. Break input into smaller chunks
