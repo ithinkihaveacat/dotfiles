@@ -32,7 +32,7 @@ def register(api):
 
     api.register_skill(
         "remote:claude-frontend-design",
-        "https://github.com/anthropics/claude-code/tree/main/plugins/frontend-design/skills/frontend-design",
+        "https://github.com/anthropics/claude-plugins-official/tree/main/plugins/frontend-design/skills/frontend-design",
     )
 
     api.register_skill(
