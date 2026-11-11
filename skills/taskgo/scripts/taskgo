@@ -4565,6 +4565,55 @@ def cmd_create(
         )
 
 
+def format_section_replacement(spec: SectionSpec, text: str) -> str:
+    """Formats replacement text for run-in or level-2 heading section SPEC."""
+    if spec.form == "run-in":
+        block = "\n" in text or text.strip().startswith("1.")
+        return f"**{spec.name}:**\n\n{text}" if block else f"**{spec.name}:** {text}"
+    return f"## {spec.name}\n\n{text}"
+
+
+def splice_schema_section(
+    body: str,
+    schema: RecordSchema,
+    spec: SectionSpec,
+    existing_span: tuple[int, int] | None,
+    replacement: str | None,
+) -> str:
+    """Replaces EXISTING_SPAN in BODY, or inserts REPLACEMENT in SCHEMA order."""
+    if existing_span is not None:
+        a, b = existing_span
+    else:
+        # Before the first section the schema lists after this one.
+        later = schema.sections[schema.sections.index(spec) + 1 :]
+        starts = [
+            found[0][0]
+            for s in later
+            if s.form != "title" and (found := section_spans(body, s))
+        ]
+        a = b = min(starts, default=len(body.rstrip()))
+    before, after = body[:a].rstrip(), body[b:].lstrip()
+    parts = [p for p in (before, replacement, after) if p]
+    return "\n\n".join(parts) + "\n"
+
+
+def edit_optional_date_field(
+    data: Any, field: str, value: str | None, flag: str
+) -> None:
+    """Sets or clears optional ISO date frontmatter FIELD on mapping DATA."""
+    if value is None:
+        return
+    if not value.strip():
+        for k in [k for k in list(data.keys()) if str(k).lower() == field]:
+            data.pop(k, None)
+        return
+    parsed = parse_iso_date(value)
+    if parsed is None:
+        die_scoped(f"invalid ISO date for {flag} (expected YYYY-MM-DD): {value}")
+    key = next((k for k in data if str(k).lower() == field), field)
+    data[key] = parsed
+
+
 def edit_task_text(
     snap: Snapshot,
     rel_path: str,
@@ -4626,31 +4675,8 @@ def edit_task_text(
             wf_key = next((k for k in data if str(k).lower() == "wait_for"), "wait_for")
             data[wf_key] = [parse_iso_date(w) or w for w in items]
 
-    if due is not None:
-        if not due.strip():
-            for k in [k for k in list(data.keys()) if str(k).lower() == "due"]:
-                data.pop(k, None)
-        else:
-            parsed_due = parse_iso_date(due)
-            if parsed_due is None:
-                die_scoped(f"invalid ISO date for --due (expected YYYY-MM-DD): {due}")
-            due_key = next((k for k in data if str(k).lower() == "due"), "due")
-            data[due_key] = parsed_due
-
-    if stale_after is not None:
-        if not stale_after.strip():
-            for k in [k for k in list(data.keys()) if str(k).lower() == "stale_after"]:
-                data.pop(k, None)
-        else:
-            parsed_stale = parse_iso_date(stale_after)
-            if parsed_stale is None:
-                die_scoped(
-                    f"invalid ISO date for --stale-after (expected YYYY-MM-DD): {stale_after}"
-                )
-            sa_key = next(
-                (k for k in data if str(k).lower() == "stale_after"), "stale_after"
-            )
-            data[sa_key] = parsed_stale
+    edit_optional_date_field(data, "due", due, "--due")
+    edit_optional_date_field(data, "stale_after", stale_after, "--stale-after")
 
     own_id = next((str(v) for k, v in data.items() if str(k).lower() == "id"), None)
     wait_spec = TASK_SCHEMA.field("wait_for")
@@ -4689,75 +4715,45 @@ def edit_task_text(
     if title:
         body = re.sub(r"^#\s+[^\n]+", f"# {title}", body, count=1, flags=re.MULTILINE)
 
-    def upsert_runin(body_str: str, label: str, val: str) -> str:
-        block = "\n" in val or val.strip().startswith("1.")
-        replacement = f"**{label}:**\n\n{val}" if block else f"**{label}:** {val}"
-        spans = find_runins(body_str, label)
-        if len(spans) > 1:
-            die_scoped(
-                f"{rel_path}: **{label}:** appears {len(spans)} times; "
-                "edit the task file directly"
-            )
-        if not spans:
-            spec = next((s for s in TASK_SCHEMA.sections if s.name == label), None)
-            if spec is not None:
-                later = TASK_SCHEMA.sections[TASK_SCHEMA.sections.index(spec) + 1 :]
-                starts = [
-                    found[0][0]
-                    for s in later
-                    if s.form != "title" and (found := section_spans(body_str, s))
-                ]
-                a = min(starts, default=len(body_str.rstrip()))
-                before, after = body_str[:a].rstrip(), body_str[a:].lstrip()
-                parts = [p for p in (before, replacement, after) if p]
-                return "\n\n".join(parts) + "\n"
-            return body_str.rstrip() + f"\n\n{replacement}\n"
-        start, end = spans[0]
-        before, after = body_str[:start], body_str[end:]
-        # Give the edited run-in its own paragraph, as 'create' lays it out,
-        # when mdformat has reflowed it into a paragraph with its neighbours.
-        if before.strip() and not before.endswith("\n\n"):
-            before = before.rstrip() + "\n\n"
-        if after.strip() and not after.startswith("\n\n"):
-            after = "\n\n" + after.lstrip()
-        return before + replacement + after
-
-    def upsert_section(body_str: str, heading: str, val: str) -> str:
-        replacement = f"## {heading}\n\n{val}"
-        spans, similar = find_sections(body_str, heading)
-        if len(spans) > 1:
-            die_scoped(
-                f"{rel_path}: '## {heading}' appears {len(spans)} times; "
-                "edit the task file directly"
-            )
-        if not spans:
-            if similar:
+    def upsert_body_section(body_str: str, name: str, val: str) -> str:
+        spec = next(s for s in TASK_SCHEMA.sections if s.name == name)
+        replacement = format_section_replacement(spec, val)
+        if spec.form == "run-in":
+            spans = find_runins(body_str, name)
+            if len(spans) > 1:
+                die_scoped(
+                    f"{rel_path}: **{name}:** appears {len(spans)} times; "
+                    "edit the task file directly"
+                )
+        else:
+            spans, similar = find_sections(body_str, name)
+            if len(spans) > 1:
+                die_scoped(
+                    f"{rel_path}: '## {name}' appears {len(spans)} times; "
+                    "edit the task file directly"
+                )
+            if not spans and similar:
                 warnings.append(
-                    f"{rel_path}: no '## {heading}' section; "
+                    f"{rel_path}: no '## {name}' section; "
                     f"appending one (similar: {', '.join(similar)})"
                 )
-            return body_str.rstrip() + f"\n\n{replacement}\n"
-        start, end = spans[0]
-        return body_str[:start] + replacement + body_str[end:]
+        return splice_schema_section(
+            body_str, TASK_SCHEMA, spec, spans[0] if spans else None, replacement
+        )
 
-    if problem:
-        body = upsert_runin(body, "Problem", problem)
-    if cost:
-        body = upsert_runin(body, "Cost", cost)
-    if goal:
-        body = upsert_runin(body, "Goal", goal)
-    if criteria:
-        body = upsert_runin(body, "Criteria", criteria)
-    if sketch:
-        body = upsert_runin(body, "Sketch", sketch)
-    if constraints:
-        body = upsert_runin(body, "Constraints", constraints)
-    if outcome:
-        body = upsert_section(body, "Outcome", outcome)
-    if findings:
-        body = upsert_section(body, "Findings", findings)
-    if next_steps:
-        body = upsert_section(body, "Next", next_steps)
+    for sec_name, sec_val in (
+        ("Problem", problem),
+        ("Cost", cost),
+        ("Goal", goal),
+        ("Criteria", criteria),
+        ("Sketch", sketch),
+        ("Constraints", constraints),
+        ("Outcome", outcome),
+        ("Findings", findings),
+        ("Next", next_steps),
+    ):
+        if sec_val:
+            body = upsert_body_section(body, sec_name, sec_val)
 
     return fm_text + "\n" + body.lstrip(), warnings
 
@@ -5525,29 +5521,14 @@ def apply_replace_section(cs: ChangeSet, change: dict[str, Any]) -> None:
     if text is None and spec.required:
         raise ChangeSetError(f"{name} is required in a {schema.kind}")
 
-    replacement = None
-    if text is not None:
-        text = text.strip()
-        if spec.form == "run-in":
-            block = "\n" in text or text.startswith("1.")
-            label = f"**{name}:**"
-            replacement = f"{label}\n\n{text}" if block else f"{label} {text}".strip()
-        else:
-            replacement = f"## {name}\n\n{text}".strip()
-    if spans:
-        a, b = spans[0]
-    else:
-        # Before the first section the schema lists after this one.
-        later = schema.sections[schema.sections.index(spec) + 1 :]
-        starts = [
-            found[0][0]
-            for s in later
-            if s.form != "title" and (found := section_spans(body, s))
-        ]
-        a = b = min(starts, default=len(body.rstrip()))
-    before, after = body[:a].rstrip(), body[b:].lstrip()
-    parts = [p for p in (before, replacement, after) if p]
-    new_body = "\n\n".join(parts) + "\n"
+    replacement = (
+        format_section_replacement(spec, text.strip()).strip()
+        if text is not None
+        else None
+    )
+    new_body = splice_schema_section(
+        body, schema, spec, spans[0] if spans else None, replacement
+    )
 
     expected_counts = section_counts(body, schema)
     expected_counts[name] = 0 if replacement is None else 1
