@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Goal-level baseline & negative-control contract tests for core taskgo CLI flows.
+
+unset NO_COLOR FORCE_COLOR
+unset AI_AGENT INVOKER_INFO_NAME
+unset JETSKI_CONVERSATION_ID ANTIGRAVITY_CONVERSATION_ID ANTIGRAVITY_SESSION
+unset CLAUDE_CODE_SESSION_ID CLAUDE_CODE_REMOTE_SESSION_ID CLAUDE_SESSION_ID CLAUDE_PROJECT_ID
+unset OPENCODE_SESSION_ID CODEX_SESSION_ID
+unset INVOKER_INFO_ROOT_SESSION_ID CONVERSATION_ID
+
+export GIT_AUTHOR_NAME="Taskgo Test"
+export GIT_AUTHOR_EMAIL="taskgo@example.com"
+export GIT_COMMITTER_NAME="Taskgo Test"
+export GIT_COMMITTER_EMAIL="taskgo@example.com"
+
+TEST_DIR="$(cd "$(dirname "$0")" && pwd)"
+BIN="$TEST_DIR/../scripts/taskgo"
+TEST_ROOT="$(mktemp -d)"
+trap 'rm -rf -- "$TEST_ROOT"' EXIT
+export TASKGO_MCP_LOG="$TEST_ROOT/mcp-requests.jsonl"
+
+echo "1..9"
+
+REPO="$TEST_ROOT/goal-repo"
+mkdir -p "$REPO/alpha"
+git -C "$REPO" init -q -b main
+printf '%s\n' \
+  '# Agent instructions' \
+  '' \
+  'This repository follows taskgo:' \
+  '<https://github.com/ithinkihaveacat/dotfiles/tree/main/skills/taskgo>.' \
+  >"$REPO/AGENTS.md"
+printf '# Inbox\n' >"$REPO/INBOX.md"
+printf '# Alpha\n\nAlpha project.\n' >"$REPO/alpha/README.md"
+git -C "$REPO" add AGENTS.md INBOX.md alpha/README.md
+git -C "$REPO" commit -qm 'chore: seed goal repo'
+
+# 1. taskgo id allocates valid unique TASK-XXXXX IDs
+ALLOC_ID=$("$BIN" --root "$REPO" --offline id)
+if [[ "$ALLOC_ID" =~ ^TASK-[0-9A-F]{5}$ ]]; then
+  echo 'ok 1 - id allocates valid TASK-XXXXX identifier'
+else
+  echo "not ok 1 - id returned unexpected value: $ALLOC_ID"
+fi
+
+# 2. taskgo create creates formatted record, updates STATUS.md, and commits
+CREATED_LINE=$("$BIN" --root "$REPO" --offline create alpha 'First goal task' --slug first-goal --goal 'Keep invariants green' --next 'Verify lifecycle' 2>/dev/null)
+TASK_ID="${CREATED_LINE%%$'\t'*}"
+TASK_REL="${CREATED_LINE#*$'\t'}"
+TASK_FILE="$REPO/$TASK_REL"
+if [[ "$TASK_ID" =~ ^TASK-[0-9A-F]{5}$ ]] &&
+  [[ "$TASK_REL" == "alpha/tasks/${TASK_ID}-first-goal.md" ]] &&
+  [[ -f "$TASK_FILE" ]] &&
+  grep -qx '# First goal task' "$TASK_FILE" &&
+  grep -q '<!-- taskgo:begin -->' "$REPO/alpha/STATUS.md" &&
+  grep -qx 'Todo: 1 Done: 0' "$REPO/alpha/STATUS.md" &&
+  [[ "$(git -C "$REPO" log -1 --format=%s)" == *"create $TASK_ID"* ]]; then
+  echo 'ok 2 - create writes formatted task, updates STATUS.md, and commits'
+else
+  echo "not ok 2 - create did not preserve expected contract ($CREATED_LINE)"
+fi
+
+# 3. taskgo update updates fields, sections, status, and enforces guards
+python3 - "$TASK_FILE" <<'PY'
+import sys, pathlib
+p = pathlib.Path(sys.argv[1])
+txt = p.read_text(encoding="utf-8")
+p.write_text(txt.replace("status: todo\n", "status: todo\nCustomKey: KeepValue # inline comment\n", 1), encoding="utf-8")
+PY
+
+if ! EXPECT_ERR=$("$BIN" --root "$REPO" --offline update "$TASK_ID" --expect-status 'done' --status cancelled 2>&1) &&
+  [[ "$EXPECT_ERR" == *"expected 'done'; nothing changed"* ]] &&
+  ! DONE_ERR=$("$BIN" --root "$REPO" --offline update "$TASK_ID" --status 'done' 2>&1) &&
+  [[ "$DONE_ERR" == *"Outcome"* ]] &&
+  ("$BIN" --root "$REPO" --offline update "$TASK_ID" --expect-status todo --status in-progress --goal 'Updated goal.' --findings 'Baseline verified.' >/dev/null 2>&1) &&
+  grep -qx 'status: in-progress' "$TASK_FILE" &&
+  grep -qx 'CustomKey: KeepValue # inline comment' "$TASK_FILE" &&
+  grep -qx '\*\*Goal:\*\* Updated goal\.' "$TASK_FILE" &&
+  grep -qx '## Findings' "$TASK_FILE"; then
+  echo 'ok 3 - update mutates fields/sections, preserves custom YAML, and enforces guards'
+else
+  echo 'not ok 3 - update failed field/guard invariants'
+fi
+
+# 4. taskgo list displays tasks filtered by project and state
+LIST_OUT=$("$BIN" --root "$REPO" --offline list alpha --status in-progress)
+LIST_DONE=$("$BIN" --root "$REPO" --offline list alpha --status 'done')
+if grep -q "$TASK_ID" <<<"$LIST_OUT" && ! grep -q "$TASK_ID" <<<"$LIST_DONE"; then
+  echo 'ok 4 - list filters tasks by project and status'
+else
+  echo "not ok 4 - list filter mismatch ($LIST_OUT)"
+fi
+
+# 5. taskgo status renders project STATUS.md containing task snapshot
+STATUS_OUT=$("$BIN" --root "$REPO" --offline status alpha)
+if grep -q '### In progress' <<<"$STATUS_OUT" && grep -q "$TASK_ID" <<<"$STATUS_OUT"; then
+  echo 'ok 5 - status renders project snapshot with active task'
+else
+  echo "not ok 5 - status output missing expected task"
+fi
+
+# 6. taskgo sync regenerates deterministic generated block idempotently
+sed 's/^status: in-progress$/status: todo/' "$TASK_FILE" >"$TASK_FILE.tmp"
+mv "$TASK_FILE.tmp" "$TASK_FILE"
+SYNC1=$("$BIN" --root "$REPO" --offline sync alpha)
+SYNC2=$("$BIN" --root "$REPO" --offline sync alpha)
+if [[ "$SYNC1" == 'updated' ]] &&
+  [[ "$SYNC2" == 'current' ]] &&
+  grep -q '^- None$' <<<"$(awk '/### In progress/,/### Blocked/' "$REPO/alpha/STATUS.md")"; then
+  echo 'ok 6 - sync deterministically updates and converges STATUS.md'
+else
+  echo "not ok 6 - sync mismatch ($SYNC1 / $SYNC2)"
+fi
+
+# 7. taskgo doctor passes cleanly on healthy repository
+if DOC_OK=$("$BIN" --root "$REPO" --offline doctor 2>&1) &&
+  grep -q '^\[PASS\]  Control repository' <<<"$DOC_OK"; then
+  echo 'ok 7 - doctor exits 0 with PASS tag on healthy repo'
+else
+  echo "not ok 7 - doctor failed on healthy repo ($DOC_OK)"
+fi
+
+# 8. Negative control: invalid task status fails doctor with exit non-zero
+sed 's/^status: todo$/status: invalid-status/' "$TASK_FILE" >"$TASK_FILE.tmp"
+mv "$TASK_FILE.tmp" "$TASK_FILE"
+if ! DOC_BAD=$("$BIN" --root "$REPO" --offline doctor 2>&1) &&
+  grep -q "non-standard status 'invalid-status'" <<<"$DOC_BAD"; then
+  echo 'ok 8 - negative control detects invalid status with non-zero exit'
+else
+  echo "not ok 8 - negative control missed invalid status ($DOC_BAD)"
+fi
+
+# 9. Repairing to done with Outcome restores healthy doctor status
+sed 's/^status: invalid-status$/status: todo/' "$TASK_FILE" >"$TASK_FILE.tmp"
+mv "$TASK_FILE.tmp" "$TASK_FILE"
+("$BIN" --root "$REPO" --offline update "$TASK_ID" --status 'done' --outcome 'All goal checks passed.' >/dev/null 2>&1)
+if "$BIN" --root "$REPO" --offline doctor >/dev/null 2>&1; then
+  echo 'ok 9 - done transition with Outcome restores clean doctor status'
+else
+  echo 'not ok 9 - doctor still failed after done transition with Outcome'
+fi
