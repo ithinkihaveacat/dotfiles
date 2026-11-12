@@ -1,0 +1,763 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "pillow==13.0.0",
+#     "pillow-heif==1.8.1",
+# ]
+# ///
+# Tests: skills/picgo/tests/test-picgo
+"""Keep the last ten images or videos in a directory and serve them to agents.
+
+The directory is the database: one file per item, named
+'<timestamp>-<random>.<ext>', newest ten kept. There is no index, no metadata
+file and no cleanup job. A single flock covers each write, its eviction and the
+read of a file, so a reader never sees a half-written or half-deleted item and
+two concurrent uploads cannot leave eleven files.
+
+Images are normalised on ingest: EXIF orientation is applied, the long edge is
+capped (2048 px by default), and JPEG/HEIC become JPEG while PNG and WebP keep
+their format. Videos are stored untouched.
+"""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import dataclasses
+import datetime
+import fcntl
+import io
+import json
+import os
+import re
+import secrets
+import shutil
+import sys
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, NoReturn
+from urllib.parse import quote
+
+import PIL
+from PIL import Image, ImageOps
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+try:
+    import pillow_heif
+
+    pillow_heif.register_heif_opener()
+except ImportError:  # HEIC then fails with a clear message, other formats work
+    pillow_heif = None
+
+PROG = "picgo"
+Image.MAX_IMAGE_PIXELS = 50_000_000
+MAX_ITEMS = 10
+DEFAULT_MAX_EDGE = 2048
+TARGET_BYTES = 2 * 1024 * 1024
+MAX_UPLOAD_BYTES = 64 * 1024 * 1024
+DIR_ENV = "PICGO_DIR"
+MAX_EDGE_ENV = "PICGO_MAX_EDGE"
+MAX_UPLOAD_ENV = "PICGO_MAX_UPLOAD_BYTES"
+MCP_PROG = "picgo-mcp"
+
+# Longest edge Claude downsizes to before tokenising; above it, bytes are
+# wasted for the model, so the default cap is deliberately close.
+QUALITY_STEPS = (85, 75, 65)
+
+EXT_MIME = {
+    "jpg": "image/jpeg",
+    "jpeg": "image/jpeg",
+    "png": "image/png",
+    "gif": "image/gif",
+    "webp": "image/webp",
+    "heic": "image/heic",
+    "heif": "image/heif",
+    "avif": "image/avif",
+    "bmp": "image/bmp",
+    "tif": "image/tiff",
+    "tiff": "image/tiff",
+    "mp4": "video/mp4",
+    "m4v": "video/x-m4v",
+    "mov": "video/quicktime",
+    "webm": "video/webm",
+    "3gp": "video/3gpp",
+    "3g2": "video/3gpp2",
+    "mkv": "video/x-matroska",
+}
+PREFERRED_EXT = {
+    "image/jpeg": "jpg",
+    "image/png": "png",
+    "image/gif": "gif",
+    "image/webp": "webp",
+    "image/heic": "heic",
+    "image/heif": "heif",
+    "image/avif": "avif",
+    "image/bmp": "bmp",
+    "image/tiff": "tif",
+    "video/mp4": "mp4",
+    "video/x-m4v": "m4v",
+    "video/quicktime": "mov",
+    "video/webm": "webm",
+    "video/3gpp": "3gp",
+    "video/3gpp2": "3g2",
+    "video/x-matroska": "mkv",
+}
+ID_RE = re.compile(r"^[0-9A-Za-z._-]{1,80}$")
+NAME_RE = re.compile(r"^(?P<stamp>\d{8}T\d{6}\.\d{6}Z)-(?P<rand>[0-9a-f]{6})$")
+STAMP_FMT = "%Y%m%dT%H%M%S.%fZ"
+
+
+class Error(Exception):
+    """An expected failure, reported without a traceback."""
+
+
+class NotFoundError(Error):
+    """An item that the store does not hold."""
+
+
+def die(message: str, code: int = 1) -> NoReturn:
+    print(f"{PROG}: {message}", file=sys.stderr)
+    sys.exit(code)
+
+
+def default_dir() -> Path:
+    base = os.environ.get("XDG_CACHE_HOME") or str(Path.home() / ".cache")
+    return Path(base).expanduser() / "picgo"
+
+
+def env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        die(f"{name} must be an integer, not {raw!r}")
+    if value < 1:
+        die(f"{name} must be positive")
+    return value
+
+
+def utcnow() -> datetime.datetime:
+    return datetime.datetime.now(datetime.UTC)
+
+
+def iso(stamp: datetime.datetime) -> str:
+    return (
+        stamp.astimezone(datetime.UTC)
+        .isoformat(timespec="microseconds")
+        .replace("+00:00", "Z")
+    )
+
+
+def parse_stem(stem: str) -> tuple[datetime.datetime, str]:
+    match = NAME_RE.fullmatch(stem)
+    if not match:
+        raise ValueError(f"not an item name: {stem}")
+    stamp = datetime.datetime.strptime(match["stamp"], STAMP_FMT).replace(
+        tzinfo=datetime.UTC
+    )
+    return stamp, match["rand"]
+
+
+def human_bytes(value: int) -> str:
+    size = float(value)
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if size < 1024 or unit == "GiB":
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{value} B"
+
+
+def infer_extension(mime: str | None, filename: str | None) -> tuple[str, str]:
+    """The stored extension and MIME type from the declared type or the name."""
+    declared = (mime or "").split(";", 1)[0].strip().lower()
+    if declared in PREFERRED_EXT:
+        ext = PREFERRED_EXT[declared]
+        return ext, EXT_MIME[ext]
+    suffix = Path(filename or "").suffix.lower().lstrip(".")
+    if suffix in EXT_MIME:
+        return suffix, EXT_MIME[suffix]
+    raise Error(
+        f"unsupported media type {declared or '(none)'}"
+        + (f" for {filename}" if filename else "")
+    )
+
+
+def _rgb(im: Image.Image) -> Image.Image:
+    """A JPEG-safe RGB image: transparency is flattened onto white."""
+    if im.mode in ("RGBA", "LA") or (im.mode == "P" and "transparency" in im.info):
+        rgba = im.convert("RGBA")
+        flat = Image.new("RGB", rgba.size, (255, 255, 255))
+        flat.paste(rgba, mask=rgba.getchannel("A"))
+        return flat
+    return im.convert("RGB")
+
+
+def _encode(im: Image.Image, ext: str, quality: int | None = None) -> bytes:
+    buf = io.BytesIO()
+    if ext == "jpg":
+        im.save(buf, "JPEG", quality=quality, optimize=True, progressive=True)
+    elif ext == "png":
+        im.save(buf, "PNG", optimize=True)
+    elif ext == "webp":
+        im.save(buf, "WEBP", quality=quality, method=4)
+    elif ext == "gif":
+        im.save(buf, "GIF", optimize=True)
+    else:
+        raise Error(f"cannot encode {ext}")
+    return buf.getvalue()
+
+
+def normalise_image(
+    data: bytes, ext: str, max_edge: int
+) -> tuple[bytes, str, int, int]:
+    """Normalise an image: orientation, long edge and format.
+
+    Animated images are returned untouched: resizing every frame changes the
+    file more than it saves, and they are usually small. The result is a
+    (bytes, extension, width, height) tuple."""
+    try:
+        im = Image.open(io.BytesIO(data))
+    except Image.DecompressionBombError as e:
+        raise Error(f"image is too large: {e}") from None
+    except (OSError, ValueError) as e:
+        raise Error(f"cannot read the image: {e}") from None
+    if getattr(im, "is_animated", False):
+        return data, ext, im.width, im.height
+    im = ImageOps.exif_transpose(im)
+
+    out_ext = {
+        "jpg": "jpg",
+        "jpeg": "jpg",
+        "heic": "jpg",
+        "heif": "jpg",
+        "png": "png",
+        "webp": "webp",
+        "gif": "gif",
+    }.get(ext, "jpg")
+    if out_ext == "jpg":
+        im = _rgb(im)
+
+    im.thumbnail((max_edge, max_edge), Image.Resampling.LANCZOS)
+    best = b""
+    for scale in (1.0, 0.5):
+        if scale != 1.0:
+            im.thumbnail(
+                (max(1, int(im.width * scale)), max(1, int(im.height * scale))),
+                Image.Resampling.LANCZOS,
+            )
+        if out_ext in ("jpg", "webp"):
+            for quality in QUALITY_STEPS:
+                best = _encode(im, out_ext, quality)
+                if len(best) <= TARGET_BYTES:
+                    return best, out_ext, im.width, im.height
+        else:
+            best = _encode(im, out_ext)
+            if len(best) <= TARGET_BYTES:
+                return best, out_ext, im.width, im.height
+    return best, out_ext, im.width, im.height
+
+
+@dataclasses.dataclass(frozen=True)
+class Item:
+    id: str
+    path: Path
+    kind: str
+    mime_type: str
+    bytes: int
+    created_at: datetime.datetime
+    width: int | None = None
+    height: int | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        out: dict[str, Any] = {
+            "id": self.id,
+            "kind": self.kind,
+            "mime_type": self.mime_type,
+            "bytes": self.bytes,
+            "created_at": iso(self.created_at),
+        }
+        if self.width is not None:
+            out["width"] = self.width
+            out["height"] = self.height
+        return out
+
+
+class Store:
+    """A directory of at most MAX_ITEMS items, safe for several processes."""
+
+    def __init__(self, root: Path, max_edge: int = DEFAULT_MAX_EDGE):
+        self.root = Path(root).expanduser()
+        self.max_edge = max_edge
+        self.lock_path = self.root / ".lock"
+
+    def ensure(self) -> None:
+        self.root.mkdir(parents=True, exist_ok=True)
+
+    @contextlib.contextmanager
+    def locked(self, exclusive: bool) -> Iterator[None]:
+        self.ensure()
+        fd = os.open(self.lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+            yield
+        finally:
+            os.close(fd)  # Closing the descriptor releases the flock.
+
+    def _paths(self) -> list[Path]:
+        found: list[tuple[str, Path]] = []
+        with contextlib.suppress(FileNotFoundError):
+            for path in self.root.iterdir():
+                if not path.is_file() or path.name.startswith("."):
+                    continue
+                try:
+                    parse_stem(path.stem)
+                except ValueError:
+                    continue  # A stray file is not an item.
+                if path.suffix.lower().lstrip(".") in EXT_MIME:
+                    found.append((path.stem, path))
+        found.sort(reverse=True)
+        return [path for _, path in found]
+
+    def _item(self, path: Path) -> Item:
+        ext = path.suffix.lower().lstrip(".")
+        mime = EXT_MIME[ext]
+        width = height = None
+        if mime.startswith("image/"):
+            with contextlib.suppress(OSError, ValueError), Image.open(path) as im:
+                width, height = im.size
+        created, _ = parse_stem(path.stem)
+        return Item(
+            id=path.stem,
+            path=path,
+            kind=mime.split("/", 1)[0],
+            mime_type=mime,
+            bytes=path.stat().st_size,
+            created_at=created,
+            width=width,
+            height=height,
+        )
+
+    def list(self) -> list[Item]:
+        with self.locked(exclusive=False):
+            return [self._item(path) for path in self._paths()]
+
+    def _resolve(self, item_id: str | None) -> Path:
+        paths = self._paths()
+        if item_id is None:
+            if not paths:
+                raise NotFoundError("the store is empty")
+            return paths[0]
+        if not ID_RE.fullmatch(item_id) or ".." in item_id:
+            raise NotFoundError(f"no such item: {item_id}")
+        match = [p for p in paths if p.stem == item_id]
+        if not match:
+            raise NotFoundError(f"no such item: {item_id}")
+        return match[0]
+
+    def get(self, item_id: str | None = None) -> tuple[Item, bytes]:
+        with self.locked(exclusive=False):
+            path = self._resolve(item_id)
+            try:
+                data = path.read_bytes()
+            except FileNotFoundError:
+                raise NotFoundError(f"no such item: {item_id or 'latest'}") from None
+            return self._item(path), data
+
+    def put(
+        self,
+        data: bytes,
+        *,
+        mime: str | None = None,
+        filename: str | None = None,
+    ) -> Item:
+        if not data:
+            raise Error("the upload is empty")
+        limit = env_int(MAX_UPLOAD_ENV, MAX_UPLOAD_BYTES)
+        if len(data) > limit:
+            raise Error(f"the upload is larger than {human_bytes(limit)}")
+        ext, _ = infer_extension(mime, filename)
+        created = utcnow()
+        if EXT_MIME[ext].startswith("image/"):
+            data, ext, _, _ = normalise_image(data, ext, self.max_edge)
+        return self._publish(data, ext, created)
+
+    def _publish(self, data: bytes, ext: str, created: datetime.datetime) -> Item:
+        self.ensure()
+        with self.locked(exclusive=True):
+            for _ in range(10):
+                rand = secrets.token_hex(3)
+                stem = f"{created.strftime('%Y%m%dT%H%M%S')}.{created.microsecond:06d}Z-{rand}"
+                final = self.root / f"{stem}.{ext}"
+                if not final.exists():
+                    break
+            else:
+                raise Error("cannot allocate a unique item name")
+            tmp = self.root / f".tmp-{secrets.token_hex(8)}"
+            try:
+                with open(tmp, "wb") as fh:
+                    fh.write(data)
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                os.replace(tmp, final)
+            finally:
+                with contextlib.suppress(FileNotFoundError):
+                    tmp.unlink()
+            for old in self._paths()[MAX_ITEMS:]:
+                with contextlib.suppress(FileNotFoundError):
+                    old.unlink()
+            return self._item(final)
+
+    def delete(self, item_id: str) -> Item:
+        with self.locked(exclusive=True):
+            path = self._resolve(item_id)
+            item = self._item(path)
+            path.unlink()
+            return item
+
+
+# --- HTTP client -------------------------------------------------------------
+
+
+def request(
+    server: str,
+    method: str,
+    path: str,
+    *,
+    body: bytes | None = None,
+    ctype: str | None = None,
+    filename: str | None = None,
+) -> bytes:
+    """One request to a remote 'picgo mcp --http' server, with no third-party
+    HTTP client: the CLI otherwise needs only Pillow."""
+    import urllib.error
+    import urllib.request
+
+    url = server.rstrip("/") + path
+    req = urllib.request.Request(url, data=body, method=method)
+    if ctype:
+        req.add_header("Content-Type", ctype)
+    if filename:
+        req.add_header("X-Picgo-Filename", quote(filename))
+    try:
+        with urllib.request.urlopen(req, timeout=120) as response:
+            return response.read()
+    except urllib.error.HTTPError as e:
+        detail = e.read(500).decode("utf-8", "replace").strip()
+        raise Error(
+            f"{method} {url}: HTTP {e.code}{f': {detail}' if detail else ''}"
+        ) from None
+    except urllib.error.URLError as e:
+        raise Error(f"{method} {url}: {e.reason}") from None
+
+
+def server_items(server: str) -> list[dict[str, Any]]:
+    return json.loads(request(server, "GET", "/api/media"))
+
+
+# --- Command line ------------------------------------------------------------
+
+
+class Parser(argparse.ArgumentParser):
+    def error(self, message: str) -> NoReturn:
+        self.print_usage(sys.stderr)
+        print(
+            f"{self.prog}: {message}\nTry '{self.prog} --help' for more information.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    def format_help(self) -> str:
+        return (
+            super()
+            .format_help()
+            .replace("usage:", "Usage:", 1)
+            .replace("options:", "Options:", 1)
+            .replace(
+                "show this help message and exit",
+                "Display this help message and exit",
+                1,
+            )
+        )
+
+
+HELP_MAIN = """\
+Keep the last ten images or videos in a store, for sharing with agents.
+
+The store is a directory: one file per item, named for the moment it was
+uploaded and kept newest first. Every upload evicts what falls past the tenth.
+Images are resized so their long edge is at most PICGO_MAX_EDGE (2048 px by
+default); JPEG and HEIC become JPEG, PNG and WebP keep their format. Videos are
+stored as they are.
+
+Commands:
+  upload FILE...        Add images or videos
+  get [ID]              Read the latest item, or ID, as bytes
+  list                  Show the stored items, newest first
+  delete ID...          Remove items
+  mcp [ARGS...]         Serve the store over MCP (see 'picgo mcp --help')
+  doctor                Check the store, the item count and image support
+
+Options:
+  --dir DIR     The store (default: $PICGO_DIR, else $XDG_CACHE_HOME/picgo);
+                must appear before COMMAND
+  -h, --help    Display this help message and exit
+
+Environment:
+  PICGO_DIR              The store, if --dir is not given
+  PICGO_MAX_EDGE         Longest edge for images (default: 2048)
+  PICGO_MAX_UPLOAD_BYTES Reject uploads larger than this (default: 67108864)
+  PICGO_SERVER           A remote server, so upload, get, list and delete use
+                         its REST API instead of the local store
+
+Examples:
+  picgo upload photo.jpg clip.mp4
+  picgo list
+  picgo get --output latest.jpg
+  picgo get 20261112T143012.123456Z-7f3a9c --output photo.jpg
+  PICGO_SERVER=https://picgo.example.com picgo upload photo.jpg
+  picgo mcp --http --host 0.0.0.0 --allow-host picgo.example.com
+"""
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = Parser(
+        prog=PROG,
+        description="Keep the last ten images or videos in a store, for sharing "
+        "with agents.",
+        epilog=HELP_MAIN.split("Examples:", 1)[1].rstrip(),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--dir",
+        metavar="DIR",
+        help="The store (default: $PICGO_DIR, else ~/.cache/picgo)",
+    )
+    subs = parser.add_subparsers(dest="command", metavar="COMMAND")
+
+    upload = subs.add_parser("upload", help="Add images or videos")
+    upload.add_argument("files", nargs="+", metavar="FILE")
+    upload.add_argument("--json", action="store_true", help="Print JSON")
+
+    get = subs.add_parser("get", help="Read the latest item, or ID, as bytes")
+    get.add_argument("id", nargs="?", metavar="ID")
+    get.add_argument("-o", "--output", metavar="FILE", help="Write to FILE")
+    get.add_argument("--json", action="store_true", help="Print metadata, not bytes")
+
+    listing = subs.add_parser("list", help="Show the stored items, newest first")
+    listing.add_argument("--json", action="store_true", help="Print JSON")
+
+    delete = subs.add_parser("delete", help="Remove items")
+    delete.add_argument("ids", nargs="+", metavar="ID")
+
+    subs.add_parser("mcp", help="Serve the store over MCP", add_help=False)
+
+    subs.add_parser("doctor", help="Check the store and image support")
+    return parser
+
+
+def store_from(args: argparse.Namespace) -> Store:
+    path = args.dir or os.environ.get(DIR_ENV) or default_dir()
+    return Store(path, env_int(MAX_EDGE_ENV, DEFAULT_MAX_EDGE))
+
+
+def remote(args: argparse.Namespace) -> str | None:
+    return os.environ.get("PICGO_SERVER", "").strip() or None
+
+
+def item_line(item: dict[str, Any]) -> str:
+    dims = f" {item['width']}x{item['height']}" if item.get("width") else ""
+    return (
+        f"{item['id']}  {item['kind']}  {item['mime_type']}{dims}  "
+        f"{human_bytes(item['bytes'])}  {item['created_at']}"
+    )
+
+
+def cmd_upload(args: argparse.Namespace) -> int:
+    paths = [Path(p) for p in args.files]
+    for path in paths:
+        if not path.is_file():
+            die(f"not a file: {path}")
+    store = store_from(args)
+    server = remote(args)
+    items: list[dict[str, Any]] = []
+    for path in paths:
+        data = path.read_bytes()
+        ctype = EXT_MIME.get(
+            path.suffix.lower().lstrip("."), "application/octet-stream"
+        )
+        if server:
+            body = request(
+                server,
+                "POST",
+                "/api/media",
+                body=data,
+                ctype=ctype,
+                filename=path.name,
+            )
+            item = json.loads(body)
+        else:
+            item = store.put(data, mime=ctype, filename=path.name).as_dict()
+        items.append(item)
+        if not args.json:
+            print(item_line(item))
+    if args.json:
+        print(json.dumps(items, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_get(args: argparse.Namespace) -> int:
+    server = remote(args)
+    if args.json:
+        items = (
+            server_items(server)
+            if server
+            else [i.as_dict() for i in store_from(args).list()]
+        )
+        wanted = args.id or (items[0]["id"] if items else None)
+        item = next((i for i in items if i["id"] == wanted), None)
+        if item is None:
+            raise NotFoundError(f"no such item: {args.id or 'latest'}")
+        print(json.dumps(item, ensure_ascii=False, indent=2))
+        return 0
+    if server:
+        suffix = f"/{args.id}" if args.id else ""
+        data = request(server, "GET", f"/api/media{suffix}")
+    else:
+        _, data = store_from(args).get(args.id)
+    if args.output and args.output != "-":
+        Path(args.output).write_bytes(data)
+        print(args.output, file=sys.stderr)
+        return 0
+    sys.stdout.buffer.write(data)
+    sys.stdout.buffer.flush()
+    return 0
+
+
+def cmd_list(args: argparse.Namespace) -> int:
+    server = remote(args)
+    items = (
+        server_items(server)
+        if server
+        else [i.as_dict() for i in store_from(args).list()]
+    )
+    if args.json:
+        print(json.dumps(items, ensure_ascii=False, indent=2))
+        return 0
+    rows = [("ID", "KIND", "TYPE", "SIZE", "CREATED")]
+    for item in items:
+        created = item["created_at"].replace("T", " ")[:19] + "Z"
+        dims = f" {item['width']}x{item['height']}" if item.get("width") else ""
+        rows.append(
+            (
+                item["id"],
+                item["kind"],
+                item["mime_type"] + dims,
+                human_bytes(item["bytes"]),
+                created,
+            )
+        )
+    widths = [max(len(row[i]) for row in rows) for i in range(4)]
+    for row in rows:
+        print("  ".join([row[i].ljust(widths[i]) for i in range(4)] + [row[4]]))
+    return 0
+
+
+def cmd_delete(args: argparse.Namespace) -> int:
+    server = remote(args)
+    failed = False
+    for item_id in args.ids:
+        try:
+            if server:
+                request(server, "DELETE", f"/api/media/{item_id}")
+                print(f"deleted {item_id}")
+            else:
+                item = store_from(args).delete(item_id)
+                print(f"deleted {item.id}")
+        except NotFoundError as e:
+            print(f"{PROG}: {e}", file=sys.stderr)
+            failed = True
+    return 1 if failed else 0
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    store = store_from(args)
+    problems = 0
+
+    def report(tag: str, message: str) -> None:
+        nonlocal problems
+        print(f"[{tag}] {message}")
+        if tag == "FAIL":
+            problems += 1
+
+    try:
+        store.ensure()
+        probe = store.root / f".probe-{secrets.token_hex(6)}"
+        probe.write_bytes(b"ok")
+        probe.unlink()
+        report("PASS", f"{store.root}: writable")
+    except OSError as e:
+        report("FAIL", f"{store.root}: {e}")
+    items = store.list()
+    report(
+        "PASS" if len(items) <= MAX_ITEMS else "FAIL",
+        f"{len(items)} item(s), limit {MAX_ITEMS}",
+    )
+    if pillow_heif is None:
+        report("WARN", "pillow-heif is not installed; HEIC uploads are refused")
+    else:
+        report("PASS", "HEIC support present")
+    report("INFO", "Pillow " + PIL.__version__)
+    return 1 if problems else 0
+
+
+def cmd_mcp(argv: list[str]) -> int:
+    server = Path(__file__).resolve().with_name(MCP_PROG)
+    if not server.is_file():
+        die(f"the MCP server is missing: {server}")
+    uv = shutil.which("uv")
+    if uv is None:
+        die("uv not found", 127)
+    os.execv(uv, [uv, "run", "--quiet", "--script", str(server), *argv])
+    return 1  # unreachable
+
+
+def main(argv: list[str] | None = None) -> int:
+    raw = list(sys.argv[1:] if argv is None else argv)
+    if raw[:1] == ["mcp"]:
+        return cmd_mcp(raw[1:])
+    parser = build_parser()
+    args = parser.parse_args(raw)
+    if args.command is None:
+        print(HELP_MAIN, end="")
+        return 0
+    try:
+        if args.command == "upload":
+            return cmd_upload(args)
+        if args.command == "get":
+            return cmd_get(args)
+        if args.command == "list":
+            return cmd_list(args)
+        if args.command == "delete":
+            return cmd_delete(args)
+        if args.command == "doctor":
+            return cmd_doctor(args)
+        if args.command == "mcp":
+            return cmd_mcp(raw[raw.index("mcp") + 1 :])
+    except NotFoundError as e:
+        die(str(e))
+    except Error as e:
+        die(str(e))
+    except BrokenPipeError:
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(130)

@@ -1,0 +1,448 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "pillow==13.0.0",
+#     "pillow-heif==1.8.1",
+# ]
+# ///
+"""Exercise the picgo CLI, the MCP server over stdio and the HTTP API. Prints
+TAP. No network access: the HTTP server binds loopback and Access is off."""
+
+from __future__ import annotations
+
+import base64
+import io
+import json
+import select
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+import traceback
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+from PIL import Image
+
+HERE = Path(__file__).resolve().parent
+SKILL = HERE.parent
+PICGO = SKILL / "scripts" / "picgo"
+MCP = SKILL / "scripts" / "picgo-mcp"
+PNG = "image/png"
+NUMBER = 0
+FAILED = 0
+
+
+def report(name: str, ok: bool, detail: str = "") -> None:
+    global NUMBER, FAILED
+    NUMBER += 1
+    if not ok:
+        FAILED += 1
+    print(f"{'ok' if ok else 'not ok'} {NUMBER} - {name}", flush=True)
+    for line in [] if ok else detail.splitlines():
+        print(f"# {line}", flush=True)
+
+
+def case(name: str, fn) -> None:
+    try:
+        detail = str(fn() or "")
+    except Exception:
+        report(name, False, traceback.format_exc())
+    else:
+        report(name, True, detail)
+
+
+def run(args: list[str], *, check: bool = True, text: bool = True):
+    proc = subprocess.run(
+        [str(PICGO), *args],
+        capture_output=True,
+        text=text,
+        check=False,
+    )
+    if check and proc.returncode != 0:
+        stderr = proc.stderr if text else proc.stderr.decode("utf-8", "replace")
+        raise AssertionError(f"picgo {args} exited {proc.returncode}: {stderr}")
+    return proc
+
+
+def make_image(path: Path, size: tuple[int, int], mode: str = "RGB") -> None:
+    image = Image.new(mode, size, (200, 80, 40) if mode == "RGB" else (0, 0, 0, 0))
+    image.save(path)
+
+
+def small_png(tmp: Path) -> Path:
+    path = tmp / "small.png"
+    if not path.exists():
+        make_image(path, (800, 600))
+    return path
+
+
+def big_jpeg(tmp: Path) -> Path:
+    path = tmp / "big.jpg"
+    if not path.exists():
+        make_image(path, (4000, 3000))
+    return path
+
+
+def clip(tmp: Path) -> Path:
+    path = tmp / "clip.mp4"
+    if not path.exists():
+        path.write_bytes(b"\x00\x00\x00\x18ftypmp42" + b"x" * 2000)
+    return path
+
+
+def items(store: Path) -> list[dict]:
+    return json.loads(run(["--dir", str(store), "list", "--json"]).stdout)
+
+
+def free_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def wait_up(base: str, proc: subprocess.Popen, timeout: float = 20.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            raise AssertionError(f"server exited {proc.returncode}")
+        try:
+            with urllib.request.urlopen(base + "/up", timeout=1) as response:
+                if response.status == 200:
+                    return
+        except OSError:
+            time.sleep(0.2)
+    raise AssertionError("the server did not become healthy")
+
+
+def http(method: str, url: str, data: bytes | None = None, headers: dict | None = None):
+    request = urllib.request.Request(url, data=data, method=method)
+    for key, value in (headers or {}).items():
+        request.add_header(key, value)
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return response.status, response.headers, response.read()
+    except urllib.error.HTTPError as e:
+        return e.code, e.headers, e.read()
+
+
+class Stdio:
+    def __init__(self, store: Path, log: Path):
+        self.proc = subprocess.Popen(
+            [str(MCP), "--dir", str(store), "--log", str(log)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+        self.next_id = 0
+
+    def send(self, method: str, params=None, *, notify: bool = False) -> int | None:
+        message: dict = {"jsonrpc": "2.0", "method": method}
+        if params is not None:
+            message["params"] = params
+        if not notify:
+            self.next_id += 1
+            message["id"] = self.next_id
+        assert self.proc.stdin is not None
+        self.proc.stdin.write(json.dumps(message) + "\n")
+        self.proc.stdin.flush()
+        return None if notify else self.next_id
+
+    def read(self, want: int, timeout: float = 30.0) -> dict:
+        assert self.proc.stdout is not None
+        deadline = time.monotonic() + timeout
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise AssertionError("no MCP response")
+            ready, _, _ = select.select([self.proc.stdout], [], [], left)
+            if not ready:
+                raise AssertionError("no MCP response")
+            line = self.proc.stdout.readline()
+            if not line:
+                stderr = self.proc.stderr.read() if self.proc.stderr else ""
+                raise AssertionError("MCP server closed: " + stderr)
+            message = json.loads(line)
+            if message.get("id") == want:
+                return message
+
+    def call(self, name: str, arguments: dict | None = None) -> dict:
+        ident = self.send("tools/call", {"name": name, "arguments": arguments or {}})
+        assert ident is not None
+        message = self.read(ident)
+        if "error" in message:
+            raise AssertionError(f"JSON-RPC error: {message['error']}")
+        return message["result"]
+
+    def close(self) -> int:
+        assert self.proc.stdin is not None
+        self.proc.stdin.close()
+        return self.proc.wait(timeout=15)
+
+
+def test_resize(tmp: Path) -> str:
+    source = big_jpeg(tmp)
+    store = tmp / "resize"
+    run(["--dir", str(store), "upload", str(source)])
+    item = items(store)[0]
+    assert (item["width"], item["height"]) == (2048, 1536), item
+    assert item["bytes"] < source.stat().st_size, (item, source.stat().st_size)
+    return f"2048x1536, {item['bytes']} bytes"
+
+
+def test_formats(tmp: Path) -> str:
+    store = tmp / "formats"
+    run(["--dir", str(store), "upload", str(small_png(tmp))])
+    run(["--dir", str(store), "upload", str(clip(tmp))])
+    kinds = {item["mime_type"] for item in items(store)}
+    assert PNG in kinds, kinds
+    assert "video/mp4" in kinds, kinds
+    return ", ".join(sorted(kinds))
+
+
+def test_eviction(tmp: Path) -> str:
+    store = tmp / "evict"
+    png = small_png(tmp)
+    for i in range(12):
+        source = tmp / f"n{i}.png"
+        source.write_bytes(png.read_bytes())
+        run(["--dir", str(store), "upload", str(source)])
+    listed = items(store)
+    assert len(listed) == 10, len(listed)
+    assert not [p for p in store.iterdir() if p.name.startswith(".tmp-")]
+    return f"{len(listed)} items"
+
+
+def test_get_delete(tmp: Path) -> str:
+    store = tmp / "get"
+    run(["--dir", str(store), "upload", str(small_png(tmp))])
+    latest = items(store)[0]
+    raw = run(["--dir", str(store), "get"], text=False)
+    assert len(raw.stdout) > 100, len(raw.stdout)
+    meta = json.loads(run(["--dir", str(store), "get", "--json"]).stdout)
+    assert meta["id"] == latest["id"], (meta, latest)
+    run(["--dir", str(store), "delete", latest["id"]])
+    assert items(store) == []
+    missing = run(["--dir", str(store), "get", "nope"], check=False)
+    assert missing.returncode == 1, missing.returncode
+    assert "no such item" in missing.stderr, missing.stderr
+    return "get and delete"
+
+
+def test_concurrent(tmp: Path) -> str:
+    store = tmp / "race"
+    png = small_png(tmp)
+    procs = []
+    for i in range(12):
+        source = tmp / f"race{i}.png"
+        source.write_bytes(png.read_bytes())
+        procs.append(
+            subprocess.Popen(
+                [str(PICGO), "--dir", str(store), "upload", str(source)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+        )
+    for proc in procs:
+        _, stderr = proc.communicate(timeout=180)
+        assert proc.returncode == 0, stderr
+    listed = items(store)
+    assert len(listed) == 10, len(listed)
+    assert not [p for p in store.iterdir() if p.name.startswith(".tmp-")]
+    for item in listed:
+        assert any(p.stem == item["id"] for p in store.iterdir()), item["id"]
+    return f"{len(listed)} items, no temp files"
+
+
+def test_mcp(tmp: Path) -> tuple[str, Path]:
+    store = tmp / "mcp"
+    log = tmp / "mcp.jsonl"
+    client = Stdio(store, log)
+    try:
+        ident = client.send(
+            "initialize",
+            {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "picgo-test", "version": "1"},
+            },
+        )
+        assert ident is not None
+        client.read(ident)
+        client.send("notifications/initialized", notify=True)
+
+        ident = client.send("tools/list")
+        assert ident is not None
+        tools = [tool["name"] for tool in client.read(ident)["result"]["tools"]]
+        assert tools == ["upload_media", "get_media", "list_media", "delete_media"], (
+            tools
+        )
+
+        uploaded = client.call(
+            "upload_media",
+            {
+                "data": base64.b64encode(small_png(tmp).read_bytes()).decode(),
+                "filename": "small.png",
+                "mime_type": PNG,
+            },
+        )
+        item = uploaded["structuredContent"]
+        assert item["kind"] == "image", item
+
+        got = client.call("get_media")
+        types = [block["type"] for block in got["content"]]
+        assert types == ["text", "image"], types
+        assert got["content"][1]["mimeType"] == PNG, got["content"][1]
+
+        client.call(
+            "upload_media",
+            {
+                "data": base64.b64encode(clip(tmp).read_bytes()).decode(),
+                "filename": "clip.mp4",
+                "mime_type": "video/mp4",
+            },
+        )
+        got = client.call("get_media")
+        assert got["content"][1]["type"] == "resource", got["content"][1]
+        assert got["content"][1]["resource"]["mimeType"] == "video/mp4"
+
+        listed = client.call("list_media")["structuredContent"]["items"]
+        assert len(listed) == 2, listed
+        missing = client.call("get_media", {"id": "nope"})
+        assert missing["isError"] is True, missing
+        client.call("delete_media", {"id": item["id"]})
+        assert client.close() == 0, "the stdio server exits 0"
+    finally:
+        if client.proc.poll() is None:
+            client.proc.kill()
+    return f"{len(listed)} items", log
+
+
+def test_log_shape(log: Path) -> str:
+    records = [json.loads(line) for line in log.read_text().splitlines()]
+    assert records
+    for record in records:
+        assert record["ts"].endswith("Z"), record
+        assert record["transport"] == "stdio", record
+        assert record["version"] == "1", record
+        assert record["outcome"] in {
+            "ok",
+            "tool-error",
+            "rpc-error",
+            "refused",
+            "error",
+        }
+        assert "data" not in record.get("args", {}), record
+    calls = [r for r in records if r.get("method") == "tools/call"]
+    assert {r.get("tool") for r in calls} >= {
+        "upload_media",
+        "get_media",
+        "list_media",
+        "delete_media",
+    }, calls
+    return f"{len(records)} records"
+
+
+def test_http(tmp: Path) -> str:
+    store = tmp / "http"
+    log = tmp / "http.jsonl"
+    port = free_port()
+    base = f"http://127.0.0.1:{port}"
+    proc = subprocess.Popen(
+        [
+            str(MCP),
+            "--http",
+            "--port",
+            str(port),
+            "--dir",
+            str(store),
+            "--log",
+            str(log),
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        wait_up(base, proc)
+        status, _, body = http("GET", base + "/")
+        assert status == 200, status
+        assert b"<title>picgo</title>" in body, body
+        status, _, body = http("GET", base + "/manifest.webmanifest")
+        assert status == 200, status
+        assert json.loads(body)["short_name"] == "picgo"
+        status, _, body = http("GET", base + "/api/media")
+        assert status == 200, status
+        assert json.loads(body)["items"] == []
+
+        status, _, body = http(
+            "POST",
+            base + "/api/media",
+            small_png(tmp).read_bytes(),
+            {"Content-Type": PNG, "X-Picgo-Filename": "small.png"},
+        )
+        assert status == 201, (status, body)
+        item = json.loads(body)
+        assert item["kind"] == "image", item
+
+        status, headers, data = http("GET", base + "/api/media/" + item["id"])
+        assert status == 200, status
+        assert headers["Content-Type"] == PNG, headers
+        with Image.open(io.BytesIO(data)) as image:
+            assert image.size == (800, 600), image.size
+
+        status, _, body = http("DELETE", base + "/api/media/" + item["id"])
+        assert status == 200, (status, body)
+        status, _, _ = http("GET", base + "/api/media/" + item["id"])
+        assert status == 404, status
+        return "PWA and REST API"
+    finally:
+        if proc.poll() is None:
+            proc.send_signal(signal.SIGTERM)
+            try:
+                assert proc.wait(timeout=15) == 0, "SIGTERM exits 0"
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                raise AssertionError("SIGTERM did not stop the server") from None
+
+
+def main() -> int:
+    tmp = Path(tempfile.mkdtemp(prefix="picgo-test."))
+    try:
+        case("upload resizes the long edge to 2048", lambda: test_resize(tmp))
+        case("PNG and MP4 keep their types", lambda: test_formats(tmp))
+        case("twelve uploads leave ten items", lambda: test_eviction(tmp))
+        case(
+            "get defaults to the latest and delete removes",
+            lambda: test_get_delete(tmp),
+        )
+        case("concurrent uploads leave ten items", lambda: test_concurrent(tmp))
+        mcp_log: dict[str, Path] = {}
+
+        def run_mcp() -> str:
+            detail, log = test_mcp(tmp)
+            mcp_log["log"] = log
+            return detail
+
+        case("MCP serves the four tools over stdio", run_mcp)
+        case(
+            "MCP request records follow the shared format",
+            lambda: test_log_shape(mcp_log["log"]),
+        )
+        case("HTTP serves the PWA and the REST API", lambda: test_http(tmp))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print(f"1..{NUMBER}")
+    return 1 if FAILED else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

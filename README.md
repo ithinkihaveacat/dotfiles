@@ -60,7 +60,8 @@ state and connectivity testing on phone and Wear OS),
 [`agent-config`](skills/agent-config/) (skill selection, agent tool permissions,
 MCP servers and Andon alerts), and [`workspace-tools`](skills/workspace-tools/)
 (runtimes, `.envrc` blocks and git hooks). Personal-workflow skills live here
-too: [`agent-review`](skills/agent-review/), [`pinboard`](skills/pinboard/),
+too: [`agent-review`](skills/agent-review/), [`picgo`](skills/picgo/) (the last
+ten photos and videos, for sharing with agents), [`pinboard`](skills/pinboard/),
 [`taskgo`](skills/taskgo/), [`technical-writing`](skills/technical-writing/),
 and [`travel`](skills/travel/).
 
