@@ -431,6 +431,46 @@ def method_allowed(path: str, method: str) -> tuple[bool, str]:
     return True, ""
 
 
+class RangeError(Exception):
+    """A valid byte range that starts past the end of the item."""
+
+
+def byte_range(value: str, total: int) -> tuple[int, int] | None:
+    """The single byte range in a Range header, or None to send the whole item.
+
+    A malformed, multi-range or non-bytes header is ignored, as HTTP allows.
+    A valid range past the end raises RangeError, for a 416."""
+    if not value or "," in value or total <= 0:
+        return None
+    unit, _, spec = value.partition("=")
+    if unit.strip().lower() != "bytes":
+        return None
+    spec = spec.strip()
+    if not spec or "-" not in spec:
+        return None
+    first, _, last = spec.partition("-")
+    first, last = first.strip(), last.strip()
+    if not first:
+        if not last.isdigit():
+            return None
+        suffix = int(last)
+        if suffix <= 0:
+            raise RangeError
+        return max(0, total - suffix), total - 1
+    try:
+        start = int(first)
+        end = int(last) if last else total - 1
+    except ValueError:
+        return None
+    if start < 0:
+        return None
+    if start >= total:
+        raise RangeError
+    if end < start:
+        return None
+    return start, min(end, total - 1)
+
+
 async def read_body(request: Any, limit: int) -> tuple[bytes, bool]:
     """Read a request body, stopping as soon as it passes LIMIT.
 
@@ -667,16 +707,47 @@ def build_app(store: Any, verifier: AccessVerifier | None, log: RequestLog) -> A
         try:
             if request.method == "GET":
                 item, data = await anyio.to_thread.run_sync(store.get, item_id)
+                total = len(data)
+                headers = {
+                    "accept-ranges": "bytes",
+                    "cache-control": "private, max-age=31536000, immutable",
+                }
+                try:
+                    selection = byte_range(request.headers.get("range", ""), total)
+                except RangeError:
+                    if event:
+                        event.tool = "get_media"
+                        event.size = 0
+                    return Response(
+                        status_code=416,
+                        headers={
+                            **headers,
+                            "content-range": f"bytes */{total}",
+                        },
+                    )
+                if selection is not None:
+                    start, end = selection
+                    chunk = data[start : end + 1]
+                    if event:
+                        event.tool = "get_media"
+                        event.size = len(chunk)
+                    return Response(
+                        chunk,
+                        status_code=206,
+                        media_type=item.mime_type,
+                        headers={
+                            **headers,
+                            "content-range": f"bytes {start}-{end}/{total}",
+                            "content-length": str(len(chunk)),
+                        },
+                    )
                 if event:
                     event.tool = "get_media"
-                    event.size = len(data)
+                    event.size = total
                 return Response(
                     data,
                     media_type=item.mime_type,
-                    headers={
-                        "content-length": str(len(data)),
-                        "cache-control": "private, max-age=31536000, immutable",
-                    },
+                    headers={**headers, "content-length": str(total)},
                 )
             item = await anyio.to_thread.run_sync(store.delete, item_id)
         except cli.NotFoundError as e:
