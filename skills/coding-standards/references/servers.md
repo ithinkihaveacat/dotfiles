@@ -51,6 +51,6 @@ preference.
   writer's output against it, so that a server that drifts fails its own tests.
 
 In this repository the MCP servers (`taskgo mcp`, `skill mcp`, `pinboard mcp`,
-`andon mcp`) are such a family. Each writes a request log; `mcp logs` reads
-them, and `skills/agent-config/references/mcp-logs.md` is the record format that
-every server's tests check against.
+`andon mcp`, `picgo mcp`) are such a family. Each writes a request log;
+`mcp logs` reads them, and `skills/agent-config/references/mcp-logs.md` is the
+record format that every server's tests check against.

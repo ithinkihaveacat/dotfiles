@@ -1,0 +1,1227 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "anyio==4.15.1",
+#     "cffi==2.1.1",
+#     "cryptography==50.0.2",
+#     "mcp==2.3.0",
+#     "mcp-types==2.3.0",
+#     "pillow==13.0.0",
+#     "pillow-heif==1.8.1",
+#     "pycparser==3.12",
+#     "PyJWT==2.15.1",
+#     "pydantic==2.14.1",
+#     "pydantic-core==2.50.1",
+#     "starlette==1.10.0",
+#     "uvicorn==0.54.0",
+# ]
+# ///
+# Tests: skills/picgo/tests/test-picgo
+"""The 'picgo mcp' server: an MCP endpoint at /mcp and the PWA's REST API.
+
+It imports 'picgo' for the store, so the CLI and the server share one
+implementation of upload, resize, eviction and locking. Over HTTP it serves:
+
+  GET    /                      the PWA
+  GET    /manifest.webmanifest  the PWA manifest
+  GET    /icon.svg              the PWA icon
+  POST   /api/media             raw body, Content-Type + X-Picgo-Filename
+  GET    /api/media             JSON list, newest first
+  GET    /api/media/<id>        the bytes
+  DELETE /api/media/<id>        remove one
+  GET    /up                    health, unauthenticated
+  POST   /mcp                   Streamable HTTP MCP
+
+Behind Cloudflare Access, every path but /up checks Cf-Access-Jwt-Assertion.
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import contextlib
+import contextvars
+import datetime
+import hashlib
+import importlib.util
+import json
+import os
+import re
+import signal
+import sys
+import threading
+import time
+from dataclasses import dataclass, field
+from importlib.machinery import SourceFileLoader
+from pathlib import Path
+from typing import Any, NoReturn
+from urllib.parse import unquote
+
+PROG = "picgo mcp"
+VERSION = "1"
+DEFAULT_PORT = 8793
+MCP_PATH = "/mcp"
+LOOPBACK = ("127.0.0.1", "localhost", "::1")
+ACCESS_HEADER = "cf-access-jwt-assertion"
+CERTS_TTL = 3600
+LOG_ENV = "PICGO_MCP_LOG"
+DIR_ENV = "PICGO_DIR"
+EDGE_ENV = "PICGO_MAX_EDGE"
+MAX_REQUEST_BYTES = 96 * 1024 * 1024
+CALLER_CLAIMS = ("sub", "email", "client_id", "azp")
+# Arguments a record keeps: an item ID, never an image or a filename.
+LOG_ARGS = ("id",)
+LOG_HASHED: tuple[str, ...] = ()
+# Content types an ImageContent block can safely carry; everything else is
+# attached as a blob resource.
+IMAGE_BLOCK_TYPES = frozenset({"image/jpeg", "image/png", "image/gif", "image/webp"})
+
+
+def die(msg: str, code: int = 1) -> NoReturn:
+    print(f"{PROG}: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def log_line(msg: str) -> None:
+    print(f"{PROG}: {msg}", file=sys.stderr, flush=True)
+
+
+def skill_root() -> Path:
+    """The directory holding this skill's SKILL.md, found by sentinel rather
+    than depth. PICGO_SKILL_DIR names it when the script has been copied."""
+    override = os.environ.get("PICGO_SKILL_DIR")
+    if override:
+        return Path(override).expanduser().resolve()
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "SKILL.md").is_file():
+            return parent
+    die("cannot find SKILL.md above this script; set PICGO_SKILL_DIR")
+
+
+def load_cli() -> Any:
+    path = skill_root() / "scripts" / "picgo"
+    if not path.is_file():
+        die(f"{path} not found; set PICGO_SKILL_DIR")
+    loader = SourceFileLoader("picgo_cli", str(path))
+    spec = importlib.util.spec_from_loader("picgo_cli", loader)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["picgo_cli"] = module
+    loader.exec_module(module)
+    return module
+
+
+cli = load_cli()
+
+
+# --- Request log ---------------------------------------------------------------
+# The request log writer of this repository's MCP servers. skill-mcp,
+# pinboard-mcp and picgo-mcp carry this block; taskgo and andon write the same
+# records with code of their own. 'mcp logs' reads them all, and its format
+# reference (skills/agent-config/references/mcp-logs.md) is the specification;
+# each server's tests check its records against it. Each file defines PROG,
+# VERSION, LOG_ARGS and LOG_HASHED outside the block.
+#
+# One JSON line per message, and per job the server starts itself, in --log,
+# else <TOOL>_MCP_LOG, else $XDG_STATE_HOME/<tool>/mcp.jsonl; rotated at 8 MiB
+# to FILE.1 (newest) to FILE.4, each append under flock. Fields, any of them
+# left out when empty:
+#   ts         UTC, ISO 8601 with milliseconds and Z
+#   transport  stdio, http, or background (a job the server started)
+#   event      a background job's name, such as sync
+#   http       the HTTP method
+#   method     the JSON-RPC method
+#   tool, args the tool, and its allowlisted arguments as short strings
+#   outcome    ok; tool-error (isError); rpc-error (a JSON-RPC error);
+#              refused (declined before it ran: auth, method, rate limit);
+#              error (no answer could be given)
+#   status, ms, bytes   HTTP status, duration, size of a tool's result
+#   reason     why it was not ok: a short phrase, never quoting input
+#   agent      the client's User-Agent
+#   caller     10 hex digits of SHA-256 over the Access token's identifying
+#              claims, or over stdio, the pid and start time
+#   commit     a Git commit the call made or read
+#   version    the server's
+# plus a tool's own fields. Over HTTP, GET /up is open and unlogged and reports
+# version and source commit.
+
+LOG_ROTATE_BYTES = 8 * 1024 * 1024
+LOG_ROTATED = 4  # FILE.1 (newest) to FILE.4
+LOG_QUOTED = re.compile(r"'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"")
+RPC_ERRORS = {
+    -32700: "parse error",
+    -32600: "invalid request",
+    -32601: "method not found",
+    -32602: "invalid params",
+    -32603: "internal error",
+}
+TOOLS = ("upload_media", "get_media", "list_media", "delete_media")
+
+
+def log_text(value: Any, limit: int = 80) -> str | None:
+    if value is None:
+        return None
+    text = str(value)
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def log_value(value: Any) -> str:
+    text = str(value)
+    plain = re.fullmatch(r"[\w./:@+-]+", text, re.ASCII)
+    return text if plain else json.dumps(text, ensure_ascii=False)
+
+
+def log_reason(message: str) -> str:
+    return LOG_QUOTED.sub("'…'", str(message).split("\n", 1)[0])
+
+
+def caller_key(*parts: Any) -> str:
+    joined = "\0".join("" if p is None else str(p) for p in parts)
+    return hashlib.sha256(joined.encode()).hexdigest()[:10]
+
+
+def log_args(args: dict[str, Any]) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for k, v in args.items():
+        if k in LOG_ARGS and isinstance(v, (str, int, float, bool, list)):
+            v = " ".join(str(x) for x in v) if isinstance(v, list) else v
+            out[k] = log_text(" ".join(str(v).split()), 60) or ""
+        elif k in LOG_HASHED and v not in (None, "", []):
+            text = json.dumps(v, ensure_ascii=False, sort_keys=True)
+            out[k] = "#" + hashlib.sha256(text.encode()).hexdigest()[:12]
+    return out
+
+
+@dataclass
+class Event:
+    transport: str
+    started: float = field(default_factory=time.monotonic)
+    at: float = field(default_factory=time.time)
+    event: str | None = None
+    http: str | None = None
+    method: Any = None
+    tool: Any = None
+    args: dict[str, str] | None = None
+    outcome: str = "ok"
+    status: int | None = None
+    size: int | None = None
+    reason: str | None = None
+    agent: str | None = None
+    caller: str | None = None
+    commit: str | None = None
+    extra: dict[str, Any] = field(default_factory=dict)
+
+    def fail(self, outcome: str, reason: str) -> None:
+        self.outcome, self.reason = outcome, reason
+
+    def record(self) -> dict[str, Any]:
+        stamp = datetime.datetime.fromtimestamp(self.at, datetime.UTC)
+        rec = {
+            "ts": stamp.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+            "transport": self.transport,
+            "event": self.event,
+            "http": self.http,
+            "method": log_text(self.method),
+            "tool": log_text(self.tool),
+            "args": self.args or None,
+            "outcome": self.outcome,
+            "status": self.status,
+            "ms": int((time.monotonic() - self.started) * 1000),
+            "bytes": self.size,
+            "reason": log_text(self.reason, 200),
+            "agent": log_text(self.agent),
+            "caller": self.caller,
+            "commit": self.commit,
+            **self.extra,
+            "version": VERSION,
+        }
+        return {k: v for k, v in rec.items() if v is not None}
+
+
+EVENT: contextvars.ContextVar[Event | None] = contextvars.ContextVar(
+    "EVENT", default=None
+)
+
+
+class RequestLog:
+    """A record goes to stderr and the log file. Logging never fails a
+    request: a record the file cannot take is dropped, with one warning."""
+
+    def __init__(self, path: Path | None):
+        self.path = path
+        self.warned = False
+        self.lock = threading.Lock()
+
+    def emit(self, event: Event) -> None:
+        rec = event.record()
+        line = " ".join(
+            f"{k}={log_value(v)}"
+            for k, v in rec.items()
+            if k not in ("ts", "args", "version")
+        )
+        print(f"{PROG}: request {line}", file=sys.stderr, flush=True)
+        if self.path is None:
+            return
+        with self.lock:
+            try:
+                self.append(json.dumps(rec, ensure_ascii=False) + "\n")
+            except OSError as e:
+                if not self.warned:
+                    self.warned = True
+                    print(
+                        f"{PROG}: cannot use the request log {self.path}: {e}",
+                        file=sys.stderr,
+                    )
+
+    def append(self, line: str) -> None:
+        import fcntl
+
+        assert self.path is not None
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        for _ in range(3):
+            with open(self.path, "a", encoding="utf-8") as fh:
+                fcntl.flock(fh, fcntl.LOCK_EX)
+                st = os.fstat(fh.fileno())
+                try:
+                    current = os.stat(self.path).st_ino == st.st_ino
+                except FileNotFoundError:
+                    current = False
+                if not current:
+                    continue
+                if st.st_size and st.st_size + len(line) > LOG_ROTATE_BYTES:
+                    for i in range(LOG_ROTATED - 1, 0, -1):
+                        if Path(f"{self.path}.{i}").exists():
+                            os.replace(f"{self.path}.{i}", f"{self.path}.{i + 1}")
+                    os.replace(self.path, f"{self.path}.1")
+                    with open(self.path, "a", encoding="utf-8") as fresh:
+                        fcntl.flock(fresh, fcntl.LOCK_EX)
+                        fresh.write(line)
+                else:
+                    fh.write(line)
+                return
+        raise OSError(f"{self.path} kept being rotated")
+
+
+def default_log() -> Path:
+    base = os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local/state")
+    return Path(base) / "picgo" / "mcp.jsonl"
+
+
+def source_commit() -> str | None:
+    import subprocess
+
+    with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+        proc = subprocess.run(
+            ["git", "-C", str(Path(__file__).resolve().parent), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        return proc.stdout.strip()[:12] if proc.returncode == 0 else None
+    return None
+
+
+def request_logging(log: RequestLog) -> Any:
+    from mcp.shared.exceptions import MCPError
+    from pydantic import ValidationError
+
+    stdio_caller = caller_key("stdio", os.getpid(), time.time())
+
+    async def logged(ctx: Any, call_next: Any) -> Any:
+        event = EVENT.get()
+        own = event is None
+        if own:
+            event = Event("stdio", caller=stdio_caller)
+        event.method = ctx.method
+        token = EVENT.set(event)
+        try:
+            return await call_next(ctx)
+        except MCPError as e:
+            event.fail("rpc-error", RPC_ERRORS.get(e.code, f"error {e.code}"))
+            raise
+        except ValidationError:
+            event.fail("rpc-error", RPC_ERRORS[-32602])
+            raise
+        except Exception:
+            event.fail("rpc-error", RPC_ERRORS[-32603])
+            raise
+        finally:
+            EVENT.reset(token)
+            if own:
+                log.emit(event)
+
+    return logged
+
+
+# --- HTTP --------------------------------------------------------------------
+
+
+class AccessError(Exception):
+    """A request without a usable Cloudflare Access token."""
+
+
+class AccessVerifier:
+    """Checks Cloudflare Access JWTs (Cf-Access-Jwt-Assertion): RS256
+    signature against the team's certificates, issuer, audience, and expiry."""
+
+    def __init__(self, team: str, audience: str, certs_url: str | None = None):
+        import jwt
+
+        self.jwt = jwt
+        self.team, self.audience = team, audience
+        self.jwks = jwt.PyJWKClient(
+            certs_url or f"https://{team}/cdn-cgi/access/certs",
+            cache_keys=True,
+            lifespan=CERTS_TTL,
+            headers={"User-Agent": f"picgo-mcp/{VERSION}"},
+            timeout=10,
+        )
+
+    def verify(self, token: str) -> dict[str, Any]:
+        jwt = self.jwt
+        try:
+            key = self.jwks.get_signing_key_from_jwt(token)
+            return jwt.decode(
+                token,
+                key.key,
+                algorithms=["RS256"],
+                audience=self.audience,
+                issuer=f"https://{self.team}",
+                leeway=60,
+                options={"require": ["exp", "iss", "aud"]},
+            )
+        except jwt.ExpiredSignatureError:
+            raise AccessError("Access token expired") from None
+        except jwt.InvalidAudienceError:
+            raise AccessError("Access token for another application") from None
+        except jwt.InvalidIssuerError:
+            raise AccessError("Access token from another team") from None
+        except jwt.PyJWKClientError as e:
+            raise AccessError(f"Access token key not usable: {e}") from None
+        except jwt.PyJWTError as e:
+            raise AccessError(f"Access token refused: {e}") from None
+
+
+async def reply(
+    send: Any,
+    status: int,
+    body: bytes,
+    ctype: str,
+    extra: Any = (),
+    head: bool = False,
+) -> None:
+    headers = [(b"content-type", ctype.encode())]
+    headers += [(b"content-length", str(len(body)).encode())]
+    headers += [(k.encode(), v.encode()) for k, v in extra]
+    await send({"type": "http.response.start", "status": status, "headers": headers})
+    await send({"type": "http.response.body", "body": b"" if head else body})
+
+
+def method_allowed(path: str, method: str) -> tuple[bool, str]:
+    if path == MCP_PATH:
+        return method == "POST", "POST"
+    if path == "/api/media":
+        return method in ("GET", "POST"), "GET, POST"
+    if path.startswith("/api/media/"):
+        return method in ("GET", "DELETE"), "GET, DELETE"
+    if path in ("/", "/manifest.webmanifest", "/icon.svg"):
+        return method in ("GET", "HEAD"), "GET, HEAD"
+    return True, ""
+
+
+class RangeError(Exception):
+    """A valid byte range that starts past the end of the item."""
+
+
+def byte_range(value: str, total: int) -> tuple[int, int] | None:
+    """The single byte range in a Range header, or None to send the whole item.
+
+    A malformed, multi-range or non-bytes header is ignored, as HTTP allows.
+    A valid range past the end raises RangeError, for a 416."""
+    if not value or "," in value or total <= 0:
+        return None
+    unit, _, spec = value.partition("=")
+    if unit.strip().lower() != "bytes":
+        return None
+    spec = spec.strip()
+    if not spec or "-" not in spec:
+        return None
+    first, _, last = spec.partition("-")
+    first, last = first.strip(), last.strip()
+    if not first:
+        if not last.isdigit():
+            return None
+        suffix = int(last)
+        if suffix <= 0:
+            raise RangeError
+        return max(0, total - suffix), total - 1
+    try:
+        start = int(first)
+        end = int(last) if last else total - 1
+    except ValueError:
+        return None
+    if start < 0:
+        return None
+    if start >= total:
+        raise RangeError
+    if end < start:
+        return None
+    return start, min(end, total - 1)
+
+
+async def read_body(request: Any, limit: int) -> tuple[bytes, bool]:
+    """Read a request body, stopping as soon as it passes LIMIT.
+
+    Reading the stream rather than request.body() means a chunked upload
+    without Content-Length cannot buffer more than the limit before it is
+    refused."""
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > limit:
+            return b"", True
+        chunks.append(chunk)
+    return b"".join(chunks), False
+
+
+def host_allowed(value: str, allowed: list[str]) -> bool:
+    """Whether a Host header names one of the server's allowed hosts.
+
+    The MCP transport applies the same list to /mcp; checking it here as
+    well keeps the REST routes (and the PWA) from being reachable through a
+    DNS-rebinding origin."""
+    value = value.strip().lower().rstrip(".")
+    for pattern in allowed:
+        pattern = pattern.lower()
+        if pattern.endswith(":*"):
+            base = pattern[:-2]
+            if value == base or value.startswith(base + ":"):
+                return True
+        elif value == pattern:
+            return True
+    return False
+
+
+class Gate:
+    """ASGI: the health check, the Host check, the Access check, the method
+    check, and one request record. Routes fill in the tool and size on the
+    event."""
+
+    def __init__(
+        self,
+        app: Any,
+        verifier: AccessVerifier | None,
+        log: RequestLog,
+        allowed_hosts: list[str],
+    ):
+        self.app, self.verifier, self.log = app, verifier, log
+        self.allowed_hosts = allowed_hosts
+        health = {"status": "ok", "version": VERSION, "commit": source_commit()}
+        self.health = json.dumps(health).encode()
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        headers = {
+            k.decode("latin-1").lower(): v.decode("latin-1")
+            for k, v in scope["headers"]
+        }
+        path, method = scope["path"], scope["method"]
+        if path == "/up" and method in ("GET", "HEAD"):
+            await reply(
+                send,
+                200,
+                self.health,
+                "application/json",
+                head=method == "HEAD",
+            )
+            return
+        event = Event("http", http=method, agent=headers.get("user-agent"))
+        token = EVENT.set(event)
+        try:
+            if not host_allowed(headers.get("host", ""), self.allowed_hosts):
+                event.fail("refused", "untrusted host")
+                event.status = 421
+                await reply(
+                    send, 421, b"misdirected request\n", "text/plain; charset=utf-8"
+                )
+                return
+            allowed, allow = method_allowed(path, method)
+            refusal: tuple[int, str, Any] | None = None
+            if self.verifier is not None:
+                presented = headers.get(ACCESS_HEADER, "").strip()
+                if not presented:
+                    refusal = 401, "unauthorized", ()
+                else:
+                    try:
+                        claims = self.verifier.verify(presented)
+                    except AccessError:
+                        refusal = 401, "unauthorized", ()
+                    else:
+                        event.caller = caller_key(
+                            *(claims.get(c) for c in CALLER_CLAIMS)
+                        )
+            if refusal is None and not allowed:
+                refusal = 405, "method not allowed", (("allow", allow),)
+
+            async def sending(message: dict[str, Any]) -> None:
+                if message["type"] == "http.response.start":
+                    event.status = message["status"]
+                    if event.status >= 400 and event.outcome == "ok":
+                        event.fail(
+                            "rpc-error" if event.status == 400 else "tool-error",
+                            f"HTTP {event.status}",
+                        )
+                await send(message)
+
+            if refusal:
+                event.fail("refused", refusal[1])
+                body = (refusal[1] + "\n").encode()
+                await reply(
+                    sending, refusal[0], body, "text/plain; charset=utf-8", refusal[2]
+                )
+            else:
+                await self.app(scope, receive, sending)
+        except BaseException as e:
+            event.fail("error", type(e).__name__)
+            raise
+        finally:
+            EVENT.reset(token)
+            self.log.emit(event)
+
+
+def pwa() -> bytes:
+    path = skill_root() / "www" / "index.html"
+    try:
+        return path.read_bytes()
+    except OSError as e:
+        die(f"cannot read the PWA at {path}: {e}")
+
+
+MANIFEST = {
+    "name": "picgo",
+    "short_name": "picgo",
+    "description": "The last ten images and videos.",
+    "start_url": "/",
+    "scope": "/",
+    "display": "standalone",
+    "background_color": "#111417",
+    "theme_color": "#111417",
+    "icons": [
+        {"src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any"}
+    ],
+}
+
+ICON = b"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+<rect width="512" height="512" rx="96" fill="#111417"/>
+<rect x="96" y="144" width="320" height="224" rx="32" fill="none" stroke="#f4f4f4" stroke-width="24"/>
+<circle cx="256" cy="256" r="64" fill="none" stroke="#f4f4f4" stroke-width="24"/>
+<circle cx="352" cy="200" r="16" fill="#f4f4f4"/>
+</svg>"""
+
+
+def build_app(store: Any, verifier: AccessVerifier | None, log: RequestLog) -> Any:
+    from mcp.server.transport_security import TransportSecuritySettings
+    from starlette.applications import Starlette
+    from starlette.responses import JSONResponse, Response
+    from starlette.routing import Route
+
+    sdk = sdk_server(store, log)
+    hosts = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
+    hosts += [h if ":" in h else f"{h}:*" for h in ALLOW_HOSTS] + ALLOW_HOSTS
+    hosts = [h.lower() for h in hosts]
+    security = TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=hosts,
+        allowed_origins=["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"],
+    )
+    mcp_app = sdk.streamable_http_app(
+        streamable_http_path=MCP_PATH,
+        stateless_http=True,
+        json_response=True,
+        max_request_body_size=MAX_REQUEST_BYTES,
+        transport_security=security,
+    )
+    html = pwa()
+
+    async def index(request: Any) -> Response:
+        return Response(html, media_type="text/html; charset=utf-8")
+
+    async def manifest(request: Any) -> Response:
+        return JSONResponse(MANIFEST)
+
+    async def icon(request: Any) -> Response:
+        return Response(ICON, media_type="image/svg+xml")
+
+    async def api_media(request: Any) -> Response:
+        import anyio
+
+        event = EVENT.get()
+        if request.method == "GET":
+            items = await anyio.to_thread.run_sync(store.list)
+            payload = {"items": [i.as_dict() for i in items]}
+            if event:
+                event.tool = "list_media"
+                event.size = len(json.dumps(payload))
+            return JSONResponse(payload)
+        limit = cli.env_int(cli.MAX_UPLOAD_ENV, cli.MAX_UPLOAD_BYTES)
+        length = request.headers.get("content-length", "")
+        if length.isdigit() and int(length) > limit:
+            if event:
+                event.fail("tool-error", "upload too large")
+            return JSONResponse({"error": "the upload is too large"}, status_code=413)
+        body, too_large = await read_body(request, limit)
+        if too_large:
+            if event:
+                event.fail("tool-error", "upload too large")
+            return JSONResponse({"error": "the upload is too large"}, status_code=413)
+        filename = unquote(request.headers.get("x-picgo-filename", "")) or None
+        try:
+            item = await anyio.to_thread.run_sync(
+                lambda: store.put(
+                    body,
+                    mime=request.headers.get("content-type"),
+                    filename=filename,
+                )
+            )
+        except cli.Error as e:
+            if event:
+                event.fail("tool-error", "invalid upload")
+            return JSONResponse({"error": str(e)}, status_code=400)
+        if event:
+            event.tool = "upload_media"
+            event.size = item.bytes
+        return JSONResponse(item.as_dict(), status_code=201)
+
+    async def api_item(request: Any) -> Response:
+        import anyio
+
+        event = EVENT.get()
+        item_id = request.path_params["id"]
+        if event:
+            event.args = log_args({"id": item_id})
+        try:
+            if request.method == "GET":
+                item, data = await anyio.to_thread.run_sync(store.get, item_id)
+                total = len(data)
+                headers = {
+                    "accept-ranges": "bytes",
+                    "cache-control": "private, max-age=31536000, immutable",
+                }
+                try:
+                    selection = byte_range(request.headers.get("range", ""), total)
+                except RangeError:
+                    if event:
+                        event.tool = "get_media"
+                        event.size = 0
+                    return Response(
+                        status_code=416,
+                        headers={
+                            **headers,
+                            "content-range": f"bytes */{total}",
+                        },
+                    )
+                if selection is not None:
+                    start, end = selection
+                    chunk = data[start : end + 1]
+                    if event:
+                        event.tool = "get_media"
+                        event.size = len(chunk)
+                    return Response(
+                        chunk,
+                        status_code=206,
+                        media_type=item.mime_type,
+                        headers={
+                            **headers,
+                            "content-range": f"bytes {start}-{end}/{total}",
+                            "content-length": str(len(chunk)),
+                        },
+                    )
+                if event:
+                    event.tool = "get_media"
+                    event.size = total
+                return Response(
+                    data,
+                    media_type=item.mime_type,
+                    headers={**headers, "content-length": str(total)},
+                )
+            item = await anyio.to_thread.run_sync(store.delete, item_id)
+        except cli.NotFoundError as e:
+            if event:
+                event.fail("tool-error", "not found")
+            return JSONResponse({"error": str(e)}, status_code=404)
+        if event:
+            event.tool = "delete_media"
+        return JSONResponse(item.as_dict())
+
+    async def health(request: Any) -> Response:
+        return JSONResponse(
+            {"status": "ok", "version": VERSION, "commit": source_commit()}
+        )
+
+    @contextlib.asynccontextmanager
+    async def lifespan(app: Any) -> Any:
+        async with sdk.session_manager.run():
+            yield
+
+    routes = [
+        Route("/up", health, methods=["GET", "HEAD"]),
+        Route("/", index, methods=["GET", "HEAD"]),
+        Route("/manifest.webmanifest", manifest, methods=["GET", "HEAD"]),
+        Route("/icon.svg", icon, methods=["GET", "HEAD"]),
+        Route("/api/media", api_media, methods=["GET", "POST"]),
+        Route("/api/media/{id}", api_item, methods=["GET", "DELETE"]),
+        *mcp_app.routes,
+    ]
+    app = Starlette(routes=routes, lifespan=lifespan)
+    return Gate(app, verifier, log, hosts)
+
+
+def serve_http(
+    store: Any,
+    host: str,
+    port: int,
+    verifier: AccessVerifier | None,
+    log: RequestLog,
+) -> None:
+    import uvicorn
+
+    auth = f"Access {verifier.team}" if verifier else "no authentication"
+    log_line(
+        f"serving {MCP_PATH} on http://{host}:{port} ({auth}); request log {log.path}"
+    )
+    uvicorn.run(
+        build_app(store, verifier, log),
+        host=host,
+        port=port,
+        log_level="warning",
+        access_log=False,
+        server_header=False,
+    )
+
+
+# --- MCP ---------------------------------------------------------------------
+
+
+def tool_listing() -> list[dict[str, Any]]:
+    return [
+        {
+            "name": "upload_media",
+            "description": (
+                "Add an image or a video from base64 data. Images are resized "
+                "so the long edge is at most 2048 px; the newest ten items are "
+                "kept and older ones are evicted."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "data": {"type": "string", "description": "Base64-encoded bytes"},
+                    "filename": {
+                        "type": "string",
+                        "description": "The original name, used to infer the type",
+                    },
+                    "mime_type": {
+                        "type": "string",
+                        "description": "The content type, such as image/jpeg",
+                    },
+                },
+                "required": ["data"],
+                "additionalProperties": False,
+            },
+            "annotations": {
+                "readOnlyHint": False,
+                "destructiveHint": False,
+                "idempotentHint": False,
+                "openWorldHint": False,
+                "title": "Upload media",
+            },
+        },
+        {
+            "name": "get_media",
+            "description": (
+                "Return the most recent image or video, or the item named by "
+                "id, with its bytes attached: an image content block for a "
+                "photo and a blob resource for a video."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "description": "An item ID; default: the most recent",
+                    }
+                },
+                "additionalProperties": False,
+            },
+            "annotations": {
+                "readOnlyHint": True,
+                "destructiveHint": False,
+                "idempotentHint": True,
+                "openWorldHint": False,
+                "title": "Get media",
+            },
+        },
+        {
+            "name": "list_media",
+            "description": (
+                "List the stored items, newest first, as metadata without bytes."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+            "annotations": {
+                "readOnlyHint": True,
+                "destructiveHint": False,
+                "idempotentHint": True,
+                "openWorldHint": False,
+                "title": "List media",
+            },
+        },
+        {
+            "name": "delete_media",
+            "description": "Delete one stored item by ID.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"id": {"type": "string", "description": "The item ID"}},
+                "required": ["id"],
+                "additionalProperties": False,
+            },
+            "annotations": {
+                "readOnlyHint": False,
+                "destructiveHint": True,
+                "idempotentHint": True,
+                "openWorldHint": False,
+                "title": "Delete media",
+            },
+        },
+    ]
+
+
+def sdk_server(store: Any, log: RequestLog) -> Any:
+    import anyio
+    import mcp_types as types
+    from mcp.server.lowlevel import Server
+    from mcp.shared.exceptions import MCPError
+
+    def result(payload: dict[str, Any], size: int | None = None) -> Any:
+        event = EVENT.get()
+        if event and size is not None:
+            event.size = size
+        return types.CallToolResult(
+            content=[
+                types.TextContent(
+                    type="text", text=json.dumps(payload, ensure_ascii=False)
+                )
+            ],
+            structured_content=payload,
+        )
+
+    def failed(message: str) -> Any:
+        event = EVENT.get()
+        if event:
+            event.fail("tool-error", "invalid request")
+        return types.CallToolResult(
+            content=[types.TextContent(type="text", text=f"error: {message}")],
+            is_error=True,
+        )
+
+    async def list_tools(ctx: Any, params: Any) -> Any:
+        return types.ListToolsResult(
+            tools=[types.Tool.model_validate(t) for t in tool_listing()]
+        )
+
+    async def call_tool(ctx: Any, params: Any) -> Any:
+        if params.name not in TOOLS:
+            raise MCPError(
+                code=types.INVALID_PARAMS, message=f"unknown tool: {params.name}"
+            )
+        global ACTIVE
+        with ACTIVE_LOCK:
+            ACTIVE += 1
+        try:
+            return await _call_tool(params)
+        finally:
+            with ACTIVE_LOCK:
+                ACTIVE -= 1
+
+    async def _call_tool(params: Any) -> Any:
+        args = params.arguments or {}
+        event = EVENT.get()
+        if event:
+            event.tool = params.name
+            event.args = log_args(args)
+        try:
+            if params.name == "upload_media":
+                raw = base64.b64decode(str(args["data"]), validate=True)
+                item = await anyio.to_thread.run_sync(
+                    lambda: store.put(
+                        raw,
+                        mime=args.get("mime_type"),
+                        filename=args.get("filename"),
+                    )
+                )
+                return result(item.as_dict(), item.bytes)
+            if params.name == "get_media":
+                item, data = await anyio.to_thread.run_sync(store.get, args.get("id"))
+                meta = item.as_dict()
+                content: list[Any] = [
+                    types.TextContent(
+                        type="text", text=json.dumps(meta, ensure_ascii=False)
+                    )
+                ]
+                encoded = base64.b64encode(data).decode()
+                if item.mime_type in IMAGE_BLOCK_TYPES:
+                    content.append(
+                        types.ImageContent(
+                            type="image",
+                            data=encoded,
+                            mime_type=item.mime_type,
+                        )
+                    )
+                else:
+                    content.append(
+                        types.EmbeddedResource(
+                            type="resource",
+                            resource=types.BlobResourceContents(
+                                uri=f"picgo://{item.id}",
+                                mime_type=item.mime_type,
+                                blob=encoded,
+                            ),
+                        )
+                    )
+                if event:
+                    event.size = len(data)
+                return types.CallToolResult(content=content, structured_content=meta)
+            if params.name == "list_media":
+                items = await anyio.to_thread.run_sync(store.list)
+                payload = {"items": [i.as_dict() for i in items]}
+                return result(payload)
+            item = await anyio.to_thread.run_sync(store.delete, args["id"])
+            return result(item.as_dict(), item.bytes)
+        except KeyError as e:
+            return failed(f"missing argument: {e.args[0]}")
+        except cli.Error as e:
+            if event:
+                event.fail(
+                    "tool-error",
+                    "not found"
+                    if isinstance(e, cli.NotFoundError)
+                    else "invalid request",
+                )
+            return types.CallToolResult(
+                content=[types.TextContent(type="text", text=f"error: {e}")],
+                is_error=True,
+            )
+        except ValueError as e:  # base64 decoding
+            return failed(str(e))
+
+    sdk = Server(
+        "picgo",
+        version=VERSION,
+        title="Picgo",
+        instructions=(
+            "The last ten images and videos. get_media returns the most recent "
+            "item by default; its bytes are attached as an image block or a "
+            "blob resource. list_media shows metadata without bytes."
+        ),
+        on_list_tools=list_tools,
+        on_call_tool=call_tool,
+    )
+    sdk.middleware.append(request_logging(log))
+    return sdk
+
+
+ACTIVE = 0
+ACTIVE_LOCK = threading.Lock()
+
+
+def serve_stdio(store: Any, log: RequestLog) -> None:
+    import anyio
+    from mcp.server.stdio import stdio_server
+
+    def wait_idle() -> None:
+        """Exit once no tool call is running, or after a bounded wait.
+
+        The signal handler must return immediately: it runs on the same
+        thread as the event loop, and a tool call decrements ACTIVE from
+        that loop. Waiting here would deadlock a call blocked in a worker
+        thread."""
+        deadline = time.monotonic() + 30.0
+        while time.monotonic() < deadline:
+            with ACTIVE_LOCK:
+                if not ACTIVE:
+                    os._exit(0)
+            time.sleep(0.1)
+        os._exit(0)
+
+    def stop(signum: int, frame: Any) -> None:
+        threading.Thread(target=wait_idle, daemon=True).start()
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(sig, stop)
+
+    async def serve() -> None:
+        sdk = sdk_server(store, log)
+        async with stdio_server() as (read, write):
+            await sdk.run(read, write, sdk.create_initialization_options())
+
+    anyio.run(serve)
+
+
+# --- Command line ------------------------------------------------------------
+
+ALLOW_HOSTS: list[str] = []
+
+EPILOG = """\
+Tools:
+  upload_media   add an image or video from base64 data
+  get_media      the most recent item, or one ID, with its bytes attached
+  list_media     metadata only, newest first
+  delete_media   remove one item
+
+Environment:
+  PICGO_DIR                  The store (default: ~/.cache/picgo)
+  PICGO_MAX_EDGE             Longest edge for images (default: 2048)
+  PICGO_MAX_UPLOAD_BYTES     Largest accepted upload (default: 67108864)
+  PICGO_MCP_LOG              Request log (default:
+                             $XDG_STATE_HOME/picgo/mcp.jsonl)
+  PICGO_MCP_ACCESS_TEAM      Cloudflare Access team domain
+  PICGO_MCP_ACCESS_AUD       Cloudflare Access application audience tag
+  PICGO_MCP_ACCESS_CERTS_URL Team certificate URL, for testing
+
+Examples:
+  claude mcp add picgo -- picgo mcp
+  picgo mcp --http
+  picgo mcp --http --host 0.0.0.0 --allow-host picgo.example.com \\
+    --access-team example.cloudflareaccess.com --access-aud AUD
+  mcp logs --server picgo --since 1d
+
+Over stdio the server serves one store. Over HTTP it also serves the PWA at /
+and its REST API at /api/media. GET /up is open for a proxy's health check and
+is not logged. With both Access flags, every other request must carry a valid
+Cf-Access-Jwt-Assertion token; without them the server binds loopback only."""
+
+
+class Parser(argparse.ArgumentParser):
+    def error(self, message: str) -> NoReturn:
+        self.print_usage(sys.stderr)
+        print(
+            f"{self.prog}: {message}\nTry '{self.prog} --help' for more information.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    def format_help(self) -> str:
+        return (
+            super()
+            .format_help()
+            .replace("usage:", "Usage:", 1)
+            .replace("options:", "Options:", 1)
+            .replace(
+                "show this help message and exit",
+                "Display this help message and exit",
+                1,
+            )
+        )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = Parser(
+        prog=PROG,
+        description="Serve a store of the last ten images or videos over MCP, "
+        "and serve the PWA's REST API.",
+        epilog=EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--dir",
+        metavar="DIR",
+        help=f"The store (default: ${DIR_ENV}, else ~/.cache/picgo)",
+    )
+    parser.add_argument(
+        "--http", action="store_true", help=f"Serve HTTP at {MCP_PATH}, not stdio"
+    )
+    parser.add_argument("--host", default="127.0.0.1", help="HTTP address")
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=DEFAULT_PORT,
+        help=f"HTTP port (default: {DEFAULT_PORT})",
+    )
+    parser.add_argument(
+        "--allow-host",
+        action="append",
+        default=[],
+        metavar="HOST",
+        help="Also accept requests addressed to HOST, such as a tunnel's hostname",
+    )
+    parser.add_argument(
+        "--access-team",
+        metavar="HOST",
+        help="Cloudflare Access team domain (default: PICGO_MCP_ACCESS_TEAM)",
+    )
+    parser.add_argument(
+        "--access-aud",
+        metavar="AUD",
+        help="Cloudflare Access application audience tag "
+        "(default: PICGO_MCP_ACCESS_AUD)",
+    )
+    parser.add_argument(
+        "--log", metavar="FILE", help=f"Request log (default: ${LOG_ENV})"
+    )
+    return parser
+
+
+def main() -> int:
+    global ALLOW_HOSTS
+    args = build_parser().parse_args()
+    ALLOW_HOSTS = args.allow_host
+    log_path = Path(args.log or os.environ.get(LOG_ENV) or default_log()).expanduser()
+    log = RequestLog(log_path)
+    team = args.access_team or os.environ.get("PICGO_MCP_ACCESS_TEAM")
+    audience = args.access_aud or os.environ.get("PICGO_MCP_ACCESS_AUD")
+    if bool(team) != bool(audience):
+        die(
+            "Access needs both --access-team and --access-aud "
+            "(or PICGO_MCP_ACCESS_TEAM and PICGO_MCP_ACCESS_AUD)"
+        )
+    verifier = None
+    if args.http:
+        if team:
+            verifier = AccessVerifier(
+                team, audience, os.environ.get("PICGO_MCP_ACCESS_CERTS_URL") or None
+            )
+        elif args.host not in LOOPBACK:
+            die(f"--http without Access serves loopback only, not {args.host}")
+    elif args.access_team or args.access_aud:
+        die("--access-team and --access-aud apply only to --http")
+
+    path = args.dir or os.environ.get(DIR_ENV) or cli.default_dir()
+    store = cli.Store(path, cli.env_int(EDGE_ENV, cli.DEFAULT_MAX_EDGE))
+    store.ensure()
+    if args.http:
+        serve_http(store, args.host, args.port, verifier, log)
+    else:
+        serve_stdio(store, log)
+    return 0
+
+
+def sigterm_handler(signum: int, frame: Any) -> NoReturn:
+    raise KeyboardInterrupt
+
+
+if __name__ == "__main__":
+    # A server stops on a signal as asked, so it exits 0, not 130 or 143.
+    signal.signal(signal.SIGTERM, sigterm_handler)
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        sys.exit(0)

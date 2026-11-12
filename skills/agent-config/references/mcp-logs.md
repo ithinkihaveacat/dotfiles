@@ -1,11 +1,11 @@
 # MCP Request Logs
 
 The MCP servers in this repository (`taskgo mcp`, `skill mcp`, `pinboard mcp`,
-`andon mcp`) each write a request log, and `mcp logs` reads any number of them.
-The servers only write; reading, statistics and the web page belong to the
-reader. This file is the format both sides follow. Each server's tests check its
-records against the tables below, so a field or outcome added here, or in a
-server, must be added in both.
+`andon mcp`, `picgo mcp`) each write a request log, and `mcp logs` reads any
+number of them. The servers only write; reading, statistics and the web page
+belong to the reader. This file is the format both sides follow. Each server's
+tests check its records against the tables below, so a field or outcome added
+here, or in a server, must be added in both.
 
 ## Files
 
@@ -17,8 +17,8 @@ does not parse as JSON, or has no `ts`, is not a record (a write cut short
 leaves a partial line); readers skip it.
 
 The server's name is the directory the file is in (`taskgo`, `skill`,
-`pinboard`, `andon`), not a field of the record; `mcp logs --json` adds it to
-each record it prints, as `server`. The parser is `parse_record()` in
+`pinboard`, `andon`, `picgo`), not a field of the record; `mcp logs --json` adds
+it to each record it prints, as `server`. The parser is `parse_record()` in
 `scripts/mcp-logs`.
 
 ## Records

@@ -1,0 +1,779 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "pillow==13.0.0",
+#     "pillow-heif==1.8.1",
+# ]
+# ///
+"""Exercise the picgo CLI, the MCP server over stdio and the HTTP API. Prints
+TAP. No network access: the HTTP server binds loopback and Access is off."""
+
+from __future__ import annotations
+
+import base64
+import importlib.util
+import io
+import json
+import os
+import select
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import traceback
+import urllib.error
+import urllib.request
+from http.client import HTTPConnection
+from importlib.machinery import SourceFileLoader
+from pathlib import Path
+
+from PIL import Image
+
+HERE = Path(__file__).resolve().parent
+SKILL = HERE.parent
+PICGO = SKILL / "scripts" / "picgo"
+MCP = SKILL / "scripts" / "picgo-mcp"
+PNG = "image/png"
+NUMBER = 0
+FAILED = 0
+
+
+def report(name: str, ok: bool, detail: str = "") -> None:
+    global NUMBER, FAILED
+    NUMBER += 1
+    if not ok:
+        FAILED += 1
+    print(f"{'ok' if ok else 'not ok'} {NUMBER} - {name}", flush=True)
+    for line in [] if ok else detail.splitlines():
+        print(f"# {line}", flush=True)
+
+
+def case(name: str, fn) -> None:
+    try:
+        detail = str(fn() or "")
+    except Exception:
+        report(name, False, traceback.format_exc())
+    else:
+        report(name, True, detail)
+
+
+def run(args: list[str], *, check: bool = True, text: bool = True, env=None):
+    proc = subprocess.run(
+        [str(PICGO), *args],
+        capture_output=True,
+        text=text,
+        check=False,
+        env=env,
+    )
+    if check and proc.returncode != 0:
+        stderr = proc.stderr if text else proc.stderr.decode("utf-8", "replace")
+        raise AssertionError(f"picgo {args} exited {proc.returncode}: {stderr}")
+    return proc
+
+
+def make_image(path: Path, size: tuple[int, int], mode: str = "RGB") -> None:
+    image = Image.new(mode, size, (200, 80, 40) if mode == "RGB" else (0, 0, 0, 0))
+    image.save(path)
+
+
+def small_png(tmp: Path) -> Path:
+    path = tmp / "small.png"
+    if not path.exists():
+        make_image(path, (800, 600))
+    return path
+
+
+def big_jpeg(tmp: Path) -> Path:
+    path = tmp / "big.jpg"
+    if not path.exists():
+        make_image(path, (4000, 3000))
+    return path
+
+
+def clip(tmp: Path) -> Path:
+    path = tmp / "clip.mp4"
+    if not path.exists():
+        path.write_bytes(b"\x00\x00\x00\x18ftypmp42" + b"x" * 2000)
+    return path
+
+
+def items(store: Path) -> list[dict]:
+    return json.loads(run(["--dir", str(store), "list", "--json"]).stdout)
+
+
+def free_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def wait_up(base: str, proc: subprocess.Popen, timeout: float = 20.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            raise AssertionError(f"server exited {proc.returncode}")
+        try:
+            with urllib.request.urlopen(base + "/up", timeout=1) as response:
+                if response.status == 200:
+                    return
+        except OSError:
+            time.sleep(0.2)
+    raise AssertionError("the server did not become healthy")
+
+
+def start_server(store: Path, log: Path, *, env=None):
+    port = free_port()
+    base = f"http://127.0.0.1:{port}"
+    proc = subprocess.Popen(
+        [
+            str(MCP),
+            "--http",
+            "--port",
+            str(port),
+            "--dir",
+            str(store),
+            "--log",
+            str(log),
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+    )
+    wait_up(base, proc)
+    return proc, base
+
+
+def stop_server(proc: subprocess.Popen) -> None:
+    if proc.poll() is not None:
+        return
+    proc.send_signal(signal.SIGTERM)
+    try:
+        status = proc.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        raise AssertionError("SIGTERM did not stop the server") from None
+    assert status == 0, f"SIGTERM exited {status}"
+
+
+def child_pid(proc: subprocess.Popen) -> int | None:
+    for _ in range(50):
+        out = subprocess.run(
+            ["pgrep", "-P", str(proc.pid)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        pids = [int(p) for p in out.stdout.split() if p.isdigit()]
+        if pids:
+            return pids[0]
+        time.sleep(0.1)
+    return None
+
+
+def process_gone(pid: int) -> bool:
+    out = subprocess.run(
+        ["ps", "-o", "stat=", "-p", str(pid)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    state = out.stdout.strip()
+    return not state or state.startswith("Z")
+
+
+def http(method: str, url: str, data: bytes | None = None, headers: dict | None = None):
+    request = urllib.request.Request(url, data=data, method=method)
+    for key, value in (headers or {}).items():
+        request.add_header(key, value)
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return response.status, response.headers, response.read()
+    except urllib.error.HTTPError as e:
+        return e.code, e.headers, e.read()
+
+
+class Stdio:
+    def __init__(self, store: Path, log: Path):
+        self.proc = subprocess.Popen(
+            [str(MCP), "--dir", str(store), "--log", str(log)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+        self.next_id = 0
+
+    def send(self, method: str, params=None, *, notify: bool = False) -> int | None:
+        message: dict = {"jsonrpc": "2.0", "method": method}
+        if params is not None:
+            message["params"] = params
+        if not notify:
+            self.next_id += 1
+            message["id"] = self.next_id
+        assert self.proc.stdin is not None
+        self.proc.stdin.write(json.dumps(message) + "\n")
+        self.proc.stdin.flush()
+        return None if notify else self.next_id
+
+    def read(self, want: int, timeout: float = 30.0) -> dict:
+        assert self.proc.stdout is not None
+        deadline = time.monotonic() + timeout
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise AssertionError("no MCP response")
+            ready, _, _ = select.select([self.proc.stdout], [], [], left)
+            if not ready:
+                raise AssertionError("no MCP response")
+            line = self.proc.stdout.readline()
+            if not line:
+                stderr = self.proc.stderr.read() if self.proc.stderr else ""
+                raise AssertionError("MCP server closed: " + stderr)
+            message = json.loads(line)
+            if message.get("id") == want:
+                return message
+
+    def call(self, name: str, arguments: dict | None = None) -> dict:
+        ident = self.send("tools/call", {"name": name, "arguments": arguments or {}})
+        assert ident is not None
+        message = self.read(ident)
+        if "error" in message:
+            raise AssertionError(f"JSON-RPC error: {message['error']}")
+        return message["result"]
+
+    def close(self) -> int:
+        assert self.proc.stdin is not None
+        self.proc.stdin.close()
+        return self.proc.wait(timeout=15)
+
+
+def test_resize(tmp: Path) -> str:
+    source = big_jpeg(tmp)
+    store = tmp / "resize"
+    run(["--dir", str(store), "upload", str(source)])
+    item = items(store)[0]
+    assert (item["width"], item["height"]) == (2048, 1536), item
+    assert item["bytes"] < source.stat().st_size, (item, source.stat().st_size)
+    return f"2048x1536, {item['bytes']} bytes"
+
+
+def test_formats(tmp: Path) -> str:
+    store = tmp / "formats"
+    run(["--dir", str(store), "upload", str(small_png(tmp))])
+    run(["--dir", str(store), "upload", str(clip(tmp))])
+    kinds = {item["mime_type"] for item in items(store)}
+    assert PNG in kinds, kinds
+    assert "video/mp4" in kinds, kinds
+    return ", ".join(sorted(kinds))
+
+
+def test_eviction(tmp: Path) -> str:
+    store = tmp / "evict"
+    png = small_png(tmp)
+    for i in range(12):
+        source = tmp / f"n{i}.png"
+        source.write_bytes(png.read_bytes())
+        run(["--dir", str(store), "upload", str(source)])
+    listed = items(store)
+    assert len(listed) == 10, len(listed)
+    assert not [p for p in store.iterdir() if p.name.startswith(".tmp-")]
+    return f"{len(listed)} items"
+
+
+def test_get_delete(tmp: Path) -> str:
+    store = tmp / "get"
+    run(["--dir", str(store), "upload", str(small_png(tmp))])
+    latest = items(store)[0]
+    raw = run(["--dir", str(store), "get"], text=False)
+    assert len(raw.stdout) > 100, len(raw.stdout)
+    meta = json.loads(run(["--dir", str(store), "get", "--json"]).stdout)
+    assert meta["id"] == latest["id"], (meta, latest)
+    run(["--dir", str(store), "delete", latest["id"]])
+    assert items(store) == []
+    missing = run(["--dir", str(store), "get", "nope"], check=False)
+    assert missing.returncode == 1, missing.returncode
+    assert "no such item" in missing.stderr, missing.stderr
+    return "get and delete"
+
+
+def test_concurrent(tmp: Path) -> str:
+    store = tmp / "race"
+    png = small_png(tmp)
+    procs = []
+    for i in range(12):
+        source = tmp / f"race{i}.png"
+        source.write_bytes(png.read_bytes())
+        procs.append(
+            subprocess.Popen(
+                [str(PICGO), "--dir", str(store), "upload", str(source)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+        )
+    for proc in procs:
+        _, stderr = proc.communicate(timeout=180)
+        assert proc.returncode == 0, stderr
+    listed = items(store)
+    assert len(listed) == 10, len(listed)
+    assert not [p for p in store.iterdir() if p.name.startswith(".tmp-")]
+    for item in listed:
+        assert any(p.stem == item["id"] for p in store.iterdir()), item["id"]
+    return f"{len(listed)} items, no temp files"
+
+
+def test_mcp(tmp: Path) -> tuple[str, Path]:
+    store = tmp / "mcp"
+    log = tmp / "mcp.jsonl"
+    client = Stdio(store, log)
+    try:
+        ident = client.send(
+            "initialize",
+            {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "picgo-test", "version": "1"},
+            },
+        )
+        assert ident is not None
+        client.read(ident)
+        client.send("notifications/initialized", notify=True)
+
+        ident = client.send("tools/list")
+        assert ident is not None
+        tools = [tool["name"] for tool in client.read(ident)["result"]["tools"]]
+        assert tools == ["upload_media", "get_media", "list_media", "delete_media"], (
+            tools
+        )
+
+        uploaded = client.call(
+            "upload_media",
+            {
+                "data": base64.b64encode(small_png(tmp).read_bytes()).decode(),
+                "filename": "small.png",
+                "mime_type": PNG,
+            },
+        )
+        item = uploaded["structuredContent"]
+        assert item["kind"] == "image", item
+
+        got = client.call("get_media")
+        types = [block["type"] for block in got["content"]]
+        assert types == ["text", "image"], types
+        assert got["content"][1]["mimeType"] == PNG, got["content"][1]
+
+        client.call(
+            "upload_media",
+            {
+                "data": base64.b64encode(clip(tmp).read_bytes()).decode(),
+                "filename": "clip.mp4",
+                "mime_type": "video/mp4",
+            },
+        )
+        got = client.call("get_media")
+        assert got["content"][1]["type"] == "resource", got["content"][1]
+        assert got["content"][1]["resource"]["mimeType"] == "video/mp4"
+
+        listed = client.call("list_media")["structuredContent"]["items"]
+        assert len(listed) == 2, listed
+        missing = client.call("get_media", {"id": "nope"})
+        assert missing["isError"] is True, missing
+        client.call("delete_media", {"id": item["id"]})
+        assert client.close() == 0, "the stdio server exits 0"
+    finally:
+        if client.proc.poll() is None:
+            client.proc.kill()
+    return f"{len(listed)} items", log
+
+
+def test_log_shape(log: Path) -> str:
+    records = [json.loads(line) for line in log.read_text().splitlines()]
+    assert records
+    for record in records:
+        assert record["ts"].endswith("Z"), record
+        assert record["transport"] == "stdio", record
+        assert record["version"] == "1", record
+        assert record["outcome"] in {
+            "ok",
+            "tool-error",
+            "rpc-error",
+            "refused",
+            "error",
+        }
+        assert "data" not in record.get("args", {}), record
+    calls = [r for r in records if r.get("method") == "tools/call"]
+    assert {r.get("tool") for r in calls} >= {
+        "upload_media",
+        "get_media",
+        "list_media",
+        "delete_media",
+    }, calls
+    return f"{len(records)} records"
+
+
+def test_http(tmp: Path) -> str:
+    store = tmp / "http"
+    log = tmp / "http.jsonl"
+    proc, base = start_server(store, log)
+    try:
+        status, _, body = http("GET", base + "/")
+        assert status == 200, status
+        assert b"<title>picgo</title>" in body, body
+        status, _, body = http("GET", base + "/manifest.webmanifest")
+        assert status == 200, status
+        assert json.loads(body)["short_name"] == "picgo"
+        status, _, body = http("GET", base + "/api/media")
+        assert status == 200, status
+        assert json.loads(body)["items"] == []
+
+        status, _, body = http(
+            "POST",
+            base + "/api/media",
+            small_png(tmp).read_bytes(),
+            {"Content-Type": PNG, "X-Picgo-Filename": "small.png"},
+        )
+        assert status == 201, (status, body)
+        item = json.loads(body)
+        assert item["kind"] == "image", item
+
+        status, headers, data = http("GET", base + "/api/media/" + item["id"])
+        assert status == 200, status
+        assert headers["Content-Type"] == PNG, headers
+        with Image.open(io.BytesIO(data)) as image:
+            assert image.size == (800, 600), image.size
+
+        # The remote CLI: the listing is unwrapped, and get with no ID
+        # resolves the latest item before requesting its bytes.
+        env = dict(os.environ, PICGO_SERVER=base)
+        listed = json.loads(
+            run(["--dir", str(store), "list", "--json"], env=env).stdout
+        )
+        assert isinstance(listed, list), listed
+        assert [i["id"] for i in listed] == [item["id"]], listed
+        meta = json.loads(run(["--dir", str(store), "get", "--json"], env=env).stdout)
+        assert meta["id"] == item["id"], meta
+        out = tmp / "remote-latest.png"
+        run(["--dir", str(store), "get", "-o", str(out)], env=env)
+        with Image.open(out) as image:
+            assert image.size == (800, 600), image.size
+
+        status, _, body = http("DELETE", base + "/api/media/" + item["id"])
+        assert status == 200, (status, body)
+        status, _, _ = http("GET", base + "/api/media/" + item["id"])
+        assert status == 404, status
+        return "PWA, REST API and remote CLI"
+    finally:
+        stop_server(proc)
+
+
+def test_unsafe_names() -> str:
+    unsafe = (SKILL / "permissions" / "unsafe").read_text()
+    entries = {
+        line.strip()
+        for line in unsafe.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+    assert {"picgo delete", "picgo mcp", "picgo-mcp"} <= entries, entries
+    assert "media" not in unsafe, unsafe
+    return "picgo delete, picgo mcp, picgo-mcp"
+
+
+def test_chunked_limit(tmp: Path) -> str:
+    store = tmp / "limit"
+    log = tmp / "limit.jsonl"
+    proc, base = start_server(
+        store, log, env=dict(os.environ, PICGO_MAX_UPLOAD_BYTES="8")
+    )
+    try:
+        port = int(base.rsplit(":", 1)[1])
+        conn = HTTPConnection("127.0.0.1", port, timeout=15)
+        conn.request(
+            "POST",
+            "/api/media",
+            body=iter([b"x" * 100]),
+            headers={"Content-Type": PNG},
+            encode_chunked=True,
+        )
+        response = conn.getresponse()
+        status = response.status
+        response.read()
+        conn.close()
+        assert status == 413, status
+        status, _, body = http("GET", base + "/api/media")
+        assert status == 200, status
+        assert json.loads(body)["items"] == [], body
+        return "chunked upload refused with 413"
+    finally:
+        stop_server(proc)
+
+
+def test_signal_during_call(tmp: Path) -> str:
+    store = tmp / "signal"
+    log = tmp / "signal.jsonl"
+    store.mkdir(parents=True, exist_ok=True)
+    lock = store / ".lock"
+    holder = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import fcntl, os, time\n"
+                f"fd = os.open({str(lock)!r}, os.O_RDWR | os.O_CREAT)\n"
+                "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+                "print('locked', flush=True)\n"
+                "time.sleep(30)\n"
+            ),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    client: Stdio | None = None
+    try:
+        assert holder.stdout is not None
+        assert holder.stdout.readline().strip() == "locked"
+        client = Stdio(store, log)
+        ident = client.send(
+            "initialize",
+            {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "picgo-signal-test", "version": "1"},
+            },
+        )
+        assert ident is not None
+        client.read(ident)
+        client.send("notifications/initialized", notify=True)
+        client.send("tools/call", {"name": "list_media", "arguments": {}})
+        time.sleep(0.5)  # The call is blocked on the lock.
+        pid = child_pid(client.proc)
+        assert pid, "no server child process"
+        os.kill(pid, signal.SIGTERM)
+        holder.terminate()
+        holder.wait(timeout=10)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if process_gone(pid):
+                return "SIGTERM during a blocked call"
+            time.sleep(0.1)
+        raise AssertionError("the server did not exit after SIGTERM")
+    finally:
+        if client is not None and client.proc.poll() is None:
+            client.proc.kill()
+        if holder.poll() is None:
+            holder.kill()
+
+
+def test_host_validation(tmp: Path) -> str:
+    store = tmp / "hosts"
+    log = tmp / "hosts.jsonl"
+    proc, base = start_server(store, log)
+    try:
+        port = int(base.rsplit(":", 1)[1])
+        conn = HTTPConnection("127.0.0.1", port, timeout=10)
+        conn.request("GET", "/api/media", headers={"Host": "evil.example"})
+        response = conn.getresponse()
+        status = response.status
+        response.read()
+        conn.close()
+        assert status == 421, status
+        status, _, _ = http("GET", base + "/api/media")
+        assert status == 200, status
+
+        # The health check stays open: the proxy polls it with its own Host.
+        conn = HTTPConnection("127.0.0.1", port, timeout=10)
+        conn.request("GET", "/up", headers={"Host": "evil.example"})
+        response = conn.getresponse()
+        status = response.status
+        response.read()
+        conn.close()
+        assert status == 200, status
+        return "REST rejects an untrusted Host"
+    finally:
+        stop_server(proc)
+
+
+def test_delayed_upload(tmp: Path) -> str:
+    loader = SourceFileLoader("picgo_cli_delay", str(PICGO))
+    spec = importlib.util.spec_from_loader("picgo_cli_delay", loader)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["picgo_cli_delay"] = module
+    loader.exec_module(module)
+
+    store = module.Store(tmp / "delay", module.DEFAULT_MAX_EDGE)
+    original = module.normalise_image
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow(data, ext, max_edge):
+        started.set()
+        assert release.wait(10), "the delayed upload was not released"
+        return original(data, ext, max_edge)
+
+    module.normalise_image = slow
+    errors: list[Exception] = []
+    published: dict[str, object] = {}
+
+    def publish() -> None:
+        try:
+            published["item"] = store.put(
+                small_png(tmp).read_bytes(), mime=PNG, filename="slow.png"
+            )
+        except Exception as e:
+            errors.append(e)
+
+    worker = threading.Thread(target=publish)
+    worker.start()
+    try:
+        assert started.wait(10), "the slow upload did not start"
+        for i in range(10):
+            store.put(
+                b"\x00\x00\x00\x18ftypmp42" + b"x" * 100,
+                mime="video/mp4",
+                filename=f"v{i}.mp4",
+            )
+    finally:
+        release.set()
+        worker.join(20)
+        module.normalise_image = original
+    assert not worker.is_alive(), "the delayed upload did not finish"
+    assert not errors, errors
+    ids = [i.id for i in store.list()]
+    assert published["item"].id in ids, ids
+    return "the delayed image survives ten newer uploads"
+
+
+def test_mcp_forwarding(tmp: Path) -> str:
+    store = tmp / "forward"
+    run(["--dir", str(store), "upload", str(small_png(tmp))])
+    help_text = run(["--dir", str(store), "mcp", "--help"]).stdout
+    assert "Usage: picgo mcp" in help_text, help_text
+    assert "--http" in help_text, help_text
+
+    port = free_port()
+    base = f"http://127.0.0.1:{port}"
+    proc = subprocess.Popen(
+        [str(PICGO), "--dir", str(store), "mcp", "--http", "--port", str(port)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        wait_up(base, proc)
+        status, _, body = http("GET", base + "/api/media")
+        assert status == 200, status
+        assert len(json.loads(body)["items"]) == 1, body
+        return "mcp forwards --dir and server flags"
+    finally:
+        if proc.poll() is None:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                proc.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+
+
+def test_range_requests(tmp: Path) -> str:
+    store = tmp / "ranges"
+    log = tmp / "ranges.jsonl"
+    proc, base = start_server(store, log)
+    try:
+        data = clip(tmp).read_bytes()
+        status, _, body = http(
+            "POST",
+            base + "/api/media",
+            data,
+            {"Content-Type": "video/mp4", "X-Picgo-Filename": "clip.mp4"},
+        )
+        assert status == 201, (status, body)
+        item = json.loads(body)
+        url = base + "/api/media/" + item["id"]
+
+        status, headers, body = http("GET", url, headers={"Range": "bytes=0-1"})
+        assert status == 206, status
+        assert body == data[:2], body
+        assert headers["Content-Range"] == f"bytes 0-1/{len(data)}", headers
+        assert headers["Accept-Ranges"] == "bytes", headers
+
+        status, headers, body = http("GET", url, headers={"Range": "bytes=2-"})
+        assert status == 206, status
+        assert body == data[2:], (status, len(body))
+
+        status, headers, body = http("GET", url, headers={"Range": "bytes=-2"})
+        assert status == 206, status
+        assert body == data[-2:], (status, body)
+
+        status, headers, body = http("GET", url)
+        assert status == 200, status
+        assert body == data, (status, len(body))
+        assert headers["Accept-Ranges"] == "bytes", headers
+
+        status, headers, body = http(
+            "GET", url, headers={"Range": f"bytes={len(data)}-"}
+        )
+        assert status == 416, status
+        assert headers["Content-Range"] == f"bytes */{len(data)}", headers
+        return "byte ranges"
+    finally:
+        stop_server(proc)
+
+
+def main() -> int:
+    tmp = Path(tempfile.mkdtemp(prefix="picgo-test."))
+    try:
+        case("upload resizes the long edge to 2048", lambda: test_resize(tmp))
+        case("PNG and MP4 keep their types", lambda: test_formats(tmp))
+        case("twelve uploads leave ten items", lambda: test_eviction(tmp))
+        case(
+            "get defaults to the latest and delete removes",
+            lambda: test_get_delete(tmp),
+        )
+        case("concurrent uploads leave ten items", lambda: test_concurrent(tmp))
+        mcp_log: dict[str, Path] = {}
+
+        def run_mcp() -> str:
+            detail, log = test_mcp(tmp)
+            mcp_log["log"] = log
+            return detail
+
+        case("MCP serves the four tools over stdio", run_mcp)
+        case(
+            "MCP request records follow the shared format",
+            lambda: test_log_shape(mcp_log["log"]),
+        )
+        case("unsafe commands name picgo", test_unsafe_names)
+        case("REST rejects an untrusted Host", lambda: test_host_validation(tmp))
+        case(
+            "a delayed upload survives newer items",
+            lambda: test_delayed_upload(tmp),
+        )
+        case("mcp forwards --dir and server flags", lambda: test_mcp_forwarding(tmp))
+        case("HTTP serves the PWA, REST API and remote CLI", lambda: test_http(tmp))
+        case("media supports byte ranges for video", lambda: test_range_requests(tmp))
+        case(
+            "chunked upload over the limit is refused", lambda: test_chunked_limit(tmp)
+        )
+        case(
+            "SIGTERM during a blocked call exits",
+            lambda: test_signal_during_call(tmp),
+        )
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print(f"1..{NUMBER}")
+    return 1 if FAILED else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
