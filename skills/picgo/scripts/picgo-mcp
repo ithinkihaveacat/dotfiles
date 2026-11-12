@@ -431,6 +431,22 @@ def method_allowed(path: str, method: str) -> tuple[bool, str]:
     return True, ""
 
 
+async def read_body(request: Any, limit: int) -> tuple[bytes, bool]:
+    """Read a request body, stopping as soon as it passes LIMIT.
+
+    Reading the stream rather than request.body() means a chunked upload
+    without Content-Length cannot buffer more than the limit before it is
+    refused."""
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > limit:
+            return b"", True
+        chunks.append(chunk)
+    return b"".join(chunks), False
+
+
 class Gate:
     """ASGI: the health check, the Access check, the method check, and one
     request record. Routes fill in the tool and size on the event."""
@@ -584,7 +600,11 @@ def build_app(store: Any, verifier: AccessVerifier | None, log: RequestLog) -> A
             if event:
                 event.fail("tool-error", "upload too large")
             return JSONResponse({"error": "the upload is too large"}, status_code=413)
-        body = await request.body()
+        body, too_large = await read_body(request, limit)
+        if too_large:
+            if event:
+                event.fail("tool-error", "upload too large")
+            return JSONResponse({"error": "the upload is too large"}, status_code=413)
         filename = unquote(request.headers.get("x-picgo-filename", "")) or None
         try:
             item = await anyio.to_thread.run_sync(
@@ -920,12 +940,23 @@ def serve_stdio(store: Any, log: RequestLog) -> None:
     import anyio
     from mcp.server.stdio import stdio_server
 
-    def stop(signum: int, frame: Any) -> None:
-        while True:
+    def wait_idle() -> None:
+        """Exit once no tool call is running, or after a bounded wait.
+
+        The signal handler must return immediately: it runs on the same
+        thread as the event loop, and a tool call decrements ACTIVE from
+        that loop. Waiting here would deadlock a call blocked in a worker
+        thread."""
+        deadline = time.monotonic() + 30.0
+        while time.monotonic() < deadline:
             with ACTIVE_LOCK:
                 if not ACTIVE:
                     os._exit(0)
             time.sleep(0.1)
+        os._exit(0)
+
+    def stop(signum: int, frame: Any) -> None:
+        threading.Thread(target=wait_idle, daemon=True).start()
 
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, stop)

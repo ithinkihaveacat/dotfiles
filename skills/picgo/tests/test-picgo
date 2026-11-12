@@ -14,6 +14,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+import os
 import select
 import shutil
 import signal
@@ -25,6 +26,7 @@ import time
 import traceback
 import urllib.error
 import urllib.request
+from http.client import HTTPConnection
 from pathlib import Path
 
 from PIL import Image
@@ -57,12 +59,13 @@ def case(name: str, fn) -> None:
         report(name, True, detail)
 
 
-def run(args: list[str], *, check: bool = True, text: bool = True):
+def run(args: list[str], *, check: bool = True, text: bool = True, env=None):
     proc = subprocess.run(
         [str(PICGO), *args],
         capture_output=True,
         text=text,
         check=False,
+        env=env,
     )
     if check and proc.returncode != 0:
         stderr = proc.stderr if text else proc.stderr.decode("utf-8", "replace")
@@ -118,6 +121,67 @@ def wait_up(base: str, proc: subprocess.Popen, timeout: float = 20.0) -> None:
         except OSError:
             time.sleep(0.2)
     raise AssertionError("the server did not become healthy")
+
+
+def start_server(store: Path, log: Path, *, env=None):
+    port = free_port()
+    base = f"http://127.0.0.1:{port}"
+    proc = subprocess.Popen(
+        [
+            str(MCP),
+            "--http",
+            "--port",
+            str(port),
+            "--dir",
+            str(store),
+            "--log",
+            str(log),
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+    )
+    wait_up(base, proc)
+    return proc, base
+
+
+def stop_server(proc: subprocess.Popen) -> None:
+    if proc.poll() is not None:
+        return
+    proc.send_signal(signal.SIGTERM)
+    try:
+        status = proc.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        raise AssertionError("SIGTERM did not stop the server") from None
+    assert status == 0, f"SIGTERM exited {status}"
+
+
+def child_pid(proc: subprocess.Popen) -> int | None:
+    for _ in range(50):
+        out = subprocess.run(
+            ["pgrep", "-P", str(proc.pid)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        pids = [int(p) for p in out.stdout.split() if p.isdigit()]
+        if pids:
+            return pids[0]
+        time.sleep(0.1)
+    return None
+
+
+def process_gone(pid: int) -> bool:
+    out = subprocess.run(
+        ["ps", "-o", "stat=", "-p", str(pid)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    state = out.stdout.strip()
+    return not state or state.startswith("Z")
 
 
 def http(method: str, url: str, data: bytes | None = None, headers: dict | None = None):
@@ -354,25 +418,8 @@ def test_log_shape(log: Path) -> str:
 def test_http(tmp: Path) -> str:
     store = tmp / "http"
     log = tmp / "http.jsonl"
-    port = free_port()
-    base = f"http://127.0.0.1:{port}"
-    proc = subprocess.Popen(
-        [
-            str(MCP),
-            "--http",
-            "--port",
-            str(port),
-            "--dir",
-            str(store),
-            "--log",
-            str(log),
-        ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
+    proc, base = start_server(store, log)
     try:
-        wait_up(base, proc)
         status, _, body = http("GET", base + "/")
         assert status == 200, status
         assert b"<title>picgo</title>" in body, body
@@ -399,19 +446,126 @@ def test_http(tmp: Path) -> str:
         with Image.open(io.BytesIO(data)) as image:
             assert image.size == (800, 600), image.size
 
+        # The remote CLI: the listing is unwrapped, and get with no ID
+        # resolves the latest item before requesting its bytes.
+        env = dict(os.environ, PICGO_SERVER=base)
+        listed = json.loads(
+            run(["--dir", str(store), "list", "--json"], env=env).stdout
+        )
+        assert isinstance(listed, list), listed
+        assert [i["id"] for i in listed] == [item["id"]], listed
+        meta = json.loads(run(["--dir", str(store), "get", "--json"], env=env).stdout)
+        assert meta["id"] == item["id"], meta
+        out = tmp / "remote-latest.png"
+        run(["--dir", str(store), "get", "-o", str(out)], env=env)
+        with Image.open(out) as image:
+            assert image.size == (800, 600), image.size
+
         status, _, body = http("DELETE", base + "/api/media/" + item["id"])
         assert status == 200, (status, body)
         status, _, _ = http("GET", base + "/api/media/" + item["id"])
         assert status == 404, status
-        return "PWA and REST API"
+        return "PWA, REST API and remote CLI"
     finally:
-        if proc.poll() is None:
-            proc.send_signal(signal.SIGTERM)
-            try:
-                assert proc.wait(timeout=15) == 0, "SIGTERM exits 0"
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                raise AssertionError("SIGTERM did not stop the server") from None
+        stop_server(proc)
+
+
+def test_unsafe_names() -> str:
+    unsafe = (SKILL / "permissions" / "unsafe").read_text()
+    entries = {
+        line.strip()
+        for line in unsafe.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+    assert {"picgo delete", "picgo mcp", "picgo-mcp"} <= entries, entries
+    assert "media" not in unsafe, unsafe
+    return "picgo delete, picgo mcp, picgo-mcp"
+
+
+def test_chunked_limit(tmp: Path) -> str:
+    store = tmp / "limit"
+    log = tmp / "limit.jsonl"
+    proc, base = start_server(
+        store, log, env=dict(os.environ, PICGO_MAX_UPLOAD_BYTES="8")
+    )
+    try:
+        port = int(base.rsplit(":", 1)[1])
+        conn = HTTPConnection("127.0.0.1", port, timeout=15)
+        conn.request(
+            "POST",
+            "/api/media",
+            body=iter([b"x" * 100]),
+            headers={"Content-Type": PNG},
+            encode_chunked=True,
+        )
+        response = conn.getresponse()
+        status = response.status
+        response.read()
+        conn.close()
+        assert status == 413, status
+        status, _, body = http("GET", base + "/api/media")
+        assert status == 200, status
+        assert json.loads(body)["items"] == [], body
+        return "chunked upload refused with 413"
+    finally:
+        stop_server(proc)
+
+
+def test_signal_during_call(tmp: Path) -> str:
+    store = tmp / "signal"
+    log = tmp / "signal.jsonl"
+    store.mkdir(parents=True, exist_ok=True)
+    lock = store / ".lock"
+    holder = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import fcntl, os, time\n"
+                f"fd = os.open({str(lock)!r}, os.O_RDWR | os.O_CREAT)\n"
+                "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+                "print('locked', flush=True)\n"
+                "time.sleep(30)\n"
+            ),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    client: Stdio | None = None
+    try:
+        assert holder.stdout is not None
+        assert holder.stdout.readline().strip() == "locked"
+        client = Stdio(store, log)
+        ident = client.send(
+            "initialize",
+            {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "picgo-signal-test", "version": "1"},
+            },
+        )
+        assert ident is not None
+        client.read(ident)
+        client.send("notifications/initialized", notify=True)
+        client.send("tools/call", {"name": "list_media", "arguments": {}})
+        time.sleep(0.5)  # The call is blocked on the lock.
+        pid = child_pid(client.proc)
+        assert pid, "no server child process"
+        os.kill(pid, signal.SIGTERM)
+        holder.terminate()
+        holder.wait(timeout=10)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if process_gone(pid):
+                return "SIGTERM during a blocked call"
+            time.sleep(0.1)
+        raise AssertionError("the server did not exit after SIGTERM")
+    finally:
+        if client is not None and client.proc.poll() is None:
+            client.proc.kill()
+        if holder.poll() is None:
+            holder.kill()
 
 
 def main() -> int:
@@ -437,7 +591,15 @@ def main() -> int:
             "MCP request records follow the shared format",
             lambda: test_log_shape(mcp_log["log"]),
         )
-        case("HTTP serves the PWA and the REST API", lambda: test_http(tmp))
+        case("unsafe commands name picgo", test_unsafe_names)
+        case("HTTP serves the PWA, REST API and remote CLI", lambda: test_http(tmp))
+        case(
+            "chunked upload over the limit is refused", lambda: test_chunked_limit(tmp)
+        )
+        case(
+            "SIGTERM during a blocked call exits",
+            lambda: test_signal_during_call(tmp),
+        )
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print(f"1..{NUMBER}")
