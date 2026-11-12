@@ -12,6 +12,7 @@ TAP. No network access: the HTTP server binds loopback and Access is off."""
 from __future__ import annotations
 
 import base64
+import importlib.util
 import io
 import json
 import os
@@ -22,11 +23,13 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import traceback
 import urllib.error
 import urllib.request
 from http.client import HTTPConnection
+from importlib.machinery import SourceFileLoader
 from pathlib import Path
 
 from PIL import Image
@@ -568,6 +571,120 @@ def test_signal_during_call(tmp: Path) -> str:
             holder.kill()
 
 
+def test_host_validation(tmp: Path) -> str:
+    store = tmp / "hosts"
+    log = tmp / "hosts.jsonl"
+    proc, base = start_server(store, log)
+    try:
+        port = int(base.rsplit(":", 1)[1])
+        conn = HTTPConnection("127.0.0.1", port, timeout=10)
+        conn.request("GET", "/api/media", headers={"Host": "evil.example"})
+        response = conn.getresponse()
+        status = response.status
+        response.read()
+        conn.close()
+        assert status == 421, status
+        status, _, _ = http("GET", base + "/api/media")
+        assert status == 200, status
+
+        # The health check stays open: the proxy polls it with its own Host.
+        conn = HTTPConnection("127.0.0.1", port, timeout=10)
+        conn.request("GET", "/up", headers={"Host": "evil.example"})
+        response = conn.getresponse()
+        status = response.status
+        response.read()
+        conn.close()
+        assert status == 200, status
+        return "REST rejects an untrusted Host"
+    finally:
+        stop_server(proc)
+
+
+def test_delayed_upload(tmp: Path) -> str:
+    loader = SourceFileLoader("picgo_cli_delay", str(PICGO))
+    spec = importlib.util.spec_from_loader("picgo_cli_delay", loader)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["picgo_cli_delay"] = module
+    loader.exec_module(module)
+
+    store = module.Store(tmp / "delay", module.DEFAULT_MAX_EDGE)
+    original = module.normalise_image
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow(data, ext, max_edge):
+        started.set()
+        assert release.wait(10), "the delayed upload was not released"
+        return original(data, ext, max_edge)
+
+    module.normalise_image = slow
+    errors: list[Exception] = []
+    published: dict[str, object] = {}
+
+    def publish() -> None:
+        try:
+            published["item"] = store.put(
+                small_png(tmp).read_bytes(), mime=PNG, filename="slow.png"
+            )
+        except Exception as e:
+            errors.append(e)
+
+    worker = threading.Thread(target=publish)
+    worker.start()
+    try:
+        assert started.wait(10), "the slow upload did not start"
+        for i in range(10):
+            store.put(
+                b"\x00\x00\x00\x18ftypmp42" + b"x" * 100,
+                mime="video/mp4",
+                filename=f"v{i}.mp4",
+            )
+    finally:
+        release.set()
+        worker.join(20)
+        module.normalise_image = original
+    assert not worker.is_alive(), "the delayed upload did not finish"
+    assert not errors, errors
+    ids = [i.id for i in store.list()]
+    assert published["item"].id in ids, ids
+    return "the delayed image survives ten newer uploads"
+
+
+def test_mcp_forwarding(tmp: Path) -> str:
+    store = tmp / "forward"
+    run(["--dir", str(store), "upload", str(small_png(tmp))])
+    help_text = run(["--dir", str(store), "mcp", "--help"]).stdout
+    assert "Usage: picgo mcp" in help_text, help_text
+    assert "--http" in help_text, help_text
+
+    port = free_port()
+    base = f"http://127.0.0.1:{port}"
+    proc = subprocess.Popen(
+        [str(PICGO), "--dir", str(store), "mcp", "--http", "--port", str(port)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        wait_up(base, proc)
+        status, _, body = http("GET", base + "/api/media")
+        assert status == 200, status
+        assert len(json.loads(body)["items"]) == 1, body
+        return "mcp forwards --dir and server flags"
+    finally:
+        if proc.poll() is None:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                proc.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+
+
 def main() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="picgo-test."))
     try:
@@ -592,6 +709,12 @@ def main() -> int:
             lambda: test_log_shape(mcp_log["log"]),
         )
         case("unsafe commands name picgo", test_unsafe_names)
+        case("REST rejects an untrusted Host", lambda: test_host_validation(tmp))
+        case(
+            "a delayed upload survives newer items",
+            lambda: test_delayed_upload(tmp),
+        )
+        case("mcp forwards --dir and server flags", lambda: test_mcp_forwarding(tmp))
         case("HTTP serves the PWA, REST API and remote CLI", lambda: test_http(tmp))
         case(
             "chunked upload over the limit is refused", lambda: test_chunked_limit(tmp)

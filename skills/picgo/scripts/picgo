@@ -380,14 +380,17 @@ class Store:
         if len(data) > limit:
             raise Error(f"the upload is larger than {human_bytes(limit)}")
         ext, _ = infer_extension(mime, filename)
-        created = utcnow()
         if EXT_MIME[ext].startswith("image/"):
             data, ext, _, _ = normalise_image(data, ext, self.max_edge)
-        return self._publish(data, ext, created)
+        return self._publish(data, ext)
 
-    def _publish(self, data: bytes, ext: str, created: datetime.datetime) -> Item:
+    def _publish(self, data: bytes, ext: str) -> Item:
         self.ensure()
         with self.locked(exclusive=True):
+            # Timestamp at publication, under the lock: a slow image that
+            # finishes after ten newer uploads must not be born older than
+            # them and evict itself.
+            created = utcnow()
             for _ in range(10):
                 rand = secrets.token_hex(3)
                 stem = f"{created.strftime('%Y%m%dT%H%M%S')}.{created.microsecond:06d}Z-{rand}"
@@ -736,10 +739,41 @@ def cmd_mcp(argv: list[str]) -> int:
     return 1  # unreachable
 
 
+def split_mcp(argv: list[str]) -> tuple[list[str], list[str]] | None:
+    """The global options before 'mcp' and the server's own arguments after.
+
+    The MCP server has its own parser, so 'mcp' is found before argparse
+    sees the server's flags. '--dir' is the only global option that applies
+    to it; anything else before 'mcp' is an error."""
+    before: list[str] = []
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg == "--dir":
+            if i + 1 >= len(argv):
+                die("--dir requires a value")
+            before += [arg, argv[i + 1]]
+            i += 2
+            continue
+        if arg.startswith("--dir="):
+            before.append(arg)
+            i += 1
+            continue
+        if arg in ("-h", "--help"):
+            return None
+        if arg.startswith("-"):
+            die(f"unrecognized option {arg!r} before 'mcp'")
+        if arg == "mcp":
+            return before, argv[i + 1 :]
+        return None
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
     raw = list(sys.argv[1:] if argv is None else argv)
-    if raw[:1] == ["mcp"]:
-        return cmd_mcp(raw[1:])
+    split = split_mcp(raw)
+    if split is not None:
+        return cmd_mcp([*split[0], *split[1]])
     parser = build_parser()
     args = parser.parse_args(raw)
     if args.command is None:
@@ -756,8 +790,6 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_delete(args)
         if args.command == "doctor":
             return cmd_doctor(args)
-        if args.command == "mcp":
-            return cmd_mcp(raw[raw.index("mcp") + 1 :])
     except NotFoundError as e:
         die(str(e))
     except Error as e:

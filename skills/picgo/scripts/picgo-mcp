@@ -447,12 +447,38 @@ async def read_body(request: Any, limit: int) -> tuple[bytes, bool]:
     return b"".join(chunks), False
 
 
-class Gate:
-    """ASGI: the health check, the Access check, the method check, and one
-    request record. Routes fill in the tool and size on the event."""
+def host_allowed(value: str, allowed: list[str]) -> bool:
+    """Whether a Host header names one of the server's allowed hosts.
 
-    def __init__(self, app: Any, verifier: AccessVerifier | None, log: RequestLog):
+    The MCP transport applies the same list to /mcp; checking it here as
+    well keeps the REST routes (and the PWA) from being reachable through a
+    DNS-rebinding origin."""
+    value = value.strip().lower().rstrip(".")
+    for pattern in allowed:
+        pattern = pattern.lower()
+        if pattern.endswith(":*"):
+            base = pattern[:-2]
+            if value == base or value.startswith(base + ":"):
+                return True
+        elif value == pattern:
+            return True
+    return False
+
+
+class Gate:
+    """ASGI: the health check, the Host check, the Access check, the method
+    check, and one request record. Routes fill in the tool and size on the
+    event."""
+
+    def __init__(
+        self,
+        app: Any,
+        verifier: AccessVerifier | None,
+        log: RequestLog,
+        allowed_hosts: list[str],
+    ):
         self.app, self.verifier, self.log = app, verifier, log
+        self.allowed_hosts = allowed_hosts
         health = {"status": "ok", "version": VERSION, "commit": source_commit()}
         self.health = json.dumps(health).encode()
 
@@ -477,6 +503,13 @@ class Gate:
         event = Event("http", http=method, agent=headers.get("user-agent"))
         token = EVENT.set(event)
         try:
+            if not host_allowed(headers.get("host", ""), self.allowed_hosts):
+                event.fail("refused", "untrusted host")
+                event.status = 421
+                await reply(
+                    send, 421, b"misdirected request\n", "text/plain; charset=utf-8"
+                )
+                return
             allowed, allow = method_allowed(path, method)
             refusal: tuple[int, str, Any] | None = None
             if self.verifier is not None:
@@ -560,6 +593,7 @@ def build_app(store: Any, verifier: AccessVerifier | None, log: RequestLog) -> A
     sdk = sdk_server(store, log)
     hosts = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
     hosts += [h if ":" in h else f"{h}:*" for h in ALLOW_HOSTS] + ALLOW_HOSTS
+    hosts = [h.lower() for h in hosts]
     security = TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
         allowed_hosts=hosts,
@@ -673,7 +707,7 @@ def build_app(store: Any, verifier: AccessVerifier | None, log: RequestLog) -> A
         *mcp_app.routes,
     ]
     app = Starlette(routes=routes, lifespan=lifespan)
-    return Gate(app, verifier, log)
+    return Gate(app, verifier, log, hosts)
 
 
 def serve_http(
