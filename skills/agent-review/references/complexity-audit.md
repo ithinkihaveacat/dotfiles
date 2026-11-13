@@ -4,7 +4,7 @@
 
 - [Overview](#overview)
 - [Pass 1: Scanning for what looks bonkers](#pass-1-scanning-for-what-looks-bonkers)
-- [Pass 2: Investigating and extracting each fix](#pass-2-investigating-and-extracting-each-fix)
+- [Pass 2: Investigating and testing each fix](#pass-2-investigating-and-testing-each-fix)
 - [Pass 3: Reviewing strictly for correctness](#pass-3-reviewing-strictly-for-correctness)
 - [Pass 4: Evaluating and summarizing](#pass-4-evaluating-and-summarizing)
 - [Ground rules](#ground-rules)
@@ -15,7 +15,7 @@ The audit has two jobs:
 
 1. Check a working project for anything that is bonkers, and show how to fix it
    cleanly.
-1. Give proof—grounded in working, correctness-checked code—that the fix is
+1. Give proof—grounded in working, correctness-checked changes—that the fix is
    right and worth making.
 
 "Bonkers" means that the project pays far more for something than the job needs:
@@ -32,10 +32,11 @@ other:
 1. **Pass 1 — Scan for what looks bonkers.** Read practically every line of the
    project and its history to spot candidate problems without designing patches
    yet.
-1. **Pass 2 — Investigate and extract each fix.** Test each candidate in its own
-   isolated copy to see whether it can be cleanly removed or replaced and
-   whether the saving is real, then merge what survives.
-1. **Pass 3 — Review strictly for correctness.** Check the extracted changes for
+1. **Pass 2 — Investigate and test each fix.** Try each candidate in its own
+   isolated copy—whether changing a setting or dependency, switching algorithms,
+   relaxing a constraint, or deleting dead machinery—to see whether the fix is
+   clean and the payoff is real, then merge what survives.
+1. **Pass 3 — Review strictly for correctness.** Check the resulting changes for
    regressions and subtle edge-case bugs without re-litigating the design.
 1. **Pass 4 — Evaluate and summarize.** Re-check whether each fix still pays off
    after correctness repairs, then present a plain-English summary and proof.
@@ -64,8 +65,8 @@ design it.
 
 For each large or strange construction, trace back to the decision that caused
 it and forward to every file, layer, and test that exists because of it. Group
-symptoms of one root cause into one candidate so Pass 2 extractions do not
-collide or stack two fixes for the same problem.
+symptoms of one root cause into one candidate so Pass 2 trials do not collide or
+stack two fixes for the same problem.
 
 Question the constraints. List the constraints the design is built around,
 stated or assumed, and ask of each:
@@ -81,24 +82,24 @@ A constraint that costs a great deal and can be relaxed at little loss is the
 best finding there is. Do not treat internal machinery as wanted just because
 recent review commits or white-box tests added it, and do not treat an unused
 internal module or duplicate engine as untouchable just because the package
-exports its name—put it on the table so Pass 2 can price removing it (as an
-owner fork if outside callers could exist).
+exports its name—put it on the table so Pass 2 can price removing or replacing
+it (as an owner fork if outside callers could exist).
 
 Look for the big structural and runtime problems. Leave out style, naming,
 single bugs, small duplicate code, and micro-optimizations on cold or low-rate
 paths. Note the project's purpose, outward-facing entry points, constraints on
 the table, candidate problems, and earned parts left alone.
 
-## Pass 2: Investigating and extracting each fix
+## Pass 2: Investigating and testing each fix
 
 Investigate each candidate in its own clean copy—giving each to a fresh subagent
 or worker when available, or working through separate copies sequentially—so
-trials never interfere with each other. Focus on whether the bonkers part can be
-cleanly extracted or replaced: deleting dead code, collapsing duplicate engines
-or layers, changing a setting, using the right dependency or algorithm, or
-dropping a constraint. Prefer deleting or replacing machinery over adding a
-cache, fast path, or second format beside the old one. Make the complete fix
-build and pass tests in the copy.
+trials never interfere with each other. Focus on whether the cost can be cleanly
+removed: changing a setting or build flag, using the right dependency or
+algorithm, dropping an unnecessary constraint, collapsing duplicate engines or
+layers, or deleting dead code. Prefer removing or replacing the source of cost
+over layering a cache, fast path, or second format beside the old one. Make the
+complete fix build and pass tests in the copy.
 
 The owner trusts the working code and has good reason to doubt you. One false
 statement makes them doubt the rest. Each investigation must establish three
@@ -108,21 +109,26 @@ things, or drop its candidate:
 Count the lines, wake-ups, calls, bytes, packages, or milliseconds for a routine
 operation, and isolate the cause rather than citing an unexplained total.
 
-**The extraction pays off.** Measure the "after" figure from the working diff,
-never by guessing. For lines: what goes, what must stay, what new code comes,
-and the net, keeping production logic, tests, and duplicate or generated files
-apart. Moving code removes nothing. Keep one-off benchmark harnesses in scratch
-rather than adding bulky scaffolding to the project's test suite. If you cannot
-measure something here (no device, no production), name the measurement that
-would settle it and give no number. Make the best case for leaving the code
-alone; if extracting it turns messy, saves little, or adds more code and test
-scaffolding than it removes without a major runtime or footprint win, drop it.
+**The fix pays off.** Measure the "after" figure from the working diff, never by
+guessing. Payoff is whatever cost the finding removes: wake-ups, power, CPU,
+memory, latency, binary or bundle size, dependencies, build or test time, or
+code a maintainer must carry (a small config or dependency change can yield a
+large runtime or size win without cutting lines). When code size is part of the
+claim, separate what goes, what stays, and what new code comes across production
+logic, tests, and generated files; moving code removes nothing. Keep one-off
+benchmark harnesses in scratch rather than adding bulky scaffolding to the
+project's test suite. If you cannot measure something here (no device, no
+production), name the measurement that would settle it and give no number. Make
+the best case for leaving things alone; if fixing it turns messy, saves little,
+or bloats the code and tests without a clear runtime, footprint, or maintenance
+win, drop it.
 
 **Who decides is clear.** Read your diff and list everything the construction
 does today, including side effects, that stops or changes. Search the whole
-project for every removed name or path, and account for every reference. If a
-change deletes white-box tests for removed machinery, check that kept black-box
-tests still cover outward behavior, or add the concise check needed first:
+project for every removed or changed name, setting, or path, and account for
+every reference. If a change deletes white-box tests for removed machinery,
+check that kept black-box tests still cover outward behavior, or add the concise
+check needed first:
 
 - If nothing visible to users or outside callers changes—same outputs, wire
   compatibility, public API, and guarantees, with no trade-off—no owner decision
@@ -141,34 +147,36 @@ tests still cover outward behavior, or add the concise check needed first:
   before questioning it, and distinguish load-bearing protection from theater
   around it.
 
-Merge the surviving extractions in a clean copy (keeping owner-fork candidates
+Merge the surviving fixes in a clean copy (keeping owner-fork candidates
 separate when needed) to verify they build and pass tests together without
-double-counting overlapping deletions or stacking two fixes for the same root
+double-counting overlapping savings or stacking two fixes for the same root
 cause.
 
 ## Pass 3: Reviewing strictly for correctness
 
-In our experience, simplifying accreted code almost always introduces subtle
-errors even when the existing test suite stays completely green. Removing
-intermediate layers, replacing polling loops with event signaling, splitting
-imports, batching harnesses, or adding caches creates new lifecycle, ordering,
-flag-forwarding, and state-isolation edges that older tests never needed to
-exercise.
+In our experience, simplifying accreted code—or changing settings, dependencies,
+concurrency, or build flags—almost always introduces subtle errors even when the
+existing test suite stays completely green. Removing intermediate layers,
+swapping dependencies, changing compiler or runtime flags, replacing polling
+loops with event signaling, batching harnesses, or adding caches creates new
+lifecycle, ordering, compatibility, flag-forwarding, and state-isolation edges
+that older tests never needed to exercise.
 
-Run a dedicated correctness review on the extracted changes before trusting the
+Run a dedicated correctness review on the resulting changes before trusting the
 result:
 
 - **Scope to fit the project.** Review the merged diff by default so cross-fix
-  interactions in shared lifecycles or files are caught in one pass, or review
-  per extraction when individual surgeries are large and independent. Use a
-  fresh reviewer subagent, an external CLI agent, or a separate review pass as
+  interactions across shared lifecycles, configs, or files are caught in one
+  pass, or review per fix when individual changes are large and independent. Use
+  a fresh reviewer subagent, an external CLI agent, or a separate review pass as
   appropriate; no rigid comment template or rubric is required.
-- **Keep strict separation of concerns.** This pass takes the new, simpler shape
-  as given and looks solely for correctness defects: crashes, null or destroy
-  re-entrancy, race conditions, lost wake-ups, stale state, dropped flags,
-  non-hermetic caches or tests, and weakened assertions. Do not ask this pass to
-  judge whether the cleanup eliminated enough complexity, and do not re-add
-  speculative fallback layers unless a concrete failure path requires them.
+- **Keep strict separation of concerns.** This pass takes the new design as
+  given and looks solely for correctness defects: crashes, null or destroy
+  re-entrancy, race conditions, lost wake-ups, stale state, config or dependency
+  side effects, dropped flags, non-hermetic caches or tests, and weakened
+  assertions. Do not ask this pass to judge whether the change eliminated enough
+  complexity, and do not re-add speculative fallback layers unless a concrete
+  failure path requires them.
 - **Fix defects surgically.** Repair confirmed bugs in the scratch copy and
   re-run the build and tests.
 
@@ -187,10 +195,11 @@ clear layout. Adapt the structure and length to fit the project rather than
 following a rigid template.
 
 Open with what the project is for and a clean, high-signal summary of the
-embarrassing mistakes uncovered and what fixing them brings: whole branches or
-dead modules that can be removed, wasted wake-ups, power, CPU, memory, or
-latency saved, leaks or UI glitches fixed, build or test speedups, and the true
-`git diff` footprint separating deleted code, replacement logic, and tests.
+embarrassing mistakes uncovered and what fixing them brings: wasted wake-ups,
+power, CPU, memory, or latency saved, binary or dependency footprint cut, leaks
+or UI glitches fixed, build or test speedups, whole branches or dead modules
+removed, and the honest `git diff` footprint (separating deleted code, new or
+replacement logic, config or dependency changes, and tests).
 
 Group findings that need no owner decision separately from findings gated on an
 owner fork, and do not add several "if" answers into one headline total. Present
@@ -203,8 +212,9 @@ and left alone, including candidates dropped in Pass 2 or Pass 4.
 ## Ground rules
 
 - Never modify the original project checkout or create branches or pull requests
-  unless explicitly asked. Run every extraction, build, test, and review pass in
-  isolated copies so nothing interferes with the original or with other passes.
+  unless explicitly asked. Run every candidate fix, build, test, and review pass
+  in isolated copies so nothing interferes with the original or with other
+  passes.
 - Avoid network calls and paid services. Keep tool caches, state, and temporary
   files inside your scratch directory so tests and trials stay hermetic.
 - Do not run project tools against live data or credentials, and do not stop

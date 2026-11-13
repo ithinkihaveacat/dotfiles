@@ -23,14 +23,14 @@ This skill covers two kinds of independent review:
   [Perform a synthesized review](#perform-a-synthesized-review).
 - **Complexity audit** of a working project or subsystem: find anything whose
   cost in maintainer machinery, runtime work, or footprint is bonkers next to
-  what the project is for, extract and verify clean fixes in isolated copies,
-  and report what was wrong and what fixing it brings. See
+  what the project is for, build and verify clean fixes in isolated copies, and
+  report what was wrong and what fixing it brings. See
   [Perform a complexity audit](#perform-a-complexity-audit).
 
 The two keep separate concerns. A code review takes the design as given and
 looks for correctness defects in a change. A complexity audit takes the starting
 code as working and questions whether it should have this shape—then uses a
-correctness-only review pass to verify its own extracted fixes.
+correctness-only review pass to verify its candidate fixes.
 
 ## Choose the execution role
 
@@ -96,8 +96,8 @@ agy has no documented forced skill-invocation syntax, so its fallback names the
 activation matters.
 
 The launcher routes code reviews only. To delegate an unattended complexity
-audit, pass an external scratch directory so all copies, builds, extractions,
-and review passes stay outside the target project:
+audit, pass an external scratch directory so all copies, builds, candidate
+fixes, and review passes stay outside the target project:
 
 ```bash
 codex exec 'Use $agent-review (references/complexity-audit.md) to run an unattended complexity audit on <target-path>. Use <scratch-dir> for isolated copies and trials; do not modify <target-path>.'
@@ -139,16 +139,16 @@ Read [references/complexity-audit.md](references/complexity-audit.md) completely
 before auditing a project or subsystem.
 
 Single-pass audits fail when one pass tries to read a whole codebase and guess
-what a fix will save, and unreviewed simplifications routinely break subtle
-edges even when existing tests stay green. Work in four passes across isolated
-copies of the repository or source artifacts so nothing touches the original
-checkout, creates branches or pull requests unless explicitly requested, or lets
+what a fix will save, and unreviewed changes routinely break subtle edges even
+when existing tests stay green. Work in four passes across isolated copies of
+the repository or source artifacts so nothing touches the original checkout,
+creates branches or pull requests unless explicitly requested, or lets
 concurrent passes interfere with each other:
 
 ```text
 Audit Progress:
 - [ ] Pass 1: Scan the whole codebase for what looks bonkers
-- [ ] Pass 2: Investigate and extract clean fixes in isolated copies
+- [ ] Pass 2: Investigate and test candidate fixes in isolated copies
 - [ ] Pass 3: Review surviving fixes strictly for correctness
 - [ ] Pass 4: Evaluate net payoff and write a plain-English summary
 ```
@@ -158,28 +158,32 @@ Audit Progress:
    history. Map what the project is for and its constraints, and flag anything
    that looks bogus, overbuilt, or embarrassing—grouped by root cause—without
    designing patches yet.
-1. **Pass 2 — Investigate and extract each fix.** Explore each candidate deeply
-   in its own isolated copy (one subagent per candidate when helpful, or
-   separate copies sequentially) to see whether the cost is real and the bonkers
-   construction can be cleanly extracted or replaced. Build, run tests, measure
-   the saving from the working diff, drop anything messy or low-payoff, and
-   merge surviving fixes cleanly without stacking two fixes for one problem.
-1. **Pass 3 — Review strictly for correctness.** In practice, tearing out
-   accreted layers, replacing polling with events, or adding caches and batching
-   almost always introduces subtle bugs—lifecycle or destroy races, dropped
-   flags, non-hermetic caches, weakened test checks—that existing tests miss.
-   Run a correctness review (via a fresh subagent, CLI reviewer, or dedicated
-   pass; no fixed rubric required) on the merged fixes by default, or per
-   extraction when changes are large and independent. Keep concerns separate:
-   take the simpler design as given and check only for correctness defects, not
-   whether the cleanup was worth doing or whether to restore speculative
-   fallbacks. Fix confirmed defects surgically in the copy.
+1. **Pass 2 — Investigate and test each fix.** Explore each candidate deeply in
+   its own isolated copy (one subagent per candidate when helpful, or separate
+   copies sequentially) to see whether the cost is real and can be cleanly
+   removed—whether by changing a setting or dependency, switching algorithms,
+   relaxing a constraint, or deleting dead machinery. Build, run tests, measure
+   the real payoff (in runtime work, power, footprint, build/test time, or
+   code), drop anything messy or low-payoff, and merge surviving fixes cleanly
+   without stacking two fixes for one problem.
+1. **Pass 3 — Review strictly for correctness.** In practice, simplifying
+   accreted code, changing settings or dependencies, replacing polling with
+   events, or adding caches and batching almost always introduces subtle
+   bugs—lifecycle or destroy races, config side effects, dropped flags,
+   non-hermetic caches, weakened test checks—that existing tests miss. Run a
+   correctness review (via a fresh subagent, CLI reviewer, or dedicated pass; no
+   fixed rubric required) on the merged fixes by default, or per fix when
+   changes are large and independent. Keep concerns separate: take the new
+   design as given and check only for correctness defects, not whether the
+   change was worth making or whether to restore speculative fallbacks. Fix
+   confirmed defects surgically in the copy.
 1. **Pass 4 — Evaluate and summarize.** Re-assess after Pass 3 repairs land: if
-   fixing edge cases ate up a change's simplicity, drop that change. Present the
-   report (separating no-decision fixes from owner forks), opening with a
-   plain-English summary of the embarrassing mistakes found and what fixing them
-   brings—dead code or branches removed, power, latency, or size wins, leaks or
-   UI glitches fixed, and the true `git diff` footprint.
+   fixing edge cases wiped out a fix's payoff or made it messier than what it
+   replaced, drop it. Present the report (separating no-decision fixes from
+   owner forks), opening with a plain-English summary of the embarrassing
+   mistakes found and what fixing them brings—power, wake-ups, latency, memory,
+   or binary/dependency size saved, leaks or UI glitches fixed, build or test
+   speedups, dead branches removed, and the honest diff footprint.
 
 ## Handle review results
 
@@ -194,13 +198,14 @@ to apply changes:
   apply no-decision fixes in revertible steps (holding owner forks until
   settled), run a correctness-only review pass if anything had to adapt to
   current `HEAD`, and close with a plain-English summary of the mistakes
-  removed, benefits gained, and full `git diff` breakdown.
+  removed, concrete benefits gained (runtime, power, size, reliability, and
+  code/dependency changes), and full `git diff` breakdown.
 
 ## Reference Material
 
 - **Command Index**: Detailed launcher synopsis, options, and arguments. See
   [references/command-index.md](references/command-index.md).
-- **Complexity Audit**: Four-pass complexity scan, isolated extraction,
+- **Complexity Audit**: Four-pass complexity scan, isolated fix verification,
   correctness review, constraint questioning, owner forks, and plain-English
   summary guidance. See
   [references/complexity-audit.md](references/complexity-audit.md).
