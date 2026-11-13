@@ -2,9 +2,13 @@
 
 `taskgo mcp` serves a control repository's committed state to MCP clients, and
 writes to it on their behalf. It is for agents that have a checkout of a code
-repository but not of the control repository, such as cloud sessions. The server
-is the CLI script itself, so its tools call the same functions as the matching
-subcommands and their output matches the CLI's.
+repository but not of the control repository, such as cloud sessions.
+`taskgo mcp` delegates to `scripts/taskgo-mcp` (discovered via the `SKILL.md`
+sentinel or `TASKGO_SKILL_DIR`), which carries the MCP, HTTP, and JWT
+dependencies and loads `scripts/taskgo` in-process so that the CLI script itself
+stays lightweight and both share the exact same snapshot, audit, and change-set
+implementation. Both `taskgo mcp` and `taskgo-mcp` are listed in
+`permissions/unsafe`.
 
 One server serves one control repository.
 
@@ -134,19 +138,24 @@ reading the commit again. They stand in for running `taskgo doctor`, which a
 client without a checkout cannot; `taskgo apply` and `taskgo edit` are
 unchanged.
 
-Parsed task rows and Markdown-format verdicts are cached process-wide, keyed by
-path and a Git blob SHA computed from the bytes parsed. A blob SHA names the
-content, so an entry cannot go stale, the path is in the key because a rename
-keeps the SHA, and both caches are least-recently-used. Immutable commit
-snapshots answer from their blob SHAs without reading; a working tree is read
-first, so a file that changes between a hash and a read cannot store one
-version's result under another's SHA. A read or format failure is not cached. A
-long-lived server therefore parses the tracker once: on a synthetic 10,000-task
-tracker a warm `apply_change_set` takes 0.78 s and a handoff 1.34 s, where one
-parse pass is 20 s. A fresh process still pays one full parse, because
-validation and the handoff's duplicate-ID check read every row. At 100,000
-tasks, revisit the Markdown text each snapshot holds and the tree listing each
-new commit reads.
+Parsed task rows, frontmatter YAML, per-task structural audit findings, and
+Markdown-format verdicts are cached in memory (`_ROW_CACHE`, `_YAML_FM_CACHE`,
+`_TASK_AUDIT_CACHE`, and `_FORMAT_CACHE`), keyed by path and a Git blob SHA
+computed from the bytes parsed. Historical task IDs across Git history
+(`task_ids_in_history`) are cached both in memory (`_HISTORY_CACHE`) and on disk
+under `${XDG_CACHE_HOME:-~/.cache}/taskgo/history/`, keyed by the repository's
+common Git directory and commit tips with incremental `git log` updates when
+refs advance. A blob SHA names the content, so an entry cannot go stale, the
+path is in the key because a rename keeps the SHA, and the in-memory caches are
+least-recently-used. Immutable commit snapshots answer from their blob SHAs
+without reading; a working tree is read first, so a file that changes between a
+hash and a read cannot store one version's result under another's SHA. A read,
+parse, or format failure is not cached. A long-lived server therefore parses the
+tracker once: on a synthetic 10,000-task tracker a warm `apply_change_set` takes
+under a second and a handoff around a second, where one cold parse pass is 20 s.
+A fresh process still pays one full parse, because validation and the handoff's
+duplicate-ID check read every row. At 100,000 tasks, revisit the Markdown text
+each snapshot holds and the tree listing each new commit reads.
 
 Tool failures return `isError: true` with the diagnostic in both
 `content[0].text` and `structuredContent.error.message`. Change-set refusals
@@ -359,11 +368,11 @@ tests/mcp-call http://127.0.0.1:8789/mcp list_tasks '{"state":"ready"}'
 tests/auth-check                                       # Access JWTs, the log
 ```
 
-`protocol-check` needs the SDK, so run it with the interpreter of taskgo's own
-script environment:
+`protocol-check` needs the SDK, so run it with the interpreter of
+`scripts/taskgo-mcp`'s script environment:
 
 ```sh
-py=$(uv python find --script scripts/taskgo)
+py=$(uv python find --script scripts/taskgo-mcp)
 "$py" tests/protocol-check /tmp/synth   # both protocol eras, both transports
 ```
 
