@@ -529,8 +529,8 @@ function heading {
 # brew and apt pull in dependencies (such as rust) themselves.
 function packages_of {
   case "$1:$2" in
-    base:brew) echo "fish coreutils wget direnv jq mtr htop sevenzip ripgrep fd chafa node bat age age-plugin-se" ;;
-    base:apt) echo "fish apt-file direnv command-not-found dnsutils htop btop iftop iotop sysstat lsof traceroute mtr-tiny whois locate wget curl gnupg zip unzip libxml2-utils jed sqlite3 jq ripgrep fd-find chafa bat ruby ruby-dev age" ;;
+    base:brew) echo "fish coreutils wget direnv jq mtr btop sevenzip ripgrep fd chafa node bat age age-plugin-se" ;;
+    base:apt) echo "fish apt-file direnv command-not-found dnsutils btop iftop iotop sysstat lsof traceroute mtr-tiny whois locate wget curl gnupg zip unzip libxml2-utils jed sqlite3 jq ripgrep fd-find chafa bat ruby ruby-dev age" ;;
     cli-extras:brew) echo "git git-lfs gh fzf pv entr pwgen yazi" ;;
     cli-extras:apt) echo "gh fzf pv entr pwgen" ;;
     services:brew) echo "hcloud openclaw/tap/gogcli" ;;
