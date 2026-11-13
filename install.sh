@@ -2273,31 +2273,11 @@ function feature_overlay_hooks {
   fi
 }
 
-# Prefer the original launcher when it is identifiable. Never replay a process's
-# full command line: it may contain credentials or arguments unsuitable to reuse.
+# Recognize only the binary's native service mode, not convenience wrappers.
+# Never replay a full command line: it may contain credentials or arguments
+# unsuitable to reuse.
 function agent_restart_hint {
-  local agent=$1 proc=$2 line scope project arg
-  if [ -r "$proc/cgroup" ]; then
-    while IFS= read -r line; do
-      scope=${line##*/}
-      case "$agent:$scope" in
-        opencode:opencode-cloud.scope)
-          echo "hint: opencode-cloud stop; opencode-cloud start" >&2
-          return 0
-          ;;
-        claude:claude-cloud-*.scope | claude:cloud-claude-*.scope)
-          project=${scope%.scope}
-          project=${project#claude-cloud-}
-          project=${project#cloud-claude-}
-          # Only the project names accepted by the launcher can form a hint.
-          if [[ "$project" =~ ^[a-zA-Z0-9_][a-zA-Z0-9._-]*$ ]]; then
-            printf 'hint: claude-cloud stop %s; claude-cloud start %s\n' "$project" "$project" >&2
-            return 0
-          fi
-          ;;
-      esac
-    done <"$proc/cgroup"
-  fi
+  local agent=$1 proc=$2 arg
   if [ "$agent" = opencode ] && [ -r "$proc/cmdline" ]; then
     while IFS= read -r -d '' arg; do
       if [ "$arg" = --service ]; then
