@@ -336,6 +336,14 @@ A failing feature is reported and the rest still run; the exit status is
 non-zero if any failed. Set `AGENT_OFFLINE=1` to skip every feature that needs
 the network.
 
+On Linux, the default run ends with `restart-warnings`: it checks this user's
+native Claude and OpenCode processes for executables replaced on disk. This also
+catches application-managed updates and runs even when daily upgrades are
+skipped. Warnings include the PID and a restart command when the launcher is
+recognizable; nothing is restarted automatically. Run the check alone with
+`./install.sh --only restart-warnings`. It does not monitor continuously or
+detect outdated libraries, script-based installations, or processes on macOS.
+
 ### Cloud environments
 
 For the setup script of a disposable cloud or agent container, use the `cloud`

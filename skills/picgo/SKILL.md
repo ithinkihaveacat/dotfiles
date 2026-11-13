@@ -107,6 +107,10 @@ picgo mcp --http
   WebP, and an `EmbeddedResource` blob for a video. The text block carries the
   item's ID, kind, type, size and creation time. Video is not a typed MCP
   content block, so a client may save the blob rather than display it.
+- Clients differ in what they pass to the model: Claude and ChatGPT forward the
+  image block, while Google's Gemini app connector (Connected Apps Platform)
+  forwards only text. Gemini therefore sees the metadata above and may invent a
+  description; nothing in the server can change that.
 - Over HTTP the server also serves the phone app at `/` and its REST API:
   `POST /api/media` (raw body plus `Content-Type` and `X-Picgo-Filename`),
   `GET /api/media`, `GET /api/media/<id>`, `DELETE /api/media/<id>`. `GET /up`
@@ -127,6 +131,9 @@ picgo mcp --http
   HEIC upload is refused.
 - The PWA is one HTML file with no service worker. On iOS, Share → Add to Home
   Screen; on Android, the browser's install prompt may be absent.
+- Behind Cloudflare Access, an expired browser session makes the PWA report
+  "network or session error": the request is redirected to the login page and
+  gets no HTTP response. Reload the page, sign in, and retry.
 
 ## Reference
 
