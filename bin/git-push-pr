@@ -22,13 +22,14 @@ Push local commits on the current branch to a remote topic branch and open a dra
 Pushes HEAD to a remote topic branch (defaulting to pr/<slug> derived from
 the first commit's subject) without switching local branches, and creates a
 draft pull request via GitHub CLI ('gh'). If an open PR already exists for
-the target branch, prints its URL.
+the target branch, prints its URL. Fetches remote refs but never updates the
+checkout. Stops if upstream contains commits missing locally.
 
 Arguments:
   BRANCH         Target remote topic branch (default: pr/<slug>)
 
 Options:
-  -f, --force    Force push to the remote topic branch (+HEAD:refs/heads/BRANCH)
+  -f, --force    Replace a topic branch using --force-with-lease
   --help, -h     Display this help message and exit
 
 Examples:
@@ -42,6 +43,9 @@ Examples:
   $(basename "$0") -f
 
 Notes:
+  Publishes all committed work ahead of upstream, not a selection of files.
+  Merge PRs using a merge commit, never squash or rebase. This command does
+  not mark PRs ready, merge them, or update another machine.
   When invoked via 'git push-pr', note that 'git push-pr --help' is
   intercepted by Git (which looks for a man page); use 'git push-pr -h'
   or 'git-push-pr --help' for command-line help.
@@ -93,6 +97,11 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+if [ "${AGENT_OFFLINE:-0}" = 1 ]; then
+  echo "$(basename "$0"): offline; commits remain local and have not been published" >&2
+  exit 1
+fi
+
 cur=$(git symbolic-ref --quiet --short HEAD 2>/dev/null) || {
   echo "$(basename "$0"): detached HEAD" >&2
   exit 1
@@ -124,12 +133,31 @@ if [ -z "$push_remote" ]; then
 fi
 remote=${push_remote:-$up_remote}
 
+git_dir=$(git rev-parse --git-dir)
+for state in MERGE_HEAD rebase-merge rebase-apply CHERRY_PICK_HEAD REVERT_HEAD BISECT_LOG; do
+  if [ -e "$git_dir/$state" ]; then
+    echo "$(basename "$0"): unfinished git operation ($state); resolve it before publishing" >&2
+    exit 1
+  fi
+done
+
 if ! git -c diff.relative=false diff --quiet || ! git -c diff.relative=false diff --cached --quiet; then
   echo "$(basename "$0"): uncommitted changes present; commit them first" >&2
   exit 1
 fi
 
-ahead=$(git rev-list --count "$up..HEAD")
+snapshot=$(git rev-parse HEAD)
+echo "Saved locally: $snapshot" >&2
+git fetch -p "$up_remote"
+if [ "$remote" != "$up_remote" ]; then
+  git fetch -p "$remote"
+fi
+if ! git merge-base --is-ancestor "$up" "$snapshot"; then
+  echo "$(basename "$0"): upstream '$up' has commits missing locally; inspect and integrate separately before publishing" >&2
+  exit 1
+fi
+
+ahead=$(git rev-list --count "$up..$snapshot")
 [ "$ahead" -gt 0 ] || {
   echo "$(basename "$0"): no commits on '$cur' ahead of '$up'" >&2
   exit 1
@@ -139,7 +167,7 @@ if [ -n "$(git ls-files --others --exclude-standard)" ]; then
   echo "$(basename "$0"): note: untracked files present (not included in PR)" >&2
 fi
 
-first_sha=$(git rev-list --reverse "$up..HEAD" | sed -n '1p')
+first_sha=$(git rev-list --reverse "$up..$snapshot" | sed -n '1p')
 title=$(git log -1 --format=%s "$first_sha")
 
 if [ "$has_branch" = 0 ]; then
@@ -165,7 +193,7 @@ up_slug=""
 head_owner=""
 
 if [ "$remote" != "$up_remote" ]; then
-  u=$(git remote get-url "$up_remote" 2>/dev/null || true)
+  u=$(git config --get "remote.$up_remote.url" || true)
   case "$u" in
     https://*/*/* | http://*/*/* | ssh://*/*/*)
       s=${u#*://}
@@ -201,7 +229,7 @@ if [ "$remote" != "$up_remote" ]; then
       ;;
   esac
 
-  u=$(git remote get-url "$remote" 2>/dev/null || true)
+  u=$(git config --get "remote.$remote.url" || true)
   case "$u" in
     https://*/*/* | http://*/*/* | ssh://*/*/*)
       s=${u#*://}
@@ -236,15 +264,23 @@ if [ "$remote" != "$up_remote" ]; then
       esac
       ;;
   esac
+fi
+
+git check-ref-format "refs/heads/$branch" >/dev/null || {
+  echo "$(basename "$0"): invalid topic branch '$branch'" >&2
+  exit 1
+}
+if [ "$(git rev-parse HEAD)" != "$snapshot" ]; then
+  echo "$(basename "$0"): HEAD changed while preparing publication; retry after other work stops" >&2
+  exit 1
 fi
 
 if [ "$force" = 1 ]; then
-  refspec="+HEAD:refs/heads/$branch"
+  git push --force-with-lease "$remote" "$snapshot:refs/heads/$branch"
 else
-  refspec="HEAD:refs/heads/$branch"
+  git push "$remote" "$snapshot:refs/heads/$branch"
 fi
-
-git push "$remote" "$refspec"
+echo "Published: $snapshot to $remote/$branch (not merged by this command)" >&2
 
 if [ "$remote" = "$up_remote" ]; then
   existing=$(gh pr list --head "$branch" --state open --json url,isCrossRepository --jq 'map(select(.isCrossRepository | not)) | .[0].url // empty')
@@ -274,7 +310,7 @@ fi
 if [ "$ahead" -eq 1 ]; then
   body=$(git log -1 --format=%b "$first_sha")
 else
-  body=$(git log --reverse --format='- %s' "$up..HEAD")
+  body=$(git log --reverse --format='- %s' "$up..$snapshot")
 fi
 
 gh pr create "$@" --draft --head "$pr_head" --base "$base" --title "$title" --body "$body"

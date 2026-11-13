@@ -2,6 +2,9 @@
 
 # Tests: tests/test-install-git-pull (install.sh git_up, feature_git_pull, self-reexec)
 
+# Variables consumed by functions extracted from install.sh below.
+# shellcheck disable=SC2034
+
 set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
@@ -22,12 +25,14 @@ export GIT_COMMITTER_EMAIL="test@example.com"
 # directly against real bare git repos without touching network remotes.
 git_up_src=$(awk '/^git_up\(\) \{/,/^\}/' "$INSTALL_SH")
 feature_src=$(awk '/^function feature_git_pull \{/,/^\}/' "$INSTALL_SH")
+apply_src=$(awk '/^function git_apply_updates \{/,/^\}/' "$INSTALL_SH")
 if [[ -z "$git_up_src" || -z "$feature_src" ]]; then
   echo "Bail out! git_up or feature_git_pull not found in install.sh"
   exit 1
 fi
 eval "$git_up_src"
 eval "$feature_src"
+eval "$apply_src"
 
 # shellcheck disable=SC2034 # referenced by eval'd git_up / feature_git_pull
 GIT_NET_OPTS=()
@@ -36,7 +41,7 @@ SRCDIRS=()
 # shellcheck disable=SC2034
 INSTALL_REEXEC=0
 # shellcheck disable=SC2034
-INSTALL_REEXEC_PULL_STATUS=0
+ACCEPT_UPDATES=1
 x() { "$@"; }
 heading() { :; }
 is_offline() { return 1; }
@@ -76,11 +81,16 @@ make_remote_and_clone() {
 
 run_git_up() {
   local dir=$1 non_inter=$2 reply=${3:-}
+  GIT_UPDATE_DIRS=()
+  GIT_UPDATE_HEADS=()
+  GIT_UPDATE_TARGETS=()
+  GIT_UPDATE_BRANCHES=()
   status=0
-  output=$(NON_INTERACTIVE="$non_inter" git_up "$dir" 2>&1 <<<"$reply") || status=$?
+  output=$(
+    exec 2>&1
+    NON_INTERACTIVE="$non_inter" git_up "$dir" <<<"$reply" && git_apply_updates
+  ) || status=$?
 }
-
-echo "1..48"
 
 # 1. Fails loudly on detached HEAD
 make_remote_and_clone "detached"
@@ -121,7 +131,7 @@ git -C "$TMP/nondefault" commit -q -am "feat: stray"
 git -C "$TMP/nondefault" push -q -u origin stray-branch >/dev/null 2>&1
 run_git_up "$TMP/nondefault" 1
 check "non-default branch fails" is "$status" 1
-check "non-default branch error identifies branch" has "$output" "instead of 'origin/main'"
+check "non-default branch error identifies branch" has "$output" "stray-branch"
 
 make_remote_and_clone "mismatch"
 git -C "$TMP/mismatch" checkout -q -b local-topic --track origin/main
@@ -194,15 +204,16 @@ git -C "$TMP/inter-admin" commit -q -am "feat: remote update"
 git -C "$TMP/inter-admin" push -q origin main >/dev/null 2>&1
 
 before_head=$(git -C "$TMP/inter" rev-parse HEAD)
+ACCEPT_UPDATES=0
 run_git_up "$TMP/inter" 0 "n"
-check "declining interactive prompt skips cleanly (status 0)" is "$status" 0
+check "declining interactive prompt stops the run" is "$status" 1
 check "shows incoming commit subject in preview" has "$output" "feat: remote update"
 check "shows incoming diffstat in preview" has "$output" "file.txt | 1 +"
 check "declining leaves HEAD unchanged" is "$(git -C "$TMP/inter" rev-parse HEAD)" "$before_head"
 
 run_git_up "$TMP/inter" 0 $'d\nn'
 check "entering d then n prints full diff and leaves HEAD unchanged" \
-  is "$status:$(git -C "$TMP/inter" rev-parse HEAD)" "0:$before_head"
+  is "$status:$(git -C "$TMP/inter" rev-parse HEAD)" "1:$before_head"
 check "d then n outputs full added diff line" has "$output" "+remote line"
 
 run_git_up "$TMP/inter" 0 $'d\ny'
@@ -210,8 +221,9 @@ check "entering d then y fast-forwards cleanly" is "$status" 0
 check "d prints added lines from full git diff" has "$output" "+remote line"
 check "HEAD advances to remote commit after d then y" \
   is "$(git -C "$TMP/inter" rev-parse HEAD)" "$(git -C "$TMP/inter-admin" rev-parse HEAD)"
+ACCEPT_UPDATES=1
 
-# 8. Shallow clone with no merge-base handles diff preview without failing
+# 8. Rewritten shallow history is refused, not repaired.
 SHALLOW_BARE="$TMP/shallow-origin.git"
 SHALLOW_ADMIN="$TMP/shallow-admin"
 SHALLOW_CLONE="$TMP/shallow"
@@ -228,9 +240,9 @@ echo "s2-amended" >"$SHALLOW_ADMIN/file.txt"
 git -C "$SHALLOW_ADMIN" commit -q --amend -am "feat: amended shallow base"
 git -C "$SHALLOW_ADMIN" push -q --force origin main >/dev/null 2>&1
 run_git_up "$SHALLOW_CLONE" 0 "n"
-check "shallow clone interactive preview succeeds despite missing merge-base" is "$status" 0
+check "shallow rewritten history stops rather than guessing" is "$status" 1
 
-# 9. Interactive ahead > 0 warns loudly listing local commits and rebases cleanly on y
+# 9. Interactive divergence is refused even when the caller answers yes.
 make_remote_and_clone "inter-ahead"
 echo "local only" >"$TMP/inter-ahead/local.txt"
 git -C "$TMP/inter-ahead" add local.txt
@@ -242,13 +254,13 @@ git -C "$TMP/inter-ahead-admin" add remote.txt
 git -C "$TMP/inter-ahead-admin" commit -q -m "feat: remote parallel"
 git -C "$TMP/inter-ahead-admin" push -q origin main >/dev/null 2>&1
 run_git_up "$TMP/inter-ahead" 0 $'d\ny'
-check "interactive ahead > 0 warns loudly listing local commits" has "$output" "WARNING:"
-check "interactive ahead > 0 shows full diff on d" has "$output" "+remote only"
-check "interactive ahead > 0 shows rebase prompt" \
-  has "$output" "Rebase 1 local commit(s) and pull inter-ahead? [y/N/d]"
+check "interactive divergence explains the state" has "$output" "has diverged"
+check "interactive divergence requires separate integration" has "$output" "integrate separately"
+check "interactive divergence does not offer to rebase" \
+  is "$status" 1
 is_anc=0
 git -C "$TMP/inter-ahead" merge-base --is-ancestor origin/main HEAD || is_anc=$?
-check "interactive ahead > 0 rebases cleanly on y without pull.rebase" is "$status:$is_anc" "0:0"
+check "interactive divergence leaves local history intact" is "$status:$is_anc" "1:1"
 
 # 10. Dirty working tree: allowed when nothing incoming (behind=0), fails when updates arrive
 make_remote_and_clone "dirty"
@@ -263,7 +275,7 @@ run_git_up "$TMP/dirty" 1
 check "dirty working tree fails when updates are incoming" is "$status" 1
 check "reports uncommitted changes" has "$output" "uncommitted changes"
 
-# 11. Diverged local commit in non-interactive mode: refused unless pull.rebase opts in
+# 11. Divergence is refused regardless of pull.rebase.
 make_remote_and_clone "div"
 echo "local A" >"$TMP/div/a.txt"
 git -C "$TMP/div" add a.txt
@@ -279,7 +291,8 @@ check "diverged local main fails in non-interactive mode when pull.rebase is fal
 
 git -C "$TMP/div" config --local pull.rebase true
 run_git_up "$TMP/div" 1
-check "diverged local main reconciles via rebase when pull.rebase=true" is "$status" 0
+check "pull.rebase=true cannot override divergence refusal" is "$status" 1
+check "legacy squash divergence has recovery context" has "$output" "earlier squash merge"
 
 make_remote_and_clone "div-merges"
 echo "local B" >"$TMP/div-merges/b.txt"
@@ -292,11 +305,11 @@ git -C "$TMP/div-merges-admin" commit -q -m "feat: add B (#2)"
 git -C "$TMP/div-merges-admin" push -q origin main >/dev/null 2>&1
 git -C "$TMP/div-merges" config --local pull.rebase merges
 run_git_up "$TMP/div-merges" 1
-check "diverged local main reconciles via rebase when pull.rebase=merges" is "$status" 0
-check "reconciled HEAD matches squashed origin/main" \
-  is "$(git -C "$TMP/div-merges" rev-parse HEAD)" "$(git -C "$TMP/div-merges" rev-parse origin/main)"
+check "pull.rebase=merges cannot override divergence refusal" is "$status" 1
+check "squash divergence leaves the original commits intact" \
+  is "$(git -C "$TMP/div-merges" rev-list --count origin/main..HEAD)" "1"
 
-# Verify pull.rebase=merges preserves actual local merge commits instead of flattening
+# Actual local merge commits must not be flattened or replayed either.
 make_remote_and_clone "preserve-merge"
 git -C "$TMP/preserve-merge" checkout -q -b topic-side
 echo "side" >"$TMP/preserve-merge/side.txt"
@@ -311,10 +324,10 @@ git -C "$TMP/preserve-merge-admin" push -q origin main >/dev/null 2>&1
 git -C "$TMP/preserve-merge" config --local pull.rebase merges
 run_git_up "$TMP/preserve-merge" 1
 merge_rev=$(git -C "$TMP/preserve-merge" rev-list --merges -n 1 HEAD)
-check "pull.rebase=merges preserves local merge commits via --rebase-merges" \
-  is "$status:$([ -n "$merge_rev" ] && echo yes || echo no)" "0:yes"
+check "divergent local merge commits remain untouched" \
+  is "$status:$([ -n "$merge_rev" ] && echo yes || echo no)" "1:yes"
 
-# 12. Multi-commit squash conflict aborts rebase cleanly without leaving detached HEAD
+# 12. Multi-commit squash divergence never starts a rebase.
 make_remote_and_clone "conflict"
 echo "step1" >>"$TMP/conflict/file.txt"
 git -C "$TMP/conflict" commit -q -am "feat: step 1"
@@ -328,8 +341,94 @@ git -C "$TMP/conflict-admin" push -q origin main >/dev/null 2>&1
 git -C "$TMP/conflict" config --local pull.rebase true
 run_git_up "$TMP/conflict" 1
 check "conflicting multi-commit squash exits non-zero" is "$status" 1
-check "conflict triggers git rebase --abort so HEAD stays on main" \
+check "squash divergence never starts a rebase and HEAD stays on main" \
   is "$(git -C "$TMP/conflict" branch --show-current)" "main"
+
+# Ordinary multi-commit PR merges preserve ancestry and fast-forward naturally.
+make_remote_and_clone "merged-pr"
+echo "step1" >>"$TMP/merged-pr/file.txt"
+git -C "$TMP/merged-pr" commit -q -am "feat: step one"
+echo "step2" >>"$TMP/merged-pr/file.txt"
+git -C "$TMP/merged-pr" commit -q -am "fix: step two"
+git -C "$TMP/merged-pr" push -q origin HEAD:refs/heads/pr-multi
+git -C "$TMP/merged-pr-admin" fetch -q origin pr-multi
+git -C "$TMP/merged-pr-admin" merge -q --no-ff FETCH_HEAD -m "Merge PR"
+git -C "$TMP/merged-pr-admin" push -q origin main
+before_head=$(git -C "$TMP/merged-pr" rev-parse HEAD)
+run_git_up "$TMP/merged-pr" 1
+check "normal multi-commit PR merge fast-forwards" is "$status:$(git -C "$TMP/merged-pr" rev-parse HEAD)" \
+  "0:$(git -C "$TMP/merged-pr-admin" rev-parse HEAD)"
+check "normal merge retains original local commits" \
+  git -C "$TMP/merged-pr" merge-base --is-ancestor "$before_head" HEAD
+
+# New local work after publishing requires explicit integration, not replay.
+git -C "$TMP/merged-pr" checkout -q --detach "$before_head"
+git -C "$TMP/merged-pr" checkout -q -b newer-work
+git -C "$TMP/merged-pr" branch -f main HEAD
+git -C "$TMP/merged-pr" checkout -q main
+echo "newer" >"$TMP/merged-pr/newer.txt"
+git -C "$TMP/merged-pr" add newer.txt
+git -C "$TMP/merged-pr" commit -q -m "feat: subsequent work"
+newer_head=$(git -C "$TMP/merged-pr" rev-parse HEAD)
+run_git_up "$TMP/merged-pr" 1
+check "new local work before merge adoption stops without rewriting" \
+  is "$status:$(git -C "$TMP/merged-pr" rev-parse HEAD)" "1:$newer_head"
+
+# Automation must explicitly accept incoming code.
+make_remote_and_clone "consent"
+echo "incoming" >>"$TMP/consent-admin/file.txt"
+git -C "$TMP/consent-admin" commit -q -am "feat: incoming"
+git -C "$TMP/consent-admin" push -q origin main
+ACCEPT_UPDATES=0
+run_git_up "$TMP/consent" 1
+check "non-interactive update requires explicit consent" is "$status" 1
+check "non-interactive error names the consent flag" has "$output" "--accept-updates"
+ACCEPT_UPDATES=1
+
+# Approval is for an exact target, not a moving remote ref.
+GIT_UPDATE_DIRS=()
+GIT_UPDATE_HEADS=()
+GIT_UPDATE_TARGETS=()
+GIT_UPDATE_BRANCHES=()
+NON_INTERACTIVE=1 git_up "$TMP/consent" >/dev/null 2>&1
+approved_target=$(git -C "$TMP/consent" rev-parse origin/main)
+git -C "$TMP/consent" update-ref refs/remotes/origin/main HEAD
+status=0
+output=$(git_apply_updates 2>&1) || status=$?
+check "update uses the approved SHA even when remote ref moves" \
+  is "$status:$(git -C "$TMP/consent" rev-parse HEAD)" "0:$approved_target"
+
+# Do not autostash changes made after approval, even if Git is configured to.
+make_remote_and_clone "approval-race"
+echo "incoming" >>"$TMP/approval-race-admin/file.txt"
+git -C "$TMP/approval-race-admin" commit -q -am "feat: incoming"
+git -C "$TMP/approval-race-admin" push -q origin main
+git -C "$TMP/approval-race" config merge.autostash true
+GIT_UPDATE_DIRS=()
+GIT_UPDATE_HEADS=()
+GIT_UPDATE_TARGETS=()
+GIT_UPDATE_BRANCHES=()
+NON_INTERACTIVE=1 git_up "$TMP/approval-race" >/dev/null 2>&1
+before_head=$(git -C "$TMP/approval-race" rev-parse HEAD)
+echo "local edit after approval" >>"$TMP/approval-race/file.txt"
+status=0
+output=$(git_apply_updates 2>&1) || status=$?
+check "local changes after approval stop the update" \
+  is "$status:$(git -C "$TMP/approval-race" rev-parse HEAD)" "1:$before_head"
+check "local changes are preserved, not autostashed" \
+  is "$(git -C "$TMP/approval-race" stash list)" ""
+
+# An untracked incoming checkout is refused too.
+run_git_up "$TMP/approval-race" 1
+check "dirty incoming updates do not use merge.autostash" is "$status" 1
+
+# Apply is unambiguous and incompatible update requests are rejected.
+status=0
+output=$("$INSTALL_SH" --apply --accept-updates --dry-run 2>&1) || status=$?
+check "apply and accept-updates cannot be combined" is "$status" 1
+status=0
+output=$("$INSTALL_SH" --apply --only git-pull --dry-run 2>&1) || status=$?
+check "apply and explicit git-pull cannot be combined" is "$status" 1
 
 # 13. End-to-end self-reexec: when git-pull updates install.sh, remaining features
 #     execute from the newly updated install.sh on disk without re-running git-pull.
@@ -381,7 +480,7 @@ PY
 setup_e2e_repo "e2e" 0
 status=0
 output=$(env -i HOME="$TMP/e2e-home" PATH="/usr/bin:/bin" \
-  "$TMP/e2e-home/.dotfiles/install.sh" --only git-pull,links --no-input 2>&1 </dev/null) || status=$?
+  "$TMP/e2e-home/.dotfiles/install.sh" --only git-pull,links --accept-updates --no-input 2>&1 </dev/null) || status=$?
 check "end-to-end self-reexec --only git-pull,links exits 0" is "$status" 0
 check "runs links from newly pulled install.sh on disk" \
   has "$output" "MARKER_FROM_UPDATED_INSTALL_SH"
@@ -396,7 +495,7 @@ git -C "$TMP/e2e0-home/.ssh" commit -q -m "ssh init"
 git -C "$TMP/e2e0-home/.ssh" checkout -q --detach HEAD
 status=0
 output=$(env -i HOME="$TMP/e2e0-home" PATH="/usr/bin:/bin" \
-  "$TMP/e2e0-home/.dotfiles/install.sh" 2>&1 </dev/null) || status=$?
+  "$TMP/e2e0-home/.dotfiles/install.sh" --accept-updates 2>&1 </dev/null) || status=$?
 check "end-to-end 0-arg self-reexec exits 0" is "$status" 0
 check "0-arg self-reexec runs links from updated install.sh" \
   has "$output" "MARKER_FROM_UPDATED_INSTALL_SH"
@@ -412,7 +511,7 @@ output=$(env -i HOME="$TMP/e2e-dry-home" PATH="/usr/bin:/bin" \
 check "end-to-end --dry-run exits 0 without advancing HEAD" \
   is "$status:$(git -C "$TMP/e2e-dry-home/.dotfiles" rev-parse HEAD)" "0:$dry_before"
 
-# 16. End-to-end self-reexec propagates partial overlay failure while still running updated features
+# 16. Failed overlay preflight prevents every update and every apply feature.
 setup_e2e_repo "e2e-partial" 0
 mkdir -p "$TMP/e2e-partial-home/.private"
 git -C "$TMP/e2e-partial-home/.private" init -q --initial-branch=main
@@ -422,19 +521,55 @@ git -C "$TMP/e2e-partial-home/.private" commit -q -m "priv init"
 git -C "$TMP/e2e-partial-home/.private" checkout -q --detach HEAD
 status=0
 output=$(env -i HOME="$TMP/e2e-partial-home" PATH="/usr/bin:/bin" \
-  "$TMP/e2e-partial-home/.dotfiles/install.sh" --only git-pull,links --no-input 2>&1 </dev/null) || status=$?
+  "$TMP/e2e-partial-home/.dotfiles/install.sh" --only git-pull,links --accept-updates --no-input 2>&1 </dev/null) || status=$?
 check "end-to-end self-reexec propagates detached .private pull failure (exit 1)" is "$status" 1
-check "partial pull failure across reexec still runs updated links" \
-  has "$output" "MARKER_FROM_UPDATED_INSTALL_SH"
+check "overlay preflight failure prevents dotfiles advancing" \
+  is "$(git -C "$TMP/e2e-partial-home/.dotfiles" rev-list --count HEAD..origin/main)" "1"
+check "failed preflight runs neither incoming installer nor links" \
+  is "$([ -e "$TMP/e2e-partial-home/.testrc" ] && echo yes || echo no)" "no"
+check "failed preflight reports that nothing advanced" has "$output" "no checkouts advanced"
 
-# 17. feature_git_pull propagates failed pre-reexec status when INSTALL_REEXEC=1
+# Apply-only works with a broken remote and does not execute incoming code.
+setup_e2e_repo "e2e-apply" 0
+apply_head=$(git -C "$TMP/e2e-apply-home/.dotfiles" rev-parse HEAD)
+git -C "$TMP/e2e-apply-home/.dotfiles" remote set-url origin "$TMP/missing.git"
 status=0
-# shellcheck disable=SC2034
-INSTALL_REEXEC=1
-# shellcheck disable=SC2034
-INSTALL_REEXEC_PULL_STATUS=1
-output=$(feature_git_pull 2>&1) || status=$?
-check "feature_git_pull returns INSTALL_REEXEC_PULL_STATUS=1 on reexec" is "$status" 1
+output=$(env -i HOME="$TMP/e2e-apply-home" PATH="/usr/bin:/bin" \
+  "$TMP/e2e-apply-home/.dotfiles/install.sh" --apply --only links --no-input 2>&1 </dev/null) || status=$?
+check "apply-only succeeds without contacting a broken Git remote" is "$status" 0
+check "apply-only leaves HEAD unchanged" is "$(git -C "$TMP/e2e-apply-home/.dotfiles" rev-parse HEAD)" "$apply_head"
+check "apply-only applies current local files" test -L "$TMP/e2e-apply-home/.testrc"
+
+# Declining approval must never execute the incoming installer or overlay hook.
+setup_e2e_repo "e2e-refuse" 0
+status=0
+output=$(env -i HOME="$TMP/e2e-refuse-home" PATH="/usr/bin:/bin" \
+  "$TMP/e2e-refuse-home/.dotfiles/install.sh" --only git-pull,links --no-input 2>&1 </dev/null) || status=$?
+check "missing update approval aborts before reexec and apply" is "$status" 1
+check "unapproved incoming installer is not executed" \
+  is "$([[ "$output" == *MARKER_FROM_UPDATED_INSTALL_SH* ]] && echo yes || echo no)" "no"
+check "unapproved update does not apply local links either" \
+  is "$([ -e "$TMP/e2e-refuse-home/.testrc" ] && echo yes || echo no)" "no"
+
+# A new overlay hook must not execute without approval of its incoming code.
+setup_e2e_repo "e2e-hook" 0
+make_remote_and_clone "hook-overlay"
+mv "$TMP/hook-overlay" "$TMP/e2e-hook-home/.private"
+cat >"$TMP/hook-overlay-admin/update" <<'EOF'
+#!/bin/sh
+touch "$HOME/UNAPPROVED_HOOK_RAN"
+EOF
+chmod +x "$TMP/hook-overlay-admin/update"
+git -C "$TMP/hook-overlay-admin" add update
+git -C "$TMP/hook-overlay-admin" commit -q -m "feat: overlay hook"
+git -C "$TMP/hook-overlay-admin" push -q origin main
+status=0
+output=$(env -i HOME="$TMP/e2e-hook-home" PATH="/usr/bin:/bin" \
+  "$TMP/e2e-hook-home/.dotfiles/install.sh" --only git-pull,overlay-hooks --no-input 2>&1 </dev/null) || status=$?
+check "missing approval stops before overlay hooks" is "$status" 1
+check "unapproved incoming overlay hook never executes" test ! -e "$TMP/e2e-hook-home/UNAPPROVED_HOOK_RAN"
+
+echo "1..$n"
 
 if [ "$failed" -ne 0 ]; then
   exit 1

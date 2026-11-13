@@ -62,6 +62,9 @@ export GIT_COMMITTER_NAME="Test User"
 export GIT_COMMITTER_EMAIL="test@example.com"
 export GH_CALLS="$TMP/gh-calls"
 export PATH="$STUBS:$PATH"
+# All Git remotes are local fixtures and gh is stubbed. Exercise publication
+# even when the outer CI run is offline; individual tests override this flag.
+export AGENT_OFFLINE=0
 
 n=0
 failed=0
@@ -104,8 +107,6 @@ run_git() {
   output=$(git -C "$work" "$@" 2>&1) || status=$?
   gh_calls=$(cat "$GH_CALLS")
 }
-
-echo "1..51"
 
 WORK=$(setup_clone "repo1")
 
@@ -257,6 +258,8 @@ git init --bare -q --initial-branch=main "$FORK_BARE"
 git -C "$WORK" remote add fork "git@github.com:forkuser/repo.git"
 git -C "$WORK" remote set-url --push fork "$FORK_BARE"
 git -C "$WORK" remote set-url origin "git@github.com:upstreamorg/repo.git"
+git -C "$WORK" config "url.$TMP/repo1.git.insteadOf" "git@github.com:upstreamorg/repo.git"
+git -C "$WORK" config "url.$FORK_BARE.insteadOf" "git@github.com:forkuser/repo.git"
 git -C "$WORK" config --local remote.pushDefault fork
 run_git "$WORK" push-pr custom/to-fork
 fork_ok=$(
@@ -283,6 +286,8 @@ check "qualifies upstream repo (-R) and fork owner (--head) in fork workflow" \
 
 git -C "$WORK" remote set-url fork "gh:ForkUser/repo.git/"
 git -C "$WORK" remote set-url origin "https://github.com/upstreamorg/repo.git/"
+git -C "$WORK" config --add "url.$TMP/repo1.git.insteadOf" "https://github.com/upstreamorg/repo.git/"
+git -C "$WORK" config --add "url.$FORK_BARE.insteadOf" "gh:ForkUser/repo.git/"
 run_git "$WORK" push-pr -f custom/to-fork-alias
 fork_alias_ok=$(
   python3 - "$GH_CALLS" <<'PY'
@@ -385,6 +390,76 @@ check "git push-pr -f exits 0" is "$status" 0
 check "prints created PR URL" has "$output" "https://github.com/ithinkihaveacat/dotfiles/pull/999"
 check "truncates branch slug at 40 characters" \
   has "$(git -C "$TMP/dashrepo.git" branch -a)" "pr/feat-very-long-subject-exceeding-forty-c"
+
+# Offline publication retains the local commit and does not contact GitHub.
+saved_head=$(git -C "$DASH_WORK" rev-parse HEAD)
+AGENT_OFFLINE=1 run_git "$DASH_WORK" push-pr
+check "offline publication stops with a clear local-only status" \
+  is "$status:$(git -C "$DASH_WORK" rev-parse HEAD)" "1:$saved_head"
+check "offline publication explains that nothing was published" has "$output" "have not been published"
+check "offline publication does not call gh" is "$gh_calls" ""
+check "online retry publishes the same saved commit" \
+  git -C "$TMP/dashrepo.git" cat-file -e "$saved_head"
+run_git "$DASH_WORK" push-pr
+check "online retry succeeds without rewriting the commit" \
+  is "$status:$(git -C "$DASH_WORK" rev-parse HEAD)" "0:$saved_head"
+check "publication reports exact commit and not-merged state" has "$output" "Published: $saved_head"
+
+# Fetching detects concurrent upstream work but must never activate it locally.
+DIV_WORK=$(setup_clone "publish-diverged")
+echo "local" >"$DIV_WORK/local.txt"
+git -C "$DIV_WORK" add local.txt
+git -C "$DIV_WORK" commit -q -m "feat: local work"
+saved_head=$(git -C "$DIV_WORK" rev-parse HEAD)
+git clone -q "$TMP/publish-diverged.git" "$TMP/publish-admin"
+echo "incoming" >"$TMP/publish-admin/incoming.txt"
+git -C "$TMP/publish-admin" add incoming.txt
+git -C "$TMP/publish-admin" commit -q -m "feat: concurrent work"
+git -C "$TMP/publish-admin" push -q origin main
+run_git "$DIV_WORK" push-pr
+check "publication refuses upstream commits missing locally" is "$status" 1
+check "publication explains separate integration is needed" has "$output" "integrate separately"
+check "fetch leaves local HEAD unchanged" is "$(git -C "$DIV_WORK" rev-parse HEAD)" "$saved_head"
+check "fetch does not activate incoming files" test ! -e "$DIV_WORK/incoming.txt"
+check "divergence never creates a PR" is "$gh_calls" ""
+
+# Incomplete operations are refused even from a subdirectory.
+printf '%s\n' "$saved_head" >"$DIV_WORK/.git/REVERT_HEAD"
+run_git "$DIV_WORK/sub" push-pr
+check "unfinished Git operation blocks publication from a subdirectory" \
+  has "$output" "unfinished git operation (REVERT_HEAD)"
+rm "$DIV_WORK/.git/REVERT_HEAD"
+git -C "$DIV_WORK" remote set-url origin "$TMP/missing-publish.git"
+run_git "$DIV_WORK" push-pr
+check "failed fetch leaves local commit intact" \
+  is "$status:$(git -C "$DIV_WORK" rev-parse HEAD)" "128:$saved_head"
+check "failed fetch does not claim publication succeeded" lacks "$output" "Published:"
+
+# A concurrent topic update after fetch must not be overwritten by -f.
+LEASE_WORK=$(setup_clone "lease")
+echo "first" >>"$LEASE_WORK/README.md"
+git -C "$LEASE_WORK" commit -q -am "feat: lease test"
+run_git "$LEASE_WORK" push-pr
+git clone -q "$TMP/lease.git" "$TMP/lease-admin"
+echo "other" >"$TMP/lease-admin/other.txt"
+git -C "$TMP/lease-admin" add other.txt
+git -C "$TMP/lease-admin" commit -q -m "feat: other writer"
+other_sha=$(git -C "$TMP/lease-admin" rev-parse HEAD)
+git -C "$TMP/lease-admin" push -q origin HEAD:refs/heads/other-writer
+echo "amended" >>"$LEASE_WORK/README.md"
+git -C "$LEASE_WORK" commit -q --amend --no-edit -a
+cat >"$LEASE_WORK/.git/hooks/pre-push" <<EOF
+#!/bin/sh
+git --git-dir="$TMP/lease.git" update-ref refs/heads/pr/feat-lease-test "$other_sha"
+EOF
+chmod +x "$LEASE_WORK/.git/hooks/pre-push"
+run_git "$LEASE_WORK" push-pr -f
+check "force-with-lease refuses a concurrent topic update" is "$status" 1
+check "force-with-lease preserves the other writer's commit" \
+  is "$(git -C "$TMP/lease.git" rev-parse refs/heads/pr/feat-lease-test)" "$other_sha"
+check "rejected force push creates no PR" is "$gh_calls" ""
+
+echo "1..$n"
 
 if [ "$failed" -ne 0 ]; then
   exit 1

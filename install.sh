@@ -149,8 +149,13 @@ The work is split into features, and a profile picks which of them run. The
 default, workstation, sets up a long-lived machine for interactive use; cloud
 is for the setup script of a disposable cloud or agent container, and uses no
 sudo, installs no packages, and upgrades nothing. Features in no profile run
-only when named with --with or --only. A failing feature is reported and the
-others still run; the exit status is non-zero if any failed.
+only when named with --with or --only. Git update failures stop the run before
+applying anything. Other feature failures are reported and the remaining
+features still run; the exit status is non-zero if any failed.
+
+Git updates only fast-forward. Incoming changes require confirmation, or an
+explicit --accept-updates for automation. Divergence is never repaired here.
+Use --apply to apply the current checkout without fetching or updating Git.
 
 On Linux, restart-warnings checks this user's native Claude and OpenCode
 processes against the installed executables, including updates installed by
@@ -176,6 +181,9 @@ OPTIONS:
                 packages depend on). Asks first when interactive; otherwise
                 --prune is the consent. Default: warn only
   --no-input    Never prompt; use sudo only if it needs no password
+  --apply       Apply the current checkout without Git updates
+  --accept-updates
+                Accept incoming fast-forwards without prompting (agent hosts)
   --verbose     Print each wrapped command to stderr before running it
 
 FEATURES:
@@ -196,6 +204,8 @@ EXAMPLES:
   $(basename "$0") --with android,ruby  # Also install Android and Ruby tooling
   $(basename "$0") --prune            # Also remove packages no feature installs
   $(basename "$0") --without upgrades # Skip the daily upgrades
+  $(basename "$0") --apply            # Apply local edits without Git updates
+  $(basename "$0") --accept-updates --no-input # Explicitly adopt updates on an agent host
   $(basename "$0") --only restart-warnings # Check running agents without updating
   $(basename "$0") --profile cloud    # From a cloud environment's setup script
   $(basename "$0") --only uv          # Prepare a CI job for offline use
@@ -245,6 +255,8 @@ FORCE=0
 HAS_SUDO=false
 NON_INTERACTIVE=0
 NO_INPUT=0
+APPLY_ONLY=0
+ACCEPT_UPDATES=0
 PRUNE=0
 DRY_RUN=0
 PROFILE=""
@@ -252,8 +264,7 @@ ONLY=""
 WITH=""
 WITHOUT=""
 INSTALL_REEXEC=${_DOTFILES_INSTALL_REEXEC:-0}
-INSTALL_REEXEC_PULL_STATUS=${_DOTFILES_GIT_PULL_STATUS:-0}
-unset _DOTFILES_INSTALL_REEXEC _DOTFILES_GIT_PULL_STATUS
+unset _DOTFILES_INSTALL_REEXEC
 
 # XDG Base Directory specification defaults
 export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
@@ -304,6 +315,14 @@ while [[ $# -gt 0 ]]; do
       NO_INPUT=1
       shift
       ;;
+    --apply)
+      APPLY_ONLY=1
+      shift
+      ;;
+    --accept-updates)
+      ACCEPT_UPDATES=1
+      shift
+      ;;
     -n | --dry-run)
       DRY_RUN=1
       shift
@@ -347,6 +366,13 @@ if [ -n "$ONLY" ] && [ -n "$PROFILE$WITH" ]; then
 fi
 
 # Resolve the selection to a space-separated list in FEATURES order.
+if [ "$APPLY_ONLY" = 1 ]; then
+  if [ "$ACCEPT_UPDATES" = 1 ] || [[ " $ONLY $WITH " == *" git-pull "* ]]; then
+    echo "error: --apply cannot be combined with --accept-updates or an explicit git-pull feature" >&2
+    exit 1
+  fi
+  WITHOUT="$WITHOUT git-pull"
+fi
 SELECTED=""
 for entry in "${FEATURES[@]}"; do
   name=${entry%%|*}
@@ -765,13 +791,12 @@ link_overlay_path() {
 
 # Pull each source repo to its upstream before applying. Fails loudly on detached
 # HEAD, dirty tracked files when updates are incoming, missing/gone upstreams,
-# non-default branches, or diverged local commits in non-interactive runs unless
-# pull.rebase opts in. Interactive runs show incoming commits, diffstat, any
-# local commits to rebase, and prompt [y/N/d] (where d prints the full diff).
+# non-default branches, or diverged local commits. Plan approved fast-forwards
+# without changing any checkout; feature_git_pull applies only after all pass.
 git_up() {
   local dir=$1
   local name git_dir state branch upstream remote default_ref counts behind ahead
-  local rebase_opt rebase_allowed diff_range prompt reply
+  local before target reply changes
   [ -e "$dir/.git" ] || return 0
   name=$(basename "$dir")
 
@@ -850,45 +875,31 @@ git_up() {
     return 0
   fi
 
-  if ! git -C "$dir" -c diff.relative=false diff --quiet ||
-    ! git -C "$dir" -c diff.relative=false diff --cached --quiet; then
+  if [ "$ahead" -gt 0 ]; then
+    echo "error: $dir ($branch) has diverged from $upstream ($ahead local, $behind incoming commits)" >&2
+    echo "hint: inspect git status and git log --graph --oneline --all in $dir; integrate separately, then retry" >&2
+    echo "hint: an earlier squash merge may contain the same changes; this installer never rebases or resets" >&2
+    return 1
+  fi
+
+  changes=$(git -C "$dir" status --porcelain) || return 1
+  if [ -n "$changes" ]; then
     echo "error: $dir has uncommitted changes and $behind incoming commit(s); commit or stash before updating" >&2
     return 1
   fi
 
-  rebase_opt=$(git -C "$dir" config --get pull.rebase 2>/dev/null | LC_ALL=C tr '[:upper:]' '[:lower:]' || true)
-  case "$rebase_opt" in
-    true | yes | on | 1 | merges | interactive | preserve)
-      rebase_allowed=1
-      ;;
-    *)
-      rebase_allowed=0
-      ;;
-  esac
-  if [ "$ahead" -gt 0 ] && [ "$NON_INTERACTIVE" = 1 ] && [ "$rebase_allowed" != 1 ]; then
-    echo "error: $dir ($branch) has $ahead local commit(s) diverged from $upstream (--ff-only enforced; pull.rebase is not enabled)" >&2
-    return 1
-  fi
-
-  if git -C "$dir" merge-base HEAD "$upstream" >/dev/null 2>&1; then
-    diff_range="HEAD...$upstream"
-  else
-    diff_range="HEAD..$upstream"
-  fi
-
-  if [ "$NON_INTERACTIVE" != 1 ]; then
-    echo "Incoming updates for $name ($upstream):" >&2
-    git -C "$dir" --no-pager log --oneline "HEAD..$upstream" >&2
-    git -C "$dir" --no-pager -c diff.relative=false diff --stat "$diff_range" >&2
-    if [ "$ahead" -gt 0 ]; then
-      echo "WARNING: $name ($branch) has $ahead local commit(s) ahead of $upstream that will be rebased:" >&2
-      git -C "$dir" --no-pager log --oneline "$upstream..HEAD" >&2
-      prompt="Rebase $ahead local commit(s) and pull $name? [y/N/d] "
-    else
-      prompt="Pull $name? [y/N/d] "
+  before=$(git -C "$dir" rev-parse HEAD) || return 1
+  target=$(git -C "$dir" rev-parse "$upstream") || return 1
+  echo "Incoming updates for $name ($upstream): $before -> $target" >&2
+  git -C "$dir" --no-pager log --oneline "$before..$target" >&2 || return 1
+  git -C "$dir" --no-pager -c diff.relative=false diff --stat "$before..$target" >&2 || return 1
+  if [ "$ACCEPT_UPDATES" != 1 ]; then
+    if [ "$NON_INTERACTIVE" = 1 ]; then
+      echo "error: incoming updates require interactive approval or --accept-updates; use --apply for the current checkout" >&2
+      return 1
     fi
     while true; do
-      printf '%s' "$prompt" >&2
+      printf 'Fast-forward %s? [y/N/d] ' "$name" >&2
       reply=""
       read -r reply || reply=""
       case "$reply" in
@@ -896,39 +907,50 @@ git_up() {
           break
           ;;
         [dD] | [dD][iI][fF][fF])
-          git -C "$dir" --no-pager -c diff.relative=false diff "$diff_range" >&2
+          git -C "$dir" --no-pager -c diff.relative=false diff "$before..$target" >&2 || return 1
           ;;
         *)
-          echo "Skipping update for $name." >&2
-          return 0
+          echo "Update declined for $name; stopping before applying. Use --apply to apply the current checkout." >&2
+          return 1
           ;;
       esac
     done
   fi
 
-  if [ "$ahead" -gt 0 ]; then
-    if [ "$rebase_opt" = "merges" ] || [ "$rebase_opt" = "preserve" ]; then
-      if ! x git -C "$dir" rebase --rebase-merges "$upstream"; then
-        git -C "$dir" rebase --abort >/dev/null 2>&1 || true
-        echo "error: $dir rebase onto '$upstream' failed and was aborted" >&2
-        return 1
-      fi
-    elif ! x git -C "$dir" rebase "$upstream"; then
-      git -C "$dir" rebase --abort >/dev/null 2>&1 || true
-      echo "error: $dir rebase onto '$upstream' failed and was aborted" >&2
+  GIT_UPDATE_DIRS+=("$dir")
+  GIT_UPDATE_HEADS+=("$before")
+  GIT_UPDATE_TARGETS+=("$target")
+  GIT_UPDATE_BRANCHES+=("$branch")
+}
+
+# Recheck the plan before each update. Never roll back earlier fast-forwards if
+# something changes or fails: stop, report it, and leave diagnosis to the caller.
+function git_apply_updates {
+  local i dir changes
+  for ((i = 0; i < ${#GIT_UPDATE_DIRS[@]}; i++)); do
+    dir=${GIT_UPDATE_DIRS[$i]}
+    changes=$(git -C "$dir" status --porcelain) || return 1
+    if [ "$(git -C "$dir" rev-parse HEAD)" != "${GIT_UPDATE_HEADS[$i]}" ] ||
+      [ "$(git -C "$dir" symbolic-ref --quiet --short HEAD)" != "${GIT_UPDATE_BRANCHES[$i]}" ] ||
+      [ -n "$changes" ]; then
+      echo "error: $dir changed after approval; stopping without applying features; earlier repositories may have advanced" >&2
       return 1
     fi
-  else
-    if ! x git -C "$dir" merge --ff-only "$upstream"; then
+    if ! x git -C "$dir" merge --ff-only --no-autostash "${GIT_UPDATE_TARGETS[$i]}"; then
+      echo "error: fast-forward failed for $dir; earlier repositories may have advanced; no rollback attempted" >&2
       return 1
     fi
-  fi
+  done
 }
 
 function feature_git_pull {
-  local src status=0
+  local src
+  GIT_UPDATE_DIRS=()
+  GIT_UPDATE_HEADS=()
+  GIT_UPDATE_TARGETS=()
+  GIT_UPDATE_BRANCHES=()
   if [ "$INSTALL_REEXEC" = 1 ]; then
-    return "$INSTALL_REEXEC_PULL_STATUS"
+    return 0
   fi
   if is_offline; then
     skip_offline "git pull"
@@ -937,10 +959,11 @@ function feature_git_pull {
   for src in "${SRCDIRS[@]}"; do
     heading "git pull ($(basename "$src"))"
     if ! git_up "$src"; then
-      status=1
+      echo "error: Git update preflight failed; no checkouts advanced and no features applied" >&2
+      return 1
     fi
   done
-  return "$status"
+  git_apply_updates
 }
 
 # "dotfiles" that will end up in $HOME
@@ -2386,14 +2409,14 @@ for name in $SELECTED; do
   if declare -F "feature_${name//-/_}" >/dev/null; then
     run_step "$name" "feature_${name//-/_}"
   fi
+  if [ "$name" = git-pull ] && [[ " $FAILED " == *" git-pull "* ]]; then
+    echo "error: Git update failed; stopping before applying features (use --apply intentionally to apply local state)" >&2
+    exit 1
+  fi
   if [ "$name" = git-pull ] && [ -n "$DOTFILES_HEAD_BEFORE" ] && [ "$SELECTED" != git-pull ]; then
     DOTFILES_HEAD_AFTER=$(git -C "$SRCDIR" rev-parse --verify --quiet HEAD 2>/dev/null || true)
     if [ -n "$DOTFILES_HEAD_AFTER" ] && [ "$DOTFILES_HEAD_AFTER" != "$DOTFILES_HEAD_BEFORE" ]; then
-      pull_status=0
-      if [[ " $FAILED " == *" git-pull "* ]]; then
-        pull_status=1
-      fi
-      _DOTFILES_INSTALL_REEXEC=1 _DOTFILES_GIT_PULL_STATUS="$pull_status" \
+      _DOTFILES_INSTALL_REEXEC=1 \
         exec "${BASH:-bash}" "$SRCDIR/install.sh" ${INSTALL_ARGS[@]+"${INSTALL_ARGS[@]}"}
     fi
   fi
