@@ -17,51 +17,53 @@ and generate summaries.
 
 ## Tool Execution
 
-`taskgo` is bundled in `scripts/taskgo` within this skill directory. Commands
-operate on a fixed control repository root, resolved in this order:
+`taskgo` is bundled in `scripts/taskgo` within this skill directory
+(`taskgo mcp` delegates to `scripts/taskgo-mcp`, which carries the MCP, HTTP,
+and JWT dependencies; both `taskgo mcp` and `taskgo-mcp` are listed in
+`permissions/unsafe`, and `TASKGO_SKILL_DIR` overrides `SKILL.md` discovery when
+either script is copied outside the skill tree). Commands operate on a fixed
+control repository root, resolved in this order:
 
 1. `--root DIR` / `-R DIR` (must appear before the command)
 1. the `TASKGO_ROOT` environment variable
 1. the default `~/.projects`
 
-Execution resolution never depends on the current working directory. Run
-`taskgo doctor` to see the resolved root. To execute the tool:
+Root resolution never depends on the current working directory. Run
+`taskgo root` or `taskgo doctor` to see the resolved root:
 
-1. **Optimal (`$PATH`):** `taskgo <command>`
-1. **Dynamic anchor:** `<skill-dir>/scripts/taskgo <command>`
+1. **On `$PATH`:** `taskgo <command>`
+1. **Skill-relative:** `<skill-dir>/scripts/taskgo <command>`
 
 Read-only commands (`status`, `list`, `handoff`, `doctor`, `read`, `search`,
 etc.) work when the repository is mounted read-only. Mutating commands
 (`create`, `update`, `apply`, `edit`, `sync`, `fix`, `checkpoint`, `commit`)
-require write access to the working tree, and commands that stage or commit
-changes (`create`, `checkpoint`, `commit`, `fix`) also require write access to
-`.git/`. In a sandboxed environment that restricts filesystem or `.git/` writes,
-bypassing the sandbox may be necessary for those operations.
+need write access to the working tree, and commands that stage or commit changes
+(`create`, `checkpoint`, `commit`, `fix`) also need write access to `.git/`.
 
 ## Core Invariants
 
-1. **Current Truth:** `HEAD` describes current belief. Git owns administrative
-   history. Avoid accumulating historical journals in Markdown.
-1. **Data Segregation:** Private tracker information must not implicitly flow
-   into linked public/shared artifacts. `Conversation:` trailers and session
-   URLs belong strictly in the control repository metadata. Artifact path
-   references prefer `$HOME`-relative form (`~/...`).
-1. **Link Portability:** Internal links must be standard relative Markdown (no
-   `file://`). External references must be network URLs (`https://`) or unlinked
+1. **Current Truth:** `HEAD` describes current belief; Git owns administrative
+   history. Rewrite files to the new state rather than accumulating journals in
+   Markdown.
+1. **Data Segregation:** Private tracker information must not leak into public
+   or shared artifact repositories. `Conversation:` trailers and session URLs
+   belong strictly in the control repository. Prefer `$HOME`-relative paths
+   (`~/...`) for local checkouts.
+1. **Link Portability:** Internal links use relative Markdown paths (no
+   `file://`). External references use canonical `https://` URLs or unlinked
    monospace text.
-1. **STATUS.md:** This is the self-contained projection of current operational
-   state. Reading it directly answers status and next steps.
+1. **STATUS.md:** Self-contained projection of current operational state and
+   next steps.
 1. **Commit Authority:** The `taskgo` declaration in the control repository's
-   committed `AGENTS.md` (maintained by `taskgo fix`) grants standing authority
-   for guarded tracker commits (`create`, `checkpoint`, `commit`, `fix`, and
-   `mcp` writes). Restructuring the guarded commands cannot express (such as
-   moving a task between projects) may use a plain `git commit`; ask first, or
-   at least report it afterwards. See
+   committed `AGENTS.md` (maintained by `taskgo fix`) authorizes guarded tracker
+   commits (`create`, `checkpoint`, `commit`, `fix`, and `mcp` writes).
+   Cross-project restructuring (such as moving a task between projects) may use
+   a plain `git commit`; ask first or report it clearly afterwards. See
    [Commit Authority](references/workflows.md#commit-authority). Never rewrite
    artifact history.
-1. **No Administrative Metadata:** Do not invent metadata fields like `created`,
-   `updated`, or `blocked_since` in YAML frontmatter. Git owns administrative
-   history. Do not duplicate `Project:`, `Task:`, or `Event:` trailers.
+1. **No Administrative Metadata:** Never invent frontmatter fields like
+   `created`, `updated`, or `blocked_since`, or duplicate `Project:`, `Task:`,
+   or `Event:` trailers.
 
 ## Tasks
 

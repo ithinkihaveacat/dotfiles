@@ -425,22 +425,23 @@ catalog). Remediations write through the audited snapshot:
 - **`doctor` (Strictly Read-Only):** Runs the audit engine, renders findings
   with canonical 4-letter plain-ASCII tags (`[PASS]`, `[INFO]`, `[WARN]`,
   `[FAIL]`), and exits non-zero on errors per CLI design standards.
-- **`fix` (Auto-Healing Engine):** Runs the exact same audit engine, executes
-  structured remediation callbacks for auto-fixable findings (assigning missing
-  task IDs, normalizing status aliases, synchronizing `STATUS.md` snapshots,
-  formatting the Markdown of tracker records), verifies convergence, and
-  auto-commits repairs by default with deterministic `COMMIT_SHA` output on
+- **`fix` (Auto-Healing Engine):** Runs the same audit engine, executes
+  remediation callbacks for auto-fixable findings (assigning missing task IDs,
+  normalizing status aliases, synchronizing `STATUS.md` snapshots, formatting
+  the Markdown of tracker records), verifies convergence on the touched paths,
+  and auto-commits repairs by default with deterministic `COMMIT_SHA` output on
   `stdout`. Use `--dry-run` to preview changes without modifying files or
   committing, or `--no-commit` to apply repairs on disk without committing.
   Tracker records are the root `AGENTS.md`, `INBOX.md`, and `README.md`, and
   each project's `README.md`, `PROJECT.md`, `STATUS.md`, and the Markdown files
   directly in `tasks/` and `decisions/`. Other documents, and files Git ignores,
   are never reformatted.
-- **`handoff` (Tree Projection):** Uses the audit engine's project findings,
-  over the working tree (or the commit `--at` names), alongside handoff-specific
-  checks, then emits a handoff note from the selected project or task record.
-  Findings describe tracker defects, and uncommitted changes, on stderr without
-  changing the note on stdout.
+- **`handoff` (Tree Projection):** Runs the audit engine with `markdown=False`
+  (skipping `[INFO]` formatting checks) over the working tree or `--at REV`
+  commit alongside handoff-specific readiness checks, then emits a handoff note
+  from the selected project or task record. `[WARN]` and `[FAIL]` findings and
+  uncommitted changes are reported on stderr without changing the note on
+  stdout.
 
 ## Agent Handoff
 
@@ -476,59 +477,8 @@ as an MCP client, still has to read what the note names, so
 unchanged note: the project `README.md` with its frontmatter, `STATUS.md`,
 `PLAN.md`, the root `AGENTS.md`, the active and ready tasks, and the task
 record, verbatim, in one round trip. The payload inlines reads; it never widens
-the note.
-
-## Command Vocabulary
-
-Commands follow the fixed `tool [verb] [noun]` structure with clean,
-unhyphenated verbs:
-
-- `taskgo id`: Allocate unique `TASK-XXXXX` identifier.
-- `taskgo root`: Print the resolved control repository root.
-- `taskgo create PROJECT TITLE [--slug SLUG] [--status STATE] [--no-commit] [--dry-run]`:
-  Create a structured task record. `--slug` names the file
-  (`TASK-XXXXX-<slug>.md`); when omitted, the slug is derived from `TITLE` and
-  shortened at word boundaries to 32 characters, with a warning.
-- `taskgo update TASK_ID [--slug SLUG] [--status STATE] [--expect-status STATE] [...]`:
-  Update task fields, status, scheduling gates/dates, or sections in-place.
-- `taskgo list [PROJECT] [--state STATE] [--json]`: List tasks in tabular or
-  JSON format.
-- `taskgo info PROJECT [--json]`: Show project metadata from `README.md` YAML
-  frontmatter.
-- `taskgo skills PROJECT [--json]`: Print the agent skills a project's
-  `README.md` frontmatter declares.
-- `taskgo status [PROJECT|TASK_ID] [--at REV] [--json]`: Display a project's
-  `STATUS.md`, a task's record with its derived state (ready, or what holds it),
-  or a multi-project summary.
-- `taskgo handoff PROJECT|TASK_ID [--at REV] [--json]`: Generate agent
-  instructions from the selected project or task record in the working tree (or
-  at `--at REV`) and report readiness findings on stderr; `--json` inlines the
-  files the note names.
-- `taskgo apply CHANGES.json [--dry-run]`: Apply an atomic change set (`create`,
-  `set`, `add`, `remove`, `replace_section`, `write_file`, `delete_file`,
-  `edit_file`) to the working tree without committing.
-- `taskgo edit PATH (--old TEXT | --old-file F) (--new TEXT | --new-file F) [...]`:
-  Replace exact text in one file as a single-operation `edit_file` change set.
-- `taskgo read PATH [--start-line N] [--end-line N] [--at REV] [--json] [-n]`:
-  Read 1-indexed line slices from the working tree or commit `REV`.
-- `taskgo search [--at REV] [--json] GREP_ARGS... [-- PATHS...]`: Search tracked
-  files with allowlisted `git grep` flags and bounded output.
-- `taskgo sync [PROJECT]`: Synchronize `STATUS.md` snapshot block.
-- `taskgo check [PROJECT] [--json]`: Evaluate `wait_for` gates, `due` deadlines,
-  and `stale_after` cutoffs against `today` and each task's Git commit
-  watermark.
-- `taskgo doctor [PROJECT]`: Diagnostic health check (read-only).
-- `taskgo fix [PROJECT] [--dry-run] [--no-commit]`: Auto-heal task metadata,
-  status, and scaffolding.
-- `taskgo history PATH_OR_TASK_ID [FIELD]`: Derive state transitions from Git
-  ancestry.
-- `taskgo checkpoint TASK_ID SUBJECT [...]`: Guarded checkpoint transition
-  commit.
-- `taskgo commit SUBJECT [...]`: Commit logical transition.
-- `taskgo schema [--json]`: Display the declarative field and section schema for
-  tasks, decisions, and `STATUS.md`.
-- `taskgo mcp [...]`: Serve the control repository's committed state and
-  change-set writes over MCP.
+the note. See the [Command Index](command-index.md) for the full subcommand
+vocabulary and options.
 
 ## Root Landing Page (`README.md`)
 

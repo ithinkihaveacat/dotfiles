@@ -1,33 +1,28 @@
 # Agent Workflows & Handoff
 
-This document details the standard agent operational workflows, commit authority
-checks, session attribution, and task handoff protocols for `taskgo`.
+Standard agent workflows, commit authority rules, session attribution, and
+handoff protocols for `taskgo`.
 
 ## Standard Agent Workflow
 
-Before starting work, an agent must:
+Before starting work:
 
 1. Run `taskgo handoff <project|TASK_ID>` (or the MCP `handoff` tool) and read
-   the onboarding files (the plain note names `STATUS.md` and the task record
-   for an unfinished task, or `README.md`, `STATUS.md`, and `PLAN.md` for a
-   project; `--json` and the MCP `handoff` tool inline all of those alongside
-   the root `AGENTS.md`): the root `AGENTS.md`, then project `README.md`,
-   `STATUS.md` (using its generated `### Decisions` block to identify active,
-   non-superseded ADRs in `decisions/`), relevant tasks, and `PLAN.md` when
-   direction matters.
-1. **Activate the project's skills**, as the note lists them, if the harness has
-   a skill manager:
+   the onboarding files it names (`STATUS.md` and the task record for an
+   unfinished task, or `README.md`, `STATUS.md`, and `PLAN.md` for a project;
+   `--json` and the MCP `handoff` tool inline those files plus the root
+   `AGENTS.md`). Check the generated `### Decisions` block in `STATUS.md` for
+   active ADRs in `decisions/`.
+1. **Activate the project's skills** if the harness has a skill manager:
    ```bash
    taskgo skills <project> | skill --scope session add -
    ```
-   Pipe the whole list; the `skill` CLI reports and skips a skill the workspace
-   already links, and says when the new ones become usable. The session scope
-   leaves workspace skill links and repository files untouched. If
-   `skill --scope session` reports that the session has no directory of its own,
-   ask before adding the skills to the workspace instead. Without a skill
+   Pipe the whole list; `skill` skips skills already linked in the workspace and
+   leaves repository files untouched. If `skill --scope session` reports no
+   session directory, ask before adding skills to the workspace. Without a skill
    manager, read each skill's `SKILL.md` directly.
-1. Inspect linked artifact repos under their own instructions, consult reference
-   pages relevant to the task using the project map and task links to find them,
+1. Inspect linked artifact repositories under their own instructions, consult
+   relevant `<project>/references/` pages linked from the project map or task,
    and check `<project>/scripts/` before writing new scratch helpers.
 
 ### Commit Authority
@@ -88,11 +83,9 @@ subject, and a `Conversation:` trailer).
    or an artifact repository's documentation, update that owner and record its
    commit with a `Ref:` trailer rather than copying the new facts into the
    tracker.
-1. Run `<skill-dir>/scripts/taskgo sync PROJECT` after semantic edits are
-   coherent.
-1. Run `<skill-dir>/scripts/taskgo doctor PROJECT` and perform its semantic
-   review. Review reference pages affected by the work for outdated or
-   contradicted claims, and keep their navigation links current.
+1. Run `taskgo sync PROJECT` after semantic edits are coherent.
+1. Run `taskgo doctor PROJECT` and review any affected reference pages for
+   outdated claims or broken links.
 1. Commit a coherent transition when practical using `checkpoint` with `--conv`
    when standing authority is present. Subjects follow the workspace commit
    standard (Conventional Commits, `type(scope): description`, at most 50

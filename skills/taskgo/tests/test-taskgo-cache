@@ -1,28 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Color styling is asserted explicitly per test; isolate from inherited
-# NO_COLOR/FORCE_COLOR.
-unset NO_COLOR FORCE_COLOR
-
-# Isolate test suite from ambient agent runtime variables.
-unset AI_AGENT INVOKER_INFO_NAME
-unset JETSKI_CONVERSATION_ID ANTIGRAVITY_CONVERSATION_ID ANTIGRAVITY_SESSION
-unset CLAUDE_CODE_SESSION_ID CLAUDE_CODE_REMOTE_SESSION_ID CLAUDE_SESSION_ID CLAUDE_PROJECT_ID
-unset OPENCODE_SESSION_ID CODEX_SESSION_ID
-unset INVOKER_INFO_ROOT_SESSION_ID CONVERSATION_ID
-
-export GIT_AUTHOR_NAME="Taskgo Test"
-export GIT_AUTHOR_EMAIL="taskgo@example.com"
-export GIT_COMMITTER_NAME="Taskgo Test"
-export GIT_COMMITTER_EMAIL="taskgo@example.com"
-
-TEST_DIR="$(cd "$(dirname "$0")" && pwd)"
-BIN="$TEST_DIR/../scripts/taskgo"
-TEST_ROOT="$(mktemp -d)"
-trap 'rm -rf -- "$TEST_ROOT"' EXIT
-
-PY=$(uv sync -q --script "$BIN" </dev/null && uv python find --script "$BIN")
+# shellcheck source=skills/taskgo/tests/common.sh disable=SC1091
+source "$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
+taskgo_test_init
 
 make_repo() {
   local repo="$1"
@@ -50,11 +31,11 @@ make_repo() {
 REPO="$TEST_ROOT/repo"
 make_repo "$REPO"
 
-echo "1..11"
+echo "1..12"
 
 # 1-4: the row cache, on one repository, in one process.
 if OUT=$(
-  "$PY" - "$BIN" "$REPO" 2>&1 <<'PY'
+  "$TASKGO_PY" - "$BIN" "$REPO" 2>&1 <<'PY'
 import importlib.machinery
 import importlib.util
 import sys
@@ -147,7 +128,7 @@ git -C "$REPO2" add -A
 git -C "$REPO2" commit -qm fixture
 
 if OUT=$(
-  "$PY" - "$BIN" "$REPO2" 2>&1 <<'PY'
+  "$TASKGO_PY" - "$BIN" "$REPO2" 2>&1 <<'PY'
 import importlib.machinery
 import importlib.util
 import sys
@@ -233,7 +214,7 @@ git -C "$REPO3" add -A
 git -C "$REPO3" commit -qm fixture
 
 if OUT=$(
-  "$PY" - "$BIN" "$REPO3" 2>&1 <<'PY'
+  "$TASKGO_PY" - "$BIN" "$REPO3" 2>&1 <<'PY'
 import importlib.machinery
 import importlib.util
 import sys
@@ -318,7 +299,7 @@ fi
 
 # 11: one operation parses unchanged tasks once; only the written task is re-read.
 if OUT=$(
-  "$PY" - "$BIN" "$REPO" 2>&1 <<'PY'
+  "$TASKGO_PY" - "$BIN" "$REPO" 2>&1 <<'PY'
 import importlib.machinery
 import importlib.util
 import sys
@@ -359,5 +340,101 @@ PY
   echo 'ok 11 - a write parses unchanged tasks once'
 else
   echo 'not ok 11 - a write parses unchanged tasks once'
+  printf '# %s\n' "$OUT"
+fi
+
+# 12: task_ids_in_history memory/disk cache, incremental advance, rewind fallback, and corrupt cache recovery.
+HIST_REPO="$TEST_ROOT/hist-repo"
+make_repo "$HIST_REPO"
+if OUT=$(
+  "$TASKGO_PY" - "$BIN" "$HIST_REPO" 2>&1 <<'PY'
+import importlib.machinery
+import importlib.util
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+loader = importlib.machinery.SourceFileLoader("taskgo_under_test", sys.argv[1])
+tg = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+loader.exec_module(tg)
+repo = Path(sys.argv[2])
+
+log_calls = []
+orig_run_git = tg.run_git
+
+
+def traced_run_git(args, **kwargs):
+    if args and args[0] == "log":
+        log_calls.append(list(args))
+    return orig_run_git(args, **kwargs)
+
+
+tg.run_git = traced_run_git
+tg._HISTORY_CACHE.clear()
+common_dir, _ = tg._repo_history_tips(repo)
+cache_file = tg._history_cache_file(common_dir)
+assert cache_file is not None
+cache_file.unlink(missing_ok=True)
+
+base_ids = {"TASK-AA001", "TASK-AA002", "TASK-AA003"}
+
+# Cold scan populates memory and disk caches.
+got = tg.task_ids_in_history(repo)
+assert got == base_ids, got
+assert len(log_calls) == 1 and "--all" in log_calls[0], log_calls
+assert cache_file.is_file()
+
+# 12a. In-memory _HISTORY_CACHE hit runs no git log.
+log_calls.clear()
+assert tg.task_ids_in_history(repo) == base_ids
+assert log_calls == [], log_calls
+
+# 12b. XDG disk cache hit after _HISTORY_CACHE.clear() runs no git log.
+tg._HISTORY_CACHE.clear()
+log_calls.clear()
+assert tg.task_ids_in_history(repo) == base_ids
+assert log_calls == [], log_calls
+assert str(common_dir) in tg._HISTORY_CACHE
+
+# 12c. Incremental ref advance scans only old_tip..new_tip via --stdin.
+new_task = repo / "alpha/tasks/TASK-AA004-fourth.md"
+new_task.write_text("---\nid: TASK-AA004\nstatus: todo\n---\n\n# Fourth\n")
+subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+subprocess.run(["git", "-C", str(repo), "commit", "-qm", "add fourth"], check=True)
+log_calls.clear()
+got = tg.task_ids_in_history(repo)
+assert got == base_ids | {"TASK-AA004"}, got
+assert len(log_calls) == 1 and "--stdin" in log_calls[0] and "--all" not in log_calls[0], log_calls
+
+# 12d. Rewound branch (cached tip no longer an ancestor) falls back to full scan.
+subprocess.run(["git", "-C", str(repo), "reset", "--hard", "-q", "HEAD~1"], check=True)
+log_calls.clear()
+got = tg.task_ids_in_history(repo)
+assert got == base_ids, got
+assert len(log_calls) == 1 and "--all" in log_calls[0], log_calls
+
+# 12e. Corrupt JSON and "v": 0 in the disk cache file recover gracefully via full scan.
+tg._HISTORY_CACHE.clear()
+cache_file.write_text("{corrupt json", encoding="utf-8")
+log_calls.clear()
+assert tg.task_ids_in_history(repo) == base_ids
+assert len(log_calls) == 1 and "--all" in log_calls[0], log_calls
+assert json.loads(cache_file.read_text(encoding="utf-8"))["v"] == tg._HISTORY_CACHE_VERSION
+
+tg._HISTORY_CACHE.clear()
+stale_payload = json.loads(cache_file.read_text(encoding="utf-8"))
+stale_payload["v"] = 0
+stale_payload["ids"] = ["TASK-FFFFF"]
+cache_file.write_text(json.dumps(stale_payload), encoding="utf-8")
+log_calls.clear()
+assert tg.task_ids_in_history(repo) == base_ids
+assert len(log_calls) == 1 and "--all" in log_calls[0], log_calls
+assert json.loads(cache_file.read_text(encoding="utf-8"))["v"] == tg._HISTORY_CACHE_VERSION
+PY
+); then
+  echo 'ok 12 - task_ids_in_history hits memory/disk caches, advances incrementally, and recovers on rewind or corrupt cache'
+else
+  echo 'not ok 12 - task_ids_in_history hits memory/disk caches, advances incrementally, and recovers on rewind or corrupt cache'
   printf '# %s\n' "$OUT"
 fi

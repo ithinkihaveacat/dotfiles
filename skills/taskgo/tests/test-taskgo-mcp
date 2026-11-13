@@ -1,54 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Color styling is asserted explicitly per test; isolate from inherited
-# NO_COLOR/FORCE_COLOR.
-unset NO_COLOR FORCE_COLOR
+# shellcheck source=skills/taskgo/tests/common.sh disable=SC1091
+source "$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
+taskgo_test_init
+MCP_PY=$(uv sync -q --script "$MCP_BIN" </dev/null && uv python find --script "$MCP_BIN")
 
-# Isolate test suite from ambient agent runtime variables.
-unset AI_AGENT INVOKER_INFO_NAME
-unset JETSKI_CONVERSATION_ID ANTIGRAVITY_CONVERSATION_ID ANTIGRAVITY_SESSION
-unset CLAUDE_CODE_SESSION_ID CLAUDE_CODE_REMOTE_SESSION_ID CLAUDE_SESSION_ID CLAUDE_PROJECT_ID
-unset OPENCODE_SESSION_ID CODEX_SESSION_ID
-unset INVOKER_INFO_ROOT_SESSION_ID CONVERSATION_ID
-
-export GIT_AUTHOR_NAME="Taskgo Test"
-export GIT_AUTHOR_EMAIL="taskgo@example.com"
-export GIT_COMMITTER_NAME="Taskgo Test"
-export GIT_COMMITTER_EMAIL="taskgo@example.com"
-
-TEST_DIR="$(cd "$(dirname "$0")" && pwd)"
-BIN="$TEST_DIR/../scripts/taskgo"
-# shellcheck disable=SC2034
-MARKDOWN_FORMAT="$TEST_DIR/../../coding-standards/scripts/markdown-format"
-TEST_ROOT="$(mktemp -d)"
-trap 'rm -rf -- "$TEST_ROOT"' EXIT
-export TASKGO_MCP_LOG="$TEST_ROOT/mcp-requests.jsonl"
-
-echo "1..12"
-
-init_base_repo() {
-  local target="${1:-$TEST_ROOT/repo}"
-  mkdir -p "$target/example/tasks"
-  git -C "$target" init -q
-  printf '%s
-' '# Agent instructions' '' 'This repository follows taskgo:' '<https://github.com/ithinkihaveacat/dotfiles/tree/main/skills/taskgo>.' >"$target/AGENTS.md"
-  printf '# Inbox
-' >"$target/INBOX.md"
-  printf '# Example project
-' >"$target/example/PROJECT.md"
-  printf '# Plan
-' >"$target/example/PLAN.md"
-  printf '%s
-' '---' 'id: TASK-A1B2C' 'status: todo' '---' '' '# Confirm generated status formatting' >"$target/example/tasks/TASK-A1B2C-confirm-status.md"
-}
+echo "1..13"
 
 REPO="$TEST_ROOT/repo"
 init_base_repo "$REPO"
-
-MCP_PY=$(uv sync -q --script "$BIN" </dev/null && uv python find --script "$BIN")
-# shellcheck disable=SC2034
-APPLY_PY="$MCP_PY"
 
 TREE_REPO="$TEST_ROOT/tree-repo"
 TREE_EXPORT="$TEST_ROOT/tree-export"
@@ -72,17 +33,16 @@ printf '%s\n' '# First decision' '' '## Context' '' 'x' '' '## Decision' '' 'x' 
 printf '%s\n' '---' 'supersedes: [0001]' '---' '' '# Second decision' '' '## Context' '' \
   'See [the readme](../README.md) and [a missing note](missing.md).' '' '## Decision' '' 'x' '' \
   '## Consequences' '' 'x' >"$TREE_REPO/alpha/decisions/0002-second.md"
-("$BIN" --root "$TREE_REPO" sync) >/dev/null 2>&1
+(tg --root "$TREE_REPO" sync) >/dev/null 2>&1
 git -C "$TREE_REPO" add -A && git -C "$TREE_REPO" commit -qm 'tree fixture'
 git -C "$TREE_REPO" archive HEAD | tar -x -C "$TREE_EXPORT"
 sed -i.bak 's/^status: in-progress$/status: done/' "$TREE_REPO/alpha/tasks/TASK-7E001-first.md"
 rm -f "$TREE_REPO/alpha/tasks/TASK-7E001-first.md.bak"
 
-MCP_PY=$(uv sync -q --script "$BIN" </dev/null && uv python find --script "$BIN")
 # The client keeps stdin open until it has read every reply: closing it ends
 # the session, and a request still in progress then goes unanswered.
 MCP_OUT=$(
-  "$MCP_PY" -c '
+  "$TASKGO_PY" -c '
 import json, subprocess, sys
 msgs = [
     {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}}},
@@ -117,7 +77,7 @@ print(got["as_of"]["commit"], got["task"]["status"])
 # Each of the four messages, the notification included, logs one line, and
 # one record in the request log, all under one caller.
 MCP_LOGGED=$(grep -c '^taskgo mcp: request transport=stdio ' "$TEST_ROOT/mcp-stdio.log" || true)
-MCP_RECORDS=$("$MCP_PY" -c '
+MCP_RECORDS=$("$TASKGO_PY" -c '
 import json, sys
 recs = [json.loads(line) for line in open(sys.argv[1])]
 call = [r for r in recs if r.get("tool") == "get_task"]
@@ -138,17 +98,17 @@ fi
 
 # Every tool's output matches the CLI's at the served commit.
 MCP_SYNTH="$TEST_ROOT/synthetic"
-MCP_PORT=$("$MCP_PY" -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
+MCP_PORT=$("$TASKGO_PY" -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
 "$TEST_DIR/make-synthetic" "$MCP_SYNTH" >/dev/null 2>&1
 "$BIN" --root "$MCP_SYNTH" mcp --no-fetch --auth none --port "$MCP_PORT" \
   --log "$TEST_ROOT/mcp-synthetic.jsonl" 2>/dev/null &
 MCP_PID=$!
 for _ in $(seq 100); do
-  "$MCP_PY" -c 'import socket, sys; socket.create_connection(("127.0.0.1", int(sys.argv[1])), 1)' \
+  "$TASKGO_PY" -c 'import socket, sys; socket.create_connection(("127.0.0.1", int(sys.argv[1])), 1)' \
     "$MCP_PORT" 2>/dev/null && break
   sleep 0.1
 done
-if MCP_CMP=$("$MCP_PY" "$TEST_DIR/compare-cli" "http://127.0.0.1:$MCP_PORT/mcp" "$MCP_SYNTH" 2>&1); then
+if MCP_CMP=$("$TASKGO_PY" "$TEST_DIR/compare-cli" "http://127.0.0.1:$MCP_PORT/mcp" "$MCP_SYNTH" 2>&1); then
   echo 'ok 2 - mcp tools match the CLI on a synthetic tracker'
 else
   echo 'not ok 2 - mcp tools match the CLI on a synthetic tracker'
@@ -184,8 +144,7 @@ printf '%s\n' '---' 'id: TASK-7E203' 'status: todo' '---' '' '# On a branch' \
 git -C "$IDH_REPO" add -A && git -C "$IDH_REPO" commit -qm 'unmerged task'
 git -C "$IDH_REPO" switch -q main
 if IDH_OUT=$(
-  IDH_PY=$(uv sync -q --script "$BIN" </dev/null && uv python find --script "$BIN") &&
-    "$IDH_PY" - "$BIN" "$IDH_REPO" 2>&1 <<'PY'
+  "$TASKGO_PY" - "$BIN" "$IDH_REPO" 2>&1 <<'PY'
 import importlib.machinery
 import importlib.util
 import sys
@@ -240,13 +199,13 @@ with open(d + "/p/long.txt", "w") as f:
 git -C "$READ_REPO" add -A
 git -C "$READ_REPO" commit -qm 'read fixtures'
 printf 'changed\n' >"$READ_REPO/p/empty.txt"
-if READ_ERR=$(python3 -c '
+if READ_ERR=$("$TASKGO_PY" -c '
 import json, subprocess, sys
-bin_, repo = sys.argv[1], sys.argv[2]
+py, bin_, repo = sys.argv[1], sys.argv[2], sys.argv[3]
 
 def read(*args):
     res = subprocess.run(
-        [bin_, "--root", repo, "read", *args, "--json"],
+        [py, bin_, "--root", repo, "read", *args, "--json"],
         capture_output=True, text=True,
     )
     return json.loads(res.stdout) if res.returncode == 0 else None
@@ -294,10 +253,10 @@ size = len(d["content"].encode())
 check("numbered cap counts prefixes", d["truncated"] and size <= 262144
       and d["end_line"] < 262144 // 22
       and d["content"].endswith("%d: line %05d " % (d["end_line"], d["end_line"]) + "x" * 10 + "\n"))
-plain = subprocess.run([bin_, "--root", repo, "read", "-n", "p/crlf.txt",
+plain = subprocess.run([py, bin_, "--root", repo, "read", "-n", "p/crlf.txt",
                         "--end-line", "1"], capture_output=True).stdout
 check("numbered plain", plain == b"1: one\r\n")
-' "$BIN" "$READ_REPO" 2>&1); then
+' "$TASKGO_PY" "$BIN" "$READ_REPO" 2>&1); then
   echo 'ok 6 - read slices, caps, and clamps lines of a file'
 else
   echo 'not ok 6 - read slices, caps, and clamps lines of a file'
@@ -327,13 +286,13 @@ with open(d + "/p/many.txt", "w") as f:
 git -C "$SEARCH_REPO" add -A
 git -C "$SEARCH_REPO" commit -qm 'search fixtures'
 printf 'gamma needle\n' >>"$SEARCH_REPO/p/a-b/one.md"
-if SEARCH_ERR=$(python3 -c '
+if SEARCH_ERR=$("$TASKGO_PY" -c '
 import json, subprocess, sys
-bin_, repo = sys.argv[1], sys.argv[2]
+py, bin_, repo = sys.argv[1], sys.argv[2], sys.argv[3]
 
 def search(*args):
     res = subprocess.run(
-        [bin_, "--root", repo, "search", *args],
+        [py, bin_, "--root", repo, "search", *args],
         capture_output=True, text=True, cwd="/",
     )
     return res.returncode, res.stdout, res.stderr
@@ -383,7 +342,7 @@ for bad in (["--no-ind", "x"], ["-if/etc/passwd", "x"], ["--file=/etc/passwd"],
     check(f"refuse {bad}", rc == 2 and out == "")
 rc, out, err = search("--help")
 check("help", rc == 0 and "GREP_ARGS" in out)
-' "$BIN" "$SEARCH_REPO" 2>&1); then
+' "$TASKGO_PY" "$BIN" "$SEARCH_REPO" 2>&1); then
   echo 'ok 7 - search greps files, caps output, and refuses unsafe options'
 else
   echo 'not ok 7 - search greps files, caps output, and refuses unsafe options'
@@ -392,8 +351,7 @@ fi
 
 # Test 185: a search that runs past its time limit stops git and reports it.
 if SEARCH_TO=$(
-  SEARCH_PY=$(uv sync -q --script "$BIN" </dev/null && uv python find --script "$BIN") &&
-    "$SEARCH_PY" - "$BIN" "$SEARCH_REPO" 2>&1 <<'PY'
+  "$TASKGO_PY" - "$BIN" "$SEARCH_REPO" 2>&1 <<'PY'
 import importlib.machinery
 import importlib.util
 import os
@@ -454,7 +412,7 @@ printf '%s\n' \
   '# Proj' \
   >"$SKILLS_REPO/proj/README.md"
 printf '# Bare\n' >"$SKILLS_REPO/bare/README.md"
-("$BIN" --root "$SKILLS_REPO" sync >/dev/null)
+(tg --root "$SKILLS_REPO" sync >/dev/null)
 git -C "$SKILLS_REPO" add -A
 git -C "$SKILLS_REPO" commit -qm 'init skills fixture'
 # A stand-in skill CLI: its catalog is JSON Lines of {"name": ...}.
@@ -472,19 +430,19 @@ chmod +x "$SKILLS_REPO/nobin/skill"
 
 # Test 191: skills prints the list; handoff carries it, with the command on
 # a line of its own
-SKILLS_OUT="$("$BIN" --root "$SKILLS_REPO" skills proj)"
-SKILLS_JSON="$("$BIN" --root "$SKILLS_REPO" skills proj --json)"
-SKILLS_NONE="$("$BIN" --root "$SKILLS_REPO" skills bare)"
-SKILLS_NOTE="$("$BIN" --root "$SKILLS_REPO" handoff proj 2>/dev/null)"
-SKILLS_BARE_NOTE="$("$BIN" --root "$SKILLS_REPO" handoff bare 2>/dev/null)"
-SKILLS_PAYLOAD="$("$BIN" --root "$SKILLS_REPO" handoff proj --json 2>/dev/null)"
+SKILLS_OUT="$(tg --root "$SKILLS_REPO" skills proj)"
+SKILLS_JSON="$(tg --root "$SKILLS_REPO" skills proj --json)"
+SKILLS_NONE="$(tg --root "$SKILLS_REPO" skills bare)"
+SKILLS_NOTE="$(tg --root "$SKILLS_REPO" handoff proj 2>/dev/null)"
+SKILLS_BARE_NOTE="$(tg --root "$SKILLS_REPO" handoff bare 2>/dev/null)"
+SKILLS_PAYLOAD="$(tg --root "$SKILLS_REPO" handoff proj --json 2>/dev/null)"
 if [[ "$SKILLS_OUT" == $'coding-standards\nlocal:notes\ncoding-standard' ]] &&
   [[ "$SKILLS_JSON" == '["coding-standards", "local:notes", "coding-standard"]' ]] &&
   [[ -z "$SKILLS_NONE" ]] &&
   [[ "$SKILLS_NOTE" == *$'\n\nSkills: coding-standards, local:notes, coding-standard. '* ]] &&
   [[ "$SKILLS_NOTE" == *$'\n\n  taskgo skills proj | skill --scope session add -' ]] &&
   [[ "$SKILLS_BARE_NOTE" != *"Skills:"* ]] &&
-  "$MCP_PY" -c '
+  "$TASKGO_PY" -c '
 import json, sys
 got = json.loads(sys.argv[1])
 assert got["skills"] == ["coding-standards", "local:notes", "coding-standard"], got["skills"]
@@ -500,12 +458,12 @@ fi
 # Test 192: doctor checks the names against the skill CLI's catalog, and says
 # when it cannot
 set +e
-SKILLS_DOCTOR="$(PATH="$SKILLS_REPO/bin:$PATH" "$BIN" --root "$SKILLS_REPO" doctor proj 2>&1)"
+SKILLS_DOCTOR="$(PATH="$SKILLS_REPO/bin:$PATH" tg --root "$SKILLS_REPO" doctor proj 2>&1)"
 SKILLS_DOCTOR_RC=0
-PATH="$SKILLS_REPO/bin:$PATH" "$BIN" --root "$SKILLS_REPO" doctor proj >/dev/null 2>&1 || SKILLS_DOCTOR_RC=$?
+PATH="$SKILLS_REPO/bin:$PATH" tg --root "$SKILLS_REPO" doctor proj >/dev/null 2>&1 || SKILLS_DOCTOR_RC=$?
 SKILLS_DOCTOR_BARE_RC=0
-PATH="$SKILLS_REPO/bin:$PATH" "$BIN" --root "$SKILLS_REPO" doctor bare >/dev/null 2>&1 || SKILLS_DOCTOR_BARE_RC=$?
-SKILLS_DOCTOR_NOCLI="$(PATH="$SKILLS_REPO/nobin:$PATH" "$BIN" --root "$SKILLS_REPO" doctor proj 2>&1)"
+PATH="$SKILLS_REPO/bin:$PATH" tg --root "$SKILLS_REPO" doctor bare >/dev/null 2>&1 || SKILLS_DOCTOR_BARE_RC=$?
+SKILLS_DOCTOR_NOCLI="$(PATH="$SKILLS_REPO/nobin:$PATH" tg --root "$SKILLS_REPO" doctor proj 2>&1)"
 set -e
 if [[ "$SKILLS_DOCTOR" == *"[WARN]  proj/README.md: unknown skill 'coding-standard' (did you mean 'coding-standards'?)"* ]] &&
   [[ "$SKILLS_DOCTOR" != *"unknown skill 'coding-standards'"* ]] &&
@@ -523,10 +481,10 @@ fi
 # yields no skills
 set +e
 printf '%s\n' '---' 'skills:' '  notes: true' '---' '' '# Proj' >"$SKILLS_REPO/proj/README.md"
-SKILLS_SHAPE="$(PATH="$SKILLS_REPO/nobin:$PATH" "$BIN" --root "$SKILLS_REPO" doctor proj 2>&1)"
-SKILLS_SHAPE_LIST="$("$BIN" --root "$SKILLS_REPO" skills proj)"
+SKILLS_SHAPE="$(PATH="$SKILLS_REPO/nobin:$PATH" tg --root "$SKILLS_REPO" doctor proj 2>&1)"
+SKILLS_SHAPE_LIST="$(tg --root "$SKILLS_REPO" skills proj)"
 printf '%s\n' '---' 'skills:' '  - ../escape' '---' '' '# Proj' >"$SKILLS_REPO/proj/README.md"
-SKILLS_SPEC="$(PATH="$SKILLS_REPO/nobin:$PATH" "$BIN" --root "$SKILLS_REPO" doctor proj 2>&1)"
+SKILLS_SPEC="$(PATH="$SKILLS_REPO/nobin:$PATH" tg --root "$SKILLS_REPO" doctor proj 2>&1)"
 set -e
 if [[ "$SKILLS_SHAPE" == *"[WARN]  proj/README.md: skills must be a list of skill names, not"* ]] &&
   [[ -z "$SKILLS_SHAPE_LIST" ]] &&
@@ -540,7 +498,7 @@ fi
 # A server stops on SIGINT or SIGTERM with status 0 within a few seconds, over
 # HTTP and over --stdio, the stdio one while its client holds stdin open.
 MCP_SIGNALS=$(
-  "$MCP_PY" -c '
+  "$TASKGO_PY" -c '
 import json, signal, socket, subprocess, sys, time
 bin_, repo, branch, log = sys.argv[1:]
 init = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}}}
@@ -576,4 +534,99 @@ if [[ $MCP_SIGNALS == $'stdio SIGINT 0\nstdio SIGTERM 0\nhttp SIGINT 0\nhttp SIG
 else
   echo 'not ok 12 - mcp exits 0 on SIGINT and SIGTERM over both transports'
   printf '# %s\n' "$MCP_SIGNALS"
+fi
+
+# A symlink to either script, or to the skill directory, still finds the server
+# via the SKILL.md sentinel; a lone copy fails naming TASKGO_SKILL_DIR unless
+# that override points back to the skill tree; and permissions/unsafe guards
+# both 'taskgo mcp' and 'taskgo-mcp'.
+if SENTINEL_OUT=$(
+  "$TASKGO_PY" - "$BIN" "$MCP_BIN" "$TEST_ROOT/sentinel" 2>&1 <<'PY'
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+bin_ = Path(sys.argv[1]).resolve()
+mcp_bin = Path(sys.argv[2]).resolve()
+skill_dir = bin_.parent.parent
+tmp = Path(sys.argv[3])
+bin_dir = tmp / "bin"
+bin_dir.mkdir(parents=True)
+
+def run(exe: Path, *args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    merged = {k: v for k, v in os.environ.items() if k != "TASKGO_SKILL_DIR"}
+    if env:
+        merged.update(env)
+    return subprocess.run(
+        [str(exe), *args],
+        capture_output=True,
+        text=True,
+        env=merged,
+        timeout=60,
+        check=False,
+    )
+
+cli_link = bin_dir / "taskgo"
+cli_link.symlink_to(bin_)
+skill_link = tmp / "linked-skill"
+skill_link.symlink_to(skill_dir)
+for exe in (cli_link, skill_link / "scripts" / "taskgo"):
+    res = run(exe, "mcp", "--help")
+    assert res.returncode == 0 and "--fetch-ttl" in res.stdout, (exe, res.returncode, res.stderr)
+
+srv_link = bin_dir / "taskgo-mcp"
+srv_link.symlink_to(mcp_bin)
+res = run(srv_link, "--help")
+assert res.returncode == 0 and "--fetch-ttl" in res.stdout, (res.returncode, res.stderr)
+
+copies = tmp / "copies"
+copies.mkdir()
+for src, name, args in ((bin_, "taskgo", ("mcp", "--help")), (mcp_bin, "taskgo-mcp", ("--help",))):
+    copy = copies / name
+    shutil.copy2(src, copy)
+    res_bad = run(copy, *args)
+    assert res_bad.returncode == 1 and "TASKGO_SKILL_DIR" in res_bad.stderr, (name, res_bad.returncode, res_bad.stderr)
+    res_ok = run(copy, *args, env={"TASKGO_SKILL_DIR": str(skill_dir)})
+    assert res_ok.returncode == 0 and "--fetch-ttl" in res_ok.stdout, (name, res_ok.returncode, res_ok.stderr)
+
+unsafe = [
+    line.strip()
+    for line in (skill_dir / "permissions" / "unsafe").read_text().splitlines()
+    if line.strip() and not line.strip().startswith("#")
+]
+assert "taskgo mcp" in unsafe and "taskgo-mcp" in unsafe, unsafe
+
+import importlib.machinery
+import importlib.util
+
+loader = importlib.machinery.SourceFileLoader("taskgo_mcp_test", str(mcp_bin))
+mcp_mod = importlib.util.module_from_spec(
+    importlib.util.spec_from_loader(loader.name, loader)
+)
+loader.exec_module(mcp_mod)
+assert mcp_mod._normalize_mcp_argv(["--offline", "--stdio"]) == [
+    "--offline",
+    "mcp",
+    "--stdio",
+]
+assert not hasattr(mcp_mod, "MCP_NONEXISTENT")
+assert not hasattr(mcp_mod._cli, "MCP_NONEXISTENT")
+saved_cmd_mcp = mcp_mod.cmd_mcp
+try:
+    mcp_mod._cli.set_offline_flag(False)
+    mcp_mod.cmd_mcp = lambda **_kw: None
+    mcp_mod.main(["--offline", "--stdio"])
+    assert mcp_mod._cli._is_offline() is True
+finally:
+    mcp_mod.cmd_mcp = saved_cmd_mcp
+    mcp_mod._cli.set_offline_flag(False)
+print("ok")
+PY
+) && [[ $SENTINEL_OUT == ok ]]; then
+  echo 'ok 13 - taskgo mcp and taskgo-mcp resolve SKILL.md across symlinks and copies and are guarded in permissions/unsafe'
+else
+  echo 'not ok 13 - taskgo mcp and taskgo-mcp resolve SKILL.md across symlinks and copies and are guarded in permissions/unsafe'
+  printf '# %s\n' "$SENTINEL_OUT"
 fi
