@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+
+# Tests: install.sh's read-only Linux stale-agent warnings. Fake proc entries
+# model both deleted executables and Claude's retained version files; no real
+# agents, updates, service commands, or signals are used.
+set -euo pipefail
+
+if [ "$(uname -s)" != Linux ]; then
+  echo '1..0 # SKIP executable inode inspection is Linux-only'
+  exit 0
+fi
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
+export HOME="$TMP/home"
+mkdir -p "$HOME/.local/share/claude/versions" "$TMP/proc" "$TMP/bin"
+
+# Load only the functions under test, not the installer's main program.
+sed -n '/^function agent_restart_hint {/,/^# Ask for sudo upfront/{ /^# Ask for sudo upfront/d; p; }' \
+  "$DIR/../install.sh" >"$TMP/functions"
+# shellcheck source=/dev/null
+source "$TMP/functions"
+
+current="$TMP/bin/opencode"
+old="$TMP/bin/previous"
+printf 'current\n' >"$current"
+printf 'old\n' >"$old"
+chmod +x "$current" "$old"
+
+n=0
+failed=0
+check() {
+  n=$((n + 1))
+  if [[ "$output" == *"$2"* ]]; then
+    echo "ok $n - $1"
+  else
+    echo "not ok $n - $1"
+    printf '# output: %s\n' "$output"
+    failed=$((failed + 1))
+  fi
+}
+quiet() {
+  n=$((n + 1))
+  if [ -z "$output" ]; then
+    echo "ok $n - $1"
+  else
+    echo "not ok $n - $1"
+    printf '# output: %s\n' "$output"
+    failed=$((failed + 1))
+  fi
+}
+scan() { output=$(warn_agent_processes "$1" "$2" "$TMP/proc" 2>&1); }
+
+echo '1..18'
+scan opencode "$current"
+quiet 'no running agents is silent'
+
+mkdir "$TMP/proc/123"
+ln -s "$current" "$TMP/proc/123/exe"
+scan opencode "$current"
+quiet 'a process using the current inode is silent'
+
+# A readlink stub models /proc's deleted suffix, while -ef follows the fixture
+# link to the still-open old inode, just as it does for a real /proc/PID/exe.
+# shellcheck disable=SC2329 # called by the sourced warn_agent_processes function
+readlink() {
+  if [ "$1" = "$TMP/proc/123/exe" ] && [ "${deleted:-0}" = 1 ]; then
+    printf '%s (deleted)\n' "$current"
+  else
+    command readlink "$@"
+  fi
+}
+ln -sf "$old" "$TMP/proc/123/exe"
+deleted=1
+printf 'opencode\0serve\0--service\0--password\0DO-NOT-PRINT\0' >"$TMP/proc/123/cmdline"
+scan opencode "$current"
+check 'a replaced executable warns without needing an update this run' 'opencode PID 123 is using an outdated executable; restart required'
+check 'a managed OpenCode service has an exact restart command' 'hint: opencode service restart'
+if [[ "$output" != *DO-NOT-PRINT* ]]; then output='safe'; fi
+check 'command-line secrets are never printed' safe
+
+echo '0::/user.slice/app.slice/opencode-cloud.scope' >"$TMP/proc/123/cgroup"
+scan opencode "$current"
+check 'a cloud scope uses its own launcher instead of the shared service' 'hint: opencode-cloud stop; opencode-cloud start'
+
+: >"$TMP/proc/123/cgroup"
+printf 'opencode\0serve\0' >"$TMP/proc/123/cmdline"
+scan opencode "$current"
+check 'an unknown launcher gets guidance without an invented command' 'using its original launcher; reconnecting a client is not enough'
+
+deleted=0
+scan opencode "$current"
+quiet 'a different installation is ignored'
+
+scan opencode "$TMP/bin/missing"
+quiet 'a missing installed executable is ignored'
+
+claude_old="$HOME/.local/share/claude/versions/1.0"
+claude_current="$HOME/.local/share/claude/versions/2.0"
+cp "$old" "$claude_old"
+cp "$current" "$claude_current"
+ln -sf "$claude_old" "$TMP/proc/123/exe"
+ln -s "$claude_current" "$TMP/bin/claude"
+echo '0::/user.slice/app.slice/claude-cloud-demo.scope' >"$TMP/proc/123/cgroup"
+scan claude "$TMP/bin/claude"
+check 'retained old Claude versions are detected after a symlink update' 'claude PID 123 is using an outdated executable'
+check 'Claude cloud warnings include the project-specific restart command' 'hint: claude-cloud stop demo; claude-cloud start demo'
+
+echo '0::/user.slice/app.slice/cloud-claude-demo.scope' >"$TMP/proc/123/cgroup"
+scan claude "$TMP/bin/claude"
+check 'legacy Claude scope names still use the current launcher' 'hint: claude-cloud stop demo; claude-cloud start demo'
+
+echo '0::/user.slice/app.slice/claude-cloud-demo;bad.scope' >"$TMP/proc/123/cgroup"
+scan claude "$TMP/bin/claude"
+check 'unexpected project names do not generate executable restart commands' 'using its original launcher'
+
+output=$(warn_agent_processes claude "$TMP/bin/claude" "$TMP/proc" 2>"$TMP/stderr")
+quiet 'warnings do not pollute stdout'
+output=$(cat "$TMP/stderr")
+check 'warnings are sent to stderr' 'warning: claude PID 123'
+
+ln -sf "$claude_current" "$TMP/proc/123/exe"
+scan claude "$TMP/bin/claude"
+quiet 'restarted Claude no longer warns'
+
+rm "$TMP/proc/123/exe"
+scan claude "$TMP/bin/claude"
+quiet 'a process that exits during inspection is ignored'
+
+output=$(env -i HOME="$HOME" PATH="$TMP/bin:/usr/bin:/bin" \
+  "$DIR/../install.sh" --only restart-warnings 2>&1 </dev/null)
+quiet 'the standalone feature succeeds without executing the installed agents'
+
+exit "$failed"
