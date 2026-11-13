@@ -1,32 +1,47 @@
 # Complexity Audit
 
+## Contents
+
+- [Overview](#overview)
+- [Pass 1: Scanning for what looks bonkers](#pass-1-scanning-for-what-looks-bonkers)
+- [Pass 2: Investigating and testing each fix](#pass-2-investigating-and-testing-each-fix)
+- [Pass 3: Reviewing strictly for correctness](#pass-3-reviewing-strictly-for-correctness)
+- [Pass 4: Evaluating and summarizing](#pass-4-evaluating-and-summarizing)
+- [Ground rules](#ground-rules)
+
+## Overview
+
 The audit has two jobs:
 
-1. Check a working project for anything that is bonkers, and say how to fix it.
-1. Give proof, which the owner cannot reasonably refute, that the fix is right.
+1. Check a working project for anything that is bonkers, and show how to fix it
+   cleanly.
+1. Give proof—grounded in working, correctness-checked changes—that the fix is
+   right and worth making.
 
 "Bonkers" means that the project pays far more for something than the job needs:
 in machinery a maintainer must understand, in work done at run time (processor
 time, wake-ups, polling, calls, network, memory, battery), or in storage, binary
-size, dependencies, start-up time, and build or test time. The code is assumed
-to be correct. The question is whether it should have this shape.
+size, dependencies, start-up time, and build or test time. The starting code is
+assumed to work. The question is whether it should have this shape.
 
-The audit produces a report, not a patch. Run it in two stages so one pass does
-not have to read the whole codebase and guess what a fix would save:
+Work in four passes across isolated copies of the repository or source artifacts
+so nothing modifies the original checkout, creates branches or pull requests
+unless explicitly requested, or lets concurrent passes interfere with each
+other:
 
-1. **Stage 1 — Find the problems.** Read the codebase, tests, docs, and history
-   end to end. Map the project's purpose and constraints, and write down the
-   candidate bonkers problems without designing patches yet.
-1. **Stage 2 — Build and prove each fix.** Test each candidate in its own clean
-   scratch copy—giving each candidate to a fresh subagent or worker when
-   available, or working through them one at a time in clean scratch copies when
-   working alone. Implement the complete fix, run the build and tests, and
-   measure the real saving and side effects from the working diff, dropping
-   anything that does not pay off.
+1. **Pass 1 — Scan for what looks bonkers.** Read practically every line of the
+   project and its history to spot candidate problems without designing patches
+   yet.
+1. **Pass 2 — Investigate and test each fix.** Try each candidate in its own
+   isolated copy—whether changing a setting or dependency, switching algorithms,
+   relaxing a constraint, or deleting dead machinery—to see whether the fix is
+   clean and the payoff is real, then merge what survives.
+1. **Pass 3 — Review strictly for correctness.** Check the resulting changes for
+   regressions and subtle edge-case bugs without re-litigating the design.
+1. **Pass 4 — Evaluate and summarize.** Re-check whether each fix still pays off
+   after correctness repairs, then present a plain-English summary and proof.
 
-Then check that the surviving fixes work together and write the report.
-
-## Stage 1: Finding what may be bonkers
+## Pass 1: Scanning for what looks bonkers
 
 Read the project before judging any part of it. List all tracked files and read
 practically every production and test file, the documentation and instruction
@@ -50,7 +65,8 @@ design it.
 
 For each large or strange construction, trace back to the decision that caused
 it and forward to every file, layer, and test that exists because of it. Group
-symptoms of one root cause into one candidate so Stage 2 fixes do not collide.
+symptoms of one root cause into one candidate so Pass 2 trials do not collide or
+stack two fixes for the same problem.
 
 Question the constraints. List the constraints the design is built around,
 stated or assumed, and ask of each:
@@ -66,52 +82,53 @@ A constraint that costs a great deal and can be relaxed at little loss is the
 best finding there is. Do not treat internal machinery as wanted just because
 recent review commits or white-box tests added it, and do not treat an unused
 internal module or duplicate engine as untouchable just because the package
-exports its name—put it on the table so Stage 2 can price removing it (as an
-owner fork if outside callers could exist).
+exports its name—put it on the table so Pass 2 can price removing or replacing
+it (as an owner fork if outside callers could exist).
 
-Look for the few big structural and runtime problems. Leave out style, naming,
+Look for the big structural and runtime problems. Leave out style, naming,
 single bugs, small duplicate code, and micro-optimizations on cold or low-rate
-paths. Write down the Stage 1 scan with the project's purpose, outward-facing
-entry points, constraints on the table, candidate problems (typically 4 to 8),
-and one line each for earned parts left alone.
+paths. Note the project's purpose, outward-facing entry points, constraints on
+the table, candidate problems, and earned parts left alone.
 
-## Stage 2: Building the fix and proving it
+## Pass 2: Investigating and testing each fix
 
-Test each candidate from Stage 1 independently in its own clean scratch copy. A
-fix is whatever removes the cost: deleting code, collapsing duplicate engines or
-layers, changing a setting, using the right dependency or algorithm, or dropping
-a constraint. Prefer deleting or replacing machinery over adding a cache, fast
-path, or second format beside the old one. Make the complete fix build and pass
-tests in the scratch copy.
+Investigate each candidate in its own clean copy—giving each to a fresh subagent
+or worker when available, or working through separate copies sequentially—so
+trials never interfere with each other. Focus on whether the cost can be cleanly
+removed: changing a setting or build flag, using the right dependency or
+algorithm, dropping an unnecessary constraint, collapsing duplicate engines or
+layers, or deleting dead code. Prefer removing or replacing the source of cost
+over layering a cache, fast path, or second format beside the old one. Make the
+complete fix build and pass tests in the copy.
 
 The owner trusts the working code and has good reason to doubt you. One false
-statement makes them doubt the rest. Each Stage 2 investigation must prove three
-things, or reject its candidate:
+statement makes them doubt the rest. Each investigation must establish three
+things, or drop its candidate:
 
 **The cost is real.** Measure it on an untouched copy by running something.
 Count the lines, wake-ups, calls, bytes, packages, or milliseconds for a routine
-operation. A number does not explain itself: a claim about a cause needs its own
-measurement that isolates the cause.
+operation, and isolate the cause rather than citing an unexplained total.
 
-**The fix pays off.** Measure the "after" figure from your working diff, never
-by guessing. For lines: what goes, what must stay, what new code comes, and the
-net, keeping production logic, tests, and duplicate or generated files apart.
-Moving code removes nothing. For any other cost: the count before and after (and
-if a fix trades speed or debuggability for size or similar, measure both). Keep
-one-off benchmark harnesses in scratch rather than adding bulky measurement
-scaffolding to the project's test suite. If you cannot measure something here
-(no device, no production), name the measurement that would settle it and give
-no number. Make the best case for leaving the code alone; if fixing it saves
-little, complicates the code for a tiny saving, or adds more code and test
-scaffolding than it removes without a major runtime or footprint win, reject the
-candidate.
+**The fix pays off.** Measure the "after" figure from the working diff, never by
+guessing. Payoff is whatever cost the finding removes: wake-ups, power, CPU,
+memory, latency, binary or bundle size, dependencies, build or test time, or
+code a maintainer must carry (a small config or dependency change can yield a
+large runtime or size win without cutting lines). When code size is part of the
+claim, separate what goes, what stays, and what new code comes across production
+logic, tests, and generated files; moving code removes nothing. Keep one-off
+benchmark harnesses in scratch rather than adding bulky scaffolding to the
+project's test suite. If you cannot measure something here (no device, no
+production), name the measurement that would settle it and give no number. Make
+the best case for leaving things alone; if fixing it turns messy, saves little,
+or bloats the code and tests without a clear runtime, footprint, or maintenance
+win, drop it.
 
-**The fix is safe, and honest about who decides.** Read your own diff and list
-everything the construction does today, including side effects, that stops or
-changes. Search the whole project for every removed name or path, and account
-for every reference. If your change deletes white-box tests for removed
-machinery, say whether kept black-box tests still cover outward behavior, or add
-the concise check needed first.
+**Who decides is clear.** Read your diff and list everything the construction
+does today, including side effects, that stops or changes. Search the whole
+project for every removed or changed name, setting, or path, and account for
+every reference. If a change deletes white-box tests for removed machinery,
+check that kept black-box tests still cover outward behavior, or add the concise
+check needed first:
 
 - If nothing visible to users or outside callers changes—same outputs, wire
   compatibility, public API, and guarantees, with no trade-off—no owner decision
@@ -121,8 +138,8 @@ the concise check needed first.
   constraint, changing a wire format across versions, trading speed or symbols
   for size, or removing an exported symbol that outside repositories might
   import—it is the owner's decision. Write a fork: "If X is true, do A, which
-  saves this much. If not, do B. To settle it: ...". Make it answerable in a
-  minute, with evidence on both sides.
+  saves this much. If not, do B. To settle it: ...". Give the evidence on both
+  sides so the owner can settle it quickly.
 - Questioning a user-facing feature has a high bar: assume features with real
   callers are wanted unless their cost is huge. Security boundaries, data
   safety, and hardware or platform quirks often justify code that looks
@@ -130,39 +147,77 @@ the concise check needed first.
   before questioning it, and distinguish load-bearing protection from theater
   around it.
 
-Paste every name, path, count, and commit from command output, never from
-memory, and give the command.
+Merge the surviving fixes in a clean copy (keeping owner-fork candidates
+separate when needed) to verify they build and pass tests together without
+double-counting overlapping savings or stacking two fixes for the same root
+cause.
 
-## The report
+## Pass 3: Reviewing strictly for correctness
 
-Apply the surviving fixes together in a clean scratch copy to check that they
-build and pass tests together and so overlapping deletions are never counted
-twice. Re-run baseline figures on an unbuilt clean copy. Finding nothing worth
-changing is a valid result.
+In our experience, simplifying accreted code—or changing settings, dependencies,
+concurrency, or build flags—almost always introduces subtle errors even when the
+existing test suite stays completely green. Removing intermediate layers,
+swapping dependencies, changing compiler or runtime flags, replacing polling
+loops with event signaling, batching harnesses, or adding caches creates new
+lifecycle, ordering, compatibility, flag-forwarding, and state-isolation edges
+that older tests never needed to exercise.
+
+Run a dedicated correctness review on the resulting changes before trusting the
+result:
+
+- **Scope to fit the project.** Review the merged diff by default so cross-fix
+  interactions across shared lifecycles, configs, or files are caught in one
+  pass, or review per fix when individual changes are large and independent. Use
+  a fresh reviewer subagent, an external CLI agent, or a separate review pass as
+  appropriate; no rigid comment template or rubric is required.
+- **Keep strict separation of concerns.** This pass takes the new design as
+  given and looks solely for correctness defects: crashes, null or destroy
+  re-entrancy, race conditions, lost wake-ups, stale state, config or dependency
+  side effects, dropped flags, non-hermetic caches or tests, and weakened
+  assertions. Do not ask this pass to judge whether the change eliminated enough
+  complexity, and do not re-add speculative fallback layers unless a concrete
+  failure path requires them.
+- **Fix defects surgically.** Repair confirmed bugs in the scratch copy and
+  re-run the build and tests.
+
+## Pass 4: Evaluating and summarizing
+
+Step back after Pass 3 repairs land and evaluate the final state honestly.
+Re-run baseline and post-fix measurements from clean copies, pasting every name,
+path, count, and commit from command output rather than memory. If fixing the
+edge cases found in Pass 3 made a candidate messy or wiped out its payoff, drop
+that candidate rather than forcing a disappointing change through. Finding
+nothing worth changing is a valid result.
 
 Write in plain English, following the principles behind the Plain English
 Campaign's Crystal Mark: short sentences, active voice, everyday words, and a
-clear layout. There is no rigid template. Do not use tags or grades, and do not
-wrap numbers in code formatting or bold. The reader has ten minutes.
+clear layout. Adapt the structure and length to fit the project rather than
+following a rigid template.
 
-Open with what the project is for and a one-paragraph verdict, in proportion to
-what survived. Group findings that need no owner decision separately from
-findings that depend on an owner fork, and do not add several "if" answers into
-one large total. Within each group, present the biggest payoffs first (aim for
-under 300 words each, plus a small price table): what is there and how it came
-to be; why that is bonkers; the fix (clear enough to apply from the report
-alone); the price table; what stops or changes; how you know; and the fork, if
-there is one.
+Open with what the project is for and a clean, high-signal summary of the
+embarrassing mistakes uncovered and what fixing them brings: wasted wake-ups,
+power, CPU, memory, or latency saved, binary or dependency footprint cut, leaks
+or UI glitches fixed, build or test speedups, whole branches or dead modules
+removed, and the honest `git diff` footprint (separating deleted code, new or
+replacement logic, config or dependency changes, and tests).
 
-End with what you looked at and left alone (including candidates rejected in
-Stage 2), one line each.
+Group findings that need no owner decision separately from findings gated on an
+owner fork, and do not add several "if" answers into one headline total. Present
+the biggest payoffs first: what is there and how it came to be; why it is
+bonkers; the verified fix (clear enough to apply or inspect directly); the
+measured before-and-after cost; what stops or changes and how Pass 2 and Pass 3
+verified it; and the fork, if there is one. End briefly with what you examined
+and left alone, including candidates dropped in Pass 2 or Pass 4.
 
 ## Ground rules
 
-- Do not change the project. Work in scratch copies outside it.
+- Never modify the original project checkout or create branches or pull requests
+  unless explicitly asked. Run every candidate fix, build, test, and review pass
+  in isolated copies so nothing interferes with the original or with other
+  passes.
 - Avoid network calls and paid services. Keep tool caches, state, and temporary
-  files inside your scratch directory.
+  files inside your scratch directory so tests and trials stay hermetic.
 - Do not run project tools against live data or credentials, and do not stop
   processes by broad pattern.
-- If tests fail before you change anything, record it and carry on.
+- If tests fail on the untouched project, record it and carry on.
 - If you find private data, report counts and sizes, not contents.
