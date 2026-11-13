@@ -28,9 +28,10 @@ underlying tools directly. Where this file is more opinionated, follow it.
 
 ## Branches and Pull Requests
 
-The default branch (`main`, or `master` in `~/.ssh`) is protected: GitHub
-refuses direct pushes, force pushes, and deletion, because machines install and
-run code from it.
+These repositories contain executable configuration, tools, and skills. Publish
+through PRs, preserve history, and keep publication separate from adoption on
+another machine. Default-branch protection depends on each repository's GitHub
+plan and settings; local push guards prevent mistakes, not malicious access.
 
 To keep local skills and tools immediately usable on agent hosts without leaving
 stale `[origin/...: gone]` branches behind, **never run `git checkout -b`** in
@@ -39,23 +40,44 @@ branch (`main`, or `master` in `~/.ssh`) and publish with
 `git push-pr [-f] [BRANCH]` (`bin/git-push-pr`), which pushes
 `HEAD:refs/heads/<topic>` and opens a draft PR (`gh pr create --draft`) without
 switching branches (bare `git push` is also disabled by
-`etc/git/pr-only.gitconfig` in `~/.dotfiles`, `~/.private`, and `~/.ssh`).
-Prefer single-commit PRs: default branch name `pr/<slug>` is derived from the
-first local commit's subject ahead of upstream, so after `git commit --amend`,
-re-running `git push-pr -f` updates the same PR cleanly as long as that subject
-stays the same (if you change the subject, pass the previous branch explicitly
-with `git push-pr -f <branch>`). Use Squash/Rebase and merge on GitHub, never
-work around branch protection or ask for a bypass, and do not self-merge PRs.
+`etc/git/pr-only.gitconfig` in `~/.dotfiles`, `~/.private`, and `~/.ssh`). The
+default branch name `pr/<slug>` is derived from the first local commit's subject
+ahead of upstream, so after `git commit --amend`, re-running `git push-pr -f`
+updates the same PR cleanly as long as that subject stays the same (if you
+change the subject, pass the previous branch explicitly with
+`git push-pr -f <branch>`). Force updates use `--force-with-lease` and are only
+for topic branches. Prefer follow-up commits to rewriting published work. The
+helper publishes all commits ahead of upstream; inspect that range first.
 
-Because PRs squash- or rebase-merge onto GitHub while your local default branch
-holds the pre-merge commit(s), `./install.sh` interactive runs show incoming
-commits and prompt `[y/N/d]` (`d` prints the full `git diff`), warning loudly if
-local commits sit ahead of upstream before rebasing them onto the merged
-upstream. Non-interactive runs (`--no-input` or non-TTY) strictly enforce
-`--ff-only` and will fail after upstream PR merges unless `[pull] rebase = true`
-is configured in `~/.gitconfig.local` (also set `ff = true` if invoking
-`git pull` directly). `./install.sh` intentionally does not pull `~/.ssh`;
-inspect and pull `~/.ssh` manually.
+**Use merge commits for PRs, never squash or rebase merges.** Local commits then
+remain ancestors of the merged default branch. Agents may merge routine PRs
+after the relevant CI checks pass, using GitHub's merge-commit method and
+checking the expected PR head. Never bypass protection, force-push the default
+branch, or merge unrelated work. Draft staging, marking ready, and notifying
+reviewers are separate actions; do not notify people without explicit
+authorization.
+
+Live development can happen on any machine. A shared checkout is one stream of
+work: serialize edits there; use worktrees for independent or risky changes. On
+trusted personal or work computers, stage broad agent changes in a worktree
+before deliberately activating them. Local edits to symlinked code are already
+live, regardless of PR status.
+
+`./install.sh --apply` applies the current checkout without Git updates. Normal
+runs preflight all overlays, show the exact incoming range, and prompt `[y/N/d]`
+(`d` prints the diff) before any checkout advances. Updates only fast-forward;
+divergence, dirty incoming updates, or declined approval stop the run before
+applying features. There is no automatic rebase, reset, stash, or rollback.
+`pull.rebase` does not change this policy. Diagnose unexpected states
+separately. Offline work stays local; `AGENT_OFFLINE=1` skips network features
+and Git updates.
+
+Macs, work computers, and server host configuration require deliberate incoming
+updates; do not pass `--accept-updates` or schedule unattended pulls there. On
+agent hosts, explicit `--accept-updates --no-input` permits unattended
+fast-forwards. Publishing or merging a PR never updates another machine.
+`./install.sh` intentionally does not pull `~/.ssh`; inspect and fast-forward it
+manually. CI is a reliability check, not a security boundary against its author.
 
 ## Privacy and Information Control
 
