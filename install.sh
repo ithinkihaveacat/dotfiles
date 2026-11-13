@@ -529,8 +529,8 @@ function heading {
 # brew and apt pull in dependencies (such as rust) themselves.
 function packages_of {
   case "$1:$2" in
-    base:brew) echo "fish coreutils wget direnv jq mtr htop sevenzip ripgrep fd chafa node bat age age-plugin-se" ;;
-    base:apt) echo "fish apt-file direnv command-not-found dnsutils htop btop iftop iotop lsof traceroute mtr-tiny whois locate wget curl gnupg zip unzip libxml2-utils jed sqlite3 jq ripgrep fd-find chafa bat ruby ruby-dev age" ;;
+    base:brew) echo "fish coreutils wget direnv jq mtr btop sevenzip ripgrep fd chafa node bat age age-plugin-se" ;;
+    base:apt) echo "fish apt-file direnv command-not-found dnsutils btop iftop iotop sysstat lsof traceroute mtr-tiny whois locate wget curl gnupg zip unzip libxml2-utils jed sqlite3 jq ripgrep fd-find chafa bat ruby ruby-dev age" ;;
     cli-extras:brew) echo "git git-lfs gh fzf pv entr pwgen yazi" ;;
     cli-extras:apt) echo "gh fzf pv entr pwgen" ;;
     services:brew) echo "hcloud openclaw/tap/gogcli" ;;
@@ -1406,12 +1406,12 @@ function packages_apt {
 
   # Retired packages: ones this script used to install and no longer does.
   # Reported on every run and removed with --prune (see prune_apt_retired).
-  #   sysstat, pcp: sysstat recommends pcp, which installs 6 heavyweight
-  #     daemon services.
+  #   pcp: only ever arrived as a sysstat Recommendation; sysstat is managed
+  #     again, and on trixie does not recommend pcp.
   # shfmt, shellcheck: now run by the formatter scripts via uv (see feature_uv).
   #   npm: only where the distribution's nodejs is too old (see above); the
   #     nodejs package itself stays, since other packages depend on it.
-  retired="sysstat pcp shellcheck shfmt"
+  retired="pcp shellcheck shfmt"
   [ -n "$node_major" ] || retired="$retired npm"
   prune_apt_retired "$retired"
 }
