@@ -1,70 +1,55 @@
 # Activity Reports
 
-An **Activity Report** synthesizes the private operational ledger (tasks, git
-history, `STATUS.md`) into a concise, outward-facing summary of accomplishments,
-partner impact, and next steps for external audiences.
+An **Activity Report** turns the private tracker (`tasks/`, Git history,
+`STATUS.md`) into a concise, outward-facing summary of accomplishments, partner
+impact, and next steps.
 
-______________________________________________________________________
+## 1. Extraction & Data Segregation
 
-## 1. Extraction & Segregation Directives (Strict)
+Before drafting a report:
 
-Agents MUST execute the following before generating the report:
-
-- **Deep Extraction:** Actively parse the `## Outcome` and `## Findings`
-  sections of relevant `status: done` and `status: cancelled` task files. Do not
-  generate reports solely from task titles or `STATUS.md` summaries.
-- **Strict Redaction:** Never include API keys or unreleased embargoed product
+- **Read Task Outcomes:** Read `## Outcome` and `## Findings` in relevant `done`
+  and `cancelled` task records—do not summarize from task titles or `STATUS.md`
+  alone.
+- **Redact Sensitive Details:** Never include API keys or embargoed product
   names.
-- **Abstract Private Identifiers:** Strip all private conversation and session
-  URLs (`<agent>://`, `conversation://`), local branch names, and internal
-  repository file paths. Link exclusively to published external artifacts (PRs,
-  issues, dashboards).
-- **Draft Discussion Notes:** Append brief decision notes explaining thematic
-  grouping, inclusions/omissions, and downstream verification rationale.
+- **Strip Private Identifiers:** Remove conversation and session URIs
+  (`<agent>://`, `conversation://`), local branch names, and control-repository
+  paths. Link only to published external artifacts (PRs, CLs, issues, docs,
+  dashboards).
+- **Include Editorial Notes:** Append brief notes explaining thematic grouping,
+  inclusions or omissions, and verification status.
 
-______________________________________________________________________
+## 2. Transformation Rules
 
-## 2. Golden Rules of Transformation
+1. **Impact Over Effort:** Report what shipped, unblocked, or published. Omit
+   tracker upkeep, dead ends, intermediate scaffolding, and routine plumbing;
+   fold intermediate findings into the deliverable bullet.
+1. **One Initiative, One Primary Bullet:** Roll all tasks for a milestone into a
+   single primary bullet. Put prerequisite plumbing or incidental fixes in a
+   trailing clause or compact `Also, ...` sibling bullet—never split one
+   initiative into four or five bullets.
+1. **One Bug, One Bullet:** Track a bug's full progression (Reported ->
+   Acknowledged -> Reproduced by Partner -> Fix in Progress -> Scheduled ->
+   Shipped) in a single bullet, naming its furthest downstream state.
+1. **One Artifact, One Canonical Link:** Link the deliverable noun directly to
+   its single most authoritative external URL; omit mirror links and hosting
+   trivia.
+1. **Group by Domain or Stakeholder:** Group by external stakeholder, partner,
+   or problem domain rather than repository folders. Use short 2–3 word headings
+   (such as `Wear Widgets` or `AI Tooling`) and nest multiple deliverables under
+   each partner.
+1. **Scale by Horizon:** Keep each bullet to 1–2 sentences (~40 words):
+   - **Weekly:** Tactical deliverables and active partner milestone transitions.
+   - **Monthly:** At most 3–5 bullets per domain, consolidating tasks into
+     milestones.
+   - **Quarterly:** At most 2–3 bullets per domain focused on systemic outcomes;
+     drop individual bug fixes.
+1. **Non-Terminal Work:** For `in-progress` tasks, report the active milestone;
+   for `blocked` tasks, name the dependency; for `cancelled` tasks, report the
+   conclusive finding when it saves future effort.
 
-Follow these imperative constraints to convert inward tracker data into outward
-impact:
-
-1. **Impact Over Effort:** Report deliverables (what shipped, unblocked, or
-   published). Omit inward labor, tracker housekeeping, exploratory dead ends,
-   intermediate scaffolding, and background calculations. Fold intermediate
-   findings directly into the final deliverable.
-1. **1 Initiative = 1 Primary Bullet (Anti-Fragmentation):** Package all tasks
-   belonging to a single milestone into ONE primary deliverable bullet. Relegate
-   prerequisite plumbing or incidental harness fixes to a trailing clause or
-   compact sibling bullet (e.g., "Also, ..."). *Never emit 4–5 bullets for a
-   single initiative.*
-1. **1 Bug = 1 Bullet (Track Downstream Momentum):** Track the complete
-   lifecycle (Reported $\\to$ Acknowledged $\\to$ Reproduced by Partner $\\to$
-   Fix in Progress $\\to$ Scheduled $\\to$ Shipped) in a single bullet.
-   Explicitly report the furthest advanced downstream state to prove ecosystem
-   momentum.
-1. **1 Artifact = 1 Canonical Link:** Inline direct canonical links on the noun
-   representing the deliverable. Pick the single most authoritative target and
-   never include multiple mirror URLs. Omit mechanical hosting trivia.
-1. **Crisp Grouping:** Group strictly by external stakeholder, partner, or
-   problem domain. Do not mirror repository folders. Use crisp 2–3 word headings
-   (e.g., `Wear Widgets`, `AI Tooling`). Nest items hierarchically for multiple
-   deliverables per partner.
-1. **Quantitative Tightness:** Limit each bullet to a maximum of 1–2 sentences
-   (~40 words). Apply sub-linear horizon scaling:
-   - **Weekly:** Include all relevant tactical deliverables and active partner
-     milestone transitions.
-   - **Monthly:** Maximum 3–5 bullets per domain. Consolidate granular tasks
-     into strategic milestones.
-   - **Quarterly:** Maximum 2–3 bullets per domain. Elevate to systemic outcomes
-     and organizational trajectory; drop individual bug fixes.
-1. **Handle Non-Terminal States:** For in-progress work, report the current
-   active milestone. For blocked work, expose the dependency. For cancelled
-   tasks, report the conclusive finding if it saves future engineering time.
-
-______________________________________________________________________
-
-## 3. Standard Output Template
+## 3. Output Template
 
 ```markdown
 - [Author Name / Handle]

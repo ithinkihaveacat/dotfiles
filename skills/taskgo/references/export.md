@@ -1,59 +1,49 @@
 # Task Export
 
-When delegating a task to an isolated agent or contributor—one operating
-strictly within a single artifact repository with no access to the control
-repository—execute the **three-phase delegation lifecycle**. (An agent that can
-read the control repository needs a handoff instead; see Agent Handoff in
-[workflows.md](workflows.md).)
+When delegating a task to an isolated agent or contributor working strictly in a
+single artifact repository without access to the control repository, follow this
+three-phase workflow. (An agent that can read the control repository needs a
+handoff instead; see [Agent Handoff](workflows.md#agent-handoff).)
 
-1. **Phase 1: Export (Control Repo Agent):** Evaluate isolation feasibility,
-   resolve path drift, and generate a self-contained task brief (the exported
-   brief).
-1. **Phase 2: Implementation (Isolated Worker):** Execute the task on an
-   isolated branch utilizing explicit implementer latitude. Rely exclusively on
-   repo-native validation. Report findings out-of-band.
-1. **Phase 3: Reconciliation & Integration (Control Repo Agent):** Review the
-   isolated branch, apply workspace-level tooling (formatters/linters), polish
-   commit formatting to strictly enforce metadata segregation, and commit the
-   finalized tracker state.
+1. **Export (Control Repo Agent):** Check that the task can be completed inside
+   one repository, verify cited paths, and write a self-contained task brief.
+1. **Implementation (Isolated Worker):** Implement the task on an isolated
+   branch with implementer latitude, verify with repo-native checks, and report
+   findings out-of-band.
+1. **Reconciliation & Integration (Control Repo Agent):** Review the branch, run
+   workspace formatters and linters, verify that commits contain no private
+   tracker metadata, and record the completed state in the tracker.
 
-## Feasibility & Sanity Check (Phase 1)
+## Phase 1: Feasibility & Brief Construction
 
-- **Isolation Feasibility:** The task must be entirely executable within a
-  single target repository.
-- **Sanity Pass:** Validate that all cited target files and test scripts
-  currently exist in the target repository.
+Before exporting, confirm that:
 
-## Brief Construction
+- The task is self-contained within a single target repository.
+- Every cited file and test script exists in that repository.
 
-Construct the exported brief to be completely self-contained:
+Write a self-contained brief:
 
-1. **Strict Path Portability:** Use repository-relative paths (e.g.
-   `src/parser.py`). Never output absolute host paths or `file:///` URLs.
-1. **Component Orientation:** Synthesize a concise 1–2 sentence overview of the
+1. **Relative Paths Only:** Use repository-relative paths (such as
+   `src/parser.py`), never absolute host paths or `file://` URLs.
+1. **Subsystem Context:** Open with 1–2 sentences orienting the worker to the
    target subsystem.
-1. **Core Specification & Implementer Latitude:** Embed Title, Problem, Goal,
-   Constraints, and Criteria. Explicitly instruct the worker that they possess
-   **implementer latitude**.
-1. **Inlined Dependencies:** Resolve and inline all referenced ADRs and design
-   tokens.
-1. **Secrets and Credentials:** Inline necessary API keys or secrets into the
-   exported brief. Emit a visible warning in your chat response.
-1. **Repo-Native Verification:** Specify exact repo-native commands (e.g.
-   `npm test`) for validation.
+1. **Specification & Latitude:** Include Title, Problem, Goal, Constraints, and
+   Criteria, and state that the worker has implementer latitude on the approach.
+1. **Inlined Context:** Inline any needed ADR decisions or design tokens from
+   the control repository.
+1. **Secrets & Credentials:** If the task needs API keys or credentials, inline
+   them into the brief and warn the user in chat.
+1. **Repo-Native Verification:** Give the exact test and lint commands to run in
+   the target repository.
 
 ## Return & Reconciliation Protocol
 
-Append operational instructions to the brief:
+End the brief with these instructions for the worker:
 
-1. **Opaque Task ID Preservation:** Define `TASK-XXXXX` as an opaque routing
-   key.
-1. **Commit Conventions:** Commit to an isolated feature branch. Append the Task
-   ID as a Git trailer (`Resolves: TASK-XXXXX`).
-1. **Out-of-Band Reporting:** Instruct the worker to report completion
-   exclusively via chat response, including the verbatim Task ID, integration
-   target, active session record, and key findings.
-1. **Strict Data Segregation:** The Task ID belongs in public commit trailers.
-   Branch references, conversation links, and internal reasoning belong strictly
-   in the out-of-band chat response. Private metadata must never leak into
-   artifact commits.
+1. **Task ID Trailer:** Treat `TASK-XXXXX` as an opaque routing key and include
+   `Resolves: TASK-XXXXX` as a Git commit trailer on the feature branch.
+1. **Out-of-Band Report:** Report completion in chat with the `TASK-XXXXX` ID,
+   branch or commit, active session ID, and key findings.
+1. **Data Segregation:** Keep branch notes, conversation links, and tracker
+   context strictly in the chat response—never in artifact repository files or
+   commits.

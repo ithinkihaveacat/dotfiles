@@ -10,43 +10,15 @@
 #     "mdurl==0.1.2",
 #     "wcwidth==0.9.4",
 #     "ruamel.yaml==0.19.1",
-#     "PyJWT==2.15.1",
-#     "cryptography==50.0.2",
-#     "cffi==2.1.1",
-#     "pycparser==3.12",
-#     "mcp==2.3.0",
-#     "mcp-types==2.3.0",
-#     "annotated-types==0.8.0",
-#     "anyio==4.15.1",
-#     "attrs==26.1.0",
-#     "click==8.5.0",
-#     "h11==0.16.0",
-#     "httpcore2==2.16.0",
-#     "httpx2==2.16.0",
-#     "idna==3.20",
-#     "jsonschema==4.26.0",
-#     "jsonschema-specifications==2025.9.1",
-#     "opentelemetry-api==1.45.1",
-#     "pydantic==2.14.1",
-#     "pydantic-core==2.50.1",
-#     "python-multipart==0.0.32",
-#     "referencing==0.37.0",
-#     "rpds-py==2026.9.1",
-#     "sse-starlette==3.6.0",
-#     "starlette==1.10.0",
-#     "truststore==0.10.5",
-#     "typing-extensions==4.16.0",
-#     "typing-inspection==0.4.4",
-#     "uvicorn==0.54.0",
 # ]
 # ///
 
 import argparse
 import contextlib
-import contextvars
 import errno
 import fcntl
 import hashlib
+import importlib
 import io
 import json
 import os
@@ -68,10 +40,70 @@ from pathlib import Path
 from typing import Any, Literal, NoReturn, TypedDict
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-import mdformat
-from ruamel.yaml import YAML
-from ruamel.yaml.comments import CommentedSeq
-from ruamel.yaml.representer import Representer, RoundTripRepresenter
+_YAML_REPRESENTERS: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
+_YAML_LOADED = False
+
+
+class _LazyModule:
+    def __init__(self, module_name: str, attr_name: str) -> None:
+        self._module_name = module_name
+        self._attr_name = attr_name
+
+    def __getattr__(self, name: str) -> Any:
+        module = importlib.import_module(self._module_name)
+        globals()[self._attr_name] = module
+        return getattr(module, name)
+
+
+class _LazyRepresenter:
+    def __init__(self, name: str) -> None:
+        self._name = name
+
+    def add_representer(self, *args: Any, **kwargs: Any) -> None:
+        if _YAML_LOADED:
+            globals()[self._name].add_representer(*args, **kwargs)
+        else:
+            _YAML_REPRESENTERS.append((self._name, args, kwargs))
+
+
+def _ensure_ruamel() -> None:
+    global _YAML_LOADED, YAML, CommentedSeq, Representer, RoundTripRepresenter
+    if _YAML_LOADED:
+        return
+    ruamel_yaml = importlib.import_module("ruamel.yaml")
+    ruamel_comments = importlib.import_module("ruamel.yaml.comments")
+    ruamel_representer = importlib.import_module("ruamel.yaml.representer")
+    real_rep = ruamel_representer.Representer
+    real_rt_rep = ruamel_representer.RoundTripRepresenter
+    for target_name, args, kwargs in _YAML_REPRESENTERS:
+        target = real_rt_rep if target_name == "RoundTripRepresenter" else real_rep
+        target.add_representer(*args, **kwargs)
+    _YAML_REPRESENTERS.clear()
+    YAML = ruamel_yaml.YAML
+    CommentedSeq = ruamel_comments.CommentedSeq
+    Representer = real_rep
+    RoundTripRepresenter = real_rt_rep
+    _YAML_LOADED = True
+
+
+class _LazyRuamelSymbol:
+    def __init__(self, name: str) -> None:
+        self._name = name
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        _ensure_ruamel()
+        return globals()[self._name](*args, **kwargs)
+
+    def __getattr__(self, attr: str) -> Any:
+        _ensure_ruamel()
+        return getattr(globals()[self._name], attr)
+
+
+mdformat: Any = _LazyModule("mdformat", "mdformat")
+YAML: Any = _LazyRuamelSymbol("YAML")
+CommentedSeq: Any = _LazyRuamelSymbol("CommentedSeq")
+Representer: Any = _LazyRepresenter("Representer")
+RoundTripRepresenter: Any = _LazyRepresenter("RoundTripRepresenter")
 
 BEGIN = "<!-- taskgo:begin -->"
 END = "<!-- taskgo:end -->"
@@ -558,19 +590,60 @@ def wrap_body(text: str) -> str:
     return wrapped if wrapped != text else text
 
 
+_FRONTMATTER_RE = re.compile(r"^---\r?\n(.*?)\r?\n---(?:\r?\n|$)", re.DOTALL)
+_REFORMAT_YAML: Any = None
+_MDIT_FORMAT: Any = None
+
+
+def _reformat_yaml() -> Any:
+    global _REFORMAT_YAML
+    if _REFORMAT_YAML is None:
+        y = YAML()
+        y.width = WRAP_WIDTH
+        y.preserve_quotes = True
+        y.default_flow_style = False
+        _REFORMAT_YAML = y
+    return _REFORMAT_YAML
+
+
+def _markdown_formatter() -> Any:
+    global _MDIT_FORMAT
+    if _MDIT_FORMAT is None:
+        from importlib import import_module
+
+        build_mdit = import_module(f"{mdformat.__name__}._util").build_mdit
+        md_renderer = import_module(f"{mdformat.__name__}.renderer").MDRenderer
+        _MDIT_FORMAT = build_mdit(
+            md_renderer,
+            mdformat_opts={"wrap": WRAP_WIDTH, "filename": ""},
+            extensions={"gfm", "frontmatter"},
+        )
+    return _MDIT_FORMAT
+
+
+def _needs_frontmatter_reformat(fm_str: str) -> bool:
+    """True when reformat_frontmatter could change mdformat-frontmatter output."""
+    if ">" in fm_str or "..." in fm_str:
+        return True
+    for line in fm_str.splitlines():
+        if len(line) > WRAP_WIDTH:
+            return True
+        if line[:1].isspace() and not line.lstrip().startswith("-"):
+            return True
+    return False
+
+
 def reformat_frontmatter(text: str) -> str:
     """Reflows YAML frontmatter scalars to WRAP_WIDTH using ruamel.yaml."""
-    m = re.search(r"^---\r?\n(.*?)\r?\n---(?:\r?\n|$)", text, re.DOTALL)
+    if not text.startswith("---"):
+        return text
+    m = _FRONTMATTER_RE.match(text)
     if not m:
         return text
 
     frontmatter_str = m.group(1)
     body = text[m.end() :]
-
-    yaml = YAML()
-    yaml.width = WRAP_WIDTH
-    yaml.preserve_quotes = True
-    yaml.default_flow_style = False
+    yaml = _reformat_yaml()
 
     try:
         data = yaml.load(frontmatter_str)
@@ -588,12 +661,15 @@ def reformat_frontmatter(text: str) -> str:
 
 def format_markdown(text: str) -> str:
     """Formats Markdown text using mdformat (with gfm, frontmatter, and 80-char wrap)."""
-    text = reformat_frontmatter(text)
-    return mdformat.text(
-        text,
-        options={"wrap": WRAP_WIDTH},
-        extensions={"gfm", "frontmatter"},
-    )
+    if text.startswith("---"):
+        m = _FRONTMATTER_RE.match(text)
+        if m and _needs_frontmatter_reformat(m.group(1)):
+            text = reformat_frontmatter(text)
+    mdit = _markdown_formatter()
+    rendered = mdit.render(text)
+    if rendered != text:
+        rendered = mdit.render(rendered)
+    return rendered
 
 
 STATE_ALIASES = {
@@ -932,6 +1008,25 @@ def resolve_upstream(root: Path) -> tuple[str, str, str] | None:
     return remote, branch, upstream
 
 
+def _is_symbolic_head(git_dir: Path, root: Path) -> bool:
+    """True when HEAD is a symbolic ref, avoiding a subprocess on normal repos."""
+    head_path = git_dir / "HEAD"
+    try:
+        head_text = head_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        head_text = ""
+    if (
+        head_text.startswith("ref: refs/")
+        and "/.invalid" not in head_text
+        and not (git_dir / "reftable").exists()
+    ):
+        return True
+    return (
+        run_git(["symbolic-ref", "--quiet", "HEAD"], cwd=root, check=False).returncode
+        == 0
+    )
+
+
 def ensure_clean_git_state(
     root: Path,
     *,
@@ -960,23 +1055,18 @@ def ensure_clean_git_state(
 
     all_unmerged = sorted(
         {
-            line.split("\t", 1)[1]
-            for line in run_git(
-                ["ls-files", "-u"], cwd=root, check=False
-            ).stdout.splitlines()
-            if "\t" in line
+            entry.split("\t", 1)[1]
+            for entry in run_git(
+                ["ls-files", "-z", "-u"], cwd=root, check=False
+            ).stdout.split("\0")
+            if "\t" in entry
         }
     )
-    unmerged_cmd = ["ls-files", "-u"]
     if allow_sync_rebase_recovery and scope_project:
-        unmerged_cmd.extend(["--", f"{scope_project}/"])
-    unmerged_paths = sorted(
-        {
-            line.split("\t", 1)[1]
-            for line in run_git(unmerged_cmd, cwd=root, check=False).stdout.splitlines()
-            if "\t" in line
-        }
-    )
+        scope_prefix = f"{scope_project.rstrip('/')}/"
+        unmerged_paths = [p for p in all_unmerged if p.startswith(scope_prefix)]
+    else:
+        unmerged_paths = list(all_unmerged)
     if allow_sync_rebase_recovery:
         # During manual rebase recovery ('git checkout --ours <proj>/STATUS.md &&
         # taskgo sync <proj> && git add <proj>/STATUS.md'), STATUS.md remains in
@@ -1014,8 +1104,7 @@ def ensure_clean_git_state(
             f"finish ('git {in_progress} --continue') or abort ('git {in_progress} --abort') it first"
         )
 
-    sym = run_git(["symbolic-ref", "--quiet", "HEAD"], cwd=root, check=False)
-    if sym.returncode != 0:
+    if not _is_symbolic_head(git_dir, root):
         die_scoped(
             f"HEAD is detached in {display_path(root)}; check out a branch first"
         )
@@ -1511,6 +1600,8 @@ class FsSnapshot(Snapshot):
 
     def __init__(self, root: Path):
         self.root = root
+        self._md_files: list[str] | None = None
+        self._history: set[str] | None = None
 
     def path(self, rel: str) -> Path:
         return self.root / rel if rel else self.root
@@ -1530,14 +1621,17 @@ class FsSnapshot(Snapshot):
         return sorted(c.name for c in p.iterdir()) if p.is_dir() else []
 
     def write_text(self, rel: str, text: str) -> None:
+        self._md_files = None
         p = self.path(rel)
         p.parent.mkdir(parents=True, exist_ok=True)
         atomic_write(p, text)
 
     def rename(self, src: str, dst: str) -> None:
+        self._md_files = None
         self.path(src).rename(self.path(dst))
 
     def delete(self, rel: str) -> None:
+        self._md_files = None
         self.path(rel).unlink()
 
     def is_link(self, rel: str) -> bool:
@@ -1551,26 +1645,31 @@ class FsSnapshot(Snapshot):
         return p.is_file() and bool(p.stat().st_mode & 0o111)
 
     def historical_task_ids(self) -> set[str]:
-        return task_ids_in_history(self.root)
+        if self._history is None:
+            self._history = task_ids_in_history(self.root)
+        return self._history
 
     def walk_md(self, rel_dir: str) -> list[str]:
         # Only files Git would track: ignored paths (such as a nested external
         # checkout) are someone else's files.
-        listed = run_git(
-            [
-                "ls-files",
-                "-z",
-                "--cached",
-                "--others",
-                "--exclude-standard",
-                "--",
-                rel_dir or ".",
-            ],
-            cwd=self.root,
-            check=False,
-        )
-        if listed.returncode == 0:
-            return sorted(
+        if self._md_files is None:
+            listed = run_git(
+                ["ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+                cwd=self.root,
+                check=False,
+            )
+            if listed.returncode != 0:
+                # Not a work tree. rglob does not descend into symlinked
+                # directories; keep that.
+                return sorted(
+                    (
+                        p.relative_to(self.root).as_posix()
+                        for p in self.path(rel_dir).rglob("*.md")
+                        if p.is_file()
+                    ),
+                    key=path_key,
+                )
+            self._md_files = sorted(
                 {
                     rel
                     for rel in listed.stdout.split("\0")
@@ -1578,16 +1677,15 @@ class FsSnapshot(Snapshot):
                 },
                 key=path_key,
             )
-        # Not a work tree. rglob does not descend into symlinked directories;
-        # keep that.
-        return sorted(
-            (
-                p.relative_to(self.root).as_posix()
-                for p in self.path(rel_dir).rglob("*.md")
-                if p.is_file()
-            ),
-            key=path_key,
-        )
+        norm = rel_dir.rstrip("/")
+        if not norm or norm == ".":
+            return [rel for rel in self._md_files if self.is_file(rel)]
+        prefix = f"{norm}/"
+        return [
+            rel
+            for rel in self._md_files
+            if (rel == norm or rel.startswith(prefix)) and self.is_file(rel)
+        ]
 
 
 class WorktreeBlobs:
@@ -1881,41 +1979,94 @@ def require_project(snap: Snapshot, project_name: str) -> str:
     return project_name
 
 
+_YAML_FM_CACHE_MAX = 8192
+_YAML_FM_CACHE: "OrderedDict[str, tuple[bool, Any]]" = OrderedDict()
+_YAML_PARSE_RT: Any = None
+_YAML_DUMP_FM: Any = None
+
+
+def _yaml_parse_rt() -> Any:
+    global _YAML_PARSE_RT
+    if _YAML_PARSE_RT is None:
+        _YAML_PARSE_RT = YAML()
+    return _YAML_PARSE_RT
+
+
+def _yaml_dump_fm() -> Any:
+    global _YAML_DUMP_FM
+    if _YAML_DUMP_FM is None:
+        y = YAML()
+        y.width = WRAP_WIDTH
+        y.preserve_quotes = True
+        y.default_flow_style = False
+        y.indent(mapping=2, sequence=4, offset=2)
+        _YAML_DUMP_FM = y
+    return _YAML_DUMP_FM
+
+
+def _load_frontmatter_yaml(frontmatter_str: str) -> tuple[bool, Any]:
+    """Parses YAML frontmatter once and caches valid mappings / syntax status.
+
+    Cached mappings and their nested values are shared across read-only callers
+    and must not be mutated in-place (writers use parse_frontmatter_for_edit).
+    """
+    use_cache = len(frontmatter_str) <= 16384
+    if use_cache:
+        cached = _YAML_FM_CACHE.get(frontmatter_str)
+        if cached is not None:
+            _YAML_FM_CACHE.move_to_end(frontmatter_str)
+            return cached
+
+    yaml = _yaml_parse_rt()
+    try:
+        parsed = yaml.load(frontmatter_str)
+    except Exception as e:
+        err_line = str(e).splitlines()[0] if str(e) else "syntax error"
+        res: tuple[bool, Any] = (False, ("syntax", err_line))
+    else:
+        if not isinstance(parsed, dict):
+            res = (False, ("not_dict", None))
+        else:
+            res = (True, dict(parsed))
+
+    if use_cache:
+        _YAML_FM_CACHE[frontmatter_str] = res
+        if len(_YAML_FM_CACHE) > _YAML_FM_CACHE_MAX:
+            _YAML_FM_CACHE.popitem(last=False)
+    return res
+
+
 def parse_frontmatter(
     content: str, *, lowercase_keys: bool = True
 ) -> tuple[dict[str, Any], str]:
     """Tolerant frontmatter parser using ruamel.yaml. Returns (dict_of_fields, body_without_fm)."""
-    match = re.search(r"^---\r?\n(.*?)\r?\n---(?:\r?\n|$)", content, re.DOTALL)
+    if not content.startswith("---"):
+        return {}, content
+    match = _FRONTMATTER_RE.match(content)
     if not match:
         return {}, content
 
     frontmatter_str = match.group(1)
     body = content[match.end() :]
-
-    yaml = YAML()
-    try:
-        data = yaml.load(frontmatter_str)
-        if not isinstance(data, dict):
-            data = {}
-    except Exception:
-        data = {}
+    ok, payload = _load_frontmatter_yaml(frontmatter_str)
+    if not ok:
+        return {}, body
 
     if lowercase_keys:
-        return {str(k).lower(): v for k, v in data.items()}, body
-    return {str(k): v for k, v in data.items()}, body
+        return {str(k).lower(): v for k, v in payload.items()}, body
+    return {str(k): v for k, v in payload.items()}, body
 
 
 def parse_frontmatter_for_edit(content: str) -> tuple[Any, str]:
     """Loads frontmatter preserving raw ruamel.yaml CommentedMap and body."""
-    match = re.search(r"^---\r?\n(.*?)\r?\n---(?:\r?\n|$)", content, re.DOTALL)
+    yaml = _yaml_parse_rt()
+    match = _FRONTMATTER_RE.match(content) if content.startswith("---") else None
     if not match:
-        yaml = YAML()
         return yaml.load("{}"), content
 
     frontmatter_str = match.group(1)
     body = content[match.end() :]
 
-    yaml = YAML()
     try:
         data = yaml.load(frontmatter_str)
         if not isinstance(data, dict):
@@ -1928,13 +2079,8 @@ def parse_frontmatter_for_edit(content: str) -> tuple[Any, str]:
 
 def dump_frontmatter(data: Any) -> str:
     """Serializes frontmatter mapping to YAML string using ruamel.yaml."""
-    yaml = YAML()
-    yaml.width = WRAP_WIDTH
-    yaml.preserve_quotes = True
-    yaml.default_flow_style = False
-    yaml.indent(mapping=2, sequence=4, offset=2)
     buf = io.StringIO()
-    yaml.dump(data, buf)
+    _yaml_dump_fm().dump(data, buf)
     return f"---\n{buf.getvalue()}---\n"
 
 
@@ -1957,7 +2103,9 @@ def extract_frontmatter_field(content: str, key: str) -> str:
 
 
 def extract_body(content: str) -> str:
-    match = re.search(r"^---\r?\n(.*?)\r?\n---(?:\r?\n|$)", content, re.DOTALL)
+    if not content.startswith("---"):
+        return content
+    match = _FRONTMATTER_RE.match(content)
     return content[match.end() :] if match else content
 
 
@@ -2428,6 +2576,10 @@ class SectionSpec:
     required: bool = False
     writable: bool = True
 
+    @property
+    def key(self) -> str:
+        return "next_steps" if self.name == "Next" else self.name.lower()
+
 
 @dataclass(slots=True, frozen=True)
 class RecordSchema:
@@ -2885,20 +3037,282 @@ def find_dependency_cycles(rows: list[TaskRow]) -> list[list[str]]:
     return cycles
 
 
+# Bump if ID_IN_TEXT or the on-disk history cache format changes.
+_HISTORY_CACHE_VERSION = 1
+_HISTORY_CACHE_MAX = 64
+_HISTORY_CACHE: "OrderedDict[str, tuple[tuple[str, ...], frozenset[str]]]" = (
+    OrderedDict()
+)
+
+
+def _make_history_lock() -> Any:
+    import threading
+
+    return threading.Lock()
+
+
+_HISTORY_CACHE_LOCK = _make_history_lock()
+_FAST_FM_RE = re.compile(r"^---\r?\n(.*?)\r?\n---(?:\r?\n|$)", re.DOTALL)
+_FAST_ID_LINE_RE = re.compile(
+    r"^id:[ \t]*(['\"]?)(TASK-[0-9A-F]{5})\1(?:[ \t]+#.*|[ \t]*)\r?$",
+    re.MULTILINE | re.IGNORECASE,
+)
+_FAST_ID_KEY_RE = re.compile(r"^id[ \t]*:", re.MULTILINE | re.IGNORECASE)
+
+
+def _history_cache_file(common_dir: Path) -> Path | None:
+    try:
+        cache_home = os.environ.get("XDG_CACHE_HOME") or str(Path.home() / ".cache")
+        digest = hashlib.sha256(str(common_dir).encode("utf-8")).hexdigest()[:24]
+        return Path(cache_home) / "taskgo" / "history" / f"{digest}.json"
+    except (OSError, RuntimeError):
+        return None
+
+
+def _read_history_disk_cache(
+    cache_file: Path | None, common_dir: Path
+) -> tuple[tuple[str, ...], frozenset[str]] | None:
+    if cache_file is None:
+        return None
+    try:
+        data = json.loads(cache_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get("v") != _HISTORY_CACHE_VERSION:
+        return None
+    if data.get("common_dir") != str(common_dir):
+        return None
+    tips = data.get("tips")
+    ids = data.get("ids")
+    if (
+        not isinstance(tips, list)
+        or not isinstance(ids, list)
+        or not all(isinstance(t, str) for t in tips)
+        or not all(isinstance(i, str) for i in ids)
+    ):
+        return None
+    return tuple(tips), frozenset(ids)
+
+
+def _write_history_disk_cache(
+    cache_file: Path | None,
+    common_dir: Path,
+    tips: tuple[str, ...],
+    ids: frozenset[str],
+) -> None:
+    if cache_file is None:
+        return
+    import threading
+
+    try:
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+        tmp = cache_file.with_name(
+            f".{cache_file.name}.tmp.{os.getpid()}.{threading.get_ident()}"
+        )
+        payload = json.dumps(
+            {
+                "v": _HISTORY_CACHE_VERSION,
+                "common_dir": str(common_dir),
+                "tips": list(tips),
+                "ids": sorted(ids),
+            },
+            separators=(",", ":"),
+        )
+        try:
+            with open(tmp, "w", encoding="utf-8") as fh:
+                fh.write(payload)
+            os.replace(tmp, cache_file)
+        except OSError:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+    except OSError:
+        pass
+
+
+def _store_history_cache(
+    common_key: str,
+    cache_file: Path | None,
+    common_dir: Path,
+    tips: tuple[str, ...],
+    ids: frozenset[str],
+    *,
+    write_disk: bool = True,
+) -> None:
+    with _HISTORY_CACHE_LOCK:
+        _HISTORY_CACHE[common_key] = (tips, ids)
+        _HISTORY_CACHE.move_to_end(common_key)
+        if len(_HISTORY_CACHE) > _HISTORY_CACHE_MAX:
+            _HISTORY_CACHE.popitem(last=False)
+    if write_disk:
+        _write_history_disk_cache(cache_file, common_dir, tips, ids)
+
+
+def _repo_history_tips(repo: Path) -> tuple[Path, tuple[str, ...]] | None:
+    dot_git = repo / ".git"
+    if (
+        "GIT_DIR" not in os.environ
+        and "GIT_COMMON_DIR" not in os.environ
+        and dot_git.is_dir()
+        and not (dot_git / "commondir").exists()
+    ):
+        common_dir = dot_git.resolve()
+    else:
+        cd_res = run_git(["rev-parse", "--git-common-dir"], cwd=repo, check=False)
+        if cd_res.returncode != 0:
+            return None
+        raw_common = cd_res.stdout.strip()
+        if not raw_common:
+            return None
+        common_p = Path(raw_common)
+        common_dir = (
+            common_p.resolve()
+            if common_p.is_absolute()
+            else (repo / common_p).resolve()
+        )
+
+    tips_res = run_git(["rev-list", "--no-walk", "--all"], cwd=repo, check=False)
+    if tips_res.returncode != 0:
+        return None
+    tips = tuple(sorted({s.strip() for s in tips_res.stdout.splitlines() if s.strip()}))
+    return common_dir, tips
+
+
 def task_ids_in_history(repo: Path) -> set[str]:
     """Task IDs in the paths and messages of every commit reachable from a ref.
 
-    Covers deleted tasks, tasks on unmerged branches, and Task: trailers. One
-    uncached git log over all refs, so it is right in every repository state;
-    it costs about 4 s at 70,000 commits. Empty outside a repository or before
-    the first commit.
+    Covers deleted tasks, tasks on unmerged branches, and Task: trailers. Uses
+    an in-memory and optional XDG disk cache keyed by repository common git dir
+    and commit tips, scanning incrementally when all prior tips remain reachable
+    and falling back to a full log scan otherwise. Empty outside a repository or
+    before the first commit.
     """
+    resolved = _repo_history_tips(repo)
+    if resolved is None:
+        return set()
+    common_dir, current_tips = resolved
+    if not current_tips:
+        return set()
+
+    common_key = str(common_dir)
+    with _HISTORY_CACHE_LOCK:
+        mem_entry = cache_get(_HISTORY_CACHE, common_key)
+    if mem_entry is not None and mem_entry[0] == current_tips:
+        return set(mem_entry[1])
+
+    cache_file = _history_cache_file(common_dir)
+    disk_entry = _read_history_disk_cache(cache_file, common_dir)
+    if disk_entry is not None and disk_entry[0] == current_tips:
+        _store_history_cache(
+            common_key,
+            cache_file,
+            common_dir,
+            current_tips,
+            disk_entry[1],
+            write_disk=False,
+        )
+        return set(disk_entry[1])
+
+    base_entry = mem_entry if mem_entry is not None else disk_entry
+    if base_entry is not None:
+        cached_tips, cached_ids = base_entry
+        tip_set = set(current_tips)
+        cached_set = set(cached_tips)
+        can_increment = cached_set.issubset(tip_set)
+        if not can_increment:
+            stdin_check = "".join(
+                [*(f"{s}\n" for s in cached_tips), *(f"^{s}\n" for s in current_tips)]
+            )
+            chk = run_git(
+                ["rev-list", "-n", "1", "--stdin"],
+                cwd=repo,
+                check=False,
+                input_data=stdin_check,
+            )
+            can_increment = chk.returncode == 0 and not chk.stdout.strip()
+        if can_increment:
+            new_tips = [s for s in current_tips if s not in cached_set]
+            if not new_tips:
+                _store_history_cache(
+                    common_key, cache_file, common_dir, current_tips, cached_ids
+                )
+                return set(cached_ids)
+            stdin_log = "".join(
+                [*(f"{s}\n" for s in new_tips), *(f"^{s}\n" for s in cached_tips)]
+            )
+            delta = run_git(
+                ["log", "--no-renames", "--format=%B", "--name-only", "--stdin"],
+                cwd=repo,
+                check=False,
+                input_data=stdin_log,
+            )
+            if delta.returncode == 0:
+                ids = cached_ids | frozenset(ID_IN_TEXT.findall(delta.stdout))
+                _store_history_cache(
+                    common_key, cache_file, common_dir, current_tips, ids
+                )
+                return set(ids)
+
     res = run_git(
         ["log", "--all", "--no-renames", "--format=%B", "--name-only"],
         cwd=repo,
         check=False,
     )
-    return set(ID_IN_TEXT.findall(res.stdout)) if res.returncode == 0 else set()
+    if res.returncode != 0:
+        return set()
+    ids = frozenset(ID_IN_TEXT.findall(res.stdout))
+    _store_history_cache(common_key, cache_file, common_dir, current_tips, ids)
+    return set(ids)
+
+
+def _extract_task_id_fast(rel_path: str, content: str) -> str:
+    """Extracts a task's frontmatter ID without full YAML parsing on simple files."""
+    if "TASK-" not in content:
+        return ""
+    m = _FAST_FM_RE.search(content)
+    if m:
+        fm_str = m.group(1)
+        if (
+            "{" not in fm_str
+            and "&" not in fm_str
+            and "<<" not in fm_str
+            and len(_FAST_ID_KEY_RE.findall(fm_str)) == 1
+        ):
+            id_m = _FAST_ID_LINE_RE.search(fm_str)
+            if id_m:
+                before = fm_str[: id_m.start()]
+                if (
+                    '"' not in before
+                    and "'" not in before
+                    and "|" not in before
+                    and ">" not in before
+                ):
+                    return id_m.group(2)
+    return task_row_from_text(rel_path, content).task_id
+
+
+def _snapshot_task_ids(snap: Snapshot) -> set[str]:
+    """Task IDs currently defined in SNAP, reusing _ROW_CACHE when authoritative."""
+    ids: set[str] = set()
+    for rel_path in get_task_files(snap):
+        if snap.content_id_is_authoritative(rel_path):
+            blob = snap.content_id(rel_path)
+            if blob is None:
+                continue
+            cached = cache_get(_ROW_CACHE, (rel_path, blob))
+            if cached is not None:
+                if cached.task_id:
+                    ids.add(cached.task_id)
+                continue
+        try:
+            content = snap.read_text(rel_path)
+        except OSError:
+            continue
+        task_id = _extract_task_id_fast(rel_path, content)
+        if task_id:
+            ids.add(task_id)
+    return ids
 
 
 def random_task_ids() -> Iterator[str]:
@@ -2910,7 +3324,7 @@ def random_task_ids() -> Iterator[str]:
 
 def generate_task_id(snap: Snapshot) -> str:
     """A task ID not used in the snapshot or anywhere in its history."""
-    existing_ids = {r.task_id for r in get_task_rows(snap) if r.task_id}
+    existing_ids = _snapshot_task_ids(snap)
     existing_ids |= snap.historical_task_ids()
     for candidate in random_task_ids():
         if candidate not in existing_ids:
@@ -3335,12 +3749,14 @@ def audit_project_adrs(snap: Snapshot, name: str, findings: list[Finding]) -> No
     if not adr_files:
         return
 
+    adr_texts: dict[str, str] = {}
     for rel in adr_files:
         filename = rel.rsplit("/", 1)[1]
         try:
             dcontent = snap.read_text(rel)
         except OSError:
             continue
+        adr_texts[rel] = dcontent
         for key in unknown_fields(parse_frontmatter(dcontent)[0], DECISION_SCHEMA):
             findings.append(
                 Finding(
@@ -3401,11 +3817,13 @@ def audit_project_adrs(snap: Snapshot, name: str, findings: list[Finding]) -> No
     for row in adr_rows:
         if row.is_superseded:
             continue
-        try:
-            raw_content = snap.read_text(row.rel_path)
-        except OSError:
-            continue
-        _, body = parse_frontmatter(raw_content)
+        raw_content = adr_texts.get(row.rel_path)
+        if raw_content is None:
+            try:
+                raw_content = snap.read_text(row.rel_path)
+            except OSError:
+                continue
+        body = extract_body(raw_content)
 
         for other in adr_rows:
             if (
@@ -3507,7 +3925,13 @@ def is_record_file(rel: str) -> bool:
     )
 
 
-def markdown_finding(snap: Snapshot, rel: str) -> Finding | None:
+# Immutable per-task schema/section findings, keyed by (path, blob SHA).
+_TASK_AUDIT_CACHE: "OrderedDict[tuple[str, str], tuple[Finding, ...]]" = OrderedDict()
+
+
+def markdown_finding(
+    snap: Snapshot, rel: str, content: str | None = None
+) -> Finding | None:
     """A finding when REL is not formatted (fixable) or cannot be formatted."""
     verdict = None
     if snap.content_id_is_authoritative(rel):
@@ -3519,7 +3943,8 @@ def markdown_finding(snap: Snapshot, rel: str) -> Finding | None:
             verdict = cache_get(_FORMAT_CACHE, (rel, blob))
     if verdict is None:
         try:
-            content = snap.read_text(rel)
+            if content is None:
+                content = snap.read_text(rel)
             key = (rel, git_blob_sha(content.encode("utf-8")))
             verdict = cache_get(_FORMAT_CACHE, key)
             if verdict is None:
@@ -3701,6 +4126,8 @@ def audit_snapshot(
     else:
         projects = list_projects(snap)
 
+    read_texts: dict[str, str] = {}
+
     for name in projects:
         if only is not None and not any(p.startswith(f"{name}/") for p in only):
             continue
@@ -3732,6 +4159,7 @@ def audit_snapshot(
             doc_rel = f"{name}/{doc_name}"
             if wanted(doc_rel) and snap.is_file(doc_rel):
                 doc_text = snap.read_text(doc_rel)
+                read_texts[doc_rel] = doc_text
                 if re.match(r"^---\r?\n", doc_text):
                     try:
                         split_record(doc_text)
@@ -3771,11 +4199,26 @@ def audit_snapshot(
 
         # Check tasks
         for tf in filter(wanted, snap.glob_md(tasks_dir)):
-            content = snap.read_text(tf)
             rel_path = tf
-            tf_name = tf.rsplit("/", 1)[1]
+            auth_blob = (
+                snap.content_id(tf) if snap.content_id_is_authoritative(tf) else None
+            )
+            if auth_blob is not None:
+                cached_findings = cache_get(_TASK_AUDIT_CACHE, (rel_path, auth_blob))
+                if cached_findings is not None:
+                    findings.extend(cached_findings)
+                    continue
 
-            m_fm = re.search(r"^---\r?\n(.*?)\r?\n---(?:\r?\n|$)", content, re.DOTALL)
+            content = snap.read_text(tf)
+            read_texts[tf] = content
+            content_blob = git_blob_sha(content.encode("utf-8"))
+            cached_findings = cache_get(_TASK_AUDIT_CACHE, (rel_path, content_blob))
+            if cached_findings is not None:
+                findings.extend(cached_findings)
+                continue
+
+            tf_name = tf.rsplit("/", 1)[1]
+            m_fm = _FRONTMATTER_RE.match(content) if content.startswith("---") else None
             if not m_fm and re.match(r"^---\r?\n", content):
                 findings.append(
                     Finding(
@@ -3791,10 +4234,10 @@ def audit_snapshot(
                 )
                 continue
             if m_fm:
-                yaml = YAML()
-                try:
-                    parsed_yaml = yaml.load(m_fm.group(1))
-                    if not isinstance(parsed_yaml, dict):
+                ok, payload = _load_frontmatter_yaml(m_fm.group(1))
+                if not ok:
+                    err_kind, err_detail = payload
+                    if err_kind == "not_dict":
                         findings.append(
                             Finding(
                                 category="task",
@@ -3807,31 +4250,34 @@ def audit_snapshot(
                                 remediation=None,
                             )
                         )
-                        continue
-                except Exception as e:
-                    err_line = str(e).splitlines()[0] if str(e) else "syntax error"
-                    findings.append(
-                        Finding(
-                            category="task",
-                            severity="FAIL",
-                            message=(
-                                f"{rel_path}: invalid YAML frontmatter: {err_line}\n"
-                                "        Fix YAML frontmatter syntax or restore task from git."
-                            ),
-                            path=tf,
-                            remediation=None,
+                    else:
+                        findings.append(
+                            Finding(
+                                category="task",
+                                severity="FAIL",
+                                message=(
+                                    f"{rel_path}: invalid YAML frontmatter: {err_detail}\n"
+                                    "        Fix YAML frontmatter syntax or restore task from git."
+                                ),
+                                path=tf,
+                                remediation=None,
+                            )
                         )
-                    )
                     continue
+                fm = {str(k).lower(): v for k, v in payload.items()}
+                body = content[m_fm.end() :]
+            else:
+                fm = {}
+                body = content
 
-            fm, _ = parse_frontmatter(content)
+            task_findings: list[Finding] = []
 
             # Field values and keys come from the task schema; id and
             # status get repair findings below.
             for spec, value in invalid_field_values(fm, TASK_SCHEMA):
                 if spec.name in ("id", "status"):
                     continue
-                findings.append(
+                task_findings.append(
                     Finding(
                         category="task",
                         severity=spec.invalid,
@@ -3841,7 +4287,7 @@ def audit_snapshot(
                     )
                 )
             for key in unknown_fields(fm, TASK_SCHEMA):
-                findings.append(
+                task_findings.append(
                     Finding(
                         category="task",
                         severity="INFO",
@@ -3857,11 +4303,10 @@ def audit_snapshot(
             # A done task's Outcome gives the verdict against its Criteria.
             # Older records predate the rule, so this does not block.
             if raw_status == "done":
-                body = extract_body(content)
                 spans, similar = find_sections(body, "Outcome")
                 if not any(body[s:e].partition("\n")[2].strip() for s, e in spans):
                     hint = f" (similar: {', '.join(similar)})" if similar else ""
-                    findings.append(
+                    task_findings.append(
                         Finding(
                             category="task",
                             severity="INFO",
@@ -3935,6 +4380,7 @@ def audit_snapshot(
 
                     return remediate
 
+                findings.extend(task_findings)
                 if needs_id_fix:
                     findings.append(
                         Finding(
@@ -3965,10 +4411,15 @@ def audit_snapshot(
                             remediation=make_remediate_task(tf, tasks_dir),
                         )
                     )
+            else:
+                cached_tuple = tuple(task_findings)
+                cache_put(_TASK_AUDIT_CACHE, (rel_path, content_blob), cached_tuple)
+                findings.extend(cached_tuple)
 
         # Check STATUS.md snapshot drift
         if wanted(status_file) and snap.is_file(status_file):
             current_status = snap.read_text(status_file)
+            read_texts[status_file] = current_status
             if only is None and current_status != format_markdown(
                 render_status_file(snap, name, all_rows=all_rows, index=status_idx)
             ):
@@ -4032,7 +4483,9 @@ def audit_snapshot(
         # Check Markdown formatting of the project's records; free-form
         # documents are the owner's to format.
         for mf in snap.walk_md(name) if markdown else ():
-            if is_record_file(mf) and (finding := markdown_finding(snap, mf)):
+            if is_record_file(mf) and (
+                finding := markdown_finding(snap, mf, content=read_texts.get(mf))
+            ):
                 findings.append(finding)
 
     if not target_project and markdown:
@@ -4341,6 +4794,29 @@ def create_task(snap: Snapshot, project_name: str, rel_path: str, content: str) 
     sync_status(snap, project_name)
 
 
+def _validate_slug(slug: str) -> str:
+    normalized = normalize_slug(slug)
+    if not normalized:
+        die_scoped(f"--slug contains no usable characters: {slug}")
+    if len(normalized) > SLUG_MAX_LEN:
+        die_scoped(
+            f"--slug too long ({len(normalized)} > {SLUG_MAX_LEN} chars): {normalized}"
+        )
+    return normalized
+
+
+def _parse_iso_date_arg(value: str, option: str) -> date:
+    parsed = parse_iso_date(value)
+    if parsed is None:
+        die_scoped(f"invalid ISO date for {option} (expected YYYY-MM-DD): {value}")
+    return parsed
+
+
+def _pop_ci(data: Any, name: str) -> None:
+    for key in [k for k in data if str(k).lower() == name]:
+        data.pop(key, None)
+
+
 def cmd_create(
     project_name: str,
     title: str,
@@ -4368,34 +4844,25 @@ def cmd_create(
     """Create a new task in PROJECT."""
     check_project_name(project_name)
 
-    if due is not None and parse_iso_date(due) is None:
-        die_scoped(f"invalid ISO date for --due (expected YYYY-MM-DD): {due}")
-    if stale_after is not None and parse_iso_date(stale_after) is None:
-        die_scoped(
-            f"invalid ISO date for --stale-after (expected YYYY-MM-DD): {stale_after}"
-        )
+    for raw_val, opt in ((due, "--due"), (stale_after, "--stale-after")):
+        if raw_val is not None:
+            _parse_iso_date_arg(raw_val, opt)
     wait_spec = TASK_SCHEMA.field("wait_for")
     norm_wait_for = normalize_wait_for_args([*(wait_for or []), *(add_wait_for or [])])
     require_field_values(wait_spec, norm_wait_for, "--wait-for")
     blocked_spec = TASK_SCHEMA.field("blocked_by")
     deps = split_field_values(add_blocked_by or [], blocked_spec)
     require_field_values(blocked_spec, deps, "--add-blocked-by")
-    extra_convs: list[str] = []
-    for entry in split_field_values(
-        add_conversations or [], TASK_SCHEMA.field("conversations")
-    ):
-        parsed = normalize_conversation_id(entry)
-        if parsed:
-            extra_convs.append(f"{parsed[0]}://{parsed[1]}")
+    extra_convs = [
+        f"{parsed[0]}://{parsed[1]}"
+        for entry in split_field_values(
+            add_conversations or [], TASK_SCHEMA.field("conversations")
+        )
+        if (parsed := normalize_conversation_id(entry))
+    ]
 
     if slug is not None:
-        task_slug = normalize_slug(slug)
-        if not task_slug:
-            die_scoped(f"--slug contains no usable characters: {slug}")
-        if len(task_slug) > SLUG_MAX_LEN:
-            die_scoped(
-                f"--slug too long ({len(task_slug)} > {SLUG_MAX_LEN} chars): {task_slug}"
-            )
+        task_slug = _validate_slug(slug)
     else:
         full_slug = normalize_slug(title)
         task_slug = slugify(title) or "task"
@@ -4423,25 +4890,26 @@ def cmd_create(
             "a done task needs an Outcome: pass --outcome with a verdict "
             "against each criterion"
         )
-    session = get_active_session(conv)
-    conv_uri = f"{session[0]}://{session[1]}" if session else None
+    conv_uri = get_active_conversation_id(conv)
     root = get_repo_root()
     with repo_lock(root):
-        if not dry_run and not no_commit and has_commit_auth(root):
-            diff_cached = run_git(["diff", "--cached", "--quiet"], check=False)
-            if diff_cached.returncode != 0:
+
+        def check_clean_index() -> None:
+            if (
+                not dry_run
+                and not no_commit
+                and has_commit_auth(root)
+                and run_git(["diff", "--cached", "--quiet"], check=False).returncode
+                != 0
+            ):
                 die_scoped(
                     "git index contains staged changes; unstage or commit them first "
                     "(or pass --no-commit)"
                 )
+
+        check_clean_index()
         pre_sync_repo(root)
-        if not dry_run and not no_commit and has_commit_auth(root):
-            diff_cached = run_git(["diff", "--cached", "--quiet"], check=False)
-            if diff_cached.returncode != 0:
-                die_scoped(
-                    "git index contains staged changes; unstage or commit them first "
-                    "(or pass --no-commit)"
-                )
+        check_clean_index()
         snap = FsSnapshot(root)
         if deps:
             check_new_blockers(snap, None, deps, tuple(deps))
@@ -4456,41 +4924,23 @@ def cmd_create(
         is_new_project = not is_project(snap, project_name)
 
         if dry_run:
-            print(
-                _tagged(
-                    "[INFO]  Dry run: would create task record and sync STATUS.md:",
-                    sys.stderr,
-                ),
-                file=sys.stderr,
-            )
+            notes = ["Dry run: would create task record and sync STATUS.md:"]
             if is_new_project:
-                print(
-                    _tagged(
-                        f"[INFO]    - Scaffolding: {project_name}/README.md, {project_name}/STATUS.md",
-                        sys.stderr,
-                    ),
-                    file=sys.stderr,
+                notes.append(
+                    f"  - Scaffolding: {project_name}/README.md, {project_name}/STATUS.md"
                 )
-            print(
-                _tagged(
-                    f"[INFO]    - Task file:   {rel_task_path} (status: {status})",
-                    sys.stderr,
-                ),
-                file=sys.stderr,
-            )
+            notes.append(f"  - Task file:   {rel_task_path} (status: {status})")
             prefix = f"{project_name}: create {task_id}"
             remaining = 50 - len(prefix) - 3
             if remaining > 5 and len(title) > remaining:
-                short_title = title[: remaining - 3].rstrip() + "..."
-                subject = f"{prefix} ({short_title})"
+                subject = f"{prefix} ({title[: remaining - 3].rstrip()}...)"
             elif remaining > 5:
                 subject = f"{prefix} ({title})"
             else:
                 subject = prefix
-            print(
-                _tagged(f"[INFO]    - Commit:      {subject}", sys.stderr),
-                file=sys.stderr,
-            )
+            notes.append(f"  - Commit:      {subject}")
+            for note in notes:
+                print(_tagged(f"[INFO]  {note}", sys.stderr), file=sys.stderr)
             print(f"{task_id}\t{rel_task_path}")
             return
 
@@ -4542,13 +4992,18 @@ def cmd_create(
         run_git(["add", "--", *to_stage])
 
         subject = conventional_subject(f"create {task_id}", project_name)
-
         msg_lines = [subject, "", wrap_body(title)]
         if conv_uri:
             msg_lines.extend(["", f"Conversation: {conv_uri}"])
-        commit_msg = "\n".join(msg_lines) + "\n"
-
-        run_git(["commit", "--no-verify", "--no-gpg-sign", "-m", commit_msg])
+        run_git(
+            [
+                "commit",
+                "--no-verify",
+                "--no-gpg-sign",
+                "-m",
+                "\n".join(msg_lines) + "\n",
+            ]
+        )
         push_committed_write(root)
         commit_sha = run_git(["rev-parse", "HEAD"]).stdout.strip()
         print(
@@ -4604,48 +5059,29 @@ def edit_task_text(
             )
 
     if status:
-        norm_status = require_status(status, "--status")
-        status_key = next((k for k in data if str(k).lower() == "status"), "status")
-        data[status_key] = norm_status
+        data[fm_key(data, "status")] = require_status(status, "--status")
 
+    wait_spec = TASK_SCHEMA.field("wait_for")
     if wait_for is not None:
         if len(wait_for) == 1 and not wait_for[0].strip():
-            for k in [k for k in list(data.keys()) if str(k).lower() == "wait_for"]:
-                data.pop(k, None)
+            _pop_ci(data, "wait_for")
         else:
             items = normalize_wait_for_args(wait_for)
-            require_field_values(TASK_SCHEMA.field("wait_for"), items, "--wait-for")
-            wf_key = next((k for k in data if str(k).lower() == "wait_for"), "wait_for")
-            data[wf_key] = [parse_iso_date(w) or w for w in items]
+            require_field_values(wait_spec, items, "--wait-for")
+            data[fm_key(data, "wait_for")] = [parse_iso_date(w) or w for w in items]
 
-    if due is not None:
-        if not due.strip():
-            for k in [k for k in list(data.keys()) if str(k).lower() == "due"]:
-                data.pop(k, None)
+    for field, raw_val, opt in (
+        ("due", due, "--due"),
+        ("stale_after", stale_after, "--stale-after"),
+    ):
+        if raw_val is None:
+            continue
+        if not raw_val.strip():
+            _pop_ci(data, field)
         else:
-            parsed_due = parse_iso_date(due)
-            if parsed_due is None:
-                die_scoped(f"invalid ISO date for --due (expected YYYY-MM-DD): {due}")
-            due_key = next((k for k in data if str(k).lower() == "due"), "due")
-            data[due_key] = parsed_due
-
-    if stale_after is not None:
-        if not stale_after.strip():
-            for k in [k for k in list(data.keys()) if str(k).lower() == "stale_after"]:
-                data.pop(k, None)
-        else:
-            parsed_stale = parse_iso_date(stale_after)
-            if parsed_stale is None:
-                die_scoped(
-                    f"invalid ISO date for --stale-after (expected YYYY-MM-DD): {stale_after}"
-                )
-            sa_key = next(
-                (k for k in data if str(k).lower() == "stale_after"), "stale_after"
-            )
-            data[sa_key] = parsed_stale
+            data[fm_key(data, field)] = _parse_iso_date_arg(raw_val, opt)
 
     own_id = next((str(v) for k, v in data.items() if str(k).lower() == "id"), None)
-    wait_spec = TASK_SCHEMA.field("wait_for")
     if add_wait_for or remove_wait_for:
         adds = normalize_wait_for_args(add_wait_for or [])
         require_field_values(wait_spec, adds, "--add-wait-for")
@@ -4666,78 +5102,68 @@ def edit_task_text(
     for entry in split_field_values(remove_conversations or [], conv_spec):
         parsed = parse_conversation_entry(entry)
         remove_task_conversation(data, parsed[1] if parsed else entry)
-    for entry in split_field_values(add_conversations or [], conv_spec):
-        added = normalize_conversation_id(entry)
-        if added:
+    for entry in [
+        *split_field_values(add_conversations or [], conv_spec),
+        *([conv] if conv else []),
+    ]:
+        if added := normalize_conversation_id(entry):
             update_task_conversation(data, *added)
-
-    session = normalize_conversation_id(conv) if conv else None
-    if session:
-        scheme, c_id = session
-        update_task_conversation(data, scheme, c_id)
 
     fm_text = dump_frontmatter(data)
 
     if title:
         body = re.sub(r"^#\s+[^\n]+", f"# {title}", body, count=1, flags=re.MULTILINE)
 
-    def upsert_runin(body_str: str, label: str, val: str) -> str:
-        block = "\n" in val or val.strip().startswith("1.")
-        replacement = f"**{label}:**\n\n{val}" if block else f"**{label}:** {val}"
-        spans = find_runins(body_str, label)
-        if len(spans) > 1:
-            die_scoped(
-                f"{rel_path}: **{label}:** appears {len(spans)} times; "
-                "edit the task file directly"
+    section_vals = {
+        "Problem": problem,
+        "Cost": cost,
+        "Goal": goal,
+        "Criteria": criteria,
+        "Sketch": sketch,
+        "Constraints": constraints,
+        "Outcome": outcome,
+        "Findings": findings,
+        "Next": next_steps,
+    }
+    for spec in TASK_SCHEMA.sections:
+        val = section_vals.get(spec.name)
+        if not val:
+            continue
+        similar: list[str] = []
+        if spec.form == "run-in":
+            block = "\n" in val or val.strip().startswith("1.")
+            replacement = (
+                f"**{spec.name}:**\n\n{val}" if block else f"**{spec.name}:** {val}"
             )
-        if not spans:
-            return body_str.rstrip() + f"\n\n{replacement}\n"
-        start, end = spans[0]
-        before, after = body_str[:start], body_str[end:]
-        # Give the edited run-in its own paragraph, as 'create' lays it out,
-        # when mdformat has reflowed it into a paragraph with its neighbours.
-        if before.strip() and not before.endswith("\n\n"):
-            before = before.rstrip() + "\n\n"
-        if after.strip() and not after.startswith("\n\n"):
-            after = "\n\n" + after.lstrip()
-        return before + replacement + after
-
-    def upsert_section(body_str: str, heading: str, val: str) -> str:
-        replacement = f"## {heading}\n\n{val}"
-        spans, similar = find_sections(body_str, heading)
+            spans = find_runins(body, spec.name)
+            tag = f"**{spec.name}:**"
+        else:
+            replacement = f"## {spec.name}\n\n{val}"
+            spans, similar = find_sections(body, spec.name)
+            tag = f"'## {spec.name}'"
         if len(spans) > 1:
             die_scoped(
-                f"{rel_path}: '## {heading}' appears {len(spans)} times; "
+                f"{rel_path}: {tag} appears {len(spans)} times; "
                 "edit the task file directly"
             )
         if not spans:
             if similar:
                 warnings.append(
-                    f"{rel_path}: no '## {heading}' section; "
+                    f"{rel_path}: no '## {spec.name}' section; "
                     f"appending one (similar: {', '.join(similar)})"
                 )
-            return body_str.rstrip() + f"\n\n{replacement}\n"
-        start, end = spans[0]
-        return body_str[:start] + replacement + body_str[end:]
-
-    if problem:
-        body = upsert_runin(body, "Problem", problem)
-    if cost:
-        body = upsert_runin(body, "Cost", cost)
-    if goal:
-        body = upsert_runin(body, "Goal", goal)
-    if criteria:
-        body = upsert_runin(body, "Criteria", criteria)
-    if sketch:
-        body = upsert_runin(body, "Sketch", sketch)
-    if constraints:
-        body = upsert_runin(body, "Constraints", constraints)
-    if outcome:
-        body = upsert_section(body, "Outcome", outcome)
-    if findings:
-        body = upsert_section(body, "Findings", findings)
-    if next_steps:
-        body = upsert_section(body, "Next", next_steps)
+            body = body.rstrip() + f"\n\n{replacement}\n"
+        else:
+            start, end = spans[0]
+            before, after = body[:start], body[end:]
+            if spec.form == "run-in":
+                # Give the edited run-in its own paragraph, as 'create' lays it out,
+                # when mdformat has reflowed it into a paragraph with its neighbours.
+                if before.strip() and not before.endswith("\n\n"):
+                    before = before.rstrip() + "\n\n"
+                if after.strip() and not after.startswith("\n\n"):
+                    after = "\n\n" + after.lstrip()
+            body = before + replacement + after
 
     return fm_text + "\n" + body.lstrip(), warnings
 
@@ -4823,15 +5249,7 @@ def cmd_update(
     remove_conversations: list[str] | None = None,
 ) -> None:
     """Update task fields, status, or headings."""
-    new_slug: str | None = None
-    if slug is not None:
-        new_slug = normalize_slug(slug)
-        if not new_slug:
-            die_scoped(f"--slug contains no usable characters: {slug}")
-        if len(new_slug) > SLUG_MAX_LEN:
-            die_scoped(
-                f"--slug too long ({len(new_slug)} > {SLUG_MAX_LEN} chars): {new_slug}"
-            )
+    new_slug = _validate_slug(slug) if slug is not None else None
 
     root = get_repo_root()
     with repo_lock(root):
@@ -7013,14 +7431,28 @@ def resolve_handoff(snap: TreeSnapshot, target: Any) -> HandoffTarget:
     """
     name = str(target or "").strip()
     row = None
+    all_rows: list[TaskRow] | None = None
     if ID_PATTERN.match(name.upper()):
-        row = find_task_row(snap, name.upper())
+        task_id = name.upper()
+        all_rows = get_task_rows(snap)
+        matches = [r for r in all_rows if r.task_id == task_id]
+        if not matches:
+            where = (
+                f"commit {snap.rev[:12]}"
+                if isinstance(snap, GitTreeSnapshot)
+                else "the working tree"
+            )
+            raise TaskgoError(f"{task_id} is not in {where}")
+        if len(matches) > 1:
+            paths = ", ".join(r.rel_path for r in matches)
+            raise TaskgoError(f"{task_id} names more than one record: {paths}")
+        row = matches[0]
         project = row.project
     elif is_project(snap, name):
         project = name
     else:
         raise TaskgoError(f"not a project or task ID: {name!r}")
-    audit = audit_snapshot(snap, project)
+    audit = audit_snapshot(snap, project, markdown=False, rows=all_rows)
     readme = project_readme_rel(snap, project)
     skills = project_skills(snap, project)
     if row is not None:
@@ -7076,17 +7508,25 @@ def unverified_gates(rows: list[TaskRow]) -> dict[str, list[str]]:
     return out
 
 
-def task_record_json(snap: TreeSnapshot, row: TaskRow) -> dict[str, Any]:
+def task_record_json(
+    snap: TreeSnapshot,
+    row: TaskRow,
+    *,
+    index: dict[str, str] | None = None,
+    today: date | None = None,
+) -> dict[str, Any]:
     """One task record as get_task returns it, without as_of."""
     content = snap.read_text(row.rel_path)
     fm, _ = parse_frontmatter(content)
+    idx = status_index(snap) if index is None else index
+    cur_today = get_today(snap) if today is None else today
     return {
         "task": task_row_json(row),
         "blob": snap.blobs[row.rel_path],
         "frontmatter": _to_jsonable(fm),
         "sections": record_sections(content, TASK_SCHEMA),
-        "unresolved_blocked_by": unresolved_blockers(row, status_index(snap)),
-        "unresolved_wait_for": unresolved_wait_for(row, get_today(snap)),
+        "unresolved_blocked_by": unresolved_blockers(row, idx),
+        "unresolved_wait_for": unresolved_wait_for(row, cur_today),
         "unverified_gates": unverified_gates([row]).get(row.task_id, []),
         "content": content,
     }
@@ -7107,13 +7547,21 @@ def readme_frontmatter(content: str) -> dict[str, Any]:
     return _to_jsonable(parse_frontmatter(content, lowercase_keys=False)[0])
 
 
-def status_projection(snap: Snapshot, project: str) -> dict[str, Any]:
+def status_projection(
+    snap: Snapshot,
+    project: str,
+    *,
+    all_rows: list[TaskRow] | None = None,
+    index: dict[str, str] | None = None,
+) -> dict[str, Any]:
     """Committed STATUS.md sections, snapshot blocks, and drift flag for PROJECT."""
     rel = f"{project}/STATUS.md"
     committed = snap.read_text(rel) if snap.is_file(rel) else None
     committed_block = status_snapshot_block(committed)
     live_block = status_snapshot_block(
-        format_markdown(render_status_file(snap, project))
+        format_markdown(
+            render_status_file(snap, project, all_rows=all_rows, index=index)
+        )
     )
     return {
         "sections": (
@@ -7134,6 +7582,11 @@ def handoff_payload(
     ride beside it verbatim, as SNAP holds them.
     """
     project = t.project
+    all_rows = get_task_rows(snap)
+    index = {r.task_id: r.status for r in all_rows if r.task_id}
+    proj_rows = [r for r in all_rows if r.project == project]
+    today = get_today(snap)
+
     note = t.note(snap, lambda rel: rel)
     if isinstance(snap, GitTreeSnapshot):
         source = f"commit {snap.rev[:12]}"
@@ -7153,15 +7606,34 @@ def handoff_payload(
         "content": None,
         "truncated": False,
     }
-    status.update(status_projection(snap, project))
+    status.update(status_projection(snap, project, all_rows=all_rows, index=index))
+    in_progress = [r for r in proj_rows if r.status == "in-progress"]
+    blocked = held_rows(proj_rows, index, today)
+    ready = [
+        r
+        for r in proj_rows
+        if r.status == TaskStatus.TODO.value
+        and not unresolved_blockers(r, index)
+        and not unresolved_wait_for(r, today)
+    ]
+    ready.sort(
+        key=lambda r: (
+            parse_iso_date(r.due) is None,
+            parse_iso_date(r.due) or date.max,
+        )
+    )
     return {
         "as_of": as_of,
         "project": project,
-        "task": task_record_json(snap, t.row) if t.row is not None else None,
+        "task": (
+            task_record_json(snap, t.row, index=index, today=today)
+            if t.row is not None
+            else None
+        ),
         "note": note,
         "guide": MCP_GUIDE,
         "findings": [{"severity": s, "message": m} for s, m in t.findings],
-        "unverified_gates": unverified_gates(get_task_rows(snap, project)),
+        "unverified_gates": unverified_gates(proj_rows),
         "frontmatter": (
             readme_frontmatter(snap.read_text(t.readme)) if t.readme else {}
         ),
@@ -7171,18 +7643,9 @@ def handoff_payload(
         "plan": handoff_file(snap, f"{project}/PLAN.md"),
         "agents_md": handoff_file(snap, "AGENTS.md"),
         "tasks": {
-            "in_progress": [
-                task_row_json(r) for r in select_task_rows(snap, project, "in-progress")
-            ],
-            "blocked": [
-                task_row_json(r)
-                for r in held_rows(
-                    get_task_rows(snap, project), status_index(snap), get_today(snap)
-                )
-            ],
-            "ready": [
-                task_row_json(r) for r in select_task_rows(snap, project, "ready")
-            ],
+            "in_progress": [task_row_json(r) for r in in_progress],
+            "blocked": [task_row_json(r) for r in blocked],
+            "ready": [task_row_json(r) for r in ready],
         },
     }
 
@@ -7399,18 +7862,6 @@ def cmd_fix(
             elif f.path:
                 touched_paths.add(f.path)
 
-        # Re-run audit to verify convergence
-        post_findings = audit_workspace(root, project)
-        remaining_errors = [f for f in post_findings if f.severity in ("WARN", "FAIL")]
-        if remaining_errors:
-            for f in remaining_errors:
-                print(
-                    _tagged(
-                        f"[{f.severity}]  Still open after fix: {f.message}", sys.stderr
-                    ),
-                    file=sys.stderr,
-                )
-
         # Ensure all affected projects have their STATUS.md synchronized and included if modified
         affected_projects: set[str] = set()
         if project:
@@ -7426,14 +7877,63 @@ def cmd_fix(
             if snap.is_file(status_p):
                 touched_paths.add(status_p)
 
+        # Verify touched records converged without re-running skill catalog,
+        # shallow-clone checks, or full-repo markdown formatting.
+        post_findings = audit_snapshot(
+            snap, project, markdown=False, only=set(touched_paths)
+        )
+        post_keys = {(f.severity, f.message, f.path) for f in post_findings}
+        carried_errors = [
+            f
+            for f in findings
+            if f.remediation is None
+            and f.severity in ("WARN", "FAIL")
+            and (
+                f.path is None
+                or f.path not in touched_paths
+                or f.category in ("git", "skills", "root")
+            )
+            and (f.severity, f.message, f.path) not in post_keys
+        ]
+        remaining_errors = carried_errors + [
+            f for f in post_findings if f.severity in ("WARN", "FAIL")
+        ]
+        if remaining_errors:
+            for f in remaining_errors:
+                print(
+                    _tagged(
+                        f"[{f.severity}]  Still open after fix: {f.message}", sys.stderr
+                    ),
+                    file=sys.stderr,
+                )
+
         # Keep the touched files that have modifications or were created/deleted
-        modified_files: list[str] = []
-        for rel in sorted(touched_paths, key=path_key):
-            st = run_git(
-                ["status", "--porcelain", "--", rel], check=False
-            ).stdout.strip()
-            if st and rel not in modified_files:
-                modified_files.append(rel)
+        dirty_paths: set[str] = set()
+        if touched_paths:
+            sorted_touched = sorted(touched_paths, key=path_key)
+            for i in range(0, len(sorted_touched), 500):
+                chunk = sorted_touched[i : i + 500]
+                raw = run_git(
+                    ["status", "--porcelain", "-z", "-uall", "--", *chunk],
+                    cwd=root,
+                    check=False,
+                ).stdout
+                tokens = raw.split("\0")
+                idx = 0
+                while idx < len(tokens):
+                    entry = tokens[idx]
+                    idx += 1
+                    if len(entry) < 4:
+                        continue
+                    xy = entry[:2]
+                    dirty_paths.add(entry[3:])
+                    if xy[0] in ("R", "C") or xy[1] in ("R", "C"):
+                        if idx < len(tokens) and tokens[idx]:
+                            dirty_paths.add(tokens[idx])
+                        idx += 1
+        modified_files = [
+            rel for rel in sorted(touched_paths, key=path_key) if rel in dirty_paths
+        ]
 
         if not modified_files:
             print(
@@ -8750,98 +9250,16 @@ def cmd_commit(
 
 
 # ===========================================================================
-# MCP server ('taskgo mcp'): tools over committed state
+# MCP shared constants & launcher ('taskgo mcp' -> scripts/taskgo-mcp)
 # ===========================================================================
-#
-# Each read resolves one commit and reads only that commit, through a
-# GitTreeSnapshot, so a response is coherent even while main moves. Payloads
-# that the CLI also prints use the CLI's own functions, so they match the CLI
-# at that commit. Unpinned reads fetch the branch, or use the head fetched or
-# pushed in the last few seconds (--fetch-ttl); when the fetch fails, they
-# serve the last head fetched, marked stale. Each write applies one change
-# set over the head, commits it without a working tree, and pushes it without
-# force; a rejected push fetches the head and applies the set again there.
-# With --local there is no remote: the local branch is read as it is, and a
-# write moves it (compare-and-swap) and refreshes the checkout's touched
-# paths, so the CLI keeps working beside the server.
-# The MCP Python SDK speaks the protocol (ADR 12): every revision it supports,
-# over Streamable HTTP (stateless, with JSON responses) or, with --stdio, for
-# one local client.
-# Cloudflare Access authenticates callers in front of the server; McpGate
-# checks the Access JWT on every HTTP request before the SDK sees it.
 
-MCP_SERVER_VERSION = "0.15.0"
-MCP_MAX_FILE_BYTES = READ_MAX_BYTES
-MCP_MAX_REQUEST_BYTES = 1024 * 1024
-MCP_FETCH_TIMEOUT = 60
-MCP_PUSH_TIMEOUT = 60
-# Seconds a fetch (or this server's own push) stays fresh for unpinned reads;
-# 0 fetches on every call. Half of an agent's back-to-back tool calls come
-# within 5s of each other.
 MCP_FETCH_TTL = 5.0
-# Pushes per write; each rejected one re-reads the head and applies again.
-MCP_WRITE_ATTEMPTS = 5
-# How long, and for how many requests, a retry is recognized (ADR 2).
-MCP_REQUEST_TTL = 24 * 3600
-MCP_REQUEST_KEEP = 1000
-MCP_REQUEST_ID_MAX = 128
-# Commits behind the head searched for a request_id's trailers when the ID
-# is not in memory, as after a restart; and the trailers themselves.
-MCP_REQUEST_SCAN = 200
-MCP_REQUEST_ID_TRAILER = "Request-Id"
-MCP_REQUEST_DIGEST_TRAILER = "Request-Digest"
-MCP_REQUEST_DIGEST_LEN = 16
-MCP_CERTS_TTL = 3600
-MCP_LOOPBACK = ("localhost", "127.0.0.1", "::1")
-# Answers GET and HEAD with 200 and the server's version and source commit,
-# unauthenticated, for health checks such as a reverse proxy's. It reads
-# nothing of the tracker.
-MCP_HEALTH_PATH = "/up"
-# Longest value, and longest reason, in a request's log line.
-MCP_LOG_VALUE_MAX = 80
-MCP_LOG_REASON_MAX = 200
-# The request log: a JSON record for each request, appended to a file that is
-# rotated by size.
-MCP_LOG_ENV = "TASKGO_MCP_LOG"
-MCP_LOG_ROTATE_BYTES = 8 * 1024 * 1024
-MCP_LOG_ROTATED = 4  # FILE.1 (newest) to FILE.4: 40 MiB in all
-# Tool arguments a record keeps, shortened: those that name what a call is
-# about (a project, a task, a path, a search), never those that carry text
-# (titles, bodies, file content, edits) or conversation links.
-MCP_LOG_ARGS = (
-    "target",
-    "project",
-    "id",
-    "state",
-    "path",
-    "prefix",
-    "field",
-    "kind",
-    "slug",
-    "start_line",
-    "end_line",
-    "line_numbers",
-    "replace_all",
-    "args",
-    "paths",
-    "at",
-    "request_id",
-)
-MCP_LOG_ARG_MAX = 60
-# JWT claims that identify a caller, hashed into a record's caller key.
-MCP_CALLER_CLAIMS = ("sub", "email", "client_id", "azp")
 
 MCP_DATA_CARE = (
     "Data care: everything this server returns is private tracker content. "
     "Never copy it, or conversation links from it, into artifact repositories "
     "(code, commits, pull request descriptions, issues, or files), which may "
     "be public. Describe the work there in your own words, from the code."
-)
-
-MCP_UNVERIFIED = (
-    "External wait_for gates (bugs, changes, issues, people, free text) are not checked by "
-    "this server; each is reported as unverified and treated as still holding "
-    "its task. Run 'taskgo check' locally to poll them."
 )
 
 # The handoff payload's guide: the skill's rules that writes through the
@@ -8883,2239 +9301,102 @@ place of doctor, each write returns findings on what it touched. A new
 project is one create of kind project. Repairs across many files (fix,
 renames) are the CLI's: report what needs one instead of working around it."""
 
-MCP_INSTRUCTIONS = f"""\
-This server reads and writes a taskgo control repository: a private Git
-repository of Markdown that tracks projects, tasks (TASK-XXXXX), decisions,
-and each project's STATUS.md.
-
-Start with handoff(target), a project name or a task ID: one call returns
-the project's README.md, STATUS.md, PLAN.md, the root AGENTS.md, its active
-and ready tasks, and the task record. list_projects and list_tasks (state
-'ready' for workable tasks) find a target. Every response names the commit
-it read in as_of.commit; pass it as 'at' to keep several reads on the same
-commit. handoff.skills names the agent skills the project expects: activate
-them if your harness has a skill manager (adding one already active is
-harmless), otherwise ignore them. Before your first write, read
-handoff.guide: how to keep the tracker current.
-
-create and apply_changes record progress: each call is one commit on main,
-or nothing. Edits name the section hash or blob SHA they replace, as read
-from get_task, get_project_status, or list_files, and are refused if it no
-longer holds; read again and retry. Each write returns findings on the
-files and tasks it touched: advice, since the write has landed. Pass a
-fresh request_id for each write and the same one when retrying it after an
-unclear outcome, so that it is recorded once.
-
-{MCP_DATA_CARE}
-
-{MCP_UNVERIFIED}"""
-
-
-def status_prose(
-    snap: Snapshot, project: str, every: bool = False
-) -> list[tuple[str, str]] | None:
-    """PROJECT's STATUS.md Summary and Next texts in SNAP, or with EVERY all
-    its sections but the task snapshot; None without one."""
-    rel = f"{project}/STATUS.md"
-    if not snap.is_file(rel):
-        return None
-    return [
-        (s["name"], s["text"])
-        for s in record_sections(snap.read_text(rel), STATUS_SCHEMA)
-        if (s["name"] != "snapshot" if every else s["name"] in ("Summary", "Next"))
-    ]
-
-
-def write_findings(
-    snap: Snapshot,
-    parent: Snapshot | None,
-    paths: list[str],
-    rows: list[TaskRow] | None = None,
-) -> list[dict[str, str]]:
-    """What a write that changed PATHS, from PARENT to SNAP, leaves to check.
-
-    doctor's findings, without its formatting checks (the write formatted
-    its records), on the files the write touched or naming a task in them,
-    such as a blocker it resolved in any project; and, for each project
-    where it changed an existing task but not STATUS.md's Summary or Next,
-    a reminder. ROWS are SNAP's task rows, when the caller has them.
-    """
-    rows = get_task_rows(snap) if rows is None else rows
-    touched = set(paths)
-    # A STATUS.md the write only regenerated, because a task it changed
-    # holds one in another project, says nothing about the write.
-    if parent is not None:
-        touched -= {
-            rel
-            for rel in touched
-            if rel.endswith("/STATUS.md")
-            and not any(
-                p != rel and p.startswith(rel.removesuffix("STATUS.md"))
-                for p in touched
-            )
-            and status_prose(snap, rel.split("/", 1)[0], every=True)
-            == status_prose(parent, rel.split("/", 1)[0], every=True)
-        }
-    ids = {r.task_id for r in rows if r.task_id and r.rel_path in touched}
-    out = [
-        {"severity": f.severity, "message": f.message}
-        for f in audit_snapshot(snap, markdown=False, rows=rows, only=touched)
-        if f.severity != "PASS"
-        and (f.path in touched or any(i in f.message for i in ids))
-    ]
-    if parent is None:
-        return out
-    changed = {
-        p.split("/", 1)[0]
-        for p in touched
-        if p.partition("/")[2].startswith("tasks/") and parent.is_file(p)
-    }
-    for project in sorted(changed):
-        if status_prose(snap, project) == status_prose(parent, project):
-            out.append(
-                {
-                    "severity": "INFO",
-                    "message": (
-                        f"{project}/STATUS.md: Summary and Next are unchanged; "
-                        "if this write changed where the project stands or what "
-                        "comes next, rewrite them"
-                    ),
-                }
-            )
-    return out
-
 
 class McpToolError(Exception):
     """A refusal reported to the MCP client as a tool error."""
 
 
-@dataclass(slots=True)
-class McpConfig:
-    repo: Path
-    remote: str | None  # None reads the local branch without fetching
-    branch: str
-    auth: Literal["access", "none"]
-    team: str | None = None
-    audience: str | None = None
-    certs_url: str | None = None
-    fetch_ttl: float = MCP_FETCH_TTL
-    # Without a remote: writes move the local branch and refresh the checkout
-    # (--local), rather than being refused (--no-fetch).
-    local: bool = False
-
-    def where(self) -> str:
-        """The branch as a message names it."""
-        if self.remote:
-            return f"{self.branch} from {self.remote}"
-        return f"local {self.branch}"
-
-    def unreadable(self) -> str:
-        """The start of a message about a head that could not be read."""
-        return f"could not {'fetch' if self.remote else 'read'} {self.where()}"
+def skill_root() -> Path | None:
+    """The directory holding this skill's SKILL.md, found by sentinel rather
+    than depth so that a symlink or a move within the tree still works.
+    TASKGO_SKILL_DIR names it when the script has been copied elsewhere."""
+    override = os.environ.get("TASKGO_SKILL_DIR")
+    if override:
+        return Path(override).expanduser().resolve()
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "SKILL.md").is_file():
+            return parent
+    return None
 
 
-class McpReader:
-    """Resolves commits of one control repository and keeps their snapshots.
-
-    Snapshots are immutable per commit, so the few most recent are kept.
-
-    The remote-tracking ref is the cached head of the branch. It is fresh for
-    fetch_ttl seconds after a fetch, or after a push by this server, which
-    moves it; until then, unpinned reads use it without fetching. Losing the
-    cache, as on a restart, only costs a fetch. Without a remote, the local
-    branch is the head, read as it is for every call.
-    """
-
-    KEEP = 4
-
-    def __init__(self, cfg: McpConfig):
-        self.cfg = cfg
-        self.snaps: dict[str, tuple[GitTreeSnapshot, int]] = {}
-        # When the remote-tracking ref was last known to match the remote
-        # (time.monotonic()); None when it is not known to.
-        self.fetched_at: float | None = None
-        # When a fetch last failed; None after one succeeds. Unpinned reads
-        # within fetch_ttl of a failure serve the stale head without trying
-        # again, so an unreachable remote costs one timeout per TTL, not one
-        # per call.
-        self.failed_at: float | None = None
-
-    def git(self, *args: str) -> subprocess.CompletedProcess:
-        return run_git(list(args), cwd=self.cfg.repo, check=False)
-
-    def tracking_ref(self) -> str:
-        return f"refs/remotes/{self.cfg.remote}/{self.cfg.branch}"
-
-    def branch_ref(self) -> str:
-        """The ref that holds the head: the tracking ref, or the local branch."""
-        if self.cfg.remote:
-            return self.tracking_ref()
-        return f"refs/heads/{self.cfg.branch}"
-
-    def cached(self) -> bool:
-        """True when there is a cached head that writes may try first."""
-        return self.cfg.fetch_ttl > 0 and self.fetched_at is not None
-
-    def fresh(self) -> bool:
-        """True when the cached head is recent enough for an unpinned read."""
-        at = self.fetched_at
-        return (
-            self.cfg.fetch_ttl > 0
-            and at is not None
-            and time.monotonic() - at < self.cfg.fetch_ttl
+def mcp_server_path() -> Path:
+    root = skill_root()
+    if root is None:
+        print(
+            "taskgo mcp: cannot find SKILL.md above this script; set TASKGO_SKILL_DIR",
+            file=sys.stderr,
         )
-
-    def forget(self) -> None:
-        """Stops trusting the cached head: the next unpinned read fetches."""
-        self.fetched_at = None
-
-    def pushed(self, sha: str) -> None:
-        """Records that SHA is now the head of the remote branch. A local
-        branch was moved by the push itself, and is never cached."""
-        if self.cfg.remote:
-            self.git("update-ref", self.tracking_ref(), sha)
-            self.fetched_at = time.monotonic()
-
-    def fetch(self) -> None:
-        cfg = self.cfg
-        try:
-            res = subprocess.run(
-                ["git", "fetch", "--quiet", "--no-tags", cfg.remote, cfg.branch],
-                cwd=cfg.repo,
-                capture_output=True,
-                text=True,
-                timeout=MCP_FETCH_TIMEOUT,
-                env=dict(os.environ, GIT_TERMINAL_PROMPT="0"),
-                check=False,
-            )
-        except subprocess.TimeoutExpired:
-            self.failed_at = time.monotonic()
-            mcp_log(f"fetch failed: timed out after {MCP_FETCH_TIMEOUT}s")
-            mcp_note(fetch="timed out")
-            raise McpToolError(
-                f"could not fetch {cfg.branch} from {cfg.remote} (timed out); "
-                "pass an earlier as_of.commit as 'at' to read it"
-            ) from None
-        if res.returncode != 0:
-            self.failed_at = time.monotonic()
-            mcp_log(f"fetch failed: {res.stderr.strip()}")
-            mcp_note(fetch="failed")
-            raise McpToolError(
-                f"could not fetch {cfg.branch} from {cfg.remote}; pass an "
-                "earlier as_of.commit as 'at' to read it"
-            )
-        self.fetched_at = time.monotonic()
-        self.failed_at = None
-
-    def failing(self) -> bool:
-        """True while a failed fetch is recent enough not to retry for a read."""
-        at = self.failed_at
-        return (
-            self.cfg.fetch_ttl > 0
-            and at is not None
-            and time.monotonic() - at < self.cfg.fetch_ttl
+        sys.exit(1)
+    server = root / "scripts" / "taskgo-mcp"
+    if not server.is_file():
+        print(
+            f"taskgo mcp: {server} not found; set TASKGO_SKILL_DIR",
+            file=sys.stderr,
         )
-
-    def resolve(self, at: Any, *, fetch: bool = False) -> str:
-        """The commit to read: AT when given, else the head of the branch.
-
-        The head is the cached one while it is fresh, unless FETCH asks for
-        the remote's head as it is now.
-        """
-        if at:
-            if not isinstance(at, str) or not re.fullmatch(r"[0-9a-fA-F]{7,40}", at):
-                raise McpToolError(f"'at' is not a commit SHA: {at!r}")
-            sha = resolve_commit(self.cfg.repo, at)
-            if sha is None and self.cfg.remote:
-                # Perhaps newer than the last fetch.
-                self.fetch()
-                sha = resolve_commit(self.cfg.repo, at)
-            if sha is None:
-                raise McpToolError(f"no commit {at} in the control repository")
-            return sha
-        if self.cfg.remote and (fetch or not self.fresh()):
-            self.fetch()
-        ref = self.branch_ref()
-        sha = resolve_commit(self.cfg.repo, ref)
-        if sha is None:
-            raise McpToolError(f"{ref} does not exist in the control repository")
-        return sha
-
-    def resolve_for_read(self, at: Any) -> tuple[str, bool]:
-        """The commit a read tool reads, and whether it is a stale head.
-
-        An unpinned read whose fetch fails is served the head last fetched,
-        or pushed by this server, when there is one, rather than nothing;
-        the response says so, and reads within fetch_ttl of the failure are
-        served the same way without fetching again. A pinned read, or a
-        first read with nothing fetched yet, fails as the fetch did.
-        """
-        if not at and self.cfg.remote and self.failing() and not self.fresh():
-            sha = resolve_commit(self.cfg.repo, self.tracking_ref())
-            if sha is not None:
-                mcp_note(stale=True)
-                return sha, True
-        try:
-            return self.resolve(at), False
-        except McpToolError:
-            if at or not self.cfg.remote:
-                raise
-            sha = resolve_commit(self.cfg.repo, self.tracking_ref())
-            if sha is None:
-                raise
-            mcp_log(f"serving the last fetched head {sha[:12]} as stale")
-            mcp_note(stale=True)
-            return sha, True
-
-    def snapshot(self, sha: str) -> tuple[GitTreeSnapshot, int]:
-        """The snapshot of commit SHA and its commit time (Unix seconds)."""
-        if sha in self.snaps:
-            self.snaps[sha] = self.snaps.pop(sha)  # most recent last
-            return self.snaps[sha]
-        snap = GitTreeSnapshot(self.cfg.repo, sha)
-        committed = int(self.git("show", "-s", "--format=%ct", sha).stdout.strip())
-        self.snaps[sha] = (snap, committed)
-        while len(self.snaps) > self.KEEP:
-            self.snaps.pop(next(iter(self.snaps)))
-        return snap, committed
-
-    def is_ancestor(self, sha: str, head: str) -> bool:
-        return self.git("merge-base", "--is-ancestor", sha, head).returncode == 0
-
-    def commit(self, snap: GitTreeSnapshot, cs: ChangeSet, message: str) -> str:
-        """A commit of CS over SNAP's commit, made without a working tree.
-
-        Writes blobs, a tree, and the commit to the object store, through a
-        temporary index; no ref moves.
-        """
-        import tempfile
-
-        repo = self.cfg.repo
-        with tempfile.TemporaryDirectory(prefix="taskgo-mcp-") as tmp:
-            env = dict(os.environ, GIT_INDEX_FILE=str(Path(tmp) / "index"))
-
-            def git(*args: str, data: bytes | None = None) -> str:
-                res = subprocess.run(
-                    ["git", *args],
-                    cwd=repo,
-                    input=data,
-                    capture_output=True,
-                    env=env,
-                    check=False,
-                )
-                if res.returncode != 0:
-                    err = res.stderr.decode("utf-8", "replace").strip()
-                    raise McpToolError(f"git {args[0]} failed: {err}")
-                return res.stdout.decode("utf-8").strip()
-
-            git("read-tree", snap.rev)
-            entries = []
-            for rel, (_, after) in cs.snap.diff().items():
-                if after is None:
-                    entries.append(f"0 {'0' * 40}\t{rel}")
-                else:
-                    blob = git("hash-object", "-w", "--stdin", data=after.encode())
-                    mode = "100755" if cs.snap.is_executable(rel) else "100644"
-                    entries.append(f"{mode} {blob}\t{rel}")
-            git(
-                "update-index",
-                "-z",
-                "--index-info",
-                data="".join(e + "\0" for e in entries).encode(),
-            )
-            tree = git("write-tree")
-            return git(
-                "-c",
-                "user.useConfigOnly=true",
-                "commit-tree",
-                "--no-gpg-sign",
-                tree,
-                "-p",
-                snap.rev,
-                "-F",
-                "-",
-                data=message.encode(),
-            )
-
-    def push(self, sha: str) -> tuple[bool, str]:
-        """Makes SHA the head of the branch, if its parent still is: pushed
-        to the remote without force, or, without one, moved to on the local
-        branch (see move). Returns (accepted, Git's message)."""
-        cfg = self.cfg
-        if not cfg.remote:
-            return self.move(sha)
-        try:
-            res = subprocess.run(
-                [
-                    "git",
-                    "push",
-                    "--quiet",
-                    "--no-verify",
-                    cfg.remote,
-                    f"{sha}:refs/heads/{cfg.branch}",
-                ],
-                cwd=cfg.repo,
-                capture_output=True,
-                text=True,
-                timeout=MCP_PUSH_TIMEOUT,
-                env=dict(os.environ, GIT_TERMINAL_PROMPT="0"),
-                check=False,
-            )
-        except subprocess.TimeoutExpired:
-            return False, "push timed out"
-        # The ' ! [rejected] ... (fetch first)' line says why, when there is one.
-        lines = [line.strip() for line in res.stderr.strip().splitlines()]
-        why = next((line for line in lines if line.startswith("!")), None)
-        return res.returncode == 0, why or (lines[-1] if lines else "")
-
-    def move(self, sha: str) -> tuple[bool, str]:
-        """Moves the local branch from SHA's parent to SHA (--local).
-
-        The checkout must have the branch checked out, and no uncommitted
-        change to a path the commit touches; other dirty paths are left
-        alone. The move is a compare-and-swap on the ref, so a commit made
-        meanwhile from the checkout refuses it, as a remote refuses a
-        non-fast-forward push: (False, why), and the caller applies the set
-        again over the new head. After the move, the index and working tree
-        are brought from the parent to SHA for the touched paths only, so
-        the checkout shows the commit as if it had been made there.
-        """
-        cfg = self.cfg
-        ref = f"refs/heads/{cfg.branch}"
-        parent = self.git("rev-parse", "--verify", f"{sha}^").stdout.strip()
-        bare = self.git("rev-parse", "--is-bare-repository").stdout.strip() == "true"
-        if not bare:
-            git_dir = resolve_git_dir(cfg.repo)
-            for marker, label in (
-                ("rebase-merge", "rebase"),
-                ("rebase-apply", "rebase"),
-                ("MERGE_HEAD", "merge"),
-                ("CHERRY_PICK_HEAD", "cherry-pick"),
-                ("REVERT_HEAD", "revert"),
-            ):
-                if (git_dir / marker).exists():
-                    raise McpToolError(
-                        f"the checkout has a git {label} in progress; finish or "
-                        "abort it first. Nothing was written"
-                    )
-            if self.git("ls-files", "-u").stdout.strip():
-                raise McpToolError(
-                    "the checkout has unmerged files; resolve conflicts first. "
-                    "Nothing was written"
-                )
-            head = self.git("symbolic-ref", "--quiet", "HEAD").stdout.strip()
-            if head != ref:
-                raise McpToolError(
-                    f"the checkout does not have {cfg.branch} checked out "
-                    f"({head or 'detached HEAD'}); nothing was written"
-                )
-            paths = self.git(
-                "diff-tree", "-r", "--no-commit-id", "--name-only", "-z", sha
-            ).stdout.split("\0")
-            paths = [p for p in paths if p]
-            dirty = self.git(
-                "status", "--porcelain", "--untracked-files=all", "--", *paths
-            ).stdout
-            if dirty.strip():
-                names = ", ".join(line[3:] for line in dirty.splitlines())
-                raise McpToolError(
-                    f"the checkout has uncommitted changes to {names}; commit "
-                    "or discard them first. Nothing was written"
-                )
-        res = self.git("update-ref", "-m", "taskgo mcp: write", ref, sha, parent)
-        if res.returncode != 0:
-            why = res.stderr.strip().splitlines()
-            return False, (why[-1] if why else f"{cfg.branch} moved").removeprefix(
-                "fatal: "
-            )
-        if not bare:
-            # Two-tree read-tree: a fast-forward of the index and working tree
-            # for the paths that differ between the parent and SHA, which also
-            # removes files the commit deletes; other entries are kept.
-            res = self.git("read-tree", "-m", "-u", parent, sha)
-            if res.returncode != 0:
-                mcp_log(
-                    f"{cfg.branch} is at {sha[:12]} but the checkout could not be "
-                    f"refreshed: {res.stderr.strip()}"
-                )
-        return True, ""
-
-    def find_request(self, head: str, rid: str) -> tuple[str, str | None] | None:
-        """The commit, with its digest, that the last MCP_REQUEST_SCAN commits
-        behind HEAD record for request RID in their trailers, or None.
-
-        Git picks out the trailer block, so a body line that happens to start
-        with the trailer's name is not one.
-        """
-        res = self.git(
-            "log",
-            "-z",
-            f"-n{MCP_REQUEST_SCAN}",
-            "--format=%H%n%(trailers:only,unfold)",
-            head,
-        )
-        if res.returncode != 0:
-            return None
-        for record in res.stdout.split("\0"):
-            sha, _, message = record.partition("\n")
-            trailers = dict(
-                line.split(": ", 1)
-                for line in message.splitlines()
-                if ": " in line
-                and line.split(": ", 1)[0]
-                in (MCP_REQUEST_ID_TRAILER, MCP_REQUEST_DIGEST_TRAILER)
-            )
-            if trailers.get(MCP_REQUEST_ID_TRAILER) == rid:
-                return sha, trailers.get(MCP_REQUEST_DIGEST_TRAILER)
-        return None
+        sys.exit(1)
+    return server
 
 
-@dataclass(slots=True)
-class McpRead:
-    """One tool call's view: a commit, its snapshot, and the reader. A read
-    served a stale head, because the branch could not be fetched, says so
-    in its as_of."""
-
-    reader: McpReader
-    snap: GitTreeSnapshot
-    committed: int
-    stale: bool = False
-
-    def as_of(self) -> dict[str, Any]:
-        as_of = snapshot_as_of(self.snap, self.committed)
-        if self.stale:
-            as_of["stale"] = True
-        return as_of
-
-
-def mcp_find_task(snap: GitTreeSnapshot, task_id: Any) -> TaskRow:
-    task_id = str(task_id or "").strip().upper()
-    if not ID_PATTERN.match(task_id):
-        raise McpToolError(f"not a task ID: {task_id!r} (expected TASK-XXXXX)")
+def exec_mcp(argv: list[str]) -> NoReturn:
+    """Hands over to the MCP server, which carries its own dependencies so
+    that every other command stays free of them."""
+    server = mcp_server_path()
+    uv = shutil.which("uv")
+    if uv is None:
+        print("taskgo mcp: uv not found", file=sys.stderr)
+        sys.exit(127)
     try:
-        return find_task_row(snap, task_id)
-    except TaskgoError as e:
-        raise McpToolError(str(e)) from None
+        os.execv(uv, [uv, "run", "--quiet", "--script", str(server), *argv])
+    except OSError as e:
+        print(f"taskgo mcp: cannot run {server}: {e.strerror or e}", file=sys.stderr)
+        sys.exit(1)
 
 
-def mcp_project(snap: GitTreeSnapshot, project: Any) -> str:
-    if not isinstance(project, str) or not is_project(snap, project):
-        raise McpToolError(f"unknown project: {project}")
-    return project
+_MCP_MOD: Any = None
 
 
-def mcp_path(path: Any) -> str:
-    try:
-        return clean_rel_path(str(path or ""), allow_empty=True)
-    except TaskgoError:
-        raise McpToolError(
-            f"invalid path: {str(path or '').strip().strip('/')!r}"
-        ) from None
+def _load_mcp_module() -> Any:
+    global _MCP_MOD
+    if _MCP_MOD is not None:
+        return _MCP_MOD
+    import importlib.machinery
+    import importlib.util
+    import types
 
-
-def mcp_list_projects(r: McpRead, args: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "as_of": r.as_of(),
-        "projects": [project_status_json(r.snap, p) for p in list_projects(r.snap)],
-    }
-
-
-def mcp_list_tasks(r: McpRead, args: dict[str, Any]) -> dict[str, Any]:
-    project = args.get("project")
-    if project:
-        mcp_project(r.snap, project)
-    state = args.get("state")
-    if state and state.strip().lower() != "ready" and canonical_status(state) is None:
-        raise McpToolError(f"unknown state: {state}")
-    rows = select_task_rows(r.snap, project, state)
-    return {
-        "as_of": r.as_of(),
-        "tasks": [task_row_json(row) for row in rows],
-        "unverified_gates": unverified_gates(rows),
-    }
-
-
-def mcp_get_task(r: McpRead, args: dict[str, Any]) -> dict[str, Any]:
-    row = mcp_find_task(r.snap, args.get("id"))
-    return {"as_of": r.as_of(), **task_record_json(r.snap, row)}
-
-
-def mcp_get_project_status(r: McpRead, args: dict[str, Any]) -> dict[str, Any]:
-    project = mcp_project(r.snap, args.get("project"))
-    rel = f"{project}/STATUS.md"
-    committed = r.snap.read_text(rel) if r.snap.is_file(rel) else None
-    proj = status_projection(r.snap, project)
-    return {
-        "as_of": r.as_of(),
-        "project": project,
-        "path": rel,
-        "blob": r.snap.blobs.get(rel),
-        **proj,
-        "fresh_block": proj["live_block"],
-        "unverified_gates": unverified_gates(get_task_rows(r.snap, project)),
-        "content": committed,
-    }
-
-
-def mcp_read_file(r: McpRead, args: dict[str, Any]) -> dict[str, Any]:
-    rel = mcp_path(args.get("path"))
-    sha = r.snap.blobs.get(rel)
-    if sha is None:
-        if r.snap.is_dir(rel):
-            raise McpToolError(f"{rel} is a directory; use list_files")
-        raise McpToolError(f"{rel} is not in commit {r.snap.rev[:12]}")
-    raw = run_git(["cat-file", "blob", sha], cwd=r.reader.cfg.repo, text=False).stdout
-    try:
-        result = read_slice(
-            rel,
-            sha,
-            raw,
-            args.get("start_line"),
-            args.get("end_line"),
-            MCP_MAX_FILE_BYTES,
-            args.get("line_numbers", False),
+    cli_mod = sys.modules.get(__name__)
+    if cli_mod is None:
+        cli_mod = next(
+            (
+                m
+                for m in list(sys.modules.values())
+                if getattr(m, "__dict__", None) is globals()
+            ),
+            None,
         )
-    except TaskgoError as e:
-        raise McpToolError(str(e)) from None
-    return {"as_of": r.as_of(), **result}
-
-
-def mcp_search_files(r: McpRead, args: dict[str, Any]) -> dict[str, Any]:
-    try:
-        search = parse_search_args(args.get("args"), args.get("paths"))
-        result, _ = run_search(r.reader.cfg.repo, search, r.snap.rev, set(r.snap.blobs))
-    except TaskgoError as e:
-        raise McpToolError(str(e)) from None
-    return {"as_of": r.as_of(), **result}
-
-
-def mcp_list_files(r: McpRead, args: dict[str, Any]) -> dict[str, Any]:
-    prefix = mcp_path(args.get("prefix"))
-    if prefix and not r.snap.exists(prefix):
-        raise McpToolError(f"{prefix} is not in commit {r.snap.rev[:12]}")
-    files = [
-        {"path": rel, "blob": sha, "executable": r.snap.modes[rel] == "100755"}
-        for rel, sha in sorted(r.snap.blobs.items())
-        if not prefix or rel == prefix or rel.startswith(prefix + "/")
-    ]
-    return {"as_of": r.as_of(), "files": files}
-
-
-def mcp_handoff(r: McpRead, args: dict[str, Any]) -> dict[str, Any]:
-    try:
-        t = resolve_handoff(r.snap, args.get("target"))
-    except TaskgoError as e:
-        raise McpToolError(str(e)) from None
-    return handoff_payload(r.snap, t, r.as_of())
-
-
-def mcp_get_task_history(r: McpRead, args: dict[str, Any]) -> dict[str, Any]:
-    row = mcp_find_task(r.snap, args.get("id"))
-    field = str(args.get("field") or "status").strip()
-    versions = file_versions(r.reader.cfg.repo, r.snap.rev, row.rel_path)
-    changes = field_history(versions, field)
-    return {
-        "as_of": r.as_of(),
-        "task": task_row_json(row),
-        "field": field,
-        "changes": [
-            {
-                "date": c.date,
-                "before": c.before,
-                "after": c.after,
-                "commit": c.sha,
-                "subject": c.subject,
-            }
-            for c in changes
-        ],
-        "text": "\n".join(format_field_change(c) for c in changes),
-    }
-
-
-MCP_AT = {
-    "type": "string",
-    "description": (
-        "Commit SHA to read. Omit to read the head of main; pass the 'commit' "
-        "from an earlier response to keep several reads on one commit."
-    ),
-}
-MCP_TASK_ID = {"type": "string", "description": "Task ID, TASK-XXXXX."}
-MCP_PROJECT = {"type": "string", "description": "Project name."}
-
-
-@dataclass(slots=True, frozen=True)
-class McpTool:
-    """A read tool's handler maps a commit's view and the arguments to the
-    result; a write tool's handler maps the arguments to a change set."""
-
-    name: str
-    description: str
-    properties: dict[str, Any]
-    required: tuple[str, ...]
-    handler: Callable[..., dict[str, Any]]
-    writes: bool = False
-    destructive: bool = False
-
-    def listing(self) -> dict[str, Any]:
-        if self.writes:
-            properties = self.properties
-            annotations = {
-                "readOnlyHint": False,
-                "destructiveHint": self.destructive,
-                # With the same request_id, a retry is recorded once.
-                "idempotentHint": True,
-                "openWorldHint": False,
-            }
-        else:
-            properties = {**self.properties, "at": MCP_AT}
-            annotations = {"readOnlyHint": True, "openWorldHint": False}
-        schema: dict[str, Any] = {"type": "object", "properties": properties}
-        if self.required:
-            schema["required"] = list(self.required)
-        return {
-            "name": self.name,
-            "description": self.description,
-            "inputSchema": schema,
-            "annotations": annotations,
-        }
-
-
-def mcp_create_doc(args: dict[str, Any]) -> dict[str, Any]:
-    fields, sections = args.get("fields") or {}, args.get("sections") or {}
-    if not isinstance(fields, dict) or not isinstance(sections, dict):
-        raise McpToolError("fields and sections must be objects")
-    if "title" in sections:
-        raise McpToolError("pass the title as 'title', not in sections")
-    change = {
-        "op": "create",
-        "kind": args.get("kind") or "task",
-        "project": args.get("project"),
-        "fields": fields,
-        "sections": {"title": args.get("title"), **sections},
-    }
-    if "slug" in args:
-        change["slug"] = args["slug"]
-    return {"changes": [change]}
-
-
-def mcp_apply_doc(args: dict[str, Any]) -> dict[str, Any]:
-    return {"changes": args.get("changes")}
-
-
-def mcp_edit_doc(args: dict[str, Any]) -> dict[str, Any]:
-    keys = ("path", "old_string", "new_string", "replace_all", "expected_blob")
-    change = {"op": "edit_file", **{k: args[k] for k in keys if k in args}}
-    if isinstance(change.get("path"), str):
-        change["path"] = trim_boundary_path(change["path"])
-    return {"changes": [change]}
-
-
-MCP_WRITE_PROPERTIES = {
-    "request_id": {
-        "type": "string",
-        "description": (
-            "A fresh ID for this write, such as a UUID. Reuse it only to retry "
-            "this same write after an unclear outcome: a write that already "
-            "landed is then reported again, not recorded twice."
-        ),
-    },
-    "subject": {
-        "type": "string",
-        "description": (
-            "Commit subject, as Conventional Commits 'type(scope): description' "
-            "in up to 50 characters; derived from the changes when omitted."
-        ),
-    },
-    "body": {"type": "string", "description": "Commit body, plain text."},
-    "conversation": {
-        "type": "string",
-        "description": (
-            "Your session URI, as <agent>://<id>, where <agent> is one of "
-            f"{', '.join(CANONICAL_AGENTS)} (claude for Claude Code) and <id> "
-            "your session ID: recorded in a Conversation: trailer and in the "
-            "conversations of every task the write touches."
-        ),
-    },
-    "refs": {
-        "type": "array",
-        "items": {"type": "string"},
-        "description": (
-            "External references, such as artifact commits (repo@sha) or pull "
-            "request URLs, each recorded in a Ref: trailer."
-        ),
-    },
-}
-
-
-MCP_TOOLS = [
-    McpTool(
-        "list_projects",
-        "List the projects in the taskgo control repository, with task counts "
-        "and in-progress and blocked task IDs (as 'taskgo status --json').",
-        {},
-        (),
-        mcp_list_projects,
-    ),
-    McpTool(
-        "list_tasks",
-        "List tasks, optionally for one project and one state (as 'taskgo list "
-        "--json'). State 'ready' means todo with no unresolved blocked_by or "
-        "wait_for, soonest due date first.",
-        {
-            "project": MCP_PROJECT,
-            "state": {
-                "type": "string",
-                "description": "todo, in-progress, blocked, done, cancelled, or ready.",
-            },
-        },
-        (),
-        mcp_list_tasks,
-    ),
-    McpTool(
-        "get_task",
-        "Read one task record by ID: frontmatter, sections with hashes, "
-        "unresolved dependencies, and the full Markdown.",
-        {"id": MCP_TASK_ID},
-        ("id",),
-        mcp_get_task,
-    ),
-    McpTool(
-        "get_project_status",
-        "Read a project's STATUS.md: Summary and Next with hashes, the committed "
-        "task snapshot block, and a freshly computed block for today (they "
-        "differ when dates have moved since the last sync).",
-        {"project": MCP_PROJECT},
-        ("project",),
-        mcp_get_project_status,
-    ),
-    McpTool(
-        "read_file",
-        "Read a UTF-8 text file in the control repository by its "
-        "repository-relative path, whole or as lines start_line..end_line "
-        "(1-indexed, inclusive; lines end at '\\n'). Returns at most "
-        f"{MCP_MAX_FILE_BYTES // 1024} KiB of content, cut after a whole line: "
-        "when truncated is true, end_line is the last line returned, so read "
-        "on from end_line + 1. blob is the SHA of the whole file. content is "
-        "the file's bytes, ready to quote in edit_file; line_numbers prefixes "
-        "each line with its number and ': ' instead.",
-        {
-            "path": {
-                "type": "string",
-                "description": "Path such as 'taskgo/PLAN.md'.",
-            },
-            "start_line": {
-                "type": "integer",
-                "description": "First line to read, from 1; default 1.",
-            },
-            "end_line": {
-                "type": "integer",
-                "description": "Last line to read, inclusive; default the last.",
-            },
-            "line_numbers": {
-                "type": "boolean",
-                "description": "Prefix each line with its number, as '7: text'; "
-                "default false. Strip the prefixes before quoting text in "
-                "edit_file.",
-            },
-        },
-        ("path",),
-        mcp_read_file,
-    ),
-    McpTool(
-        "search_files",
-        "Search file contents in the control repository with git grep (as "
-        "'taskgo search --json'). args are git grep arguments, one per item: "
-        "one bare pattern, or patterns given with -e; options such as -i, "
-        "-w, -F, -E, -P, -C N, -l, -c, -m N, --and, --or, and --not; then "
-        "optionally '--' and pathspecs. Other options are refused. Returns "
-        "grep-style output (path:line:text for matches, path-line-text for "
-        "context), with repository-relative paths that read_file accepts; "
-        "files, the paths it names; and truncated, true when the output "
-        f"stopped at {SEARCH_MAX_BYTES // 1024} KiB. Lines over "
-        f"{SEARCH_LINE_MAX_BYTES} bytes are cut. No match gives empty output.",
-        {
-            "args": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "git grep arguments, such as ['-i', 'TODO'] or "
-                "['-e', 'b/123', '--', 'meta/'].",
-            },
-            "paths": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "Pathspecs to search, such as 'meta/' or "
-                "'*.md', added to any after '--' in args; default all files.",
-            },
-        },
-        ("args",),
-        mcp_search_files,
-    ),
-    McpTool(
-        "list_files",
-        "List the files in the control repository, or under one directory, "
-        "with their blob SHAs.",
-        {
-            "prefix": {
-                "type": "string",
-                "description": "Directory or file path; omit for all files.",
-            }
-        },
-        (),
-        mcp_list_files,
-    ),
-    McpTool(
-        "handoff",
-        "Start here: the handoff (or handover) for a project or an unfinished "
-        "task, to call first when asked to start, resume, or take over work "
-        "on one: everything to read before acting, in one call (as 'taskgo "
-        "handoff --json'). target is a project name or a task ID. Returns "
-        "the short handoff note; "
-        "readiness and audit findings; the project's README.md frontmatter, "
-        "parsed but unfiltered, and the agent skills it declares (skills); "
-        "README.md, STATUS.md (with Summary and Next "
-        "hashes and a live task block), PLAN.md, and the root AGENTS.md "
-        "verbatim, each with its blob and cut as read_file cuts it; the "
-        "project's in-progress, blocked, and ready tasks; and, for a task ID, "
-        "the task as get_task returns it (task is null for a project). Done "
-        "and cancelled tasks are refused.",
-        {
-            "target": {
-                "type": "string",
-                "description": "Project name, or task ID TASK-XXXXX.",
-            }
-        },
-        ("target",),
-        mcp_handoff,
-    ),
-    McpTool(
-        "get_task_history",
-        "Show how one frontmatter field of a task (default 'status') changed "
-        "across commits, following renames (as 'taskgo history').",
-        {
-            "id": MCP_TASK_ID,
-            "field": {
-                "type": "string",
-                "description": "Frontmatter field; default 'status'.",
-            },
-        },
-        ("id",),
-        mcp_get_task_history,
-    ),
-    McpTool(
-        "create",
-        "Create one task, a decision, or a project, as one commit on main, and "
-        "return what it created (a task's ID, a decision's or project's path) "
-        "and, for a task, sections: each written section's hash, ready for "
-        "replace_section. It is apply_changes with a single create. Task fields: status "
-        "(default todo), due, stale_after, blocked_by, wait_for, conversations. "
-        "Task sections: Problem, Cost, Goal, Criteria, Sketch, Constraints, "
-        "Outcome, Findings, Next. A decision needs sections Context, Decision, "
-        "and Consequences. A project (kind project, project its new directory "
-        "name, title its README heading) takes one field, skills, and no "
-        "sections or slug; it gets a README.md and a STATUS.md.\n\n"
-        f"{MCP_DATA_CARE}",
-        {
-            "project": MCP_PROJECT,
-            "title": {
-                "type": "string",
-                "description": "Title, as an imperative verb phrase.",
-            },
-            "kind": {
-                "type": "string",
-                "description": "task (default), decision, or project.",
-            },
-            "fields": {"type": "object", "description": "Frontmatter fields."},
-            "sections": {
-                "type": "object",
-                "description": 'Section texts by name, such as {"Goal": "..."}.',
-            },
-            "slug": {"type": "string", "description": "File name slug; optional."},
-            **MCP_WRITE_PROPERTIES,
-        },
-        ("project", "title", "request_id"),
-        mcp_create_doc,
-        writes=True,
-    ),
-    McpTool(
-        "apply_changes",
-        "Apply a change set as one commit on main, or nothing (as 'taskgo "
-        "apply', then a commit and push). Changes apply in order, each seeing "
-        "the ones before it:\n"
-        "- create {kind: task|decision|project, project, ref?, slug?, fields?, "
-        "sections}: sections.title is required; later changes name the record "
-        "'$ref'. kind project {project, fields?: {skills}, sections: {title}} "
-        "creates a new project's README.md and STATUS.md; later changes in "
-        "the set can create its tasks.\n"
-        "- set {record, field, value, expected?}: status, due, stale_after, or "
-        "title; expected guards the current value. Setting status done needs "
-        "the task's Outcome, giving a verdict against each criterion.\n"
-        "- add, remove {record, field, values}: blocked_by, wait_for, "
-        "conversations; supersedes on decisions.\n"
-        "- replace_section {record, section, text, expected_hash}: a task "
-        "section or STATUS.md Summary or Next; expected_hash from get_task or "
-        "get_project_status, null if absent; text null removes it. Supply "
-        "the section body only, without its heading or run-in label. Summary "
-        "and Next are rewritten to the current state, never appended to. The "
-        "result's sections list each section's new hash, for the next write.\n"
-        "- write_file {path, content, expected_blob?, executable?}: a whole "
-        "project file outside tasks/, decisions/, and STATUS.md, or INBOX.md; "
-        "without expected_blob the file must be new, and to overwrite one "
-        "expected_blob is its blob from read_file or list_files; executable "
-        "true or false sets the file's mode, omitted keeps it.\n"
-        "- delete_file {path, expected_blob}: deletes such a file whose blob "
-        "is expected_blob.\n"
-        "- edit_file {path, old_string, new_string, replace_all?, "
-        "expected_blob?}: exact text replacement, as the edit_file tool does, "
-        "with the same edits in the result.\n"
-        "A record is a task ID, a '$ref', a decision path, or "
-        "'<project>/STATUS.md'. The result must validate (known blockers, no "
-        "cycles, an Outcome on done tasks); the affected STATUS.md blocks are "
-        "regenerated. Records are reformatted (Markdown, wrapped at 80 "
-        "columns), so their text may differ from what was sent. The result "
-        "lists findings on what the write touched.\n\n"
-        f"{MCP_DATA_CARE}",
-        {
-            "changes": {
-                "type": "array",
-                "items": {"type": "object"},
-                "description": "The changes, each an object with an 'op'.",
-            },
-            **MCP_WRITE_PROPERTIES,
-        },
-        ("changes", "request_id"),
-        mcp_apply_doc,
-        writes=True,
-        destructive=True,
-    ),
-    McpTool(
-        "edit_file",
-        "Replace exact text in one file as one commit on main (apply_changes "
-        "with a single edit_file). old_string must occur exactly once, or set "
-        "replace_all. Bytes match verbatim; when nothing matches in a CRLF "
-        "file and old_string has bare '\\n' line ends, both strings are "
-        "retried with CRLF. A miss returns a diff against the closest text. "
-        "Edits a project asset (an executable keeps its mode), INBOX.md, a "
-        "task, a decision, or a project's STATUS.md outside its generated "
-        "block; a record must still validate (same id, known status, "
-        "parseable frontmatter, no duplicated section, known blockers) and is "
-        "then reformatted (Markdown, wrapped at 80 columns), so its text may "
-        "differ from new_string. Files up to "
-        f"{WRITE_FILE_MAX_BYTES // 1024} KiB. Returns edits: "
-        "occurrences_replaced, the start_line and end_line of the first "
-        "replacement, total_lines, the new blob, and reformatted; when that is "
-        "true, text holds those lines as they now stand (or text_omitted is "
-        f"true past {EDIT_TEXT_MAX_BYTES} bytes: read them back). Quote that "
-        "text, not new_string, in a later edit of those lines; with "
-        "replace_all it covers the first replacement only. reformatted is "
-        "judged after the whole write, so a later edit of the same lines in "
-        "it counts too.\n\n"
-        f"{MCP_DATA_CARE}",
-        {
-            "path": {
-                "type": "string",
-                "description": "Path such as 'taskgo/PLAN.md'.",
-            },
-            "old_string": {
-                "type": "string",
-                "description": "The exact text to replace; not empty.",
-            },
-            "new_string": {"type": "string", "description": "The replacement."},
-            "replace_all": {
-                "type": "boolean",
-                "description": "Replace every occurrence; default false.",
-            },
-            "expected_blob": {
-                "type": "string",
-                "description": "Refuse unless the file's blob SHA is this "
-                "(from read_file or list_files); optional.",
-            },
-            **MCP_WRITE_PROPERTIES,
-        },
-        ("path", "old_string", "new_string", "request_id"),
-        mcp_edit_doc,
-        writes=True,
-        destructive=True,
-    ),
-]
-MCP_TOOLS_BY_NAME = {t.name: t for t in MCP_TOOLS}
-
-
-class McpAuthError(Exception):
-    pass
-
-
-class AccessVerifier:
-    """Checks Cloudflare Access JWTs (Cf-Access-Jwt-Assertion): RS256
-    signature against the team's certificates, issuer, audience, and expiry."""
-
-    def __init__(self, team: str, audience: str, certs_url: str | None = None):
-        import jwt  # Only the server needs it.
-
-        self.jwt = jwt
-        self.team, self.audience = team, audience
-        self.jwks = jwt.PyJWKClient(
-            certs_url or f"https://{team}/cdn-cgi/access/certs",
-            cache_keys=True,
-            lifespan=MCP_CERTS_TTL,
-            # Cloudflare refuses urllib's default user agent.
-            headers={"User-Agent": f"taskgo-mcp/{MCP_SERVER_VERSION}"},
-            timeout=10,
-        )
-
-    def verify(self, token: str) -> dict[str, Any]:
-        jwt = self.jwt
-        try:
-            key = self.jwks.get_signing_key_from_jwt(token)
-            return jwt.decode(
-                token,
-                key.key,
-                algorithms=["RS256"],
-                audience=self.audience,
-                issuer=f"https://{self.team}",
-                leeway=60,
-                options={"require": ["exp", "iss", "aud"]},
-            )
-        except jwt.ExpiredSignatureError:
-            raise McpAuthError("Access token expired") from None
-        except jwt.InvalidAudienceError:
-            raise McpAuthError("Access token for another application") from None
-        except jwt.InvalidIssuerError:
-            raise McpAuthError("Access token from another team") from None
-        except jwt.PyJWKClientError as e:
-            raise McpAuthError(f"Access token key not usable: {e}") from None
-        except jwt.PyJWTError as e:
-            raise McpAuthError(f"Access token refused: {e}") from None
-
-
-def mcp_tool_error(message: str) -> dict[str, Any]:
-    # Keep diagnostics in both representations: some clients inspect only
-    # structuredContent, even when isError is true.
-    return {
-        "content": [{"type": "text", "text": message}],
-        "structuredContent": {"error": {"message": message}},
-        "isError": True,
-    }
-
-
-MCP_CHANGE_ERRORS = {
-    "invalid": "refused",
-    "precondition": "precondition failed",
-    "validation": "validation failed",
-}
-
-
-@dataclass(slots=True)
-class McpRequest:
-    """One request_id: a digest of its arguments, when it was first seen,
-    and each commit built for it, with the result to report if it lands."""
-
-    digest: str
-    seen: float
-    candidates: dict[str, dict[str, Any]]
-
-
-@dataclass(slots=True, frozen=True)
-class McpCommitArgs:
-    subject: str | None
-    body: str
-    conversation: str | None
-    refs: list[str]
-
-
-def mcp_line(value: Any, what: str, limit: int = 300) -> str:
-    if not isinstance(value, str) or not value.strip() or "\n" in value.strip():
-        raise McpToolError(f"{what} must be one non-empty line")
-    if len(value.strip()) > limit:
-        raise McpToolError(f"{what} is longer than {limit} characters")
-    return value.strip()
-
-
-def mcp_commit_args(args: dict[str, Any]) -> McpCommitArgs:
-    subject = args.get("subject")
-    subject = mcp_line(subject, "subject") if subject is not None else None
-    body = args.get("body") or ""
-    if not isinstance(body, str):
-        raise McpToolError("body must be a string")
-    conv = args.get("conversation")
-    if conv is not None:
-        conv = mcp_line(conv, "conversation")
-        if "://" not in conv or not field_is_valid(
-            TASK_SCHEMA.field("conversations"), conv
-        ):
-            raise McpToolError(
-                f"conversation {conv!r} is not a session URI, as <agent>://<id>"
-            )
-    refs = args.get("refs") or []
-    if not isinstance(refs, list):
-        raise McpToolError("refs must be a list of strings")
-    return McpCommitArgs(
-        subject, body.strip(), conv, [mcp_line(r, "each ref") for r in refs]
-    )
-
-
-def mcp_describe(cs: ChangeSet) -> str:
-    """A commit description of CS, for when the caller gives no subject."""
-    diff = cs.snap.diff()
-    new = {c["path"] for c in cs.created}
-    created = [
-        c.get("id")
-        or (f"project {c['project']}" if c["kind"] == "project" else None)
-        or c["path"].rsplit("/", 1)[-1].removesuffix(".md")
-        for c in cs.created
-    ]
-    updated = sorted(
-        {
-            r.task_id
-            for r in get_task_rows(cs.snap)
-            if r.rel_path in cs.before and r.rel_path not in new and r.task_id
-        }
-    )
-    parts = []
-    if created:
-        parts.append("add " + ", ".join(created))
-    if updated:
-        parts.append("update " + ", ".join(updated))
-    if not parts:
-        names = sorted(
-            {
-                rel.rsplit("/", 1)[-1]
-                for rel in diff
-                if rel not in new
-                and (not rel.endswith("/STATUS.md") or rel in cs.before)
-            }
-        )
-        parts.append("update " + ", ".join(names or ["STATUS.md"]))
-    return "; ".join(parts)
-
-
-def mcp_request_digest(args: dict[str, Any]) -> str:
-    """The digest of a write's arguments, request_id aside: the same request
-    again has the same digest, a different write under the same ID not."""
-    return hashlib.sha256(
-        json.dumps(
-            {k: v for k, v in args.items() if k != "request_id"}, sort_keys=True
-        ).encode()
-    ).hexdigest()
-
-
-def mcp_commit_message(cs: ChangeSet, c: McpCommitArgs, rid: str, digest: str) -> str:
-    """The message a CLI checkpoint of CS would carry, plus the request's
-    trailers.
-
-    The scope is the one project the changes are in, not counting STATUS.md
-    files regenerated only because a task they list changed. The trailers
-    Request-Id and Request-Digest (a prefix of the arguments' digest) let a
-    server that has forgotten RID, as after a restart, find the commit it
-    made for it and tell a retry from a reused ID.
-    """
-    rels = [
-        rel
-        for rel in cs.snap.diff()
-        if "/" in rel and (not rel.endswith("/STATUS.md") or rel in cs.before)
-    ]
-    projects = {rel.split("/")[0] for rel in rels}
-    scope = next(iter(projects)) if len(projects) == 1 else None
-    if c.subject:
-        subject = ensure_conventional_subject(c.subject, scope)
-    else:
-        subject = conventional_subject(mcp_describe(cs), scope)
-    lines = [subject]
-    if c.body:
-        lines += ["", wrap_body(c.body)]
-    trailers = [f"Conversation: {c.conversation}"] if c.conversation else []
-    trailers += [f"Ref: {r}" for r in c.refs]
-    trailers += [
-        f"{MCP_REQUEST_ID_TRAILER}: {rid}",
-        f"{MCP_REQUEST_DIGEST_TRAILER}: {digest[:MCP_REQUEST_DIGEST_LEN]}",
-    ]
-    lines += ["", *trailers]
-    return "\n".join(lines) + "\n"
-
-
-def mcp_log(message: str) -> None:
-    print(f"taskgo mcp: {message}", file=sys.stderr)
-
-
-def mcp_note(**fields: Any) -> None:
-    """Sets FIELDS on the record of the request being served, if any: what
-    happened behind it (a failed fetch, a stale head) that its outcome alone
-    does not say."""
-    event = MCP_EVENT.get()
-    if event is not None:
-        for name, value in fields.items():
-            setattr(event, name, value)
-
-
-def mcp_log_value(value: Any, limit: int = MCP_LOG_VALUE_MAX) -> str:
-    """VALUE as a log field: bare when it is a plain token, otherwise quoted
-    as JSON, so text from a client can neither break nor forge a line."""
-    text = str(value)
-    if len(text) > limit:
-        text = text[: limit - 1] + "\u2026"
-    if re.fullmatch(r"[\w./:@+-]+", text, re.ASCII):
-        return text
-    return json.dumps(text)
-
-
-MCP_LOG_QUOTED = re.compile(r"'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"")
-
-
-def mcp_log_reason(message: str) -> str:
-    """MESSAGE, a tool error, for the log: its first line, with quoted values
-    elided, since those can be tracker text (a title in a failed
-    precondition)."""
-    return MCP_LOG_QUOTED.sub("'\u2026'", message.split("\n", 1)[0])
-
-
-@dataclass(slots=True)
-class McpEvent:
-    """What one request came to, for the line and the record logged for it.
-
-    The outcome is ok, tool-error (a tool call that failed), rpc-error (a
-    JSON-RPC error), refused (an HTTP refusal before JSON-RPC), or error (the
-    reply could not be sent). Fields name the request, never its content.
-    """
-
-    transport: str
-    started: float
-    http: str | None = None
-    method: Any = None
-    tool: Any = None
-    outcome: str = "ok"
-    status: int | None = None
-    commit: str | None = None
-    reason: str | None = None
-    agent: str | None = None
-    caller: str | None = None
-    size: int | None = None  # bytes of a tool call's result
-    args: dict[str, str] | None = None
-    # A fetch of the remote that failed or timed out during the request, and
-    # whether a read was served the last fetched head because of one.
-    fetch: str | None = None
-    stale: bool | None = None
-    at: float = dataclass_field(default_factory=time.time)
-    ms: int | None = None
-
-    def fail(self, outcome: str, reason: str) -> None:
-        self.outcome, self.reason = outcome, reason
-
-    def finish(self) -> None:
-        if self.ms is None:
-            self.ms = int((time.monotonic() - self.started) * 1000)
-
-    def line(self) -> str:
-        self.finish()
-        fields: list[tuple[str, Any]] = [
-            ("transport", self.transport),
-            ("http", self.http),
-            ("method", self.method),
-            ("tool", self.tool),
-            ("outcome", self.outcome),
-            ("status", self.status),
-            ("ms", self.ms),
-            ("commit", self.commit),
-            ("fetch", self.fetch),
-            ("stale", self.stale),
-        ]
-        parts = [f"{k}={mcp_log_value(v)}" for k, v in fields if v is not None]
-        if self.reason:
-            parts.append(f"reason={mcp_log_value(self.reason, MCP_LOG_REASON_MAX)}")
-        if self.agent:
-            parts.append(f"agent={mcp_log_value(self.agent)}")
-        return "request " + " ".join(parts)
-
-    def record(self) -> dict[str, Any]:
-        """The request as a JSON record, with the line's fields and when it
-        came, its result's size, its caller key, and the server's version.
-        Client text is truncated as in the line; JSON escapes the rest."""
-        self.finish()
-
-        def text(value: Any, limit: int = MCP_LOG_VALUE_MAX) -> str | None:
-            if value is None:
-                return None
-            value = str(value)
-            return value if len(value) <= limit else value[: limit - 1] + "\u2026"
-
-        stamp = datetime.fromtimestamp(self.at, timezone.utc)
-        rec = {
-            "ts": stamp.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
-            "transport": self.transport,
-            "http": self.http,
-            "method": text(self.method),
-            "tool": text(self.tool),
-            "args": self.args or None,
-            "outcome": self.outcome,
-            "status": self.status,
-            "ms": self.ms,
-            "bytes": self.size,
-            "commit": self.commit,
-            "reason": text(self.reason, MCP_LOG_REASON_MAX),
-            "agent": text(self.agent),
-            "caller": self.caller,
-            "fetch": self.fetch,
-            "stale": self.stale,
-            "version": MCP_SERVER_VERSION,
-        }
-        return {k: v for k, v in rec.items() if v is not None}
-
-
-def mcp_log_args(args: dict[str, Any]) -> dict[str, str]:
-    """A tool call's ARGS for its record: the MCP_LOG_ARGS that are present,
-    each on one line and shortened, and apply_changes' changes as each one's
-    operation and target."""
-
-    def short(value: Any) -> str:
-        if isinstance(value, list):
-            value = " ".join(str(v) for v in value)
-        text = " ".join(str(value).split())
-        if len(text) > MCP_LOG_ARG_MAX:
-            text = text[: MCP_LOG_ARG_MAX - 1] + "\u2026"
-        return text
-
-    out = {
-        k: short(args[k])
-        for k in MCP_LOG_ARGS
-        if isinstance(args.get(k), (str, int, bool, list))
-    }
-    changes = args.get("changes")
-    if isinstance(changes, list):
-        parts = []
-        for c in changes:
-            if not isinstance(c, dict):
-                continue
-            target = c.get("record") or c.get("path") or c.get("project")
-            detail = c.get("field") or c.get("section")
-            parts.append(" ".join(str(x) for x in (c.get("op"), target, detail) if x))
-        out["changes"] = short(f"{len(changes)}: " + ", ".join(parts))
-    return out
-
-
-def mcp_caller(*parts: Any) -> str:
-    """An opaque key for one caller, from PARTS that identify it, so that a
-    record groups a caller's calls without naming who it is."""
-    joined = "\0".join("" if p is None else str(p) for p in parts)
-    return hashlib.sha256(joined.encode()).hexdigest()[:10]
-
-
-def mcp_log_default() -> Path:
-    """The request log's path without --log or TASKGO_MCP_LOG."""
-    state = os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local/state")
-    return Path(state) / "taskgo" / "mcp.jsonl"
-
-
-class McpLog:
-    """Where each request is logged: a line on stderr, and a record appended
-    to the log file.
-
-    Logging never fails a request. A record the file cannot take is dropped
-    there (the stderr line remains), with one warning. Several servers may
-    share one file, as stdio servers do by default: each append and rotation
-    holds an exclusive lock on the file.
-    """
-
-    def __init__(self, path: Path | None):
-        self.path = path
-        self.warned = False
-
-    def emit(self, event: McpEvent) -> None:
-        mcp_log(event.line())
-        rec = event.record()
-        if self.path:
-            try:
-                self.append(json.dumps(rec, separators=(",", ":")) + "\n")
-            except OSError as e:
-                self.warn(e)
-
-    def warn(self, e: OSError) -> None:
-        if not self.warned:
-            self.warned = True
-            mcp_log(
-                f"cannot use the request log {self.path}: {e}; logging to stderr only"
-            )
-
-    def append(self, line: str) -> None:
-        import fcntl
-
-        assert self.path
-        data = line.encode()
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        # Another server may rotate the file between the open and the lock;
-        # then the lock is on a rotated file, so open the new one.
-        for _ in range(3):
-            with open(self.path, "ab") as fh:
-                fcntl.flock(fh, fcntl.LOCK_EX)
-                st = os.fstat(fh.fileno())
-                try:
-                    current = os.stat(self.path).st_ino == st.st_ino
-                except FileNotFoundError:
-                    current = False
-                if not current:
-                    continue
-                if st.st_size and st.st_size + len(data) > MCP_LOG_ROTATE_BYTES:
-                    for i in range(MCP_LOG_ROTATED - 1, 0, -1):
-                        older = Path(f"{self.path}.{i}")
-                        if older.exists():
-                            os.replace(older, f"{self.path}.{i + 1}")
-                    os.replace(self.path, f"{self.path}.1")
-                    with open(self.path, "ab") as fresh:
-                        fcntl.flock(fresh, fcntl.LOCK_EX)
-                        fresh.write(data)
-                else:
-                    fh.write(data)
-                return
-        raise OSError(f"{self.path} kept being rotated")
-
-
-class McpServer:
-    """The tools, shared by the HTTP and stdio transports.
-
-    Calls are serialized: they share the Git repository and snapshot cache,
-    and the core is not written for concurrent use. Serializing also keeps
-    this server's own writes from racing each other; pushes from elsewhere
-    race on equal terms, through the remote's refusal of a non-fast-forward.
-    """
-
-    def __init__(self, cfg: McpConfig, log: McpLog | None = None):
-        import threading
-
-        self.reader = McpReader(cfg)
-        # Without a log, requests are logged to stderr only.
-        self.log = log or McpLog(None)
-        self.lock = threading.Lock()
-        # request_id -> McpRequest. In memory: losing it, as on a restart,
-        # loses only the recognition of retries, never a write (ADR 2).
-        self.requests: dict[str, McpRequest] = {}
-
-    def call_tool(self, params: dict[str, Any], event: McpEvent) -> dict[str, Any]:
-        # So that what happens behind the call (mcp_note) reaches its record.
-        token = MCP_EVENT.set(event)
-        try:
-            return self.run_tool(params, event)
-        finally:
-            MCP_EVENT.reset(token)
-
-    def run_tool(self, params: dict[str, Any], event: McpEvent) -> dict[str, Any]:
-        event.tool = params.get("name")
-        tool = MCP_TOOLS_BY_NAME.get(params.get("name"))
-        if tool is None:
-            event.fail("tool-error", "unknown tool")
-            return mcp_tool_error(f"unknown tool: {params.get('name')}")
-        args = params.get("arguments") or {}
-        if not isinstance(args, dict):
-            event.fail("tool-error", "arguments must be an object")
-            return mcp_tool_error("arguments must be an object")
-        event.args = mcp_log_args(args)
-        with self.lock:
-            try:
-                lock_ctx = (
-                    repo_lock(self.reader.cfg.repo, mcp_mode=True)
-                    if self.reader.cfg.local
-                    else contextlib.nullcontext()
-                )
-                with lock_ctx:
-                    if tool.writes:
-                        result = self.write(tool, args)
-                        sha = result["as_of"]["commit"]
-                    else:
-                        sha, stale = self.reader.resolve_for_read(args.get("at"))
-                        snap, committed = self.reader.snapshot(sha)
-                        result = tool.handler(
-                            McpRead(self.reader, snap, committed, stale), args
-                        )
-            except McpToolError as e:
-                event.fail("tool-error", mcp_log_reason(str(e)))
-                return mcp_tool_error(str(e))
-            except SystemExit:
-                # The core died with its message on stderr.
-                event.fail("tool-error", "the taskgo core refused the request")
-                return mcp_tool_error("the taskgo core refused the request")
-            except Exception:
-                import traceback
-
-                traceback.print_exc()
-                event.fail("tool-error", "internal error")
-                return mcp_tool_error("internal error; see the server log")
-        event.commit = sha[:12]
-        text = json.dumps(result, indent=1)
-        event.size = len(text.encode())
-        return {
-            "content": [{"type": "text", "text": text}],
-            "structuredContent": result,
-            "isError": False,
-        }
-
-    def write(self, tool: McpTool, args: dict[str, Any]) -> dict[str, Any]:
-        """Applies a write tool's change set as one commit on the branch.
-
-        The set applies over the head and is pushed without force. The head
-        is the cached one when there is one, and the push checks that it
-        still is: a refused push re-reads the head from the remote. If the
-        commit is there, the push did land; otherwise the set applies again
-        over the new head, so its preconditions are checked against what is
-        now there. A refusal by the set itself over a cached head is checked
-        against the fetched head the same way. A request_id seen before
-        fetches first and reports the commit already built for it, when that
-        commit is on the branch, instead of writing again; one not in memory
-        is looked for in the trailers of the commits behind the head first.
-        Without a remote (--local), the local branch is the head, read for
-        every write, and moving it is the push. Called with the lock held.
-        """
-        reader, cfg = self.reader, self.reader.cfg
-        unknown = sorted(set(args) - set(tool.properties))
-        if unknown:
-            raise McpToolError(
-                f"unknown argument {', '.join(unknown)}"
-                + (
-                    "; writes always apply to the head of the branch"
-                    if "at" in unknown
-                    else ""
-                )
-            )
-        if cfg.remote is None and not cfg.local:
-            raise McpToolError(
-                "this server reads a local branch (--no-fetch) and has nowhere "
-                "to push; it does not write"
-            )
-        rid = mcp_line(args.get("request_id"), "request_id", MCP_REQUEST_ID_MAX)
-        label = f"{tool.name} {json.dumps(rid[:40])}"
-        doc = tool.handler(args)
-        commit_args = mcp_commit_args(args)
-        for ident in ("GIT_AUTHOR_IDENT", "GIT_COMMITTER_IDENT"):
-            # Never a guessed identity: only the configured owner commits.
-            if reader.git("-c", "user.useConfigOnly=true", "var", ident).returncode:
-                raise McpToolError(
-                    "the server has no commit identity: set user.name and "
-                    "user.email, or GIT_AUTHOR_NAME, GIT_AUTHOR_EMAIL, "
-                    "GIT_COMMITTER_NAME, and GIT_COMMITTER_EMAIL"
-                )
-        digest = mcp_request_digest(args)
-        now = time.monotonic()
-        for key in [
-            k for k, r in self.requests.items() if now - r.seen > MCP_REQUEST_TTL
-        ]:
-            del self.requests[key]
-        while len(self.requests) >= MCP_REQUEST_KEEP:
-            del self.requests[next(iter(self.requests))]
-        request = self.requests.get(rid)
-        reused = (
-            f"request_id {rid!r} was used for a different write; pass a fresh "
-            "one for each write"
-        )
-        if request is not None and request.digest != digest:
-            raise McpToolError(reused)
-
-        # A request seen before reads the remote as it is now, so a commit
-        # built for it that landed unseen is found. Otherwise the set first
-        # applies over the cached head, when there is one, and the push says
-        # whether it was still the head; anything that can come from a stale
-        # head (a refused push, a failed precondition or validation, no
-        # change, no commit authority) fetches and tries again.
-        fetched = request is not None or not reader.cached()
-        try:
-            head = reader.resolve(None, fetch=fetched)
-        except McpToolError:
-            raise McpToolError(f"{cfg.unreadable()}; nothing was written") from None
-        if request is not None:
-            for sha, result in request.candidates.items():
-                if reader.is_ancestor(sha, head):
-                    mcp_log(f"{label} already landed as {sha[:12]}")
-                    return {**self.landed(result), "replayed": True}
-        else:
-            # Forgotten, as after a restart: the branch may still remember.
-            found = reader.find_request(head, rid)
-            if found is not None:
-                sha, recorded = found
-                if recorded != digest[:MCP_REQUEST_DIGEST_LEN]:
-                    raise McpToolError(reused)
-                mcp_log(f"{label} already landed as {sha[:12]} (from its trailers)")
-                result = self.recorded(sha, rid)
-                self.requests[rid] = McpRequest(digest, now, {sha: result})
-                return {**self.landed(result), "replayed": True}
-
-        def refetch(why: str) -> str:
-            mcp_log(f"{label} cached head {head[:12]} may be stale ({why}); fetching")
-            reader.forget()
-            try:
-                return reader.resolve(None, fetch=True)
-            except McpToolError:
-                raise McpToolError(f"{cfg.unreadable()}; nothing was written") from None
-
-        # Pushes allowed: the first, over a cached head, does not count.
-        budget = MCP_WRITE_ATTEMPTS + (0 if fetched else 1)
-        pushes = 0
-        mine: set[str] = set()
-        while True:
-            snap, committed = reader.snapshot(head)
-            if not snap.is_file("AGENTS.md") or not has_taskgo_declaration(
-                snap.read_text("AGENTS.md")
-            ):
-                if not fetched:
-                    head, fetched = refetch("no taskgo declaration"), True
-                    continue
-                raise McpToolError(
-                    f"writes are refused: AGENTS.md at {head[:12]} does not declare "
-                    f"taskgo ({CANONICAL_URL})"
-                )
-            try:
-                cs = apply_change_set(snap, doc, commit_args.conversation)
-            except ChangeSetError as e:
-                if not fetched and e.kind != "invalid":
-                    head, fetched = refetch(MCP_CHANGE_ERRORS[e.kind]), True
-                    continue
-                raise McpToolError(
-                    f"{MCP_CHANGE_ERRORS[e.kind]}: {e}; nothing was written"
-                ) from None
-            if not cs.snap.diff():
-                if not fetched:
-                    head, fetched = refetch("no change"), True
-                    continue
-                mcp_log(f"{label} changes nothing at {head[:12]}")
-                return {
-                    "as_of": McpRead(reader, snap, committed).as_of(),
-                    "request_id": rid,
-                    "commit": None,
-                    "subject": None,
-                    "created": [],
-                    "files": [],
-                    "attempts": pushes,
-                    "replayed": False,
-                    "findings": [],
-                }
-            message = mcp_commit_message(cs, commit_args, rid, digest)
-            sha = reader.commit(snap, cs, message)
-            pushes += 1
-            result = {
-                "request_id": rid,
-                "commit": sha,
-                "subject": message.split("\n", 1)[0],
-                **change_set_result(cs),
-                "attempts": pushes,
-                "replayed": False,
-            }
-            # Remembered only once there is a commit to recognize: a request
-            # refused before that can be corrected and sent with the same ID.
-            # Every pushed commit is kept, since a push can land unseen.
-            if request is None:
-                request = self.requests[rid] = McpRequest(digest, now, {})
-            request.candidates[sha] = result
-            mine.add(sha)
-            pushed, why = reader.push(sha)
-            if pushed:
-                reader.pushed(sha)
-                mcp_log(f"{label} attempt {pushes} pushed {sha[:12]} on {head[:12]}")
-                return self.landed(result, cs)
-            mcp_log(f"{label} attempt {pushes} push of {sha[:12]} refused: {why}")
-            reader.forget()
-            try:
-                new_head = reader.resolve(None, fetch=True)
-            except McpToolError:
-                raise McpToolError(
-                    f"the push of {sha[:12]} failed ({why}) and {cfg.branch} could "
-                    "not be read again, so whether it landed is unknown; retry "
-                    "with the same request_id"
-                ) from None
-            fetched = True
-            for cand, cand_result in request.candidates.items():
-                if reader.is_ancestor(cand, new_head):
-                    mcp_log(f"{label} attempt {pushes} landed {cand[:12]} after all")
-                    return {**self.landed(cand_result), "replayed": cand not in mine}
-            if new_head == head:
-                raise McpToolError(
-                    f"could not update {cfg.where()}: {why}; nothing was written"
-                )
-            head = new_head
-            if pushes >= budget:
-                raise McpToolError(
-                    f"{cfg.branch} moved on each of {pushes} attempts; nothing "
-                    "was written. Retry with the same request_id"
-                )
-
-    def landed(
-        self, result: dict[str, Any], cs: ChangeSet | None = None
-    ) -> dict[str, Any]:
-        """RESULT, with as_of for its commit and the findings it leaves.
-
-        CS, the change set this call committed, holds the commit's tree and
-        task rows, so its findings need no fresh read of the commit. The
-        write has landed, so a failure to compute its findings is logged
-        and reported as no findings, never as a failed write.
-        """
-        reader, sha = self.reader, result["commit"]
-        snap, committed = reader.snapshot(sha)
-        try:
-            paths = [f["path"] for f in result["files"]]
-            if cs is not None:
-                findings = write_findings(cs.snap, cs.snap.base, paths, cs.rows)
-            else:
-                rev = reader.git("rev-parse", "--verify", "-q", f"{sha}^")
-                parent = reader.snapshot(rev.stdout.strip())[0] if rev.stdout else None
-                findings = write_findings(snap, parent, paths)
-        except Exception as e:
-            mcp_log(f"findings for {sha[:12]} failed: {type(e).__name__}: {e}")
-            findings = []
-        return {
-            "as_of": McpRead(reader, snap, committed).as_of(),
-            **result,
-            "findings": findings,
-        }
-
-    def recorded(self, sha: str, rid: str) -> dict[str, Any]:
-        """The result of the write that made commit SHA, as far as the commit
-        tells it: its subject, the records it created, and the files it
-        changed, but not the lines of its edits."""
-        reader = self.reader
-        snap, _ = reader.snapshot(sha)
-        raw = reader.git(
-            "diff-tree", "-r", "--no-commit-id", "--raw", "-z", sha
-        ).stdout.split("\0")
-        files, created = [], []
-        rows = {r.rel_path: r.task_id for r in get_task_rows(snap)}
-        # Each entry is ':mode mode blob blob status' then the path.
-        for meta, rel in zip(raw[0::2], raw[1::2], strict=False):
-            status, blob = meta.split()[4][0], meta.split()[3]
-            files.append(
-                {
-                    "path": rel,
-                    "change": {"A": "added", "D": "deleted"}.get(status, "modified"),
-                    "blob": None if status == "D" else blob,
-                }
-            )
-            if status == "A" and rel.endswith("/README.md") and rel.count("/") == 1:
-                project = rel.split("/")[0]
-                created.append({"kind": "project", "project": project, "path": rel})
-            elif status == "A" and "/decisions/" in rel:
-                created.append({"kind": "decision", "path": rel})
-            elif status == "A" and rows.get(rel):
-                created.append({"kind": "task", "id": rows[rel], "path": rel})
-        return {
-            "request_id": rid,
-            "commit": sha,
-            "subject": reader.git("show", "-s", "--format=%s", sha).stdout.strip(),
-            "created": created,
-            "files": files,
-            "attempts": 0,
-            "replayed": True,
-        }
-
-
-# The request being served, for the transport's log line. McpGate sets it for
-# each HTTP request; over stdio, the SDK middleware sets it for each message.
-MCP_EVENT: contextvars.ContextVar[McpEvent | None] = contextvars.ContextVar(
-    "MCP_EVENT", default=None
-)
-
-MCP_RPC_ERRORS = {
-    -32700: "parse error",
-    -32600: "invalid request",
-    -32601: "method not found",
-    -32602: "invalid params",
-    -32603: "internal error",
-}
-
-
-def mcp_rpc_reason(code: Any) -> str:
-    """The log reason for JSON-RPC error CODE: a fixed phrase, since the
-    message beside it can quote the request."""
-    return MCP_RPC_ERRORS.get(code, f"error {mcp_log_value(code)}")
-
-
-def mcp_sdk_server(server: McpServer) -> Any:
-    """SERVER's tools behind the MCP SDK's low-level server, which speaks the
-    protocol: every revision the SDK supports, over either transport."""
-    import anyio
-    import mcp_types
-    from mcp.server.lowlevel import Server
-    from mcp.shared.exceptions import MCPError
-    from pydantic import ValidationError
-
-    async def list_tools(ctx: Any, params: Any) -> Any:
-        return mcp_types.ListToolsResult(
-            tools=[mcp_types.Tool.model_validate(t.listing()) for t in MCP_TOOLS]
-        )
-
-    async def call_tool(ctx: Any, params: Any) -> Any:
-        event = MCP_EVENT.get() or McpEvent("none", time.monotonic())
-        raw = {"name": params.name, "arguments": params.arguments}
-        # In a worker thread, so a long fetch or push holds up only the calls
-        # queued behind it on the lock, not the event loop.
-        result = await anyio.to_thread.run_sync(server.call_tool, raw, event)
-        return mcp_types.CallToolResult.model_validate(result)
-
-    # One stdio server serves one client.
-    stdio_caller = mcp_caller("stdio", os.getpid(), time.time())
-
-    async def logged(ctx: Any, call_next: Any) -> Any:
-        """Logs each stdio message; McpGate logs HTTP requests itself."""
-        if MCP_EVENT.get() is not None:
-            return await call_next(ctx)
-        event = McpEvent(
-            "stdio", time.monotonic(), method=ctx.method, caller=stdio_caller
-        )
-        token = MCP_EVENT.set(event)
-        try:
-            return await call_next(ctx)
-        except MCPError as e:
-            event.fail("rpc-error", mcp_rpc_reason(e.code))
-            raise
-        except ValidationError:
-            # The SDK reports malformed params as a pydantic ValidationError.
-            event.fail("rpc-error", mcp_rpc_reason(-32602))
-            raise
-        except Exception:
-            # Anything else is the server's fault, not the request's.
-            event.fail("rpc-error", mcp_rpc_reason(-32603))
-            raise
-        finally:
-            MCP_EVENT.reset(token)
-            server.log.emit(event)
-
-    sdk = Server(
-        "taskgo",
-        version=MCP_SERVER_VERSION,
-        instructions=MCP_INSTRUCTIONS,
-        on_list_tools=list_tools,
-        on_call_tool=call_tool,
-    )
-    sdk.middleware.append(logged)
-    return sdk
-
-
-def mcp_serve_stdio(server: McpServer) -> None:
-    """Newline-delimited JSON-RPC on stdin and stdout, for one local client."""
-    import anyio
-    from mcp.server.stdio import stdio_server
-
-    sdk = mcp_sdk_server(server)
-
-    def stop(signum: int, frame: Any) -> None:
-        """The SDK reads stdin in a thread that nothing can interrupt, so a
-        clean shutdown would wait for the client to close stdin; instead,
-        exit 0 between tool calls, so that no write or push is cut off."""
-        server.lock.acquire()  # Held until exit: no call starts after this.
-        os._exit(0)
-
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        signal.signal(sig, stop)
-
-    async def serve() -> None:
-        async with stdio_server() as (read, write):
-            await sdk.run(read, write, sdk.create_initialization_options())
-
-    anyio.run(serve)
-
-
-def mcp_is_loopback(host: str | None) -> bool:
-    if not host:
-        return False
-    host = host.strip().lower()
-    if host.startswith("["):  # [::1]:8080
-        host = host[1 : host.find("]")]
-    elif host.count(":") == 1:  # localhost:8080
-        host = host.split(":", 1)[0]
-    return host in MCP_LOOPBACK
-
-
-async def mcp_asgi_reply(
-    send: Callable,
-    status: int,
-    text: str,
-    allow: str | None = None,
-    content_type: str = "text/plain; charset=utf-8",
-    extra: tuple[tuple[str, str], ...] = (),
-) -> None:
-    data = text.encode()
-    headers = [
-        (b"content-type", content_type.encode()),
-        (b"content-length", str(len(data)).encode()),
-    ]
-    if allow:
-        headers.append((b"allow", allow.encode()))
-    headers += [(k.encode(), v.encode()) for k, v in extra]
-    await send({"type": "http.response.start", "status": status, "headers": headers})
-    await send({"type": "http.response.body", "body": data})
-
-
-class McpGate:
-    """ASGI, in front of the SDK's app: the health check, the endpoint's path,
-    Access or the loopback guard, the size limit, and one log record for each
-    request. The SDK sees only requests that pass, and never a token check."""
-
-    def __init__(
-        self, app: Any, verifier: "AccessVerifier | None", path: str, log: McpLog
+    if cli_mod is None:
+        cli_mod = types.ModuleType("taskgo_cli")
+        cli_mod.__dict__.update(globals())
+    sys.modules["taskgo_cli"] = cli_mod
+    server = mcp_server_path()
+    loader = importlib.machinery.SourceFileLoader("taskgo_mcp", str(server))
+    spec = importlib.util.spec_from_loader("taskgo_mcp", loader)
+    assert spec is not None
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["taskgo_mcp"] = mod
+    loader.exec_module(mod)
+    _MCP_MOD = mod
+    return mod
+
+
+def __getattr__(name: str) -> Any:
+    if name.startswith(("Mcp", "mcp_", "MCP_")) or name in (
+        "AccessVerifier",
+        "status_prose",
+        "write_findings",
+        "cmd_mcp",
     ):
-        self.app = app
-        self.verifier = verifier
-        self.path = path
-        self.log = log
-        self.claim_sets: set[frozenset[str]] = set()
-        self.health = json.dumps(
-            {
-                "status": "ok",
-                "version": MCP_SERVER_VERSION,
-                "commit": mcp_source_commit(),
-            }
-        )
-
-    async def __call__(self, scope: dict, receive: Callable, send: Callable) -> None:
-        if scope["type"] != "http":  # lifespan
-            await self.app(scope, receive, send)
-            return
-        headers: dict[str, str] = {}
-        for k, v in scope["headers"]:
-            headers.setdefault(k.decode("latin-1").lower(), v.decode("latin-1"))
-        if scope["path"] == MCP_HEALTH_PATH and scope["method"] in ("GET", "HEAD"):
-            # Polled by the proxy, so not logged.
-            await mcp_asgi_reply(
-                send, 200, self.health, content_type="application/json"
-            )
-            return
-        event = McpEvent(
-            "http",
-            time.monotonic(),
-            http=scope["method"],
-            agent=headers.get("user-agent"),
-        )
-        token = MCP_EVENT.set(event)
-        try:
-            await self.serve(scope, receive, send, headers, event)
-        except BaseException as e:
-            event.fail("error", type(e).__name__)
-            raise
-        finally:
-            MCP_EVENT.reset(token)
-            self.log.emit(event)
-
-    async def serve(
-        self,
-        scope: dict,
-        receive: Callable,
-        send: Callable,
-        headers: dict[str, str],
-        event: McpEvent,
-    ) -> None:
-        async def sending(message: dict) -> None:
-            if message["type"] == "http.response.start":
-                event.status = message["status"]
-            elif message["type"] == "http.response.body" and event.outcome == "ok":
-                try:
-                    reply = json.loads(message.get("body") or b"null")
-                except ValueError:
-                    reply = None
-                if isinstance(reply, dict) and isinstance(reply.get("error"), dict):
-                    event.fail("rpc-error", mcp_rpc_reason(reply["error"].get("code")))
-            await send(message)
-
-        if scope["path"] != self.path:
-            refusal = 404, f"not found: {scope['path']}", "not found"
-        else:
-            refusal = self.refusal(headers, event)
-        if refusal:
-            status, reason, text = refusal
-            event.fail("refused", reason)
-            await mcp_asgi_reply(sending, status, text)
-            return
-        if scope["method"] != "POST":
-            # No server-initiated stream, and no sessions to delete.
-            event.fail("refused", "method not allowed")
-            await mcp_asgi_reply(sending, 405, "method not allowed", allow="POST")
-            return
-        body = await self.body(receive, headers)
-        if body is None:
-            event.fail("refused", "request too large")
-            await mcp_asgi_reply(sending, 413, "request too large")
-            return
-        if body is False:
-            # Gone before the body arrived: nothing to answer.
-            event.fail("error", "client disconnected")
-            return
-        try:
-            msg = json.loads(body)
-        except ValueError:
-            msg = None
-        if isinstance(msg, dict):
-            event.method = msg.get("method")
-
-        delivered = False
-
-        async def replay() -> dict:
-            nonlocal delivered
-            if delivered:
-                return await receive()
-            delivered = True
-            return {"type": "http.request", "body": body, "more_body": False}
-
-        await self.app(scope, replay, sending)
-
-    def refusal(
-        self, headers: dict[str, str], event: McpEvent
-    ) -> tuple[int, str, str] | None:
-        """(status, reason, text) when the request may not proceed. A request
-        with an Access token gets its caller key from the token's claims."""
-        from urllib.parse import urlsplit
-
-        if self.verifier is None:
-            # Unauthenticated mode serves only requests addressed to a
-            # loopback name, from a page on one if from a browser at all.
-            origin = headers.get("origin")
-            if not mcp_is_loopback(headers.get("host")):
-                return 403, "not addressed to a loopback name", "forbidden"
-            if origin and not mcp_is_loopback(urlsplit(origin).netloc):
-                return 403, "from a page not on a loopback name", "forbidden"
-            return None
-        token = headers.get("cf-access-jwt-assertion")
-        if not token:
-            return 401, "no Access token", "Cloudflare Access token required"
-        try:
-            claims = self.verifier.verify(token)
-        except McpAuthError as e:
-            return 403, str(e), str(e)
-        event.caller = mcp_caller(*(claims.get(k) for k in MCP_CALLER_CLAIMS))
-        names = frozenset(claims)
-        if names not in self.claim_sets:
-            # Names only, once for each kind of token (a browser's, a
-            # client's): what a caller key could be built from.
-            self.claim_sets.add(names)
-            mcp_log("Access token claims: " + " ".join(sorted(names)))
-        return None
-
-    @staticmethod
-    async def body(
-        receive: Callable, headers: dict[str, str]
-    ) -> bytes | Literal[False] | None:
-        """The request body, None if it is larger than the limit, or False if
-        the client disconnected before sending all of it."""
-        try:
-            length = int(headers.get("content-length") or 0)
-        except ValueError:
-            length = -1
-        if length < 0 or length > MCP_MAX_REQUEST_BYTES:
-            return None
-        body = b""
-        more = True
-        while more:
-            message = await receive()
-            if message["type"] == "http.disconnect":
-                return False
-            body += message.get("body", b"")
-            if len(body) > MCP_MAX_REQUEST_BYTES:
-                return None
-            more = message.get("more_body", False)
-        return body
-
-
-def mcp_source_commit() -> str | None:
-    """The commit this script was checked out at, if it runs from Git."""
-    try:
-        res = subprocess.run(
-            ["git", "-C", str(Path(__file__).resolve().parent), "rev-parse", "HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    sha = res.stdout.strip()
-    return sha[:12] if res.returncode == 0 and sha else None
-
-
-def mcp_serve_http(
-    server: McpServer, cfg: McpConfig, host: str, port: int, path: str
-) -> None:
-    import uvicorn
-    from mcp.server.transport_security import TransportSecuritySettings
-
-    verifier = (
-        AccessVerifier(cfg.team or "", cfg.audience or "", cfg.certs_url)
-        if cfg.auth == "access"
-        else None
-    )
-    app = mcp_sdk_server(server).streamable_http_app(
-        streamable_http_path=path,
-        stateless_http=True,
-        json_response=True,
-        max_request_body_size=MCP_MAX_REQUEST_BYTES,
-        # McpGate checks the Host and Origin headers, or the Access JWT.
-        transport_security=TransportSecuritySettings(
-            enable_dns_rebinding_protection=False
-        ),
-    )
-    print(
-        f"taskgo mcp: serving {display_path(cfg.repo)} on http://{host}:{port}{path} "
-        f"(auth {cfg.auth}); request log {server.log.path}",
-        file=sys.stderr,
-    )
-    uvicorn.run(
-        McpGate(app, verifier, path, server.log),
-        host=host,
-        port=port,
-        log_level="warning",
-        access_log=False,
-        server_header=False,
-    )
-
-
-def cmd_mcp(
-    host: str = "127.0.0.1",
-    port: int = 8789,
-    path: str = "/mcp",
-    remote: str = "origin",
-    branch: str = "main",
-    no_fetch: bool = False,
-    local: bool = False,
-    auth: str = "access",
-    team: str | None = None,
-    audience: str | None = None,
-    stdio: bool = False,
-    fetch_ttl: float = MCP_FETCH_TTL,
-    log: str | None = None,
-) -> None:
-    """Serve the control repository over MCP: committed state, and writes."""
-    root = get_repo_root()
-    if not fetch_ttl >= 0:
-        die_scoped(f"--fetch-ttl must be 0 or more seconds, not {fetch_ttl}")
-    team = team or os.environ.get("TASKGO_MCP_ACCESS_TEAM")
-    audience = audience or os.environ.get("TASKGO_MCP_ACCESS_AUD")
-    if stdio:
-        auth = "none"
-    if auth == "access" and not (team and audience):
-        die_scoped(
-            "Access needs --access-team and --access-aud (or TASKGO_MCP_ACCESS_TEAM "
-            "and TASKGO_MCP_ACCESS_AUD); --auth none serves loopback only"
-        )
-    if auth == "none" and not stdio and not mcp_is_loopback(host):
-        die_scoped(f"--auth none serves loopback only, not {host}")
-    if (
-        not (no_fetch or local)
-        and run_git(["remote", "get-url", remote], check=False).returncode
-    ):
-        die_scoped(
-            f"no remote '{remote}' to fetch from; pass --no-fetch to read {branch}, "
-            "or --local to read and write it"
-        )
-    cfg = McpConfig(
-        repo=root,
-        remote=None if (no_fetch or local) else remote,
-        branch=branch,
-        auth="access" if auth == "access" else "none",
-        team=team,
-        audience=audience,
-        certs_url=os.environ.get("TASKGO_MCP_ACCESS_CERTS_URL") or None,
-        fetch_ttl=fetch_ttl,
-        local=local,
-    )
-    log_path = Path(log or os.environ.get(MCP_LOG_ENV) or mcp_log_default())
-    server = McpServer(cfg, McpLog(log_path.expanduser()))
-    if stdio:
-        mcp_serve_stdio(server)
-        return
-    # A server stops on a signal as asked, so it exits 0, not 130 or 143.
-    # Uvicorn passes a signal on once the requests in flight finish; raise it
-    # here, not through the CLI's handlers, which exit at once.
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        signal.signal(sig, signal.default_int_handler)
-    with contextlib.suppress(KeyboardInterrupt):
-        mcp_serve_http(server, cfg, host, port, path)
+        return getattr(_load_mcp_module(), name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 class HouseStyleHelpFormatter(argparse.RawDescriptionHelpFormatter):
@@ -11213,6 +9494,113 @@ def add_set_field_options(parser: argparse.ArgumentParser, removable: bool) -> N
             )
 
 
+_TASK_SECTION_OPTIONS: tuple[tuple[tuple[str, ...], str, str | None], ...] = (
+    (("--problem", "-p"), "Problem description", None),
+    (("--cost",), "Consequences of leaving the task undone", None),
+    (("--goal", "-g"), "Goal description", None),
+    (("--criteria", "-c"), "Observable end condition", None),
+    (("--sketch",), "Implementation sketch", None),
+    (("--constraints",), "Constraints", None),
+    (("--outcome",), "Outcome description", None),
+    (("--findings",), "Findings", None),
+    (("--next",), "Next steps", "next_steps"),
+)
+assert tuple(
+    dest or flags[0].lstrip("-") for flags, _, dest in _TASK_SECTION_OPTIONS
+) == tuple(s.key for s in TASK_SCHEMA.sections if s.form != "title")
+
+
+def _add_conv(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--conv",
+        "-C",
+        "--conversation",
+        dest="conv",
+        default=None,
+        help="Active conversation or session ID",
+    )
+
+
+def _add_json(
+    parser: argparse.ArgumentParser,
+    help_text: str = "Output machine-readable JSON",
+    dest: str = "as_json",
+) -> None:
+    parser.add_argument("--json", "-j", dest=dest, action="store_true", help=help_text)
+
+
+def _add_at(
+    parser: argparse.ArgumentParser,
+    help_text: str = "Read commit REV instead of the working tree",
+) -> None:
+    parser.add_argument("--at", metavar="REV", default=None, help=help_text)
+
+
+def _add_project(
+    parser: argparse.ArgumentParser,
+    *,
+    optional: bool = True,
+    help_text: str = "Optional target project",
+) -> None:
+    kw: dict[str, Any] = {"metavar": "PROJECT", "help": help_text}
+    if optional:
+        kw["nargs"] = "?"
+        kw["default"] = None
+    parser.add_argument("project", **kw)
+
+
+def _add_task_edit_options(parser: argparse.ArgumentParser, *, removable: bool) -> None:
+    for flags, help_text, dest in _TASK_SECTION_OPTIONS:
+        kw: dict[str, Any] = {"default": None, "help": help_text}
+        if dest:
+            kw["dest"] = dest
+        parser.add_argument(*flags, **kw)
+    _add_conv(parser)
+    parser.add_argument(
+        "--wait-for",
+        dest="wait_for",
+        action="append",
+        default=None,
+        metavar="GATE",
+        help=(
+            "External or temporal gate (YYYY-MM-DD, b/..., cl/..., gh:..., "
+            "@handle, URL, or free text)"
+        ),
+    )
+    parser.add_argument(
+        "--due",
+        default=None,
+        metavar="YYYY-MM-DD",
+        help="Committed completion deadline (YYYY-MM-DD)",
+    )
+    parser.add_argument(
+        "--stale-after",
+        dest="stale_after",
+        default=None,
+        metavar="YYYY-MM-DD",
+        help="Relevance cutoff date (YYYY-MM-DD)",
+    )
+    add_set_field_options(parser, removable=removable)
+
+
+def _add_commit_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--body",
+        "-b",
+        default="",
+        help="Plain-text commit body (hard-wrapped to 72 columns)",
+    )
+    parser.add_argument(
+        "--ref",
+        "-r",
+        dest="refs",
+        action="append",
+        default=[],
+        help="External references (e.g. artifact@sha)",
+    )
+    _add_conv(parser)
+
+
 def create_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="taskgo",
@@ -11221,10 +9609,7 @@ def create_parser() -> argparse.ArgumentParser:
         add_help=False,
     )
     parser.add_argument(
-        "--help",
-        "-h",
-        action="store_true",
-        help="Display this help message and exit",
+        "--help", "-h", action="store_true", help="Display this help message and exit"
     )
     parser.add_argument(
         "--root",
@@ -11246,31 +9631,42 @@ def create_parser() -> argparse.ArgumentParser:
 
     subparsers = parser.add_subparsers(dest="command", metavar="COMMAND")
 
-    # id
-    subparsers.add_parser(
-        "id",
-        help="Allocate a unique task ID",
-        description="Allocate a unique task ID.",
-        formatter_class=HouseStyleHelpFormatter,
-    )
+    def add_sub(
+        name: str,
+        help_text: str,
+        description: str | None = None,
+        *,
+        manual_help: bool = False,
+        **kwargs: Any,
+    ) -> argparse.ArgumentParser:
+        sub = subparsers.add_parser(
+            name,
+            help=help_text,
+            description=description if description is not None else f"{help_text}.",
+            formatter_class=HouseStyleHelpFormatter,
+            **({"add_help": False} if manual_help else {}),
+            **kwargs,
+        )
+        if manual_help:
+            sub.add_argument(
+                "--help",
+                "-h",
+                action="help",
+                help="Display this help message and exit",
+            )
+        return sub
 
-    # root
-    subparsers.add_parser(
+    add_sub("id", "Allocate a unique task ID")
+    add_sub(
         "root",
-        help="Print the active control repository root",
-        description=(
-            "Print the resolved control repository root (the directory all "
-            "commands operate on), after validation."
-        ),
-        formatter_class=HouseStyleHelpFormatter,
+        "Print the active control repository root",
+        "Print the resolved control repository root (the directory all "
+        "commands operate on), after validation.",
     )
 
-    # create
-    p_create = subparsers.add_parser(
+    p_create = add_sub(
         "create",
-        help="Create a new task in PROJECT",
-        description="Create a new task in PROJECT.",
-        formatter_class=HouseStyleHelpFormatter,
+        "Create a new task in PROJECT",
         epilog="""Examples:
   taskgo create my-project "Diagnose intermittent disconnects" --slug disconnects
   taskgo create my-project "Add a read-through cache layer in front of the resolver" \\
@@ -11291,55 +9687,9 @@ than a few words.""",
         help=f"Filename mnemonic, max {SLUG_MAX_LEN} chars (default: derived from TITLE)",
     )
     p_create.add_argument(
-        "--status",
-        "-s",
-        default="todo",
-        help="Initial task state (default: todo)",
+        "--status", "-s", default="todo", help="Initial task state (default: todo)"
     )
-    p_create.add_argument("--problem", "-p", default=None, help="Problem description")
-    p_create.add_argument(
-        "--cost", default=None, help="Consequences of leaving the task undone"
-    )
-    p_create.add_argument("--goal", "-g", default=None, help="Goal description")
-    p_create.add_argument(
-        "--criteria", "-c", default=None, help="Observable end condition"
-    )
-    p_create.add_argument("--sketch", default=None, help="Implementation sketch")
-    p_create.add_argument("--constraints", default=None, help="Constraints")
-    p_create.add_argument("--outcome", default=None, help="Outcome description")
-    p_create.add_argument("--findings", default=None, help="Findings")
-    p_create.add_argument("--next", dest="next_steps", default=None, help="Next steps")
-    p_create.add_argument(
-        "--conv",
-        "-C",
-        "--conversation",
-        dest="conv",
-        default=None,
-        help="Active conversation or session ID",
-    )
-    p_create.add_argument(
-        "--wait-for",
-        dest="wait_for",
-        action="append",
-        default=None,
-        metavar="GATE",
-        help="External or temporal gate (YYYY-MM-DD, b/..., cl/..., gh:..., "
-        "@handle, URL, or free text)",
-    )
-    p_create.add_argument(
-        "--due",
-        default=None,
-        metavar="YYYY-MM-DD",
-        help="Committed completion deadline (YYYY-MM-DD)",
-    )
-    p_create.add_argument(
-        "--stale-after",
-        dest="stale_after",
-        default=None,
-        metavar="YYYY-MM-DD",
-        help="Relevance cutoff date (YYYY-MM-DD)",
-    )
-    add_set_field_options(p_create, removable=False)
+    _add_task_edit_options(p_create, removable=False)
     p_create.add_argument(
         "--no-commit", action="store_true", help="Do not commit created task"
     )
@@ -11349,12 +9699,9 @@ than a few words.""",
         help="Preview allocation without modifying files",
     )
 
-    # update
-    p_update = subparsers.add_parser(
+    p_update = add_sub(
         "update",
-        help="Update task fields, status, or headings",
-        description="Update task fields, status, or headings.",
-        formatter_class=HouseStyleHelpFormatter,
+        "Update task fields, status, or headings",
         epilog="""Examples:
   taskgo update TASK-3A91F --status in-progress
   taskgo update TASK-3A91F --expect-status todo --status in-progress
@@ -11376,57 +9723,12 @@ than a few words.""",
         metavar="SLUG",
         help=f"Rename the task file's slug, max {SLUG_MAX_LEN} chars",
     )
-    p_update.add_argument("--problem", "-p", default=None, help="Problem description")
-    p_update.add_argument(
-        "--cost", default=None, help="Consequences of leaving the task undone"
-    )
-    p_update.add_argument("--goal", "-g", default=None, help="Goal description")
-    p_update.add_argument(
-        "--criteria", "-c", default=None, help="Observable end condition"
-    )
-    p_update.add_argument("--sketch", default=None, help="Implementation sketch")
-    p_update.add_argument("--constraints", default=None, help="Constraints")
-    p_update.add_argument("--outcome", default=None, help="Outcome description")
-    p_update.add_argument("--findings", default=None, help="Findings")
-    p_update.add_argument("--next", dest="next_steps", default=None, help="Next steps")
-    p_update.add_argument(
-        "--conv",
-        "-C",
-        "--conversation",
-        dest="conv",
-        default=None,
-        help="Active conversation or session ID",
-    )
-    p_update.add_argument(
-        "--wait-for",
-        dest="wait_for",
-        action="append",
-        default=None,
-        metavar="GATE",
-        help="External or temporal gate (YYYY-MM-DD, b/..., cl/..., gh:..., "
-        "@handle, URL, or free text)",
-    )
-    p_update.add_argument(
-        "--due",
-        default=None,
-        metavar="YYYY-MM-DD",
-        help="Committed completion deadline (YYYY-MM-DD)",
-    )
-    p_update.add_argument(
-        "--stale-after",
-        dest="stale_after",
-        default=None,
-        metavar="YYYY-MM-DD",
-        help="Relevance cutoff date (YYYY-MM-DD)",
-    )
+    _add_task_edit_options(p_update, removable=True)
 
-    add_set_field_options(p_update, removable=True)
-
-    # apply
-    p_apply = subparsers.add_parser(
+    p_apply = add_sub(
         "apply",
-        help="Apply a change set to the working tree",
-        description=(
+        "Apply a change set to the working tree",
+        (
             "Apply a change set to the working tree: the typed operations the MCP\n"
             "server's writes use (create, set, add, remove, replace_section,\n"
             "write_file, delete_file, and edit_file), all or none. Preconditions\n"
@@ -11448,7 +9750,6 @@ than a few words.""",
             "  ]}\n\n"
             "The change-set format is in references/model.md (Change Sets)."
         ),
-        formatter_class=HouseStyleHelpFormatter,
     )
     p_apply.add_argument(
         "changes_path",
@@ -11461,11 +9762,10 @@ than a few words.""",
         help="Print the diff the change set would make, and write nothing",
     )
 
-    # edit
-    p_edit = subparsers.add_parser(
+    p_edit = add_sub(
         "edit",
-        help="Replace exact text in a file of the working tree",
-        description=(
+        "Replace exact text in a file of the working tree",
+        (
             "Replace exact text in one file of the working tree, as the MCP\n"
             "server's edit_file tool does: a change set of one edit_file change.\n"
             "OLD must occur exactly once unless --replace-all is given. Bytes\n"
@@ -11481,7 +9781,6 @@ than a few words.""",
   taskgo edit proj/PLAN.md --old 'Phase 1' --new 'Phase 2'
   taskgo edit proj/scripts/run.py --old-file old.txt --new-file new.txt
   taskgo edit proj/decisions/001-x.md --old 'teh' --new 'the' --replace-all""",
-        formatter_class=HouseStyleHelpFormatter,
     )
     p_edit.add_argument("path", metavar="PATH", help="Repository-relative path")
     p_edit.add_argument("--old", metavar="TEXT", default=None, help="Text to replace")
@@ -11514,43 +9813,21 @@ than a few words.""",
         action="store_true",
         help="Print the diff the edit would make, and write nothing",
     )
-    p_edit.add_argument(
-        "--json",
-        "-j",
-        dest="as_json",
-        action="store_true",
-        help="Print the change-set result as JSON",
-    )
+    _add_json(p_edit, "Print the change-set result as JSON")
 
-    # schema
-    p_schema = subparsers.add_parser(
+    p_schema = add_sub(
         "schema",
-        help="Show the task, decision, and STATUS schema",
-        description=(
+        "Show the task, decision, and STATUS schema",
+        (
             "Show the record schema: the fields and sections of tasks, decisions,\n"
             "and STATUS.md. Validation, doctor, and the create/update set options\n"
             "read it; --json is the conformance form for other implementations."
         ),
-        formatter_class=HouseStyleHelpFormatter,
     )
-    p_schema.add_argument(
-        "--json", "-j", dest="json", action="store_true", help="Output as JSON"
-    )
+    _add_json(p_schema, "Output as JSON", dest="json")
 
-    # list
-    p_list = subparsers.add_parser(
-        "list",
-        help="List tasks in the repository or a specific project",
-        description="List tasks in the repository or a specific project.",
-        formatter_class=HouseStyleHelpFormatter,
-    )
-    p_list.add_argument(
-        "project",
-        nargs="?",
-        default=None,
-        metavar="PROJECT",
-        help="Optional project name filter",
-    )
+    p_list = add_sub("list", "List tasks in the repository or a specific project")
+    _add_project(p_list, help_text="Optional project name filter")
     p_list.add_argument(
         "--state",
         "--status",
@@ -11559,69 +9836,30 @@ than a few words.""",
         default=None,
         help="Filter tasks by state (e.g. in-progress, done, or ready)",
     )
-    p_list.add_argument(
-        "--json",
-        "-j",
-        dest="as_json",
-        action="store_true",
-        help="Output machine-readable JSON",
-    )
+    _add_json(p_list)
 
-    # info
-    p_info = subparsers.add_parser(
-        "info",
-        help="Show project metadata from README.md YAML frontmatter",
-        description="Show project metadata from README.md YAML frontmatter.",
-        formatter_class=HouseStyleHelpFormatter,
-    )
-    p_info.add_argument(
-        "project",
-        metavar="PROJECT",
-        help="Target project name",
-    )
-    p_info.add_argument(
-        "--json",
-        "-j",
-        dest="as_json",
-        action="store_true",
-        help="Output machine-readable JSON",
-    )
+    p_info = add_sub("info", "Show project metadata from README.md YAML frontmatter")
+    _add_project(p_info, optional=False, help_text="Target project name")
+    _add_json(p_info)
 
-    # skills
-    p_skills = subparsers.add_parser(
+    p_skills = add_sub(
         "skills",
-        help="Print the skills a project declares, one per line",
-        description=(
+        "Print the skills a project declares, one per line",
+        (
             "Print the agent skills a project's README.md frontmatter declares, "
             "one per line, for a skill manager to activate."
         ),
-        formatter_class=HouseStyleHelpFormatter,
         epilog="""Examples:
   taskgo skills alpha | skill --scope session add -
   taskgo skills alpha --json""",
     )
-    p_skills.add_argument(
-        "project",
-        metavar="PROJECT",
-        help="Target project name",
-    )
-    p_skills.add_argument(
-        "--json",
-        "-j",
-        dest="as_json",
-        action="store_true",
-        help="Output a JSON array",
-    )
+    _add_project(p_skills, optional=False, help_text="Target project name")
+    _add_json(p_skills, "Output a JSON array")
 
-    # status
-    p_status = subparsers.add_parser(
+    p_status = add_sub(
         "status",
-        help="Show a task's, a project's, or the workspace's status",
-        description=(
-            "Show a task's or a project's status, or a one-line summary of "
-            "each project."
-        ),
-        formatter_class=HouseStyleHelpFormatter,
+        "Show a task's, a project's, or the workspace's status",
+        "Show a task's or a project's status, or a one-line summary of each project.",
         epilog="""Examples:
   taskgo status
   taskgo status alpha
@@ -11639,30 +9877,15 @@ the record; --json prints the record as the MCP get_task tool returns it.""",
         metavar="PROJECT|TASK_ID",
         help="Project or task; omit for every project",
     )
-    p_status.add_argument(
-        "--at",
-        metavar="REV",
-        default=None,
-        help="Read commit REV instead of the working tree",
-    )
-    p_status.add_argument(
-        "--json",
-        "-j",
-        dest="as_json",
-        action="store_true",
-        help="Output machine-readable JSON",
-    )
+    _add_at(p_status)
+    _add_json(p_status)
 
-    # handoff (handover; dispatch is its former name)
-    p_handoff = subparsers.add_parser(
+    p_handoff = add_sub(
         "handoff",
+        "Print agent instructions for a project or task",
+        "Print instructions handing a project or a selected task to an agent.",
+        manual_help=True,
         aliases=["handover", "dispatch"],
-        help="Print agent instructions for a project or task",
-        description=(
-            "Print instructions handing a project or a selected task to an agent."
-        ),
-        formatter_class=HouseStyleHelpFormatter,
-        add_help=False,
         epilog="""Examples:
   taskgo handoff TASK-3A91F
   taskgo handoff alpha
@@ -11677,52 +9900,21 @@ note, the files it names inlined verbatim, the skills list, and the project's
 in-progress, blocked, and ready tasks, as the MCP handoff tool returns them.""",
     )
     p_handoff.add_argument(
-        "--help",
-        "-h",
-        action="help",
-        help="Display this help message and exit",
-    )
-    p_handoff.add_argument(
         "target",
         metavar="PROJECT|TASK_ID",
         help="Project or task to assign to the agent",
     )
-    p_handoff.add_argument(
-        "--at",
-        metavar="REV",
-        default=None,
-        help="Read commit REV instead of the working tree",
-    )
-    p_handoff.add_argument(
-        "--json",
-        "-j",
-        dest="as_json",
-        action="store_true",
-        help="Output the full payload as JSON",
+    _add_at(p_handoff)
+    _add_json(p_handoff, "Output the full payload as JSON")
+
+    _add_project(
+        add_sub("sync", "Update STATUS.md snapshot for a project or the workspace")
     )
 
-    # sync
-    p_sync = subparsers.add_parser(
-        "sync",
-        help="Update STATUS.md snapshot for a project or the workspace",
-        description="Update STATUS.md snapshot for a project or the workspace.",
-        formatter_class=HouseStyleHelpFormatter,
-    )
-    p_sync.add_argument(
-        "project",
-        nargs="?",
-        default=None,
-        metavar="PROJECT",
-        help="Optional target project",
-    )
-
-    # check
-    p_check = subparsers.add_parser(
+    p_check = add_sub(
         "check",
-        help="Evaluate wait_for gates, due deadlines, and stale_after cutoffs",
-        description="Evaluate wait_for gates, due deadlines, and stale_after cutoffs.",
-        formatter_class=HouseStyleHelpFormatter,
-        add_help=False,
+        "Evaluate wait_for gates, due deadlines, and stale_after cutoffs",
+        manual_help=True,
         epilog="""Examples:
   taskgo check
   taskgo check my-project --json
@@ -11730,60 +9922,19 @@ in-progress, blocked, and ready tasks, as the MCP handoff tool returns them.""",
 Scans open tasks declaring wait_for, due, or stale_after against today and each
 task file's Git commit watermark, emitting nothing when no tasks trigger.""",
     )
-    p_check.add_argument(
-        "--help",
-        "-h",
-        action="help",
-        help="Display this help message and exit",
-    )
-    p_check.add_argument(
-        "project",
-        nargs="?",
-        default=None,
-        metavar="PROJECT",
-        help="Optional target project",
-    )
-    p_check.add_argument(
-        "--json",
-        "-j",
-        dest="as_json",
-        action="store_true",
-        help="Output machine-readable JSON",
+    _add_project(p_check)
+    _add_json(p_check)
+
+    _add_project(
+        add_sub(
+            "doctor", "Run mechanical health checks across the workspace or a project"
+        )
     )
 
-    # doctor
-    p_doctor = subparsers.add_parser(
-        "doctor",
-        help="Run mechanical health checks across the workspace or a project",
-        description="Run mechanical health checks across the workspace or a project.",
-        formatter_class=HouseStyleHelpFormatter,
-    )
-    p_doctor.add_argument(
-        "project",
-        nargs="?",
-        default=None,
-        metavar="PROJECT",
-        help="Optional target project",
-    )
-
-    # fix
-    p_fix = subparsers.add_parser(
-        "fix",
-        help="Auto-heal IDs, statuses, and snapshot drift",
-        description="Auto-heal IDs, statuses, and snapshot drift.",
-        formatter_class=HouseStyleHelpFormatter,
-    )
+    p_fix = add_sub("fix", "Auto-heal IDs, statuses, and snapshot drift")
+    _add_project(p_fix)
     p_fix.add_argument(
-        "project",
-        nargs="?",
-        default=None,
-        metavar="PROJECT",
-        help="Optional target project",
-    )
-    p_fix.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Preview repairs without modifying files",
+        "--dry-run", action="store_true", help="Preview repairs without modifying files"
     )
     p_fix.add_argument(
         "--no-commit",
@@ -11791,11 +9942,10 @@ task file's Git commit watermark, emitting nothing when no tasks trigger.""",
         help="Apply repairs on disk without committing",
     )
 
-    # mcp
-    p_mcp = subparsers.add_parser(
+    p_mcp = add_sub(
         "mcp",
-        help="Serve the control repository over MCP",
-        description=textwrap.dedent(
+        "Serve the control repository over MCP",
+        textwrap.dedent(
             """\
             Serve the control repository's committed state to MCP clients,
             and accept writes from them, over Streamable HTTP (stateless, one
@@ -11835,7 +9985,6 @@ task file's Git commit watermark, emitting nothing when no tasks trigger.""",
               TASKGO_MCP_ACCESS_AUD   Default for --access-aud
               TASKGO_MCP_LOG          Default for --log"""
         ),
-        formatter_class=HouseStyleHelpFormatter,
     )
     p_mcp.add_argument(
         "--host", default="127.0.0.1", help="Address to listen on (default 127.0.0.1)"
@@ -11907,12 +10056,8 @@ task file's Git commit watermark, emitting nothing when no tasks trigger.""",
         ),
     )
 
-    # history
-    p_history = subparsers.add_parser(
-        "history",
-        help="Show frontmatter field history across git revisions",
-        description="Show frontmatter field history across git revisions.",
-        formatter_class=HouseStyleHelpFormatter,
+    p_history = add_sub(
+        "history", "Show frontmatter field history across git revisions"
     )
     p_history.add_argument(
         "query", metavar="PATH_OR_TASK_ID", help="Task ID or relative path"
@@ -11925,11 +10070,10 @@ task file's Git commit watermark, emitting nothing when no tasks trigger.""",
         help="Frontmatter field to track (default: status)",
     )
 
-    # read
-    p_read = subparsers.add_parser(
+    p_read = add_sub(
         "read",
-        help="Print lines of a file in the control repository",
-        description=(
+        "Print lines of a file in the control repository",
+        (
             "Print lines START..END of a UTF-8 file in the control repository,"
             " from the working tree or from commit REV, as the MCP server's"
             " read_file tool does. Lines are 1-indexed and inclusive and end"
@@ -11938,7 +10082,6 @@ task file's Git commit watermark, emitting nothing when no tasks trigger.""",
             " stderr names the line to continue from. Output is the file's"
             " bytes unless --line-numbers prefixes each line with 'N: '."
         ),
-        formatter_class=HouseStyleHelpFormatter,
         epilog="""Examples:
   taskgo read proj/PLAN.md
   taskgo read proj/logs/logcat.txt --start-line 2001 --end-line 2400
@@ -11960,18 +10103,9 @@ task file's Git commit watermark, emitting nothing when no tasks trigger.""",
         metavar="N",
         help="Last line (default: the last)",
     )
-    p_read.add_argument(
-        "--at",
-        metavar="REV",
-        default=None,
-        help="Read commit REV instead of the working tree",
-    )
-    p_read.add_argument(
-        "--json",
-        "-j",
-        dest="as_json",
-        action="store_true",
-        help="Print path, blob, size, line range, truncated, and content as JSON",
+    _add_at(p_read)
+    _add_json(
+        p_read, "Print path, blob, size, line range, truncated, and content as JSON"
     )
     p_read.add_argument(
         "-n",
@@ -11982,11 +10116,10 @@ task file's Git commit watermark, emitting nothing when no tasks trigger.""",
     )
 
     # search (main() hands its arguments to cmd_search; this parser gives help)
-    p_search = subparsers.add_parser(
+    p_search = add_sub(
         "search",
-        help="Search file contents with git grep",
-        usage="taskgo search [--at REV] [--json] GREP_ARGS... [-- PATHS...]",
-        description=(
+        "Search file contents with git grep",
+        (
             "Search tracked files in the control repository with git grep,"
             " in the working tree or in commit REV, as the MCP server's"
             " search_files tool does. GREP_ARGS are git grep arguments: one"
@@ -12001,26 +10134,15 @@ task file's Git commit watermark, emitting nothing when no tasks trigger.""",
             f" on none, and 2 on an error; git is stopped after"
             f" {SEARCH_TIMEOUT} s."
         ),
-        formatter_class=HouseStyleHelpFormatter,
+        usage="taskgo search [--at REV] [--json] GREP_ARGS... [-- PATHS...]",
         epilog="""Examples:
   taskgo search TASK-084C7
   taskgo search -i -C2 'partner name' -- meta/ '*.md'
   taskgo search -l -e b/123456 -e cl/123456
   taskgo search -e TODO --and --not -e done --at HEAD~3 --json""",
     )
-    p_search.add_argument(
-        "--at",
-        metavar="REV",
-        default=None,
-        help="Search commit REV instead of the working tree",
-    )
-    p_search.add_argument(
-        "--json",
-        "-j",
-        dest="as_json",
-        action="store_true",
-        help="Print output, files, and truncated as JSON",
-    )
+    _add_at(p_search, "Search commit REV instead of the working tree")
+    _add_json(p_search, "Print output, files, and truncated as JSON")
     p_search.add_argument(
         "grep_args",
         nargs=argparse.REMAINDER,
@@ -12028,18 +10150,16 @@ task file's Git commit watermark, emitting nothing when no tasks trigger.""",
         help="git grep pattern and options, then optionally -- PATHS",
     )
 
-    # checkpoint
-    p_checkpoint = subparsers.add_parser(
+    p_checkpoint = add_sub(
         "checkpoint",
-        help="Commit an authorized tracker checkpoint for TASK_ID",
-        description=(
+        "Commit an authorized tracker checkpoint for TASK_ID",
+        (
             "Commit an authorized tracker checkpoint for TASK_ID. Nonconforming"
             " subjects are rewritten as 'chore(<project>): <subject>'"
             " (truncated to 50 characters). Staged paths must belong to"
             " TASK_ID's project; changes spanning projects (such as moving a"
             " task) need a plain 'git commit'; see references/workflows.md."
         ),
-        formatter_class=HouseStyleHelpFormatter,
         epilog="""Examples:
   taskgo checkpoint TASK-3A91F "chore(proj): start diagnosis" --all
   taskgo checkpoint TASK-3A91F "docs(proj): update task" --path proj/tasks/TASK-3A91F-slug.md """,
@@ -12068,68 +10188,24 @@ task file's Git commit watermark, emitting nothing when no tasks trigger.""",
         default=[],
         help="Explicit project files to stage",
     )
-    p_checkpoint.add_argument(
-        "--body",
-        "-b",
-        default="",
-        help="Plain-text commit body (hard-wrapped to 72 columns)",
-    )
-    p_checkpoint.add_argument(
-        "--ref",
-        "-r",
-        dest="refs",
-        action="append",
-        default=[],
-        help="External references (e.g. artifact@sha)",
-    )
-    p_checkpoint.add_argument(
-        "--conv",
-        "-C",
-        "--conversation",
-        dest="conv",
-        default=None,
-        help="Active conversation or session ID",
-    )
+    _add_commit_options(p_checkpoint)
 
-    # commit
-    p_commit = subparsers.add_parser(
+    p_commit = add_sub(
         "commit",
-        help="Commit a logical transition with automatic project status synchronization",
-        description=(
+        "Commit a logical transition with automatic project status synchronization",
+        (
             "Commit a logical transition with automatic project status"
             " synchronization. Staged changes must touch at most one project;"
             " changes spanning projects (such as moving a task) need a plain"
             " 'git commit'; see references/workflows.md."
         ),
-        formatter_class=HouseStyleHelpFormatter,
     )
     p_commit.add_argument(
         "subject",
         metavar="SUBJECT",
         help="Conventional Commits subject line (rewritten when nonconforming)",
     )
-    p_commit.add_argument(
-        "--body",
-        "-b",
-        default="",
-        help="Plain-text commit body (hard-wrapped to 72 columns)",
-    )
-    p_commit.add_argument(
-        "--ref",
-        "-r",
-        dest="refs",
-        action="append",
-        default=[],
-        help="External references (e.g. artifact@sha)",
-    )
-    p_commit.add_argument(
-        "--conv",
-        "-C",
-        "--conversation",
-        dest="conv",
-        default=None,
-        help="Active conversation or session ID",
-    )
+    _add_commit_options(p_commit)
 
     seen_parsers: set[int] = set()
     for sub_name, sub_p in subparsers.choices.items():
@@ -12168,6 +10244,26 @@ def search_command_split(argv: list[str]) -> tuple[list[str], list[str]] | None:
     return None
 
 
+def mcp_command_split(argv: list[str]) -> tuple[list[str], list[str]] | None:
+    """ARGV split after an 'mcp' command: (head, its arguments), or None."""
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a in ("--root", "-R"):
+            i += 2
+        elif (
+            a.startswith("--root=")
+            or (a.startswith("-R") and len(a) > 2)
+            or a in ("--offline", "--no-fetch")
+        ):
+            i += 1
+        else:
+            break
+    if i < len(argv) and argv[i] == "mcp":
+        return argv[: i + 1], argv[i + 1 :]
+    return None
+
+
 def main(argv: list[str] | None = None) -> None:
     if argv is None:
         argv = sys.argv[1:]
@@ -12176,6 +10272,8 @@ def main(argv: list[str] | None = None) -> None:
         print(help_text())
         sys.exit(0)
 
+    if mcp_command_split(argv) is not None:
+        mcp_server_path()
     parser = create_parser()
     # git grep's options are not taskgo's, so search takes its arguments
     # verbatim rather than through argparse, which would mistake them.
@@ -12302,21 +10400,7 @@ def main(argv: list[str] | None = None) -> None:
             no_commit=args.no_commit,
         )
     elif args.command == "mcp":
-        cmd_mcp(
-            host=args.host,
-            port=args.port,
-            path=args.path,
-            remote=args.remote,
-            branch=args.branch,
-            no_fetch=args.no_fetch,
-            local=args.local,
-            auth=args.auth,
-            team=args.access_team,
-            audience=args.access_aud,
-            stdio=args.stdio,
-            fetch_ttl=args.fetch_ttl,
-            log=args.log,
-        )
+        exec_mcp(argv)
     elif args.command == "history":
         cmd_history(
             query=args.query,
