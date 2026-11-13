@@ -1,0 +1,177 @@
+#!/usr/bin/env bash
+
+# One-shot text generation through the pinned `gemini-api` CLI.
+#
+# Internal helper for the agent-tools wrappers. It owns the parts of the
+# Interactions API contract those wrappers rely on:
+#
+#   - the request shape (`--body` merge, `store: false`, non-streaming);
+#   - the response shape (text lives in `.steps[].content[]`);
+#   - the exit-code translation (`gemini-api` 1/2/3 -> 1 here);
+#   - the truncation warning (`status` other than "completed").
+#
+# If `gemini-api` changes any of those, `tests/test-gemini-cli-contract` fails.
+#
+# Usage: gemini-text --model MODEL [OPTIONS] PROMPT
+#
+# Arguments:
+#   PROMPT      The instruction sent after the context.
+#
+# Options:
+#   --model MODEL    Gemini model id (required; callers resolve defaults).
+#   --system TEXT    System instruction.
+#   --body JSON      Additional request body, merged into the payload.
+#   --context FILE   Read reference text from FILE and send it before PROMPT.
+#   --help           Display this help message and exit.
+#
+# Output:
+#   stdout      The model's text, verbatim.
+#   stderr      `gemini-api` diagnostics, plus a warning when the interaction
+#               did not complete normally.
+#
+# Exit Codes:
+#   0    Success.
+#   1    The CLI failed, or the response contained no text.
+#   127  Missing dependency (`gemini-api` or `jq`).
+
+set -euo pipefail
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") --model MODEL [OPTIONS] PROMPT
+
+One-shot text generation through the pinned \`gemini-api\` CLI. Internal helper
+for the agent-tools wrappers: it owns the request body additions
+(\`store: false\`), the response-text extraction, and the exit-code mapping.
+
+Arguments:
+  PROMPT      The instruction sent after the context.
+
+Options:
+  --model MODEL    Gemini model id (required; callers resolve defaults).
+  --system TEXT    System instruction.
+  --body JSON      Additional request body, merged into the payload.
+  --context FILE   Read reference text from FILE and send it before PROMPT.
+  --help           Display this help message and exit.
+
+Output:
+  stdout      The model's text, verbatim.
+  stderr      \`gemini-api\` diagnostics, plus a warning when the interaction did
+              not complete normally.
+
+Exit Codes:
+  0    Success.
+  1    The CLI failed, or the response contained no text.
+  127  Missing dependency (\`gemini-api\` or \`jq\`).
+
+Environment:
+  GEMINI_API_KEY   Read by \`gemini-api\`, not by this helper. A key stored with
+                   \`gemini-api configure\` is also accepted.
+EOF
+  exit 0
+}
+
+fail() {
+  echo "gemini-text: $*" >&2
+  exit 1
+}
+
+MODEL=""
+SYSTEM=""
+BODY="{}"
+CONTEXT=""
+PROMPT=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --help | -h)
+      usage
+      ;;
+    --model)
+      [[ $# -ge 2 ]] || fail "--model requires an argument"
+      MODEL="$2"
+      shift 2
+      ;;
+    --system)
+      [[ $# -ge 2 ]] || fail "--system requires an argument"
+      SYSTEM="$2"
+      shift 2
+      ;;
+    --body)
+      [[ $# -ge 2 ]] || fail "--body requires an argument"
+      BODY="$2"
+      shift 2
+      ;;
+    --context)
+      [[ $# -ge 2 ]] || fail "--context requires an argument"
+      CONTEXT="$2"
+      shift 2
+      ;;
+    -*)
+      fail "unknown option: $1"
+      ;;
+    *)
+      PROMPT="$1"
+      shift
+      ;;
+  esac
+done
+
+command -v jq >/dev/null 2>&1 || {
+  echo "gemini-text: jq not found" >&2
+  exit 127
+}
+command -v gemini-api >/dev/null 2>&1 || {
+  echo "gemini-text: gemini-api not found (see agent-tools/SKILL.md, 'Gemini API CLI')" >&2
+  exit 127
+}
+
+[[ -n "$MODEL" ]] || fail "missing --model"
+[[ -n "$PROMPT" ]] || fail "missing prompt argument"
+
+# `generate` does not send a `store` field at all, and the service keeps the
+# interaction by default. Every one of these tools feeds documents through the
+# API, so opt out here rather than in every caller.
+BODY=$(printf '%s' "$BODY" | jq -c '. + {store: false}') ||
+  fail "--body is not valid JSON"
+
+ARGS=(generate "$PROMPT" --model "$MODEL" --stream=false --output-format json --body "$BODY")
+if [[ -n "$SYSTEM" ]]; then
+  ARGS+=(--system "$SYSTEM")
+fi
+if [[ -n "$CONTEXT" ]]; then
+  ARGS+=(--stdin)
+fi
+
+# Always give the CLI a closed stdin: without it a wrapper run from a terminal
+# would hang waiting on --stdin or on the interactive configure prompt.
+if [[ -n "$CONTEXT" ]]; then
+  RESPONSE=$(gemini-api "${ARGS[@]}" <"$CONTEXT") || {
+    fail "gemini-api failed"
+  }
+else
+  RESPONSE=$(gemini-api "${ARGS[@]}" </dev/null) || {
+    fail "gemini-api failed"
+  }
+fi
+
+STATUS=$(printf '%s' "$RESPONSE" | jq -r '.status // "unknown"')
+case "$STATUS" in
+  completed) ;;
+  *)
+    echo "gemini-text: warning: interaction finished as '$STATUS'" >&2
+    ;;
+esac
+
+# Text arrives as model_output steps. `.outputs` is the shape the published
+# fixtures use, but the live service does not return it; do not "fix" this
+# without re-running tests/test-gemini-api-live.
+TEXT=$(printf '%s' "$RESPONSE" | jq -r '
+  [.steps[]? | select(.type == "model_output") | .content[]?
+   | select(.type == "text") | .text] | join("")')
+
+if [[ -z "$TEXT" ]]; then
+  fail "no text in response (status: $STATUS)"
+fi
+
+printf '%s\n' "$TEXT"

@@ -7,7 +7,8 @@ usage() {
 Usage: $(basename "$0") PROMPT
 
 Evaluates if the input from stdin satisfies the PROMPT.
-Returns true (exit 0) or false (exit 1).
+Returns true (exit 0) or false (exit 1). Uses the gemini-flash-lite-latest
+model by default.
 
 Arguments:
   PROMPT      The condition or question to evaluate (e.g., "mentions Elvis")
@@ -18,12 +19,15 @@ Options:
   -v, --verbose  Output "true" or "false" to stderr
 
 Environment:
-  GEMINI_API_KEY     Required. Your Gemini API key.
+  GEMINI_API_KEY     Optional. Read by gemini-api; a key stored with
+                     "gemini-api configure" is also accepted.
   GEMINI_MODEL       Optional. Default model if --model is not given.
 
 Exit Codes:
   0  True (satisfies prompt)
   1  False (does not satisfy prompt)
+  2  Error (no input, API or transport failure, unparseable response)
+  127  Missing required dependency
 
 Examples:
   cat file.txt | $(basename "$0") "mentions Elvis"
@@ -45,7 +49,7 @@ while [[ $# -gt 0 ]]; do
       if [[ $# -lt 2 ]]; then
         echo "$(basename "$0"): --model requires an argument" >&2
         echo "Try '$(basename "$0") --help' for more information." >&2
-        exit 1
+        exit 2
       fi
       MODEL="$2"
       shift 2
@@ -57,7 +61,7 @@ while [[ $# -gt 0 ]]; do
     -*)
       echo "$(basename "$0"): unknown option: $1" >&2
       echo "Try '$(basename "$0") --help' for more information." >&2
-      exit 1
+      exit 2
       ;;
     *)
       if [[ -z "$PROMPT" ]]; then
@@ -66,7 +70,7 @@ while [[ $# -gt 0 ]]; do
       else
         echo "$(basename "$0"): too many arguments" >&2
         echo "Try '$(basename "$0") --help' for more information." >&2
-        exit 1
+        exit 2
       fi
       ;;
   esac
@@ -76,7 +80,7 @@ if [[ -z "$PROMPT" ]]; then
   echo "Usage: $(basename "$0") PROMPT [OPTIONS]" >&2
   echo "Examples: $(basename "$0") \"Is the user asking for help?\"" >&2
   echo "Try '$(basename "$0") --help' for more information." >&2
-  exit 1
+  exit 2
 fi
 
 require() {
@@ -86,41 +90,36 @@ require() {
   }
 }
 
-require curl
 require jq
+require gemini-text
 
-GEMINI_API_KEY="${GEMINI_API_KEY:-}"
-if [[ -z "${GEMINI_API_KEY:-}" ]]; then
-  echo "$(basename "$0"): GEMINI_API_KEY environment variable not set" >&2
-  exit 1
-fi
-
-# Read stdin into a temp file and use --rawfile to avoid ARG_MAX limits on
-# large inputs (see shell.md "Handling Large Inputs with jq").
+# Read stdin into a temp file and use --rawfile-style handling so large inputs
+# never hit ARG_MAX.
 STDIN_FILE=$(mktemp)
 trap 'rm -f "$STDIN_FILE"' EXIT
 cat >"$STDIN_FILE"
 if [[ ! -s "$STDIN_FILE" ]]; then
   echo "$(basename "$0"): missing input from stdin" >&2
-  exit 1
+  echo "Try '$(basename "$0") --help' for more information." >&2
+  exit 2
 fi
 
-URL="https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent"
+CONTEXT_FILE=$(mktemp)
+trap 'rm -f "$STDIN_FILE" "$CONTEXT_FILE"' EXIT
+{
+  printf '<context>\n'
+  cat "$STDIN_FILE"
+  printf '\n</context>\n'
+} >"$CONTEXT_FILE"
 
-# Construct JSON payload using jq to ensure safe escaping
-REQUEST_BODY=$(jq -n \
-  --arg prompt "$PROMPT" \
-  --rawfile stdin_content "$STDIN_FILE" \
-  '{
-    contents: [{
-      parts: [
-        {text: ("<context>\n" + $stdin_content + "\n</context>")},
-        {text: ("<task>\nEvaluate if the text in the context satisfies this condition: " + $prompt + "\n</task>\n<instructions>\nRespond with true if the condition is satisfied, and false otherwise. Provide only the requested JSON.\n</instructions>")}
-      ]
-    }],
-    generationConfig: {
-      responseMimeType: "application/json",
-      responseJsonSchema: {
+# Build the response schema with jq so the condition is escaped, whatever the
+# caller passed.
+BODY=$(jq -cn --arg prompt "$PROMPT" '
+  {
+    response_format: {
+      type: "text",
+      mime_type: "application/json",
+      schema: {
         type: "object",
         properties: {
           satisfies: {
@@ -133,58 +132,26 @@ REQUEST_BODY=$(jq -n \
     }
   }')
 
-# Read the status via -w '%{http_code}' rather than trusting curl's exit code:
-# it is "000" only when no HTTP response arrived at all, which is what separates
-# a blocked or absent network from an API that answered with an error. Capturing
-# the exit code also stops a failed curl from killing the script silently under
-# `set -e`, before any of the handling below can run.
-CURL_STATUS=0
-RAW=$(echo "${REQUEST_BODY}" | curl -sS -X POST \
-  -H "x-goog-api-key: $GEMINI_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d @- -w '\n%{http_code}' \
-  "${URL}" 2>/dev/null) || CURL_STATUS=$?
+TASK="<task>
+Evaluate if the text in the context satisfies this condition: $PROMPT
+</task>
+<instructions>
+Respond with true if the condition is satisfied, and false otherwise. Provide only the requested JSON.
+</instructions>"
 
-HTTP_STATUS="${RAW##*$'\n'}"
-RESPONSE="${RAW%$'\n'*}"
-
-# Classify by status first: -w emits a three-digit code whenever a response
-# arrived, and "000" when none did, which is the only reliable way to separate
-# a blocked or absent network from an API that answered. The exit code is
-# reported here for diagnosis only; it becomes meaningful on the 2xx path below.
-if [[ ! "$HTTP_STATUS" =~ ^[0-9]{3}$ || "$HTTP_STATUS" == "000" ]]; then
-  echo "$(basename "$0"): could not reach $URL (curl exit $CURL_STATUS, http ${HTTP_STATUS:-none}: network unreachable, DNS failure, or blocked egress)" >&2
-  exit 1
-fi
-
-# Only on a 2xx does the exit code say something the status cannot: whether the
-# body finished arriving. A response truncated mid-transfer still reads as HTTP
-# 200, and would otherwise reach the parser below and be reported as the model
-# returning nothing -- a refusal, rather than the transport failure it is.
-if [[ "$HTTP_STATUS" == 2?? && $CURL_STATUS -ne 0 ]]; then
-  echo "$(basename "$0"): $URL returned HTTP $HTTP_STATUS but the body did not finish transferring (curl exit $CURL_STATUS)" >&2
-  exit 1
-fi
-
-if [[ "$HTTP_STATUS" != 2?? ]]; then
-  ERROR_MSG=$(echo "$RESPONSE" | jq -r '.error.message // empty' 2>/dev/null || true)
-  echo "$(basename "$0"): API error (HTTP $HTTP_STATUS): ${ERROR_MSG:-no error message in response}" >&2
-  exit 1
-fi
-
-# Extract the JSON response text
-TEXT=$(echo "$RESPONSE" | jq -r '.candidates[0].content.parts[0].text // empty')
-if [[ -z "$TEXT" ]]; then
-  echo "$(basename "$0"): no response text received from API" >&2
-  echo "Full response: $RESPONSE" >&2
-  exit 1
+if ! TEXT=$(gemini-text \
+  --model "$MODEL" \
+  --body "$BODY" \
+  --context "$CONTEXT_FILE" \
+  "$TASK"); then
+  exit 2
 fi
 
 # Parse the boolean result
-RESULT=$(echo "$TEXT" | jq -r '.satisfies')
+RESULT=$(printf '%s' "$TEXT" | jq -r '.satisfies' 2>/dev/null || true)
 if [[ "$RESULT" != "true" && "$RESULT" != "false" ]]; then
   echo "$(basename "$0"): failed to parse response: $TEXT" >&2
-  exit 1
+  exit 2
 fi
 
 if [[ "$VERBOSE" == "true" ]]; then

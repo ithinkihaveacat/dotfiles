@@ -1,0 +1,223 @@
+#!/usr/bin/env bash
+#
+# Contract tests for the parts of the `gemini-api` CLI that the agent-tools
+# wrappers rely on.
+#
+# The CLI is beta: commands, flags, request bodies and response shapes may
+# change between releases. Each test here encodes one assumption that would
+# otherwise fail silently in production (an empty answer, a stored interaction,
+# a missing key). They run against the real binary and a local stub server, so
+# they need no key and no network, but they do need the pinned CLI installed.
+#
+# On a deliberate upgrade, run this file, review each failure against the
+# release notes, then update fixtures/gemini-api-version and SKILL.md.
+#
+
+set -u
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+HELPER="$DIR/../libexec/gemini-text"
+STUB="$DIR/fixtures/gemini-api-stub"
+PIN_FILE="$DIR/fixtures/gemini-api-version"
+
+CLI="${GEMINI_API_BIN:-$(command -v gemini-api || true)}"
+if [[ -z "$CLI" || ! -x "$CLI" ]]; then
+  echo "1..0 # SKIP gemini-api not installed (set GEMINI_API_BIN to the pinned binary)"
+  exit 0
+fi
+if ! command -v jq >/dev/null 2>&1; then
+  echo "Bail out! jq not found"
+  exit 1
+fi
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "Bail out! python3 not found"
+  exit 1
+fi
+
+WORK=$(mktemp -d)
+STUB_PID=""
+cleanup() {
+  if [[ -n "$STUB_PID" ]]; then
+    kill "$STUB_PID" 2>/dev/null
+    wait "$STUB_PID" 2>/dev/null
+  fi
+  rm -rf "$WORK"
+}
+trap cleanup EXIT
+
+mkdir -p "$WORK/shim"
+RESPONSE_FILE="$WORK/response.json"
+RECORD_FILE="$WORK/request.jsonl"
+PORT=$((20000 + (RANDOM % 20000)))
+
+start_stub() {
+  local status=$1
+  # One stub at a time; the port moves each time so a socket still in
+  # TIME_WAIT from the previous case cannot block the next one.
+  stop_stub
+  PORT=$((PORT + 1))
+  : >"$RECORD_FILE"
+  printf '%s' "$2" >"$RESPONSE_FILE"
+  python3 "$STUB" --port "$PORT" --status "$status" \
+    --response "$RESPONSE_FILE" --record "$RECORD_FILE" \
+    >"$WORK/stub.out" 2>"$WORK/stub.err" &
+  STUB_PID=$!
+  local i
+  for ((i = 0; i < 100; i++)); do
+    if grep -q READY "$WORK/stub.out" 2>/dev/null; then
+      cat >"$WORK/shim/gemini-api" <<SHIM
+#!/usr/bin/env bash
+exec "$CLI" --no-keyring --server-url "http://127.0.0.1:$PORT" "\$@"
+SHIM
+      chmod +x "$WORK/shim/gemini-api"
+      return 0
+    fi
+    sleep 0.05
+  done
+  echo "Bail out! stub server did not start" >&2
+  sed 's/^/# /' "$WORK/stub.err" >&2
+  exit 1
+}
+
+stop_stub() {
+  [[ -n "$STUB_PID" ]] || return 0
+  kill "$STUB_PID" 2>/dev/null
+  wait "$STUB_PID" 2>/dev/null
+  STUB_PID=""
+}
+
+run_cli() {
+  # Go through the shim so the request lands on the local stub.
+  PATH="$WORK/shim:$PATH" GEMINI_API_KEY=unused gemini-api "$@"
+}
+
+run_helper() {
+  PATH="$WORK/shim:$PATH" GEMINI_API_KEY=unused "$HELPER" "$@"
+}
+
+last_request() {
+  tail -n 1 "$RECORD_FILE"
+}
+
+TOTAL_TESTS=9
+echo "1..$TOTAL_TESTS"
+TEST_NUM=0
+
+ok() {
+  TEST_NUM=$((TEST_NUM + 1))
+  echo "ok $TEST_NUM - $1"
+}
+
+not_ok() {
+  TEST_NUM=$((TEST_NUM + 1))
+  echo "not ok $TEST_NUM - $1"
+  if [[ -n "${2:-}" ]]; then
+    printf '%s\n' "$2" | sed 's/^/# /'
+  fi
+}
+
+# 1. The binary is the version the skill documents. A newer release is a prompt
+#    to review this file, not an automatic pass: the wrappers assume the flag
+#    and shape assertions below.
+pinned=$(tr -d '[:space:]' <"$PIN_FILE")
+installed=$("$CLI" version 2>/dev/null | awk 'NR == 1 { print $2 }')
+if [[ "$installed" == "$pinned" ]]; then
+  ok "gemini-api is the pinned $pinned"
+else
+  not_ok "gemini-api is ${installed:-unknown}, expected $pinned; review this contract, then update fixtures/gemini-api-version"
+fi
+
+# 2. Every flag the wrappers pass still exists. A removed flag must fail here,
+#    not as a usage error inside an essay prompt.
+help=$("$CLI" generate --help 2>&1)
+missing_flags=""
+for flag in --model --system --body --stdin --stream --output-format --jq; do
+  grep -q -- "$flag" <<<"$help" || missing_flags="$missing_flags $flag"
+done
+if [[ -z "$missing_flags" ]]; then
+  ok "generate still accepts the flags the wrappers pass"
+else
+  not_ok "generate dropped flags:$missing_flags"
+fi
+
+# Happy-path interaction used by several cases below.
+COMPLETED='{"id":"int-stub","object":"interaction","status":"completed","model":"gemini-3.8-flash","steps":[{"type":"thought","signature":"x"},{"type":"model_output","content":[{"type":"text","text":"pong"}]}]}'
+
+# 3. The helper extracts text through the real CLI.
+start_stub 200 "$COMPLETED"
+if out=$(run_helper --model gemini-flash-lite-latest "ping" 2>"$WORK/err") && [[ "$out" == "pong" ]]; then
+  ok "helper returns the model text through the real CLI"
+else
+  not_ok "helper did not return the model text" "$(cat "$WORK/err")"
+fi
+
+# 4. The request the CLI puts on the wire carries store:false (the default is
+#    to keep the interaction server-side) and the prompt.
+request=$(last_request)
+if [[ "$(jq -r '.store' <<<"$request")" == "false" ]] &&
+  [[ "$(jq -r '.stream' <<<"$request")" == "false" ]] &&
+  [[ "$(jq -r '.input' <<<"$request")" == "ping" ]]; then
+  ok "helper's request is non-streaming and opts out of storage"
+else
+  not_ok "request did not carry store:false/stream:false: $request"
+fi
+
+# 5. Authentication failures are exit 3 from the CLI and a hard failure here:
+#    they must never be mistaken for a boolean "false".
+start_stub 401 '{"error":{"code":401,"message":"API key not valid","status":"UNAUTHENTICATED"}}'
+run_cli generate "ping" --model gemini-flash-lite-latest --stream=false >"$WORK/out" 2>"$WORK/err"
+cli_rc=$?
+if run_helper --model gemini-flash-lite-latest "ping" >"$WORK/out" 2>"$WORK/err"; then
+  not_ok "helper succeeded on a 401"
+elif [[ $cli_rc -eq 3 ]] && grep -qi "API key not valid" "$WORK/err"; then
+  ok "401 is exit 3 from the CLI and a hard failure from the helper"
+else
+  not_ok "401 handling changed (CLI exit $cli_rc)" "$(cat "$WORK/err")"
+fi
+
+# 6. Rate limiting is reported as such, not swallowed.
+start_stub 429 '{"error":{"code":429,"message":"Quota exceeded","status":"RESOURCE_EXHAUSTED"}}'
+if run_helper --model gemini-flash-lite-latest "ping" >"$WORK/out" 2>"$WORK/err"; then
+  not_ok "helper succeeded on a 429"
+elif grep -qi "quota exceeded" "$WORK/err"; then
+  ok "429 is reported with the API's message"
+else
+  not_ok "429 message was not surfaced" "$(cat "$WORK/err")"
+fi
+
+# 7. The response text lives in .steps[], not .outputs[]. If the service or the
+#    CLI moves it, this fails loudly instead of returning an empty answer.
+start_stub 200 '{"id":"int-stub","object":"interaction","status":"completed","outputs":[{"type":"text","text":"legacy"}]}'
+if run_helper --model gemini-flash-lite-latest "ping" >"$WORK/out" 2>"$WORK/err"; then
+  not_ok "helper accepted a response without .steps[]"
+elif grep -q "no text in response" "$WORK/err"; then
+  ok ".steps[] is still where the text lives"
+else
+  not_ok "unexpected failure for a steps-less response" "$(cat "$WORK/err")"
+fi
+
+# 8. --output-format json writes exactly one JSON document to stdout and no
+#    banner: the helper parses stdout, so a stray status line would corrupt it.
+start_stub 200 "$COMPLETED"
+run_cli generate "ping" --model gemini-flash-lite-latest --stream=false --output-format json \
+  >"$WORK/out" 2>"$WORK/err"
+if jq -e '.steps' "$WORK/out" >/dev/null 2>&1 && [[ ! -s "$WORK/err" ]]; then
+  ok "--output-format json is clean JSON on stdout"
+else
+  not_ok "json output was not clean" "$(cat "$WORK/err")"
+fi
+
+# 9. Documents the default the helper exists to override: without an explicit
+#    store:false, generate sends no store field, so the service keeps the
+#    interaction. If this ever becomes opt-in by default, relax the helper.
+start_stub 200 "$COMPLETED"
+run_cli generate "ping" --model gemini-flash-lite-latest --stream=false \
+  >"$WORK/out" 2>"$WORK/err"
+request=$(last_request)
+if ! jq -e 'has("store")' <<<"$request" >/dev/null; then
+  ok "generate still defaults to server-side storage (helper must set store:false)"
+else
+  not_ok "generate now sends store: $request; review whether helpers still need to force it"
+fi
+
+stop_stub
