@@ -209,8 +209,10 @@ offline_miss() {
 #
 # Exit codes:
 #   0  body available (fetched, or served from cache when offline)
-#   1  the server was reached and answered non-2xx (a genuine "not found")
+#   1  the resource is absent: the server answered 404 or 410
 #   2  no response at all (network failure), or a cache miss while offline
+#   3  the server was reached but declined to serve the resource (429, 403,
+#      5xx): that says nothing about whether it exists
 http_get() {
   local url="$1" outfile="$2"
   local cache_file curl_status=0
@@ -257,9 +259,19 @@ http_get() {
     return 2
   fi
 
-  if [[ "$HTTP_STATUS" != 2?? ]]; then
+  # A 404 or 410 is the server saying the resource is not there. Every other
+  # non-2xx -- 429 rate limiting, 403, 5xx -- is the server declining to answer,
+  # which is not evidence of absence: folding them together lets a rate-limited
+  # Maven read as "this artifact does not exist", the confidently-wrong answer
+  # the cache and offline paths exist to avoid.
+  if [[ "$HTTP_STATUS" == "404" || "$HTTP_STATUS" == "410" ]]; then
     HTTP_ERROR="$url returned HTTP $HTTP_STATUS"
     return 1
+  fi
+
+  if [[ "$HTTP_STATUS" != 2?? ]]; then
+    HTTP_ERROR="$url returned HTTP $HTTP_STATUS (the server is reachable but did not serve the resource; this says nothing about whether it exists)"
+    return 3
   fi
 
   # Only once a 2xx is in hand does the exit code carry information the status
@@ -278,33 +290,83 @@ http_get() {
   return 0
 }
 
-# http_get_body URL -- print the response body on stdout. Same exit codes and
-# HTTP_STATUS/HTTP_ERROR contract as http_get, for callers that want a string.
-http_get_body() {
-  local url="$1" tmp status=0 cached
-  if cached=$(offline_body_file "$url"); then
+# fetch_body URL [DIR] -- make the response body available as a file, without
+# assuming the filesystem is writable.
+#
+# Offline, BODY_FILE is the cache file where it already lies and nothing is
+# copied: the sandbox that denies the network usually denies writes too. Online,
+# BODY_FILE is a new temporary file under DIR (default $TMPDIR) that the caller
+# must release. BODY_TEMP says which it is.
+#
+# Callers that want the bytes read BODY_FILE; callers that only want to know
+# whether the resource exists ignore it. Fetching into a file rather than a
+# command substitution keeps HTTP_STATUS/HTTP_ERROR/HTTP_HINT in this shell:
+# a $(...) subshell would take them with it, and with them the reason a fetch
+# failed.
+#
+# Same exit codes and HTTP_STATUS/HTTP_ERROR contract as http_get.
+BODY_FILE=""
+BODY_TEMP=0
+BODY_ALLOC_FAILED=0
+
+fetch_body() {
+  local url="$1" tmp status=0
+  BODY_FILE=""
+  BODY_TEMP=0
+  BODY_ALLOC_FAILED=0
+
+  if BODY_FILE=$(offline_body_file "$url"); then
     HTTP_STATUS="200"
     HTTP_ERROR=""
     HTTP_HINT=""
-    cat "$cached"
     return 0
   fi
+
   if is_offline; then
     offline_miss "$url"
     return 2
   fi
-  tmp=$(make_temp) || {
+
+  tmp=$(make_temp "${2:-}") || {
+    BODY_ALLOC_FAILED=1
     HTTP_STATUS=""
     HTTP_ERROR="no writable temporary directory for the body of $url"
     HTTP_HINT=""
     return 2
   }
   http_get "$url" "$tmp" || status=$?
-  if [[ $status -eq 0 ]]; then
-    cat "$tmp"
+
+  if [[ $status -ne 0 ]]; then
+    rm -f "$tmp"
+    return $status
   fi
-  rm -f "$tmp"
-  return $status
+
+  BODY_FILE="$tmp"
+  BODY_TEMP=1
+  return 0
+}
+
+# Delete the temporary file fetch_body left, if any. A cached file is never
+# removed.
+release_body() {
+  if [[ "$BODY_TEMP" -eq 1 && -n "$BODY_FILE" ]]; then
+    rm -f "$BODY_FILE"
+  fi
+  BODY_FILE=""
+  BODY_TEMP=0
+}
+
+# http_get_body URL -- print the response body on stdout. Same exit codes and
+# HTTP_STATUS/HTTP_ERROR contract as http_get, for callers that want a string.
+http_get_body() {
+  local status=0
+  fetch_body "$1" || status=$?
+  if [[ $status -ne 0 ]]; then
+    return $status
+  fi
+  cat "$BODY_FILE"
+  release_body
+  return 0
 }
 
 # Print http_get's remediation line, if it left one, after the caller's error.
@@ -355,43 +417,25 @@ fetch_maven_metadata() {
 
   # Offline, the cached metadata is readable where it already lies and a miss is
   # already decided; only the online path needs somewhere to put a response.
-  local tmp_body status body_file
-  status=0
-  if body_file=$(offline_body_file "$metadata_url"); then
-    tmp_body=""
-    HTTP_STATUS="200"
-    HTTP_ERROR=""
-    HTTP_HINT=""
-  elif is_offline; then
-    tmp_body=""
-    offline_miss "$metadata_url"
-    status=2
-  else
-    tmp_body=$(make_temp) || {
-      HTTP_ERROR="no writable temporary directory for $metadata_url"
-      status=2
-    }
-    body_file="$tmp_body"
-    if [[ $status -eq 0 ]]; then
-      http_get "$metadata_url" "$tmp_body" || status=$?
-    fi
-  fi
+  local status=0
+  fetch_body "$metadata_url" || status=$?
 
-  if [[ $status -eq 2 ]]; then
-    # Neither a missing network nor an unwarmed cache is evidence the artifact
-    # is missing, so don't call it "not found" and don't offer "did you mean"
-    # suggestions that imply a live index lookup was possible.
-    rm -f "$tmp_body"
+  if [[ $status -eq 2 || $status -eq 3 ]]; then
+    # Neither a missing network, an unwarmed cache, nor a server that declined
+    # to answer is evidence the artifact is missing, so don't call it "not
+    # found" and don't offer "did you mean" suggestions that imply a live index
+    # lookup was possible.
     echo "$SCRIPT_NAME: $HTTP_ERROR; cannot determine whether '$group_id:$artifact_id' exists" >&2
     http_print_hint
     if is_offline; then
       warm_hint
     fi
-    return 1
+    # Propagate 2/3 so a caller can tell "absent" from "inconclusive"; every
+    # caller treats any non-zero as failure.
+    return "$status"
   fi
 
   if [[ $status -ne 0 ]]; then
-    rm -f "$tmp_body"
     echo "$SCRIPT_NAME: artifact '$group_id:$artifact_id' not found at $metadata_url ($HTTP_STATUS)" >&2
 
     # Suggest alternatives from the local index
@@ -413,10 +457,8 @@ fetch_maven_metadata() {
     return 1
   fi
 
-  cat "$body_file"
-  if [[ -n "$tmp_body" ]]; then
-    rm -f "$tmp_body"
-  fi
+  cat "$BODY_FILE"
+  release_body
   return 0
 }
 
@@ -468,12 +510,12 @@ Commands:
                       List all versions for a given Maven artifact.
   list dependencies <artifact> [version]
                       List direct Maven dependencies for a given Maven artifact.
-  resolve <name>      Convert a fully qualified class name or package prefix to
-                      its corresponding Maven artifact (GROUP_ID:ARTIFACT_ID).
-                      Uses internal heuristics and an exceptions table.
+  resolve <class>     Convert a fully qualified class name to its Maven
+                      artifact (GROUP_ID:ARTIFACT_ID), from the cached class
+                      index. For a package or function, use 'search'.
   search <query> [--force]
-                      Search for artifacts by package name (using cached index)
-                      or class name (using Android Code Search).
+                      Search for artifacts by package, artifact, or class name
+                      (using the cached GMaven index).
                       Use --force to rebuild the local package index.
   source <artifact>... [version]
                       Download and extract source JARs for one or more Maven artifacts.
@@ -899,8 +941,14 @@ cmd_version() {
       repo_url="$SNAPSHOT_REPO_URL"
     fi
 
-    if ! xml_content=$(fetch_maven_metadata "$repo_url" "$group_id" "$artifact_id"); then
-      echo "$SCRIPT_NAME version: package may not exist in snapshot builds" >&2
+    local fetch_status=0
+    xml_content=$(fetch_maven_metadata "$repo_url" "$group_id" "$artifact_id") || fetch_status=$?
+    if [[ $fetch_status -ne 0 ]]; then
+      # Only a genuine absence says anything about the snapshot repository; a
+      # declined or unreachable request was already explained.
+      if [[ $fetch_status -eq 1 ]]; then
+        echo "$SCRIPT_NAME version: package may not exist in snapshot builds" >&2
+      fi
       exit 1
     fi
 
@@ -922,49 +970,36 @@ cmd_version() {
   all_versions=$(echo "$xml_content" | extract_versions_from_xml)
 
   case "$version_type" in
-    ALPHA)
-      version=$(echo "$all_versions" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+-alpha[0-9]+$' | tail -n 1)
-      if [[ -z "$version" ]]; then
-        echo "$SCRIPT_NAME version: no alpha version found" >&2
-        exit 1
-      fi
-      ;;
-
-    BETA)
-      version=$(echo "$all_versions" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+-beta[0-9]+$' | tail -n 1)
-      if [[ -z "$version" ]]; then
-        echo "$SCRIPT_NAME version: no beta version found" >&2
-        exit 1
-      fi
-      ;;
-
-    RC)
-      version=$(echo "$all_versions" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+-rc[0-9]+$' | tail -n 1)
-      if [[ -z "$version" ]]; then
-        echo "$SCRIPT_NAME version: no rc version found" >&2
-        exit 1
-      fi
-      ;;
-
-    STABLE)
-      version=$(echo "$all_versions" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | tail -n 1)
-
-      if [[ -z "$version" ]]; then
-        # Fallback to latest available version if no stable found
-        version=$(echo "$all_versions" | tail -n 1)
-        if [[ -z "$version" ]]; then
-          echo "$SCRIPT_NAME version: no stable version found" >&2
-          exit 1
-        fi
-        echo "$SCRIPT_NAME version: using prerelease version: $version" >&2
-      fi
-      ;;
-
     LATEST)
       version=$(echo "$xml_content" | xmllint --xpath "//versioning/latest/text()" -)
-
       if [[ -z "$version" ]]; then
         echo "$SCRIPT_NAME version: no latest version found" >&2
+        exit 1
+      fi
+      ;;
+    *)
+      # ALPHA, BETA, RC and STABLE differ only in the version shape they accept,
+      # so they share one selection step; STABLE alone falls back to the newest
+      # prerelease when no final release exists.
+      local pattern
+      case "$version_type" in
+        ALPHA) pattern='^[0-9]+\.[0-9]+\.[0-9]+-alpha[0-9]+$' ;;
+        BETA) pattern='^[0-9]+\.[0-9]+\.[0-9]+-beta[0-9]+$' ;;
+        RC) pattern='^[0-9]+\.[0-9]+\.[0-9]+-rc[0-9]+$' ;;
+        *) pattern='^[0-9]+\.[0-9]+\.[0-9]+$' ;;
+      esac
+
+      version=$(echo "$all_versions" | grep -E "$pattern" | tail -n 1)
+
+      if [[ -z "$version" && "$version_type" == "STABLE" ]]; then
+        version=$(echo "$all_versions" | tail -n 1)
+        if [[ -n "$version" ]]; then
+          echo "$SCRIPT_NAME version: using prerelease version: $version" >&2
+        fi
+      fi
+
+      if [[ -z "$version" ]]; then
+        echo "$SCRIPT_NAME version: no $(echo "$version_type" | tr '[:upper:]' '[:lower:]') version found" >&2
         exit 1
       fi
       ;;
@@ -1041,23 +1076,24 @@ cmd_versions() {
 
 usage_resolve() {
   cat <<EOF
-Usage: $SCRIPT_NAME resolve PACKAGE_NAME
+Usage: $SCRIPT_NAME resolve CLASS_NAME
 
-Convert an Android package name to its corresponding Maven artifact.
+Convert a fully qualified Android class name to its Maven artifact.
 
 Arguments:
-  PACKAGE_NAME  Fully qualified package/class name
+  CLASS_NAME    Fully qualified class name
                 (e.g., androidx.core.splashscreen.SplashScreen)
 
 Examples:
-  $SCRIPT_NAME resolve androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
+  $SCRIPT_NAME resolve androidx.core.splashscreen.SplashScreen
   $SCRIPT_NAME resolve androidx.wear.ambient.AmbientLifecycleObserver
-  $SCRIPT_NAME resolve androidx.wear.protolayout.material3.textButton
   $SCRIPT_NAME resolve androidx.lifecycle.ViewModel
 
-The command converts AndroidX package names to Maven artifacts using
-the cached Google Maven class index. Output format is
-GROUP_ID:ARTIFACT_ID (e.g., androidx.core:core-splashscreen).
+The class must appear in the cached Google Maven class index, which lists
+top-level classes only. For a package, a Kotlin top-level function, or a
+nested class, search for the package and pick a coordinate:
+  $SCRIPT_NAME search androidx.compose.foundation.layout
+Output format is GROUP_ID:ARTIFACT_ID (e.g., androidx.core:core-splashscreen).
 EOF
   exit "${1:-0}"
 }
@@ -1073,13 +1109,12 @@ cmd_resolve() {
 
   local input="$1"
 
-  # 1. Short-circuit if already a coordinate
+  # Already a coordinate
   if [[ "$input" == *:* ]]; then
     echo "$input"
     return 0
   fi
 
-  # 2. Ensure index is fresh
   if ! is_index_fresh; then
     update_index >&2 || return 1
   fi
@@ -1091,129 +1126,34 @@ cmd_resolve() {
 
   note_index_age
 
-  # 3. Pre-compute all fallback query variations to avoid reading the large index file multiple times.
-  local temp_query="$input"
-  local -a query_targets=()
-  local -a prefix_targets=()
-
-  while [[ -n "$temp_query" && "$temp_query" == *.* ]]; do
-    local -a all_segments
-    local -a pkg_segments=()
-    local -a top_class_segments=()
-    local in_class=0
-
-    IFS='.' read -ra all_segments <<<"$temp_query"
-    for segment in "${all_segments[@]}"; do
-      if [[ "$segment" =~ ^[A-Z] ]]; then
-        in_class=1
-      fi
-      if [[ $in_class -eq 0 ]]; then
-        pkg_segments+=("$segment")
-      fi
-    done
-
-    for segment in "${all_segments[@]}"; do
-      top_class_segments+=("$segment")
-      if [[ "$segment" =~ ^[A-Z] ]]; then
-        break
-      fi
-    done
-
-    local search_target package_prefix=""
-    search_target=$(
-      IFS='.'
-      echo "${top_class_segments[*]}"
-    )
-    if [[ ${#pkg_segments[@]} -gt 0 ]]; then
-      package_prefix=$(
-        IFS='.'
-        echo "${pkg_segments[*]}"
-      )
-    fi
-
-    query_targets+=("$search_target")
-    prefix_targets+=("$package_prefix")
-
-    temp_query="${temp_query%.*}"
-  done
-
-  if [[ ${#query_targets[@]} -eq 0 ]]; then
-    echo "$SCRIPT_NAME resolve: could not resolve '$input'" >&2
-    return 1
-  fi
-
-  # Serialize Bash arrays to JSON arrays
-  local q_json p_json
-  q_json=$(printf '%s\n' "${query_targets[@]}" | jq -Rn -c '[inputs]')
-  p_json=$(printf '%s\n' "${prefix_targets[@]}" | jq -Rn -c '[inputs]')
-
-  # 4. Query the index in a single pass
+  # The index states which artifacts declare a class, so a fully qualified class
+  # name needs no scoring or prefix guessing. Package names and Kotlin functions
+  # are not classes: 'search' lists candidates for those.
   local results
-  results=$(jq -r --argjson q_arr "$q_json" --argjson p_arr "$p_json" '
-    # Helper to check if a prefix is allowed for prefix/fuzzy matching (prevents generic short prefix false positives)
-    def is_allowed_prefix(p):
-      (p | startswith("androidx.")) or (p | split(".") | length >= 3);
-
-    # Strict KMP regex: Excludes lint, testing, samples
+  results=$(jq -r --arg q "$input" '
     "-(jvm|android|desktop|ios[a-z0-9]+|macos[a-z0-9]+|linux[a-z0-9]+|tvos[a-z0-9]+|watchos[a-z0-9]+|js|wasmjs|wasmwasi|mingw[a-z0-9]+)$" as $kmp_regex |
     .Index as $index |
-    ($index | map({key: "\(.groupId):\(.artifactId)", value: true}) | from_entries) as $artifact_lookup |
-    
-    $index | map(
-      .groupId as $group |
-      .artifactId as $artifact |
-      
-      # For each fallback query variation, compute its match score and take the maximum.
-      # i is weighted heavily so that the longest matching query (smallest i) always wins.
-      [range(0; $q_arr | length) as $i |
-       $q_arr[$i] as $q |
-       $p_arr[$i] as $p |
-       
-       (if any(.fqcns[]?; . == $q) then 3.0
-        elif (any(.fqcns[]?; startswith($q + ".")) and is_allowed_prefix($q)) then 2.0
-        elif (any(.fqcns[]?; startswith($p + ".")) and is_allowed_prefix($p)) then 1.0
-        else 0.0 end) as $class_score |
-        
-       # Fuzzy fallback score if fqcns are empty
-       (if $class_score == 0.0 then
-          if ($p | startswith($group + ".")) then
-            $p[($group | length) + 1:] as $rem |
-            (if (($artifact | gsub("[.-]"; "") | contains($rem | gsub("[.-]"; ""))) and is_allowed_prefix($p)) then 1.0 else 0.0 end)
-          elif ($group == $p) then 1.0
-          else 0.0 end
-        else 0.0 end) as $fuzzy_score |
-        
-       # Group match tie-breaker bonus:
-       # 0.8 if group matches package prefix exactly
-       # 0.4 if group is a prefix of package prefix
-       (if ($group == $p) then 0.8
-        elif ($p | startswith($group + ".")) then 0.4
-        else 0.0 end) as $group_bonus |
-        
-       ($class_score + $fuzzy_score) as $base_score |
-       (if $base_score > 0.0 then (((($q_arr | length) - $i) * 10.0) + $base_score + $group_bonus) else 0.0 end)
-      ] | (max // 0.0) as $score |
-      
-      select($score > 0.0) |
-      
-      # Client-Side KMP Redirection
-      (if ($artifact | test($kmp_regex; "i")) then
-         ($artifact | sub($kmp_regex; ""; "i")) as $base_artifact |
-         if ($artifact_lookup["\($group):\($base_artifact)"]) then "\($group):\($base_artifact)"
-         else "\($group):\($artifact)" end
-       else "\($group):\($artifact)" end) as $coord |
-       
-      { coord: $coord, score: $score, len: ($coord | length) }
-    ) | 
-    # Group by coordinate to remove duplicates
-    group_by(.coord) | map(sort_by(-.score) | .[0]) |
-    # Sort by Score (Desc), then by Length (Asc)
-    sort_by(-.score, .len) | 
-    .[0].coord // empty
+    ($index | map({key: "\(.groupId):\(.artifactId)", value: true}) | from_entries) as $lookup |
+    ($q | split(".") | .[:-1] | join(".")) as $pkg |
+    [ $index[] | select(any(.fqcns[]?; . == $q)) |
+      .groupId as $g | .artifactId as $a |
+      # When several artifacts declare the class, prefer the group that is the
+      # class package itself, then a parent group, then anything else; the
+      # shorter coordinate breaks ties. The KMP base artifact is usually the
+      # shorter one.
+      { coord:
+          (if ($a | test($kmp_regex; "i")) then
+             ($a | sub($kmp_regex; ""; "i")) as $base |
+             if $lookup["\($g):\($base)"] then "\($g):\($base)" else "\($g):\($a)" end
+           else "\($g):\($a)" end),
+        own: (if $g == $pkg then 0
+              elif ($pkg | startswith($g + ".")) then 1
+              else 2 end) }
+    ] | group_by(.coord) | map(.[0]) | sort_by(.own, (.coord | length)) | .[0].coord // empty
   ' "$INDEX_FILE")
 
   if [[ -z "$results" ]]; then
-    echo "$SCRIPT_NAME resolve: could not resolve '$input'" >&2
+    echo "$SCRIPT_NAME resolve: no artifact declares '$input'; for a package or function use '$SCRIPT_NAME search'" >&2
     return 1
   fi
 
@@ -1398,7 +1338,7 @@ cmd_source() {
     temp_dir="$build_dir"
   fi
 
-  local tmp_metadata=""
+  local status=0
   for artifact in "${artifacts[@]}"; do
     group_id=$(echo "$artifact" | cut -d: -f1)
     artifact_id=$(echo "$artifact" | cut -d: -f2)
@@ -1407,34 +1347,23 @@ cmd_source() {
 
     # This body is only ever tested for existence, so a cache hit needs no copy
     # and, offline, a miss needs no temporary file to report itself.
-    if offline_body_file "$metadata_url" >/dev/null; then
-      continue
-    fi
-    if is_offline; then
-      offline_miss "$metadata_url"
-      echo "$SCRIPT_NAME source: $HTTP_ERROR" >&2
-      warm_hint
-      exit 1
-    fi
-
-    if [[ -z "$tmp_metadata" ]]; then
-      tmp_metadata=$(make_temp "$temp_dir") || exit 1
-    fi
-    if ! http_get "$metadata_url" "$tmp_metadata"; then
-      rm -f "$tmp_metadata"
+    status=0
+    fetch_body "$metadata_url" "$temp_dir" || status=$?
+    if [[ $status -ne 0 ]]; then
       echo "$SCRIPT_NAME source: $HTTP_ERROR" >&2
       http_print_hint
+      if is_offline; then
+        warm_hint
+      fi
       exit 1
     fi
+    release_body
   done
-  if [[ -n "$tmp_metadata" ]]; then
-    rm -f "$tmp_metadata"
-  fi
 
   # Download and extract each package
   local version="" jar_version snapshot_jar_version
   local source_jar_url source_jar_filename
-  local pom_url pom_content pom_file pom_status platform_artifacts
+  local pom_url pom_content pom_status platform_artifacts
 
   for artifact in "${artifacts[@]}"; do
     group_id=$(echo "$artifact" | cut -d: -f1)
@@ -1499,21 +1428,17 @@ cmd_source() {
     pom_url="${repo_url}/${group_id_path}/${artifact_id}/${version}/${artifact_id}-${jar_version}.pom"
     pom_status=0
     pom_content=""
-    if pom_file=$(offline_body_file "$pom_url"); then
-      pom_content=$(cat "$pom_file")
-    elif is_offline; then
-      offline_miss "$pom_url"
-      pom_status=2
-    else
-      pom_file=$(make_temp "$temp_dir") || exit 1
-      http_get "${pom_url}" "$pom_file" || pom_status=$?
-      if [[ $pom_status -eq 0 ]]; then
-        pom_content=$(cat "$pom_file")
-      fi
-      rm -f "$pom_file"
-    fi
-
-    if [[ $pom_status -eq 2 ]] && is_offline; then
+    fetch_body "$pom_url" "$temp_dir" || pom_status=$?
+    if [[ $pom_status -eq 0 ]]; then
+      pom_content=$(cat "$BODY_FILE")
+      release_body
+    elif [[ $pom_status -eq 2 && "$BODY_ALLOC_FAILED" -eq 1 ]]; then
+      # --output is supposed to be the writable place, so failing to stage the
+      # POM here cannot be fixed by the caller; carrying on would return
+      # sources with every platform target silently missing.
+      echo "$SCRIPT_NAME source: $HTTP_ERROR" >&2
+      exit 1
+    elif [[ $pom_status -eq 2 ]] && is_offline; then
       echo "$SCRIPT_NAME source: $HTTP_ERROR" >&2
       echo "$SCRIPT_NAME source: without it, whether $artifact has Kotlin Multiplatform sources cannot be determined, and the extracted sources may be incomplete" >&2
       warm_hint
@@ -1859,25 +1784,13 @@ cmd_dependencies() {
   fi
 
   local pom_url="${repo_url}/${group_id_path}/${artifact_id}/${version}/${artifact_id}-${jar_version}.pom"
-  # Fetch into a file rather than a command substitution: HTTP_ERROR is set by
-  # http_get in the shell that runs it, and a $(...) subshell would take it
-  # (and the reason this failed) with it.
-  local pom_content pom_file cached_pom fetch_failed=0
-  if cached_pom=$(offline_body_file "$pom_url"); then
-    pom_content=$(cat "$cached_pom")
-  elif is_offline; then
-    # A cold cache with no network is decided already, and reporting that must
-    # not depend on having somewhere to write the body that will never arrive.
-    offline_miss "$pom_url"
-    fetch_failed=1
+  local pom_content pom_status=0 fetch_failed=0
+  fetch_body "$pom_url" || pom_status=$?
+  if [[ $pom_status -eq 0 ]]; then
+    pom_content=$(cat "$BODY_FILE")
+    release_body
   else
-    pom_file=$(make_temp) || exit 1
-    if http_get "${pom_url}" "$pom_file"; then
-      pom_content=$(cat "$pom_file")
-    else
-      fetch_failed=1
-    fi
-    rm -f "$pom_file"
+    fetch_failed=1
   fi
 
   if [[ $fetch_failed -eq 1 ]]; then

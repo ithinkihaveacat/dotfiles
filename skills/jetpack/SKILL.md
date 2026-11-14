@@ -11,8 +11,8 @@ description: >-
   general Android tutorials or APIs where no lookup is required.
 compatibility: >-
   Requires curl, xmllint (libxml2-utils), jar (JDK), jq, perl. Needs network
-  access to dl.google.com, androidx.dev, and cs.android.com, or a cache left by
-  an earlier online run plus AGENT_OFFLINE where there is none.
+  access to dl.google.com and androidx.dev, or a cache left by an earlier online
+  run plus AGENT_OFFLINE where there is none.
 ---
 
 # Jetpack Library Utilities
@@ -24,8 +24,8 @@ Jetpack library coordinates, versions, and source locations. References to
 `scripts/...` in this skill are relative to this skill directory. The script
 handles complex resolution logic that manual queries miss:
 
-- Package-to-coordinate resolution with a comprehensive exceptions table
-- Code search integration for finding artifacts by class name
+- Class-to-coordinate lookup in the cached GMaven class index
+- Class-name search over that same index
 - Version type filtering (ALPHA, BETA, STABLE, SNAPSHOT)
 - Kotlin Multiplatform platform-specific source detection
 - Build ID resolution for pinned snapshots
@@ -36,7 +36,7 @@ into `$JETPACK_CACHE_DIR` with `jq`, `unzip`, `jar`, `find`, or `grep` bypasses
 it just as completely — and offline, where the script is answering from that
 same cache, it looks like the shortest path. It is not: the index and the cached
 responses are raw upstream data, so reading them by hand skips the version-type
-filtering, the exceptions table, and the platform-source detection listed above,
+filtering, the class matching, and the platform-source detection listed above,
 and returns something plausible with no sign that those steps were missed. Ask
 the script the question, offline or not; browse the cache only to diagnose the
 script itself.
@@ -73,7 +73,7 @@ re-run where there is network; it is never a reason to answer from memory.
 - **Search for a library:** `scripts/jetpack search androidx.wear.compose`
 - **Check stable version:**
   `scripts/jetpack version androidx.wear.tiles:tiles STABLE`
-- **Resolve package to Maven coordinate:**
+- **Resolve class to Maven coordinate:**
   `scripts/jetpack resolve androidx.lifecycle.ViewModel`
 - **Download bleeding-edge source:**
   `scripts/jetpack source androidx.compose.ui:ui SNAPSHOT`
@@ -97,9 +97,10 @@ package. **Usage**: `scripts/jetpack version PACKAGE [TYPE] [REPO]` **Options**:
 
 ### `resolve`
 
-**Purpose**: Convert Android package/class name to Maven coordinate. **Usage**:
-`scripts/jetpack resolve PACKAGE_OR_CLASS` **Note**: Uses heuristic rules and an
-exceptions table.
+**Purpose**: Convert an Android class to its Maven coordinate. **Usage**:
+`scripts/jetpack resolve CLASS_NAME` **Note**: Exact top-level class names from
+the cached index; use `search` for packages, Kotlin functions, and nested
+classes.
 
 ### `search`
 
@@ -117,8 +118,8 @@ specify destination, `--find PATTERN` to locate specific files.
 
 **Purpose**: Convenience wrapper combining `search`/`resolve` + `source`.
 **Usage**: `scripts/jetpack inspect CLASS_NAME [VERSION]` **Note**: Best for
-quickly checking implementation details; uses code search if direct resolution
-fails.
+quickly checking implementation details; falls back to an index search if direct
+resolution fails.
 
 ### `list dependencies`
 
@@ -130,11 +131,6 @@ fails.
 **Purpose**: Report dependencies, offline mode, and cache state. **Usage**:
 `scripts/jetpack doctor` **Note**: Read-only; exits non-zero if anything needs
 attention.
-
-### `resolve-exceptions`
-
-**Purpose**: Find missing exceptions for the `resolve` command. **Usage**:
-`scripts/jetpack resolve-exceptions COORDINATE [VERSION]`
 
 ## Standalone Scripts
 
@@ -244,9 +240,8 @@ See local HTTP caching guidelines (storing response artifacts locally under
 
 ## Safety Notes
 
-- **Network Access**: Requires access to `dl.google.com`, `androidx.dev`, and
-  `cs.android.com` — or a cache warmed by an earlier online run, plus
-  `AGENT_OFFLINE=1`.
+- **Network Access**: Requires access to `dl.google.com` and `androidx.dev` — or
+  a cache warmed by an earlier online run, plus `AGENT_OFFLINE=1`.
 - **Cached answers are dated, not current**: offline answers carry their age on
   stderr. Report that age; do not present a stale version as the latest.
 - **SNAPSHOTs**: Change frequently; use pinned versions or Build IDs for

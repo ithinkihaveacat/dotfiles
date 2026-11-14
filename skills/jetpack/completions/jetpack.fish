@@ -12,7 +12,6 @@ complete -c jetpack -n __fish_use_subcommand -a list -d 'List versions or depend
 complete -c jetpack -n __fish_use_subcommand -a resolve -d 'Convert package name to Maven coordinate'
 complete -c jetpack -n __fish_use_subcommand -a source -d 'Download and extract source JARs'
 complete -c jetpack -n __fish_use_subcommand -a inspect -d 'Resolve class name and download source'
-complete -c jetpack -n __fish_use_subcommand -a resolve-exceptions -d 'Find missing exceptions for resolve'
 complete -c jetpack -n __fish_use_subcommand -a search -d 'Search for artifacts by package or class name'
 complete -c jetpack -n __fish_use_subcommand -a doctor -d 'Report dependencies, offline mode, and cache state'
 
@@ -32,10 +31,6 @@ complete -c jetpack -n '__fish_seen_subcommand_from source' -a 'ALPHA BETA RC ST
 complete -c jetpack -n '__fish_seen_subcommand_from inspect' -s h -l help -d 'Display help'
 complete -c jetpack -n '__fish_seen_subcommand_from inspect' -l output -r -d 'Specify output directory'
 complete -c jetpack -n '__fish_seen_subcommand_from inspect' -a 'ALPHA BETA RC STABLE LATEST SNAPSHOT' -d 'Symbolic (floating) version'
-
-# resolve-exceptions subcommand
-complete -c jetpack -n '__fish_seen_subcommand_from resolve-exceptions' -s h -l help -d 'Display help'
-complete -c jetpack -n '__fish_seen_subcommand_from resolve-exceptions' -a 'ALPHA BETA RC STABLE LATEST SNAPSHOT' -d 'Symbolic version'
 
 # list subcommands
 complete -c jetpack -n '__fish_seen_subcommand_from list; and not __fish_seen_subcommand_from versions dependencies' -a versions -d 'List all versions for a given Maven artifact'

@@ -25,7 +25,7 @@ script relies on system tools. **Solution**:
 
 ## Network Errors
 
-`version`, `list versions`, and `list dependencies` report two distinct
+`version`, `list versions`, and `list dependencies` report three distinct
 failures, and the message tells you which one happened:
 
 **Symptom**: `could not reach .../maven-metadata.xml (curl exit N: ...)`.
@@ -39,35 +39,46 @@ unverified rather than as a "not found." **Solution**:
 - Retry once connectivity is confirmed.
 
 **Symptom**: `artifact '...' not found at .../maven-metadata.xml (404)`.
-**Cause**: The server was reached and returned a genuine 404 — the package does
-not exist in the specified repository, or the name is wrong. **Solution**:
+**Cause**: The server was reached and returned a genuine 404 or 410 — the
+package does not exist in the specified repository, or the name is wrong.
+**Solution**:
 
 - Verify package name is correct (e.g., `androidx.wear.tiles:tiles` vs
   `androidx.wear.tiles:wear-tiles`).
 - Verify Build ID exists at `https://androidx.dev/snapshots/builds` (invalid or
   expired Build IDs 404 the same way).
 
+**Symptom**:
+`... returned HTTP 429 (the server is reachable but did not serve the resource; this says nothing about whether it exists)`,
+followed by `cannot determine whether '...' exists`. **Cause**: The server
+declined to answer — rate limiting, forbidden, or a server-side failure. Unlike
+a 404, this is **not** evidence the package is missing. **Solution**:
+
+- Wait and retry; rate limits usually clear within minutes.
+- Don't change the package name on this message alone.
+
 ## Search Failures
 
-**Symptom**: `Code search request failed` or stale index. **Cause**:
+**Symptom**: Stale or missing results. **Cause**: The local class index
+(`~/.cache/jetpack/androidx-index.json`) is outdated, and the network is down so
+it cannot be rebuilt. **Solution**:
 
-- `search` uses `cs.android.com` which may rate limit or change APIs.
-- Local package index (`~/.cache/jetpack/androidx-index.json`) is outdated and
-  network is down. **Solution**:
-- Wait and try again (for API rate limits).
-- Delete `~/.cache/jetpack/androidx-index.json` to force a rebuild.
-- Use explicit `--index` (packages) or `--code` (classes) flags.
+- Delete `~/.cache/jetpack/androidx-index.json`, or run
+  `scripts/jetpack search --force QUERY`, where there is network.
+- Offline, any existing index is used as-is; its age is reported on stderr.
 
 ## Resolution Failures
 
-**Symptom**: `resolve` returns incorrect coordinate or generic fallback.
-**Cause**: The package name doesn't follow standard naming conventions and isn't
-in the exceptions table. **Solution**:
+**Symptom**: `no artifact declares 'X'`. **Cause**: `resolve` matches exact
+top-level class names from the cached index. A package, a Kotlin top-level
+function, a nested class, or an artifact Google has not indexed will not match.
+**Solution**:
 
-1. Find the correct coordinate manually (e.g., search Google Maven).
-1. Use `scripts/jetpack resolve-exceptions CORRECT_COORDINATE` to identify the
-   missing mapping.
+1. Search the package, then pick a coordinate:
+   `scripts/jetpack search androidx.compose.foundation.layout`.
 1. Use the coordinate directly: `scripts/jetpack source GROUP:ARTIFACT`.
+1. If a top-level class known to exist still misses, refresh the index:
+   `scripts/jetpack search --force QUERY`.
 
 ## Version Not Found
 
