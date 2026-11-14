@@ -49,24 +49,22 @@ not exist in the specified repository, or the name is wrong. **Solution**:
 
 ## Search Failures
 
-**Symptom**: `Code search request failed` or stale index. **Cause**:
+**Symptom**: Stale or missing results. **Cause**: The local class index
+(`~/.cache/jetpack/androidx-index.json`) is outdated, and the network is down so
+it cannot be rebuilt. **Solution**:
 
-- `search` uses `cs.android.com` which may rate limit or change APIs.
-- Local package index (`~/.cache/jetpack/androidx-index.json`) is outdated and
-  network is down. **Solution**:
-- Wait and try again (for API rate limits).
-- Delete `~/.cache/jetpack/androidx-index.json` to force a rebuild.
-- Use explicit `--index` (packages) or `--code` (classes) flags.
+- Delete `~/.cache/jetpack/androidx-index.json`, or run
+  `scripts/jetpack search --force QUERY`, where there is network.
+- Offline, any existing index is used as-is; its age is reported on stderr.
 
 ## Resolution Failures
 
-**Symptom**: `resolve` returns incorrect coordinate or generic fallback.
-**Cause**: The package name doesn't follow standard naming conventions and isn't
-in the exceptions table. **Solution**:
+**Symptom**: `resolve` returns an incorrect coordinate or nothing. **Cause**:
+The class is not in the cached index, or several artifacts declare it.
+**Solution**:
 
-1. Find the correct coordinate manually (e.g., search Google Maven).
-1. Use `scripts/jetpack resolve-exceptions CORRECT_COORDINATE` to identify the
-   missing mapping.
+1. Refresh the index: `scripts/jetpack search --force QUERY`.
+1. Search for the class: `scripts/jetpack search CLASS_NAME`.
 1. Use the coordinate directly: `scripts/jetpack source GROUP:ARTIFACT`.
 
 ## Version Not Found

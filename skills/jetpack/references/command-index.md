@@ -13,8 +13,6 @@
 - [source](#source)
 - [inspect](#inspect)
 - [doctor](#doctor)
-- [resolve-exceptions](#resolve-exceptions)
-- [Exceptions Table](#exceptions-table)
 
 ## Help
 
@@ -42,10 +40,10 @@ Commands:
                       List direct Maven dependencies for a given Maven artifact.
   resolve <name>      Convert a fully qualified class name or package prefix to
                       its corresponding Maven artifact (GROUP_ID:ARTIFACT_ID).
-                      Uses internal heuristics and an exceptions table.
+                      Uses heuristics and the cached class index.
   search <query> [--force]
-                      Search for artifacts by package name (using cached index)
-                      or class name (using Android Code Search).
+                      Search for artifacts by package, artifact, or class name
+                      (using the cached GMaven index).
                       Use --force to rebuild the local package index.
   source <artifact>... [version]
                       Download and extract source JARs for one or more Maven artifacts.
@@ -161,8 +159,8 @@ xmllint --xpath "//version/text()" - | tr ' ' '\n' | grep -E '^[0-9]+\.[0-9]+\.[
 - `scripts/jetpack resolve androidx.lifecycle.ViewModel`
 - `scripts/jetpack resolve androidx.compose.ui.Modifier`
 
-**Raw Commands**: N/A (Logic is internal script heuristics + table lookup). See
-[Exceptions Table](#exceptions-table).
+**Raw Commands**: N/A (logic is the script's class matching over the cached
+GMaven index).
 
 ## search
 
@@ -171,18 +169,12 @@ xmllint --xpath "//version/text()" - | tr ' ' '\n' | grep -E '^[0-9]+\.[0-9]+\.[
 
 - `QUERY`: Substring to search for (e.g., `androidx.wear` or `RemoteImage`).
   **Options**:
-- `--index`: Force searching the package index (offline cache).
-- `--code`: Force searching code (Android Code Search).
 - `--force`: Force cache rebuild (ignore existing index). **Examples**:
 - `scripts/jetpack search androidx.wear.compose`
 - `scripts/jetpack search RemoteImage`
 - `scripts/jetpack search --force androidx.wear`
 
-**Raw Commands**:
-
-- Uses `https://dl.google.com/android/maven2/master-index.xml` for package
-  index.
-- Uses `cs.android.com` (Android Code Search) API for class search.
+**Raw Commands**: N/A (the cached GMaven class index, refreshed with `--force`).
 
 ## source
 
@@ -252,29 +244,5 @@ AGENT_OFFLINE=1 scripts/jetpack inspect androidx.wear.tiles.TileService
 The GMaven class index behind `search`/`resolve` is refreshed by
 `scripts/jetpack search --force QUERY` (which refuses to run offline, since it
 deletes the index it cannot then rebuild).
-
-## resolve-exceptions
-
-**Purpose**: Find missing exceptions for `resolve` command. **Synopsis**:
-`scripts/jetpack resolve-exceptions LIBRARY_COORDINATE` **Arguments**:
-
-- `LIBRARY_COORDINATE`: Maven coordinate to analyze. **Examples**:
-- `scripts/jetpack resolve-exceptions androidx.wear:wear`
-
-**Raw Commands**: Downloads SNAPSHOT source JAR, lists all packages in it, and
-checks if `resolve` correctly maps them back to the coordinate.
-
-## Exceptions Table
-
-The `resolve` command uses an internal table to map package prefixes to Maven
-coordinates for libraries that don't follow standard naming conventions.
-
-**Why it exists**: Standard heuristic is `androidx.group:group-artifact`.
-Exceptions: `androidx.lifecycle` -> `androidx.lifecycle:lifecycle-runtime`
-(instead of `lifecycle:lifecycle`).
-
-**Adding exceptions**: Use `resolve-exceptions` to find missing mappings, then
-edit the `exceptions` array in `scripts/jetpack` (canonical source;
-`bin/jetpack` is the symlink entrypoint).
 
 <!-- markdownlint-restore MD013 -->
