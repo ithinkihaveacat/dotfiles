@@ -38,9 +38,9 @@ Commands:
                       List all versions for a given Maven artifact.
   list dependencies <artifact> [version]
                       List direct Maven dependencies for a given Maven artifact.
-  resolve <name>      Convert a fully qualified class name or package prefix to
-                      its corresponding Maven artifact (GROUP_ID:ARTIFACT_ID).
-                      Uses heuristics and the cached class index.
+  resolve <class>     Convert a fully qualified class name to its Maven
+                      artifact (GROUP_ID:ARTIFACT_ID), from the cached class
+                      index. For a package or function, use 'search'.
   search <query> [--force]
                       Search for artifacts by package, artifact, or class name
                       (using the cached GMaven index).

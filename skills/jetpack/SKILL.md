@@ -24,7 +24,7 @@ Jetpack library coordinates, versions, and source locations. References to
 `scripts/...` in this skill are relative to this skill directory. The script
 handles complex resolution logic that manual queries miss:
 
-- Package-to-coordinate resolution against the cached GMaven class index
+- Class-to-coordinate lookup in the cached GMaven class index
 - Class-name search over that same index
 - Version type filtering (ALPHA, BETA, STABLE, SNAPSHOT)
 - Kotlin Multiplatform platform-specific source detection
@@ -73,7 +73,7 @@ re-run where there is network; it is never a reason to answer from memory.
 - **Search for a library:** `scripts/jetpack search androidx.wear.compose`
 - **Check stable version:**
   `scripts/jetpack version androidx.wear.tiles:tiles STABLE`
-- **Resolve package to Maven coordinate:**
+- **Resolve class to Maven coordinate:**
   `scripts/jetpack resolve androidx.lifecycle.ViewModel`
 - **Download bleeding-edge source:**
   `scripts/jetpack source androidx.compose.ui:ui SNAPSHOT`
@@ -97,9 +97,10 @@ package. **Usage**: `scripts/jetpack version PACKAGE [TYPE] [REPO]` **Options**:
 
 ### `resolve`
 
-**Purpose**: Convert Android package/class name to Maven coordinate. **Usage**:
-`scripts/jetpack resolve PACKAGE_OR_CLASS` **Note**: Uses heuristic rules and
-the cached class index.
+**Purpose**: Convert an Android class to its Maven coordinate. **Usage**:
+`scripts/jetpack resolve CLASS_NAME` **Note**: Exact top-level class names from
+the cached index; use `search` for packages, Kotlin functions, and nested
+classes.
 
 ### `search`
 

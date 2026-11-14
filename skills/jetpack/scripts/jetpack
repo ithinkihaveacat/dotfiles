@@ -510,9 +510,9 @@ Commands:
                       List all versions for a given Maven artifact.
   list dependencies <artifact> [version]
                       List direct Maven dependencies for a given Maven artifact.
-  resolve <name>      Convert a fully qualified class name or package prefix to
-                      its corresponding Maven artifact (GROUP_ID:ARTIFACT_ID).
-                      Uses heuristics and the cached class index.
+  resolve <class>     Convert a fully qualified class name to its Maven
+                      artifact (GROUP_ID:ARTIFACT_ID), from the cached class
+                      index. For a package or function, use 'search'.
   search <query> [--force]
                       Search for artifacts by package, artifact, or class name
                       (using the cached GMaven index).
@@ -1076,23 +1076,24 @@ cmd_versions() {
 
 usage_resolve() {
   cat <<EOF
-Usage: $SCRIPT_NAME resolve PACKAGE_NAME
+Usage: $SCRIPT_NAME resolve CLASS_NAME
 
-Convert an Android package name to its corresponding Maven artifact.
+Convert a fully qualified Android class name to its Maven artifact.
 
 Arguments:
-  PACKAGE_NAME  Fully qualified package/class name
+  CLASS_NAME    Fully qualified class name
                 (e.g., androidx.core.splashscreen.SplashScreen)
 
 Examples:
-  $SCRIPT_NAME resolve androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
+  $SCRIPT_NAME resolve androidx.core.splashscreen.SplashScreen
   $SCRIPT_NAME resolve androidx.wear.ambient.AmbientLifecycleObserver
-  $SCRIPT_NAME resolve androidx.wear.protolayout.material3.textButton
   $SCRIPT_NAME resolve androidx.lifecycle.ViewModel
 
-The command converts AndroidX package names to Maven artifacts using
-the cached Google Maven class index. Output format is
-GROUP_ID:ARTIFACT_ID (e.g., androidx.core:core-splashscreen).
+The class must appear in the cached Google Maven class index, which lists
+top-level classes only. For a package, a Kotlin top-level function, or a
+nested class, search for the package and pick a coordinate:
+  $SCRIPT_NAME search androidx.compose.foundation.layout
+Output format is GROUP_ID:ARTIFACT_ID (e.g., androidx.core:core-splashscreen).
 EOF
   exit "${1:-0}"
 }
@@ -1108,13 +1109,12 @@ cmd_resolve() {
 
   local input="$1"
 
-  # 1. Short-circuit if already a coordinate
+  # Already a coordinate
   if [[ "$input" == *:* ]]; then
     echo "$input"
     return 0
   fi
 
-  # 2. Ensure index is fresh
   if ! is_index_fresh; then
     update_index >&2 || return 1
   fi
@@ -1126,129 +1126,30 @@ cmd_resolve() {
 
   note_index_age
 
-  # 3. Pre-compute all fallback query variations to avoid reading the large index file multiple times.
-  local temp_query="$input"
-  local -a query_targets=()
-  local -a prefix_targets=()
-
-  while [[ -n "$temp_query" && "$temp_query" == *.* ]]; do
-    local -a all_segments
-    local -a pkg_segments=()
-    local -a top_class_segments=()
-    local in_class=0
-
-    IFS='.' read -ra all_segments <<<"$temp_query"
-    for segment in "${all_segments[@]}"; do
-      if [[ "$segment" =~ ^[A-Z] ]]; then
-        in_class=1
-      fi
-      if [[ $in_class -eq 0 ]]; then
-        pkg_segments+=("$segment")
-      fi
-    done
-
-    for segment in "${all_segments[@]}"; do
-      top_class_segments+=("$segment")
-      if [[ "$segment" =~ ^[A-Z] ]]; then
-        break
-      fi
-    done
-
-    local search_target package_prefix=""
-    search_target=$(
-      IFS='.'
-      echo "${top_class_segments[*]}"
-    )
-    if [[ ${#pkg_segments[@]} -gt 0 ]]; then
-      package_prefix=$(
-        IFS='.'
-        echo "${pkg_segments[*]}"
-      )
-    fi
-
-    query_targets+=("$search_target")
-    prefix_targets+=("$package_prefix")
-
-    temp_query="${temp_query%.*}"
-  done
-
-  if [[ ${#query_targets[@]} -eq 0 ]]; then
-    echo "$SCRIPT_NAME resolve: could not resolve '$input'" >&2
-    return 1
-  fi
-
-  # Serialize Bash arrays to JSON arrays
-  local q_json p_json
-  q_json=$(printf '%s\n' "${query_targets[@]}" | jq -Rn -c '[inputs]')
-  p_json=$(printf '%s\n' "${prefix_targets[@]}" | jq -Rn -c '[inputs]')
-
-  # 4. Query the index in a single pass
+  # The index states which artifacts declare a class, so a fully qualified class
+  # name needs no scoring or prefix guessing. Package names and Kotlin functions
+  # are not classes: 'search' lists candidates for those.
   local results
-  results=$(jq -r --argjson q_arr "$q_json" --argjson p_arr "$p_json" '
-    # Helper to check if a prefix is allowed for prefix/fuzzy matching (prevents generic short prefix false positives)
-    def is_allowed_prefix(p):
-      (p | startswith("androidx.")) or (p | split(".") | length >= 3);
-
-    # Strict KMP regex: Excludes lint, testing, samples
+  results=$(jq -r --arg q "$input" '
     "-(jvm|android|desktop|ios[a-z0-9]+|macos[a-z0-9]+|linux[a-z0-9]+|tvos[a-z0-9]+|watchos[a-z0-9]+|js|wasmjs|wasmwasi|mingw[a-z0-9]+)$" as $kmp_regex |
     .Index as $index |
-    ($index | map({key: "\(.groupId):\(.artifactId)", value: true}) | from_entries) as $artifact_lookup |
-    
-    $index | map(
-      .groupId as $group |
-      .artifactId as $artifact |
-      
-      # For each fallback query variation, compute its match score and take the maximum.
-      # i is weighted heavily so that the longest matching query (smallest i) always wins.
-      [range(0; $q_arr | length) as $i |
-       $q_arr[$i] as $q |
-       $p_arr[$i] as $p |
-       
-       (if any(.fqcns[]?; . == $q) then 3.0
-        elif (any(.fqcns[]?; startswith($q + ".")) and is_allowed_prefix($q)) then 2.0
-        elif (any(.fqcns[]?; startswith($p + ".")) and is_allowed_prefix($p)) then 1.0
-        else 0.0 end) as $class_score |
-        
-       # Fuzzy fallback score if fqcns are empty
-       (if $class_score == 0.0 then
-          if ($p | startswith($group + ".")) then
-            $p[($group | length) + 1:] as $rem |
-            (if (($artifact | gsub("[.-]"; "") | contains($rem | gsub("[.-]"; ""))) and is_allowed_prefix($p)) then 1.0 else 0.0 end)
-          elif ($group == $p) then 1.0
-          else 0.0 end
-        else 0.0 end) as $fuzzy_score |
-        
-       # Group match tie-breaker bonus:
-       # 0.8 if group matches package prefix exactly
-       # 0.4 if group is a prefix of package prefix
-       (if ($group == $p) then 0.8
-        elif ($p | startswith($group + ".")) then 0.4
-        else 0.0 end) as $group_bonus |
-        
-       ($class_score + $fuzzy_score) as $base_score |
-       (if $base_score > 0.0 then (((($q_arr | length) - $i) * 10.0) + $base_score + $group_bonus) else 0.0 end)
-      ] | (max // 0.0) as $score |
-      
-      select($score > 0.0) |
-      
-      # Client-Side KMP Redirection
-      (if ($artifact | test($kmp_regex; "i")) then
-         ($artifact | sub($kmp_regex; ""; "i")) as $base_artifact |
-         if ($artifact_lookup["\($group):\($base_artifact)"]) then "\($group):\($base_artifact)"
-         else "\($group):\($artifact)" end
-       else "\($group):\($artifact)" end) as $coord |
-       
-      { coord: $coord, score: $score, len: ($coord | length) }
-    ) | 
-    # Group by coordinate to remove duplicates
-    group_by(.coord) | map(sort_by(-.score) | .[0]) |
-    # Sort by Score (Desc), then by Length (Asc)
-    sort_by(-.score, .len) | 
-    .[0].coord // empty
+    ($index | map({key: "\(.groupId):\(.artifactId)", value: true}) | from_entries) as $lookup |
+    [ $index[] | select(any(.fqcns[]?; . == $q)) |
+      .groupId as $g | .artifactId as $a |
+      # When several artifacts declare the class, prefer one whose group is the
+      # package the class lives in, then the shorter coordinate. The KMP base
+      # artifact is usually the shorter one.
+      { coord:
+          (if ($a | test($kmp_regex; "i")) then
+             ($a | sub($kmp_regex; ""; "i")) as $base |
+             if $lookup["\($g):\($base)"] then "\($g):\($base)" else "\($g):\($a)" end
+           else "\($g):\($a)" end),
+        own: (if ($q | startswith($g + ".")) then 0 else 1 end) }
+    ] | group_by(.coord) | map(.[0]) | sort_by(.own, (.coord | length)) | .[0].coord // empty
   ' "$INDEX_FILE")
 
   if [[ -z "$results" ]]; then
-    echo "$SCRIPT_NAME resolve: could not resolve '$input'" >&2
+    echo "$SCRIPT_NAME resolve: no artifact declares '$input'; for a package or function use '$SCRIPT_NAME search'" >&2
     return 1
   fi
 

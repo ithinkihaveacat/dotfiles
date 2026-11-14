@@ -69,13 +69,16 @@ it cannot be rebuilt. **Solution**:
 
 ## Resolution Failures
 
-**Symptom**: `resolve` returns an incorrect coordinate or nothing. **Cause**:
-The class is not in the cached index, or several artifacts declare it.
+**Symptom**: `no artifact declares 'X'`. **Cause**: `resolve` matches exact
+top-level class names from the cached index. A package, a Kotlin top-level
+function, a nested class, or an artifact Google has not indexed will not match.
 **Solution**:
 
-1. Refresh the index: `scripts/jetpack search --force QUERY`.
-1. Search for the class: `scripts/jetpack search CLASS_NAME`.
+1. Search the package, then pick a coordinate:
+   `scripts/jetpack search androidx.compose.foundation.layout`.
 1. Use the coordinate directly: `scripts/jetpack source GROUP:ARTIFACT`.
+1. If a top-level class known to exist still misses, refresh the index:
+   `scripts/jetpack search --force QUERY`.
 
 ## Version Not Found
 
