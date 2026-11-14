@@ -209,8 +209,10 @@ offline_miss() {
 #
 # Exit codes:
 #   0  body available (fetched, or served from cache when offline)
-#   1  the server was reached and answered non-2xx (a genuine "not found")
+#   1  the resource is absent: the server answered 404 or 410
 #   2  no response at all (network failure), or a cache miss while offline
+#   3  the server was reached but declined to serve the resource (429, 403,
+#      5xx): that says nothing about whether it exists
 http_get() {
   local url="$1" outfile="$2"
   local cache_file curl_status=0
@@ -257,9 +259,19 @@ http_get() {
     return 2
   fi
 
-  if [[ "$HTTP_STATUS" != 2?? ]]; then
+  # A 404 or 410 is the server saying the resource is not there. Every other
+  # non-2xx -- 429 rate limiting, 403, 5xx -- is the server declining to answer,
+  # which is not evidence of absence: folding them together lets a rate-limited
+  # Maven read as "this artifact does not exist", the confidently-wrong answer
+  # the cache and offline paths exist to avoid.
+  if [[ "$HTTP_STATUS" == "404" || "$HTTP_STATUS" == "410" ]]; then
     HTTP_ERROR="$url returned HTTP $HTTP_STATUS"
     return 1
+  fi
+
+  if [[ "$HTTP_STATUS" != 2?? ]]; then
+    HTTP_ERROR="$url returned HTTP $HTTP_STATUS (the server is reachable but did not serve the resource; this says nothing about whether it exists)"
+    return 3
   fi
 
   # Only once a 2xx is in hand does the exit code carry information the status
@@ -408,16 +420,19 @@ fetch_maven_metadata() {
   local status=0
   fetch_body "$metadata_url" || status=$?
 
-  if [[ $status -eq 2 ]]; then
-    # Neither a missing network nor an unwarmed cache is evidence the artifact
-    # is missing, so don't call it "not found" and don't offer "did you mean"
-    # suggestions that imply a live index lookup was possible.
+  if [[ $status -eq 2 || $status -eq 3 ]]; then
+    # Neither a missing network, an unwarmed cache, nor a server that declined
+    # to answer is evidence the artifact is missing, so don't call it "not
+    # found" and don't offer "did you mean" suggestions that imply a live index
+    # lookup was possible.
     echo "$SCRIPT_NAME: $HTTP_ERROR; cannot determine whether '$group_id:$artifact_id' exists" >&2
     http_print_hint
     if is_offline; then
       warm_hint
     fi
-    return 1
+    # Propagate 2/3 so a caller can tell "absent" from "inconclusive"; every
+    # caller treats any non-zero as failure.
+    return "$status"
   fi
 
   if [[ $status -ne 0 ]]; then
@@ -926,8 +941,14 @@ cmd_version() {
       repo_url="$SNAPSHOT_REPO_URL"
     fi
 
-    if ! xml_content=$(fetch_maven_metadata "$repo_url" "$group_id" "$artifact_id"); then
-      echo "$SCRIPT_NAME version: package may not exist in snapshot builds" >&2
+    local fetch_status=0
+    xml_content=$(fetch_maven_metadata "$repo_url" "$group_id" "$artifact_id") || fetch_status=$?
+    if [[ $fetch_status -ne 0 ]]; then
+      # Only a genuine absence says anything about the snapshot repository; a
+      # declined or unreachable request was already explained.
+      if [[ $fetch_status -eq 1 ]]; then
+        echo "$SCRIPT_NAME version: package may not exist in snapshot builds" >&2
+      fi
       exit 1
     fi
 

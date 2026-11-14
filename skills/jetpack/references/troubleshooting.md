@@ -25,7 +25,7 @@ script relies on system tools. **Solution**:
 
 ## Network Errors
 
-`version`, `list versions`, and `list dependencies` report two distinct
+`version`, `list versions`, and `list dependencies` report three distinct
 failures, and the message tells you which one happened:
 
 **Symptom**: `could not reach .../maven-metadata.xml (curl exit N: ...)`.
@@ -39,13 +39,23 @@ unverified rather than as a "not found." **Solution**:
 - Retry once connectivity is confirmed.
 
 **Symptom**: `artifact '...' not found at .../maven-metadata.xml (404)`.
-**Cause**: The server was reached and returned a genuine 404 — the package does
-not exist in the specified repository, or the name is wrong. **Solution**:
+**Cause**: The server was reached and returned a genuine 404 or 410 — the
+package does not exist in the specified repository, or the name is wrong.
+**Solution**:
 
 - Verify package name is correct (e.g., `androidx.wear.tiles:tiles` vs
   `androidx.wear.tiles:wear-tiles`).
 - Verify Build ID exists at `https://androidx.dev/snapshots/builds` (invalid or
   expired Build IDs 404 the same way).
+
+**Symptom**:
+`... returned HTTP 429 (the server is reachable but did not serve the resource; this says nothing about whether it exists)`,
+followed by `cannot determine whether '...' exists`. **Cause**: The server
+declined to answer — rate limiting, forbidden, or a server-side failure. Unlike
+a 404, this is **not** evidence the package is missing. **Solution**:
+
+- Wait and retry; rate limits usually clear within minutes.
+- Don't change the package name on this message alone.
 
 ## Search Failures
 
