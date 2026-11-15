@@ -62,6 +62,14 @@ broken merge. `taskgo doctor` reports duplicate task IDs after a merge. Avoid
 squash merges when intermediate state changes matter, because squashing erases
 them.
 
+### Remote Sync
+
+Commands that write fetch the upstream branch first, and fast-forward or rebase
+when the checkout is behind. Commands that commit also push. `--offline` (or
+`AGENT_OFFLINE=1`) skips both. Read-only commands such as `list`, `status`, and
+`doctor` work on a read-only mount; commands that write need a writable tree and
+`.git/`.
+
 ## Agent Handoff
 
 To point an agent that can read the control repository at work, run
