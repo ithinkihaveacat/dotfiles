@@ -1,193 +1,138 @@
-# taskgo model & architecture
+# taskgo Model
 
-## Context Economics
+Read this when you decide where a fact or file belongs, create or restructure a
+project, write a project README or an ADR, or set scheduling fields
+(`blocked_by`, `wait_for`, `due`, `stale_after`).
 
-The main reason for current-state Markdown is **context economics**: append-only
-journals grow monotonically with project age, whereas rewritten current state
-grows mainly with active complexity. Historical reads are queryable on demand
-via Git history without cluttering active agent context windows.
+## Control and Artifact Repositories
 
-`HEAD` reflects current belief and active truth. Git retains earlier states,
-diffs, ancestry, and recorded-at metadata; commit prose explains conclusions and
-reasoning that diffs alone cannot recover.
+A **control repository** (also called the control repo or tracker) holds private
+task tracking, plans, decisions, and project working files for one or more
+external **artifact repositories**. Artifact repositories hold the product code,
+libraries, and their tests. Their commits never carry tracker metadata.
+Reference or fetch very large artifacts (cloned repositories, heavy binary test
+data) on demand rather than checking them into the control repository.
 
-## Single Developer & Project Scaling Spectrum
+A project grows only as far as it needs. A light project is `README.md`,
+`STATUS.md`, and `tasks/`; a long initiative adds `PLAN.md`, `decisions/`,
+`references/`, and so on. Unsorted notes go in the root `INBOX.md`.
 
-`taskgo` is explicitly designed for a **single human developer operating
-alongside AI coding agents**. To prevent unnecessary ceremony on small
-initiatives while scaling cleanly to large efforts, it supports three tiers of
-project scale:
-
-- **Scale 0 (Quick Scratchpad):** `INBOX.md` at the repository root provides
-  zero-ceremony capture of unclassified notes, thoughts, and ideas without
-  schemas.
-- **Scale 1 (Lightweight Project):** A project directory containing `README.md`
-  (serving as project manifest, optionally declaring YAML frontmatter such as
-  `skills: [...]` for per-project agent skills, and
-  `**Domain / Stakeholders:** [Entity]` to anchor thematic grouping for activity
-  reporting), `STATUS.md` (operational projection), and `tasks/` containing
-  granular task records. `PLAN.md`, `decisions/`, `references/`, `scripts/`, and
-  `data/` remain optional.
-- **Scale 2 (Multi-Month Initiative):** Extends Scale 1 with explicit roadmap
-  sequencing in `PLAN.md`, formal Nygard-style Architecture Decision Records in
-  `decisions/*.md`, supporting context in `references/`, custom tooling in
-  `scripts/`, datasets in `data/`, evaluation/benchmark runs in `results/`, and
-  deployable deliverables in `dist/`.
-
-## Repository Terminology & Boundaries
-
-A **control repository** (interchangeably called a *control repo*, *taskgo
-tracker*, *tracker repository*, or *project tracker*) manages initiatives,
-tasks, decisions, and exploratory assets across one or more external **artifact
-repositories**:
-
-- **Control Repository (`projects/`):** Houses private task tracking
-  (`STATUS.md`, `tasks/`), roadmaps (`PLAN.md`), Architecture Decision Records
-  (`decisions/`), supporting context (`references/`), and project-scoped working
-  artifacts (`scripts/`, `data/`, `results/`, `dist/`). Very large artifacts
-  (such as cloned repositories or heavy binary test data) should be referenced
-  or fetched on demand rather than checked into Git.
-- **Artifact Repositories (e.g. `dotfiles`, product codebases):** House
-  permanent production code, reusable libraries, shipping CLIs, and
-  contract/regression test suites (`test-*`). Commits in artifact repositories
-  must remain strictly free of private control repo metadata.
-
-### Standard Directory Structure
+## Directory Layout
 
 ```text
-AGENTS.md                 # canonical taskgo declaration + standing rules (managed by taskgo fix)
-INBOX.md                  # zero-ceremony capture; no schema
-<id>/
-  README.md               # identity, map, standing rules (optional YAML frontmatter: skills, etc.)
-  STATUS.md               # current human view + generated task block
-  PLAN.md                 # intended route forward (optional)
-  tasks/*.md              # stable task records
-  decisions/*.md          # ADRs for private or cross-artifact decisions (optional)
-  docs/*                  # authored prose deliverables, specs, guides, or sync mirrors (optional)
-  references/*            # compounding project reference pages, playbooks, and domain notes (optional)
-  bugreports/*            # captured bug reports, reproduction logs, triage traces (optional)
-  reviews/*               # code, design, or document reviews (optional)
-  scripts/*               # automation, audit harnesses, pipelines, report generators (optional)
-  data/*                  # input datasets, package lists, static fixtures (optional)
-  results/*               # benchmark telemetry, run logs, audit outputs (optional)
-  dist/*                  # static dashboards, deployable bundles, HTML reports (optional)
+AGENTS.md          # taskgo-managed block plus this repo's local policy
+INBOX.md           # zero-ceremony capture; no schema
+README.md          # optional landing page; frontmatter may set timezone:
+<project>/
+  README.md        # identity, map, standing rules (frontmatter: skills, etc.)
+  STATUS.md        # current situation, generated task block, next actions
+  PLAN.md          # intended route forward (optional)
+  tasks/           # one record per task
+  decisions/       # ADRs for private or cross-artifact decisions
+  references/      # compounding reference pages, playbooks, domain notes
+  scripts/         # repeatable project helpers (queries, audits, reports)
+  results/         # run logs, benchmark telemetry, audit outputs
+  reports/         # authored reports and other prose deliverables
 ```
 
-`PROJECT.md` is a legacy name for the project README; the CLI still reads it
-when `README.md` is absent, but new and renamed projects use `README.md`.
+Other directories (`docs/`, `data/`, and so on) are fine when a project needs
+them; name them in the project README's map. `PROJECT.md` is a legacy name for
+the project README; the CLI still reads it when `README.md` is absent.
 
-`docs/`, `bugreports/`, and `reviews/` hold authored prose deliverables when the
-output is a document, issue report, or review for a milestone or external
-audience rather than code; when published externally, the `README.md` map
-records which copy is canonical.
+**`references/`** holds topic and entity pages that outlive single tasks: domain
+syntheses, capability matrices, playbooks, and catalogues of external resources.
+When a task uncovers durable facts or disproves an earlier claim, fold the
+result into the right page in place. Link sources; keep observations,
+interpretations, and untested proposals apart; date observations when their age
+matters. Revise maintained pages, but keep the historical meaning of task
+outcomes, captured evidence, and dated reports. Link every page from the README
+map, directly or through a short index. Promote material to a skill only when
+other projects keep needing it.
 
-`references/` holds the project's compounding reference material: topic- and
-entity-oriented Markdown pages (domain syntheses, capability matrices,
-operational playbooks, external resource catalogs) that outlive individual tasks
-and are private to the project. When a task uncovers durable domain facts or
-invalidates an earlier claim, fold the synthesis into the relevant `references/`
-page in place. Link supporting sources and distinguish observations,
-interpretations, and untested proposals. Date observations when their age
-affects their meaning. Revise maintained reference pages as understanding
-changes; preserve the historical meaning of task outcomes, captured evidence,
-and dated reports. Keep pages discoverable from the `README.md` map, directly or
-through a short reference index, with one-line summaries to help readers choose
-what to open.
+**`scripts/`** holds repeatable helpers so later sessions reuse them instead of
+rewriting them. They need not meet the packaging bar of skill scripts. Raw run
+evidence belongs in `results/`. Label material imported from elsewhere and kept
+for history as such in the README map.
 
-Project reference pages do not need a skill wrapper. Consider a knowledge or
-capability skill when material is repeatedly needed outside its originating
-project and topic-based discovery would improve access. Update an existing owner
-regardless of how quickly the information is changing.
+## Non-Code and System Projects
 
-`scripts/` holds repeatable, project-scoped helpers (queries, audit runners,
-report builders) so future sessions reuse them instead of recreating them in
-scratch; they need not meet the packaging bar of reusable skill scripts. Raw run
-evidence and captured telemetry belong in `results/`. Material imported from
-elsewhere and kept for history is labeled as such in the README map rather than
-presented as current.
-
-## System & Non-Code Projects
-
-Not every project centers on a code repository. A project's primary output may
-be prose deliverables (`docs/`, `bugreports/`, `reviews/`) and supporting
-`scripts/`, or it may have no external artifact at all (such as a personal or
-household project where `STATUS.md` and `tasks/` carry the work).
-
+Not every project has a code repository; some have nothing outside the tracker.
 A **system project** tracks work on something the user operates, such as
-machines and services or a household, whose durable description lives in a
-**knowledge skill**: a private skill, loaded by topic, that records current
-facts about particular systems, accounts, people, or places. The knowledge skill
-plays the role of the artifact repository: tasks change the system and finish by
-updating the skill to the new current state, linking the skill repository's
-commit with a `Ref:` trailer. The project README names the skill in its map (and
-in `skills:` frontmatter) instead of copying its facts. Many knowledge skills
-never need a project; create one when a system has enough ongoing work to track.
+machines, services, or a household. Its durable description lives in a
+**knowledge skill**: a private skill that records current facts about particular
+systems, accounts, people, or places. The knowledge skill plays the role of the
+artifact repository. A task changes the system and finishes by updating the
+skill to the new state, with the skill commit in a `Ref:` trailer. The project
+README names the skill in its map and its `skills:` frontmatter instead of
+copying its facts.
 
 ## Where Knowledge Lives
 
-Each fact has one owner; other locations link to it. Choose the owner by who
-needs the fact and how often it changes:
+Each fact has one owner; other places link to it. Choose the owner by who needs
+the fact and how often it changes:
 
-| Kind of fact                                                                | Owner                                                                         |
-| --------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
-| How the code works, how to build and run it, code-level invariants and ADRs | Artifact repository (`README.md`, `AGENTS.md`, `docs/`)                       |
-| What a system, account, person, or place is and how to reach or operate it  | Knowledge skill                                                               |
-| Authored reports, specs, guides, bug reports, or reviews                    | External canonical doc/issue, or `<project>/docs/`, `bugreports/`, `reviews/` |
-| Repeatable project-scoped queries, probes, or report helpers                | `<project>/scripts/` (or a skill/artifact repo once promoted)                 |
-| Why the project exists, its scope, where everything lives, standing rules   | Project `README.md`                                                           |
-| Reasoning behind a private or cross-artifact standing rule                  | Project `decisions/`                                                          |
-| Intended route                                                              | `PLAN.md`                                                                     |
-| Current situation and next actions                                          | `STATUS.md`                                                                   |
-| A unit of work, its outcome, and findings                                   | `tasks/`                                                                      |
-| Project-scoped domain notes, playbooks, and syntheses across tasks          | Project `references/` (linked from `README.md`, directly or through an index) |
-| Run evidence, benchmark telemetry, and static input datasets                | Project `results/` and `data/`                                                |
-| What changed, when, and why                                                 | Git history (commit prose, `Ref:` and `Conversation:`)                        |
+| Kind of fact                                                 | Owner                                               |
+| ------------------------------------------------------------ | --------------------------------------------------- |
+| How the code works and is built; code-level rules and ADRs   | Artifact repository                                 |
+| What a system, account, person, or place is; how to reach it | Knowledge skill                                     |
+| Authored reports, specs, guides, bug reports, reviews        | External canonical copy, or `<project>/reports/`    |
+| Repeatable project queries, probes, report helpers           | `<project>/scripts/` (or a skill once promoted)     |
+| Why the project exists, scope, map, standing rules           | Project `README.md`                                 |
+| Reasoning behind a private or cross-artifact rule            | Project `decisions/`                                |
+| Intended route                                               | `PLAN.md`                                           |
+| Current situation and next actions                           | `STATUS.md`                                         |
+| A unit of work, its outcome, and findings                    | `tasks/`                                            |
+| Domain notes, playbooks, syntheses across tasks              | Project `references/`, linked from the README       |
+| Run evidence and benchmark telemetry                         | Project `results/`                                  |
+| Repo-wide local policy (time zone, reports, environment)     | Root `AGENTS.md`, outside the managed block         |
+| What changed, when, and why                                  | Git history (commit prose, `Ref:`, `Conversation:`) |
 
-The control repository files differ mainly in how often they change: `README.md`
-over months, `PLAN.md` over weeks, and `STATUS.md` nearly every commit.
+The project files differ mainly in how often they change: `README.md` over
+months, `PLAN.md` over weeks, and `STATUS.md` nearly every commit.
 
-Information architecture drifts, and historical layouts persist. Work with it
-using these principles rather than reorganizing everything at once:
+Layouts drift, and old layouts persist. Work with them rather than reorganising
+everything at once:
 
 1. **One owner per fact; everywhere else links.** Pointers go stale more slowly
    than copies.
-1. **Repair opportunistically.** When touching a file, replace a copied fact
-   with a link to its owner, or move misplaced content to where it belongs.
-1. **The artifact wins.** When a description disagrees with the code or the
-   system it describes, the description is wrong.
-1. **Declare historical locations and exceptions instead of forcing them to
-   move.** An in-repository `TODO.md`, an imported planning document, a staging
-   skill that mixes workflows and reference facts, or a project that diverges
-   from these defaults can stay where it is; the project `README.md` map (or
-   skill header, if useful) says what it is and whether it is canonical.
+1. **Repair as you go.** When you touch a file, replace a copied fact with a
+   link to its owner, or move misplaced content to where it belongs.
+1. **The artifact wins.** When a description disagrees with the code or system
+   it describes, the description is wrong.
+1. **Declare exceptions instead of forcing moves.** An in-repository `TODO.md`,
+   an imported planning document, or a project that departs from these defaults
+   can stay; the project README map says what it is and whether it is canonical.
 
 ## Project README
 
 The project `README.md` is the stable, private description of the project. An
-artifact repository's own README describes the code to anyone who has it: what
-it is, how to build and use it, how it is put together. The project README
-describes the user's stewardship of it: things that are true because this
-project exists and that a stranger with only the code would not need or should
-not see. It has three roles:
+artifact repository's README describes the code to anyone who has it. The
+project README describes the user's stewardship of it: things that are true
+because this project exists, and that a stranger with only the code would not
+need or should not see. It has three roles:
 
 - **Identity:** why the project exists, whom it serves, what success looks like,
-  and what is in and out of scope. Scope may exclude things the code README
-  never mentions ("not the in-repository backlog", "no paid APIs").
-- **Map:** where everything lives — checkouts, remotes and forks, deployments,
-  data, project `references/`, `docs/`, and `scripts/`, related projects, and
-  the knowledge skills describing the systems it runs on — with links to
-  reference pages or a reference index, one-line summaries to guide selection,
-  and which source is canonical where several overlap.
-- **Standing rules:** constraints that govern work and outlast any task,
-  especially private ones such as data-safety rules, spending limits, and
-  publication boundaries. State each rule briefly and link the ADR that explains
-  it, if one exists.
+  and what is in and out of scope ("not the in-repository backlog", "no paid
+  APIs").
+- **Map:** where everything lives: checkouts, remotes and forks, deployments,
+  data, `references/` and `scripts/`, related projects, and the knowledge skills
+  for the systems it runs on. Give one-line summaries, and say which source is
+  canonical where several overlap.
+- **Standing rules:** constraints that outlast any task, especially private ones
+  such as data-safety rules, spending limits, and publication boundaries. State
+  each rule briefly and link the ADR that explains it, if there is one.
 
-To decide whether a sentence belongs in the project README, ask whether it will
-still be true after the next five tasks finish; if not, it belongs in
-`STATUS.md`, `PLAN.md`, or a task. Code facts, system facts (host specs, how to
-reach a machine), the reasoning behind rules, and history belong to the owners
-in the table above; the README links to them.
+To test a sentence, ask whether it will still be true after the next five tasks
+finish. If not, it belongs in `STATUS.md`, `PLAN.md`, or a task. Code facts,
+system facts, the reasoning behind rules, and history belong to the owners in
+the table above; the README links to them.
+
+Optional frontmatter holds project configuration. `skills` lists the agent
+skills to use on the project, named as the `skill` CLI resolves them (a catalog
+short name, optionally `namespace:name`). `taskgo skills <project>` prints the
+list, `taskgo handoff` carries it, and `taskgo doctor` warns about unknown
+names. A `**Domain / Stakeholders:**` line anchors thematic grouping in
+[activity reports](activity-reports.md).
 
 Suggested skeleton (existing headings such as `## Artifacts` or `## Boundaries`
 serve the map role and need not be renamed):
@@ -219,324 +164,78 @@ In scope, and explicitly out of scope.
 - Standing rule, briefly ([ADR](decisions/001-rule.md)).
 ```
 
-## Task Records & Archiving
+## Task Records
 
-Completed tasks remain as permanent, stable records in `tasks/TASK-XXXXX-*.md`
-with `status: done`. They keep Problem, Cost, Goal, and Criteria, and add
-`## Outcome` (a verdict against each criterion) and `## Findings`.
+Completed tasks stay in `tasks/` as permanent records with `status: done`.
+`STATUS.md` keeps context bounded: its generated block lists only `In progress`,
+`Blocked`, `Due soon` (open tasks due within 7 days), and active `Decisions`,
+with state counts. `## Summary` says where the project stands now in a few
+sentences; it is rewritten whole, not appended to, and finished work leaves it
+(done tasks and Git history keep that). `## Next` is the next few concrete
+actions. If a record is ever removed from the working tree, `taskgo history`
+reads it from Git.
 
-Context boundedness is achieved through `STATUS.md`:
+## ADR Lifecycle
 
-- `STATUS.md` projects active `In progress` and `Blocked` tasks, `Due soon`
-  tasks (open tasks due within 7 days), and active `Decisions` (when
-  `decisions/*.md` exist) alongside counts (`Todo: N Done: M`).
-- Completed tasks are summarized in `## Summary` prose rather than listed in the
-  active task snapshot, preventing `STATUS.md` from bloating as milestones
-  accumulate.
-- If a task record is ever archived or deleted from the working tree,
-  `taskgo history` falls back to querying Git history blobs seamlessly.
+Projects with durable architectural rules keep Nygard-style ADRs in
+`<project>/decisions/NNN-slug.md`, with `## Status`, `## Context`,
+`## Decision`, and `## Consequences` sections.
 
-## Architecture Decision Records (ADRs) & Supersedes Lifecycle
+- **Superseding:** when a newer ADR replaces an older decision, record
+  `supersedes: [001-old-decision.md]` (filename, stem, or numeric prefix such as
+  `001`) in the *newer* ADR's frontmatter. Do not rewrite the older file. Edit
+  an accepted ADR in place only for typos, status updates, broken links, or
+  implementation notes, never to change its decision.
+- **Projection:** `taskgo sync` lists only active (not superseded) ADRs in the
+  `### Decisions` part of the generated `STATUS.md` block.
+- **Checks:** `taskgo doctor` checks `supersedes` targets and cycles. For active
+  ADRs it warns about citations of superseded ADRs and broken relative links. A
+  superseded ADR's old links are exempt.
 
-Projects with durable architectural invariants store Nygard-style ADRs in
-`<project>/decisions/NNN-slug.md` with `## Status`, `## Context`, `## Decision`,
-and `## Consequences` sections.
+## Scheduling Fields
 
-To keep accepted ADRs stable while preventing obsolete decisions from polluting
-active agent context:
+Most tasks need none of these. Use them when something outside the task's own
+work decides when it can start or end:
 
-- **Declarative `supersedes` Edges:** When a newer ADR replaces an earlier
-  decision, record `supersedes: [001-old-decision.md]` (matching by filename,
-  stem, or numeric prefix like `001`) in the *newer* ADR's YAML frontmatter
-  rather than rewriting the older file. Edit an accepted ADR in place only for
-  typos, status updates, broken links, or implementation notes, never to change
-  its decision.
-- **Active ADR Projection (`STATUS.md`):** When `<project>/decisions/*.md` is
-  non-empty, `taskgo sync` projects a `### Decisions` list inside the generated
-  `<!-- taskgo:begin --> ... <!-- taskgo:end -->` snapshot containing only
-  *active* (non-superseded) ADRs.
-- **Stale-Reference & Graph Auditing (`taskgo doctor`):** The shared
-  `AuditEngine` verifies `supersedes` targets and checks for cycles. For active
-  ADRs, it warns (`[WARN]`) if an ADR cites a superseded ADR or contains broken
-  relative Markdown links within the control repository. Once an ADR is
-  superseded, its historical links and ADR references are exempt from staleness
-  warnings.
-
-## Telemetry & Dual-Representation
-
-Taskgo deliberately records agent session identifiers (`<agent>://<id>`) in two
-distinct locations. This is an intentional architectural pattern, not a
-violation of the Single Source of Truth:
-
-1. **YAML Frontmatter (`conversations:`):** Acts as the spatial, fast-read
-   manifest of all sessions that have contributed to the task. It guarantees
-   context portability during task export (when Git history is severed) and
-   provides zero-latency visibility for active (`in-progress`) sessions before
-   commits exist.
-1. **Git Commit Trailers (`Conversation:`):** Act as the temporal, immutable
-   event log linking specific lifecycle transitions to exact agent runs.
-
-Drift between these locations arises in valid workflows (e.g. human
-collaborators executing raw `git commit` commands without trailers, or agents
-actively iterating in uncommitted working trees before forming a checkpoint).
-`taskgo doctor` emits non-blocking `[INFO]` diagnostics for these anomalies, but
-agents must prioritize the Markdown files as current state and Git as the
-historical record.
-
-## Snapshot Core
-
-Parsing, validation, rendering, formatting, audit, and task edits read and write
-repository files only through a `Snapshot`, addressed by repository-relative
-POSIX paths:
-
-- **`FsSnapshot`:** The working tree (`WorktreeSnapshot` extends it with
-  `HEAD`'s commit SHA and on-demand blob SHAs for `status` and `handoff`). Reads
-  and writes go straight to disk; CLI commands operating on the working tree use
-  it.
-- **`GitTreeSnapshot`:** One commit's tree, read with `git ls-tree` and
-  `git cat-file --batch`, without a checkout. Used by `taskgo mcp` and by CLI
-  reads passed `--at REV` (`status`, `handoff`, `read`, `search`). It is
-  read-only; writes raise `ReadOnlySnapshotError`.
-- **`OverlaySnapshot`:** Pending writes held in memory over either of the
-  others. A [change set](#change-sets) is applied to one, so a refused change
-  set writes nothing.
-
-Rendering a commit's tree gives the same task rows, `STATUS.md`, and audit
-findings as rendering a checkout of it. Git commands that inspect the repository
-rather than its files (commit authority, shallow clones, staging, history) stay
-in the CLI commands. Task edits are `edit_task_text()` (text in, text out) and
-`update_task()` (edit, rename, and sync over a snapshot).
-
-## Change Sets
-
-A change set is the unit of a typed write: a list of operations applied in
-order, all or none. `taskgo apply CHANGES.json` applies one to the working tree
-without committing, so the MCP server's write semantics can be tried offline.
-The file is a JSON object with one key, `changes`:
-
-```json
-{"changes": [
-  {"op": "create", "kind": "task", "project": "my-project", "ref": "a",
-   "fields": {"blocked_by": ["TASK-3A91F"]},
-   "sections": {"title": "Add a cache", "Goal": "Sub-10ms reads."}},
-  {"op": "set", "record": "TASK-3A91F", "field": "status", "value": "done",
-   "expected": "in-progress"},
-  {"op": "replace_section", "record": "TASK-3A91F", "section": "Outcome",
-   "text": "Met.", "expected_hash": null}
-]}
+```yaml
+blocked_by: [TASK-1627D]
+wait_for: [issue/123, 2026-10-13]
+due: 2026-10-15
+stale_after: 2026-11-01
 ```
 
-| Operation         | Keys                                                                                                 | Precondition                          |
-| ----------------- | ---------------------------------------------------------------------------------------------------- | ------------------------------------- |
-| `create`          | `kind` (`task`, `decision`, or `project`), `project`, `ref`, `slug`, `fields` (optional), `sections` | none; IDs and numbers are allocated   |
-| `set`             | `record`, `field`, `value`, `expected` (optional)                                                    | `expected`, when given                |
-| `add`, `remove`   | `record`, `field`, `values`                                                                          | none; repeats and absences are no-ops |
-| `replace_section` | `record`, `section`, `text`, `expected_hash`                                                         | the section's hash                    |
-| `write_file`      | `path`, `content`, `expected_blob` (optional), `executable` (optional)                               | absent, or the file's Git blob SHA    |
-| `delete_file`     | `path`, `expected_blob`                                                                              | the file's Git blob SHA               |
-| `edit_file`       | `path`, `old_string`, `new_string`, `replace_all` (optional), `expected_blob` (optional)             | `old_string` occurs; `expected_blob`  |
+- **`blocked_by`:** other `TASK-XXXXX` IDs only. Record the edge on the task
+  that is *held*, never on the blocker. When `taskgo doctor` reports a resolved
+  blocker, remove it, or re-plan if the blocker was cancelled.
+- **`wait_for`:** external or time gates that keep a task off the ready list.
+  Use a typed gate where one fits: an ISO date (`YYYY-MM-DD`, resolved once
+  today reaches it), an issue reference (`issue/123`, `gh:owner/repo#12`), a
+  handle (`@reviewer`), or an `http(s)` URL. Otherwise write the condition as
+  one line of free text (`ShellCheck release with SC2337`). `taskgo check`
+  resolves dates and polls `gh:` issues with the `gh` CLI; other typed
+  references are tracked but not polled. Those, handles, URLs, and free text
+  hold the task until someone removes them. The CLI refuses free text that
+  contains a task ID or a gate it would rather see as its own entry, and says
+  why.
+- **`due`:** a committed deadline. `taskgo doctor` reports `[FAIL]` when it has
+  passed and `[INFO]` within 48 hours; `taskgo list --state ready` sorts near
+  deadlines first.
+- **`stale_after`:** a relevance cutoff. After it, `taskgo doctor` warns so you
+  re-scope or cancel the task.
 
-- **Projects:** `create` with `kind` `project` names a new top-level directory
-  in `project`, takes `sections` `{"title": ...}` (the README heading) and
-  optionally `fields` `{"skills": [...]}`, and no `ref` or `slug`. It writes
-  `README.md` and, unless one with content is there, `STATUS.md`. A directory
-  without a README that holds `STATUS.md` or `tasks/`, which `doctor` warns
-  about, becomes a project this way; an existing project, any other existing
-  directory, and an invalid name are refused. Later changes in the set can
-  create its tasks.
-- **Records:** A task ID, a decision path, a project's `STATUS.md`, or `$name`
-  for a record an earlier `create` named with `ref`. `$name` also works in
-  `blocked_by` and `supersedes` values, so one set can create a task and the
-  task it blocks.
-- **Fields:** `set` takes a task's `status`, `due`, `stale_after`, or `title`,
-  and a decision's `status`; null clears an optional one. `add` and `remove`
-  take the set fields of the [schema](command-index.md#schema). Conversations
-  need an explicit `<agent>://<id>`.
-- **Sections:** `replace_section` takes a task section other than the title, or
-  `STATUS.md` Summary or Next. `expected_hash` is the hash `get_task` or
-  `get_project_status` reports, or null when the section is absent; a null
-  `text` removes an optional section. A new section goes where the schema orders
-  it. Supply the section body only: omit its `## Heading` or `**Label:**`, which
-  the tool adds. Text that duplicates a section or adds or removes any other
-  section is refused. The result's `sections` list gives the new hash of each
-  section `replace_section` or a task `create` wrote (`record`, `section`,
-  `hash`; null when removed), ready for the next `replace_section`.
-- **Files:** `write_file` writes project assets: any file in an existing project
-  outside `tasks/`, `decisions/`, and `STATUS.md`, and `INBOX.md`. It refuses
-  `.git*` paths, `..`, symbolic links, more than 256 KiB, non-UTF-8 content, and
-  a `README.md` whose frontmatter does not parse. Without `expected_blob` (or
-  with null) the file must be new; a file that exists is refused with its blob,
-  which `expected_blob` must name to overwrite it, so a write never loses a
-  change made since the caller read the file. `content` must be a string:
-  `delete_file` deletes a file whose blob is `expected_blob`, under the same
-  path rules, except a project's `README.md`. A rewritten file keeps its mode
-  and a new one is not executable, unless `executable` is `true` or `false`,
-  which sets the mode (100755 or 100644). Markdown is formatted, so the result
-  reports each written file's new blob SHA.
-- **Edits:** `edit_file` replaces exact text in an existing file, as Caxton's
-  `search_and_replace` does: `old_string` must occur exactly once, or
-  `replace_all` must be true. It edits the assets `write_file` writes and the
-  records too: tasks, decisions, and a project's `STATUS.md` outside its
-  generated block. Bytes match verbatim; only when nothing matches, the file has
-  CRLF line endings, and `old_string` has bare `\n` ones, are both strings
-  retried with CRLF. Assets are written exactly as replaced and keep their mode.
-  A record must stay valid: its frontmatter parses, a task keeps its `id` and a
-  known status, no section appears twice that did not before, and entries added
-  to `blocked_by` or `supersedes` are checked as `add` checks them; records are
-  formatted once the whole set has applied, so several edits of one record each
-  match the text the one before it left. Files and results are limited to 256
-  KiB. A miss is a precondition failure, with a unified diff against the closest
-  lines; several matches without `replace_all` are invalid. The result's `edits`
-  list gives each edit's `occurrences_replaced`, the `start_line` and `end_line`
-  of its first replacement (lines end at `\n`), and the file's `total_lines` and
-  `blob` after the set. Formatting can rewrap a record's edited lines, so the
-  text there may differ from `new_string`: `reformatted` says whether it does,
-  and then `text` holds those lines as they now stand, or, past 1 KiB,
-  `text_omitted` is true and the caller reads them back. A later edit of the
-  same lines quotes that text. With `replace_all`, the returned `text` and line
-  numbers cover the first replacement only. `reformatted` is judged after the
-  whole set, so a later edit of the same lines in the set also makes it true;
-  `text` is still what to quote.
+`status: blocked` needs no warning while `blocked_by` or `wait_for` has an
+unresolved entry. Run `taskgo check [PROJECT]` to list only the open tasks whose
+dates have passed, deadlines are near, or upstream issues moved.
 
-Each precondition is checked when its change applies, against the state the
-changes before it left. Validation then runs on the state after the whole set:
-added blockers and superseded decisions exist, no `blocked_by` or `supersedes`
-cycle passes through a changed record, task IDs stay unique, and a task that
-becomes done, or whose Outcome changes while done, has a non-empty Outcome.
-Last, `STATUS.md` is regenerated for each project with a changed task, decision,
-or `STATUS.md`, and for each project with a task that a changed task blocks; a
-snapshot block shows only direct blockers, so no further project can change.
-Other projects' date-driven refreshes stay with `taskgo sync`.
+On `create` and `update`, `--add-blocked-by` and `--add-wait-for` add one entry;
+on `update`, `--remove-blocked-by` and `--remove-wait-for` remove one, and
+`--set-wait-for` replaces the whole `wait_for` list. Repeats and absent values
+are no-ops. `--due` and `--stale-after` set the dates. `update` refuses a
+blocker that is unknown, the task itself, or closes a cycle. `taskgo schema`
+lists every field and section.
 
-A refusal names the change and its kind: `invalid` (malformed or disallowed),
-`precondition` (an expected value, hash, or blob that no longer holds), or
-`validation` (the whole set's result breaks a rule). Nothing is written. To read
-section hashes offline, use `taskgo status TASK_ID --json`,
-`taskgo handoff PROJECT|TASK_ID --json`, or `taskgo mcp --stdio --no-fetch`.
-
-## Unified AuditEngine Architecture (`doctor`, `fix`, and `handoff`)
-
-To eliminate diagnostic and repair drift, `scripts/taskgo` uses a single shared
-`AuditEngine`: `audit_snapshot()` over a snapshot, wrapped by
-`audit_workspace()`, which adds the repository's shallow-clone check and
-`audit_skills()` (checking declared project `skills` against the `skill` CLI
-catalog). Remediations write through the audited snapshot:
-
-- **`doctor` (Strictly Read-Only):** Runs the audit engine, renders findings
-  with canonical 4-letter plain-ASCII tags (`[PASS]`, `[INFO]`, `[WARN]`,
-  `[FAIL]`), and exits non-zero on errors per CLI design standards.
-- **`fix` (Auto-Healing Engine):** Runs the same audit engine, executes
-  remediation callbacks for auto-fixable findings (assigning missing task IDs,
-  normalizing status aliases, synchronizing `STATUS.md` snapshots, formatting
-  the Markdown of tracker records), verifies convergence on the touched paths,
-  and auto-commits repairs by default with deterministic `COMMIT_SHA` output on
-  `stdout`. Use `--dry-run` to preview changes without modifying files or
-  committing, or `--no-commit` to apply repairs on disk without committing.
-  Tracker records are the root `AGENTS.md`, `INBOX.md`, and `README.md`, and
-  each project's `README.md`, `PROJECT.md`, `STATUS.md`, and the Markdown files
-  directly in `tasks/` and `decisions/`. Other documents, and files Git ignores,
-  are never reformatted.
-- **`handoff` (Tree Projection):** Runs the audit engine with `markdown=False`
-  (skipping `[INFO]` formatting checks) over the working tree or `--at REV`
-  commit alongside handoff-specific readiness checks, then emits a handoff note
-  from the selected project or task record. `[WARN]` and `[FAIL]` findings and
-  uncommitted changes are reported on stderr without changing the note on
-  stdout.
-
-## Agent Handoff
-
-Agent handoff and task export solve different problems. An isolated worker
-cannot read the control repository, so an exported brief must inline the task
-specification and its dependencies. An agent with the control repository can
-read the tracker, artifact repositories, and Git history; it needs a destination
-rather than duplicated context. This is true both at the start of a fresh agent
-session and when work passes to a successor.
-
-`taskgo handoff TASK_ID` therefore generates a short handoff note containing
-only the task ID, project, title, `Goal`, and paths to the project status and
-task record. `taskgo handoff PROJECT` names the project, its `README.md` title,
-its in-progress and ready tasks (one line each, at most ten), and paths to its
-`README.md`, `STATUS.md`, and `PLAN.md`. The task list is what lets the person
-passing the note on check it, as the `Goal` does for a task; it lists the
-frontier without choosing from it. These values come from the working tree,
-which a local agent reads too; `--at REV` reads a commit instead. An agent
-reading through the MCP server sees only what has been pushed, so uncommitted
-changes in the project raise a warning. The human passing on the note remains
-the router: its summary lets that person verify the selected task before pasting
-it, while the receiving agent uses the identifier and title as a cross-check
-before reading the tracker and choosing an approach.
-
-The command does not select work. `taskgo list PROJECT --state ready` exposes
-the ready frontier, and `STATUS.md` records the intended immediate direction. A
-long handoff note or one requiring extra facts indicates that the tracker is not
-handoff-ready; repair the durable state instead of expanding the note.
-
-The note is a destination for a human router. An agent without a checkout, such
-as an MCP client, still has to read what the note names, so
-`taskgo handoff --json` and the MCP `handoff` tool carry those files beside the
-unchanged note: the project `README.md` with its frontmatter, `STATUS.md`,
-`PLAN.md`, the root `AGENTS.md`, the active and ready tasks, and the task
-record, verbatim, in one round trip. The payload inlines reads; it never widens
-the note. See the [Command Index](command-index.md) for the full subcommand
-vocabulary and options.
-
-## Root Landing Page (`README.md`)
-
-`AGENTS.md` is strictly machine- and agent-directed. For human developers
-browsing the control repository via web interfaces (GitHub, GitLab), a root
-`README.md` is optionally useful as an evergreen, zero-maintenance landing page.
-
-To prevent ceremony and drift, a root `README.md` should **not** attempt to
-maintain manual project tables or task summaries. Instead, it provides a stable
-structural overview and CLI quick reference:
-
-````markdown
-# Control Repository
-
-A private project and task control repository maintained with [**`taskgo`**](https://github.com/ithinkihaveacat/dotfiles/tree/main/skills/taskgo).
-
-## Structure
-
-- [`AGENTS.md`](AGENTS.md) — Agent operating instructions, environment rules, and repository authority.
-- [`INBOX.md`](INBOX.md) — Unclassified scratchpad and zero-ceremony task capture.
-- **Projects (`<project>/`)** — Discrete initiatives containing identity, operational status, and granular task records.
-
-## CLI Quick Reference
-
-```bash
-# Check status across all projects
-taskgo status
-
-# Create a new task
-taskgo create <project> "<task-title>"
-
-# Synchronize status snapshots
-taskgo sync <project>
-
-# Auto-heal metadata and synchronize snapshots
-taskgo fix
-
-# Verify repository health
-taskgo doctor
-```
-````
-
-## Concurrency
-
-Prefer separate branches/worktrees. Random globally checked IDs avoid a shared
-allocator: a new ID is checked against the current tree and against every ID
-named in the paths or messages of any ref's history, so a deleted task's ID or
-one on an unmerged branch is never reused. Allocation does not reserve an ID, so
-two writers can still pick the same one; `taskgo doctor` reports duplicate IDs
-after a merge. Resolve merges by reconciling files to one intended current
-state; STATUS may be rewritten freely. Stable paths and accepted ADR text are
-defaults, not reasons to preserve a broken merge. Avoid squash integration when
-intermediate state transitions matter, because squashing can erase
-reconstructible states.
-
-## References
-
-- <https://adr.github.io/>
-- <https://cognitect.com/blog/2011/11/15/documenting-architecture-decisions>
-- <https://git-scm.com/docs/git-log>
-- <https://git-scm.com/docs/git-interpret-trailers>
+**Dates** are calendar days with no time zone. Only "today" depends on a zone:
+`TASKGO_TODAY=YYYY-MM-DD` wins, then an IANA `timezone:` (such as
+`Europe/London`) in the root `README.md` frontmatter, then the machine's local
+date. Set the repository zone so cloud sessions on UTC agree with local ones.
+`taskgo doctor` fails on an unknown zone.

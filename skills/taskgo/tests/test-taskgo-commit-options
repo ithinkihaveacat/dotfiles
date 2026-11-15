@@ -1,0 +1,171 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Tests the managed AGENTS.md block, record formatting on commit, update's
+# list options, and the grouped top-level help.
+
+# shellcheck source=skills/taskgo/tests/common.sh disable=SC1091
+source "$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
+taskgo_test_init
+
+echo "1..8"
+
+REPO="$TEST_ROOT/repo"
+init_base_repo "$REPO"
+tg --root "$REPO" --offline sync example >/dev/null
+git -C "$REPO" add -A
+git -C "$REPO" commit -qm 'chore: init'
+
+# 1: fix keeps local policy outside the block byte for byte
+tg --root "$REPO" --offline fix >/dev/null 2>&1
+printf '\n## Local policy\n\n*  Keep   this   exactly.\n' >>"$REPO/AGENTS.md"
+LOCAL_TAIL="$(sed -n '/<!-- taskgo:end -->/,$p' "$REPO/AGENTS.md")"
+sed -i.bak 's/^- Start with/- Begin with/' "$REPO/AGENTS.md" && rm -f "$REPO/AGENTS.md.bak"
+git -C "$REPO" commit -qam 'docs: local policy'
+if DOC_OUT=$(tg --root "$REPO" --offline doctor 2>&1) &&
+  grep -q '^\[INFO\]  AGENTS.md: taskgo block differs' <<<"$DOC_OUT" &&
+  (tg --root "$REPO" --offline fix) >/dev/null 2>&1 &&
+  grep -q '^- Start with' "$REPO/AGENTS.md" &&
+  [[ "$(sed -n '/<!-- taskgo:end -->/,$p' "$REPO/AGENTS.md")" == "$LOCAL_TAIL" ]] &&
+  [[ "$(tg --root "$REPO" --offline doctor 2>&1)" != *'AGENTS.md'* ]]; then
+  echo 'ok 1 - fix rewrites only the AGENTS.md block and keeps local policy'
+else
+  echo 'not ok 1 - fix rewrites only the AGENTS.md block and keeps local policy'
+  printf '# doctor=%s\n' "${DOC_OUT:-}"
+fi
+
+# 2: an older canonical AGENTS.md is replaced by the managed block
+LEGACY_REPO="$TEST_ROOT/legacy"
+init_base_repo "$LEGACY_REPO"
+cat >"$LEGACY_REPO/AGENTS.md" <<'EOF'
+# Agent Instructions
+
+This repository follows taskgo:
+<https://github.com/ithinkihaveacat/dotfiles/tree/main/skills/taskgo>.
+
+## Standing Rules
+
+- **Project and task onboarding:** When work touches a `taskgo` project or task
+  (`<project>` or `TASK-XXXXX`), run `taskgo handoff <project|TASK-ID>`, read
+  the files it names, and activate the project's declared skills with
+  `taskgo skills <project> | skill --scope session add -`. When work extends to
+  other repositories or technology stacks not covered by active skills, discover
+  and add session skills via `skill catalog --json`.
+- **Declaring skills:** A project's required skills are declared in the
+  `skills:` list in `<project>/README.md` YAML frontmatter (`taskgo doctor`
+  validates the names) and activated per session (`skill --scope session add`),
+  rather than added to the control repository's workspace skills.
+- **Environments and constraints:** Before running build, test, or operational
+  commands, check `<project>/README.md` (including `**Target Environment:**`,
+  scope, map, and standing constraints) and the root `README.md` (when present)
+  for environment rules.
+- **Session continuity:** In this control repository, always cite the active
+  globally unique conversation/session ID without abbreviation as
+  `[<conversation-id>](<agent>://<conversation-id>)` (or
+  `conversation://<conversation-id>`) in `STATUS.md` `## Summary` and task
+  records. Pass `--conv <conversation-id>` to task- and commit-recording
+  subcommands (`taskgo create`, `taskgo update`, `taskgo checkpoint`,
+  `taskgo commit`) to record it in frontmatter and commit trailers; subcommands
+  like `taskgo sync`, `taskgo status`, `taskgo check`, and `taskgo doctor` do
+  not take `--conv`.
+- **Data segregation and paths:** Keep private tracker notes, `Conversation:`
+  trailers, and session links strictly inside this control repository—never in
+  commits, PRs, or files of external artifact repositories. Within tracker
+  files, use relative Markdown links (no `file://`) and `$HOME`-relative paths
+  (`~/...`) for local checkouts.
+EOF
+tg --root "$LEGACY_REPO" --offline sync >/dev/null 2>&1
+if LEG_OUT=$(tg --root "$LEGACY_REPO" --offline doctor 2>&1) &&
+  grep -q '^\[INFO\]  AGENTS.md: older taskgo template' <<<"$LEG_OUT" &&
+  (tg --root "$LEGACY_REPO" --offline fix --no-commit) >/dev/null 2>&1 &&
+  ! grep -q 'Standing Rules\|Target Environment' "$LEGACY_REPO/AGENTS.md" &&
+  [[ "$(head -1 "$LEGACY_REPO/AGENTS.md")" == '# Agent Instructions' ]] &&
+  grep -qx '<!-- taskgo:end -->' "$LEGACY_REPO/AGENTS.md" &&
+  [[ "$(tail -1 "$LEGACY_REPO/AGENTS.md")" == '<!-- taskgo:end -->' ]]; then
+  echo 'ok 2 - an older canonical AGENTS.md is replaced by the managed block'
+else
+  echo 'not ok 2 - an older canonical AGENTS.md is replaced by the managed block'
+  printf '# doctor=%s\n' "${LEG_OUT:-}"
+fi
+
+# 3: the managed block stays short
+BLOCK_BYTES=$(sed -n '/<!-- taskgo:begin -->/,/<!-- taskgo:end -->/p' "$REPO/AGENTS.md" | wc -c)
+if ((BLOCK_BYTES < 1100)); then
+  echo 'ok 3 - the managed AGENTS.md block is under about 1 KB'
+else
+  echo "not ok 3 - the managed AGENTS.md block is $BLOCK_BYTES bytes"
+fi
+
+# 4: checkpoint formats the records it commits
+TASK_FILE="$REPO/example/tasks/TASK-A1B2C-confirm-status.md"
+printf '\n**Findings:**   one    two\nthree\n' >>"$TASK_FILE"
+if tg --root "$REPO" --offline checkpoint TASK-A1B2C 'docs(example): findings' \
+  >/dev/null 2>&1 &&
+  "$MARKDOWN_FORMAT" --check "$TASK_FILE" >/dev/null 2>&1 &&
+  [[ -z "$(git -C "$REPO" status --porcelain)" ]]; then
+  echo 'ok 4 - checkpoint formats the task record it commits'
+else
+  echo 'not ok 4 - checkpoint formats the task record it commits'
+  git -C "$REPO" status --porcelain | sed 's/^/# /'
+fi
+
+# 5: commit formats a staged record, re-stages it, and leaves non-records
+printf '\nSome   *plan*   text\n' >>"$REPO/example/PLAN.md"
+printf '\n**Constraints:**   keep    it\nsimple\n' >>"$TASK_FILE"
+git -C "$REPO" add example/PLAN.md "$TASK_FILE"
+if tg --root "$REPO" --offline commit 'docs(example): constraints' >/dev/null 2>&1 &&
+  "$MARKDOWN_FORMAT" --check "$TASK_FILE" >/dev/null 2>&1 &&
+  grep -q 'Some   \*plan\*   text' "$REPO/example/PLAN.md" &&
+  [[ -z "$(git -C "$REPO" status --porcelain)" ]]; then
+  echo 'ok 5 - commit formats staged records only'
+else
+  echo 'not ok 5 - commit formats staged records only'
+  git -C "$REPO" status --porcelain | sed 's/^/# /'
+fi
+
+# 6: commit leaves a staged record with unstaged changes unformatted
+printf '\n**Cost:**   slow    builds\n' >>"$TASK_FILE"
+git -C "$REPO" add "$TASK_FILE"
+printf '\nUnstaged line.\n' >>"$TASK_FILE"
+if tg --root "$REPO" --offline commit 'docs(example): cost' >/dev/null 2>&1 &&
+  { shown=$(git -C "$REPO" show HEAD:example/tasks/TASK-A1B2C-confirm-status.md) &&
+    [[ "$shown" == *'**Cost:**   slow    builds'* && "$shown" != *'Unstaged line.'* ]]; } &&
+  grep -q 'Unstaged line.' "$TASK_FILE"; then
+  echo 'ok 6 - commit does not re-stage a record with unstaged changes'
+else
+  echo 'not ok 6 - commit does not re-stage a record with unstaged changes'
+fi
+git -C "$REPO" checkout -q -- example
+
+# 7: update --set-wait-for replaces the list; --wait-for still works hidden
+tg --root "$REPO" --offline update TASK-A1B2C --add-wait-for 2030-01-01 \
+  --add-wait-for gh:octo/repo#7 >/dev/null 2>&1
+HELP="$(tg update --help)"
+if tg --root "$REPO" --offline update TASK-A1B2C --set-wait-for 2031-02-03 >/dev/null 2>&1 &&
+  { fm=$(sed -n '/^wait_for:/,/^[a-z_]*:/p' "$TASK_FILE") &&
+    [[ "$fm" == *2031-02-03* && "$fm" != *2030-01-01* && "$fm" != *octo* ]]; } &&
+  tg --root "$REPO" --offline update TASK-A1B2C --wait-for 2032-04-05 >/dev/null 2>&1 &&
+  { fm=$(sed -n '/^wait_for:/,/^[a-z_]*:/p' "$TASK_FILE") &&
+    [[ "$fm" == *2032-04-05* && "$fm" != *2031-02-03* ]]; } &&
+  [[ "$HELP" == *'--set-wait-for GATE'*'Replace the whole wait_for list'* ]] &&
+  [[ "$HELP" != *'  --wait-for'* ]] &&
+  [[ "$HELP" == *'--status done --outcome'* ]]; then
+  echo 'ok 7 - update --set-wait-for replaces the list and --wait-for is a hidden alias'
+else
+  echo 'not ok 7 - update --set-wait-for replaces the list and --wait-for is a hidden alias'
+fi
+git -C "$REPO" checkout -q -- example
+
+# 8: top-level help groups every command
+TOP="$(tg --help)"
+missing=""
+for c in id root create update apply edit list info skills status handoff sync \
+  check doctor fix history read search checkpoint commit schema mcp; do
+  grep -q "^  $c\b" <<<"$TOP" || missing="$missing $c"
+done
+if [[ -z "$missing" && "$TOP" == *$'\nTasks:\n'* && "$TOP" == *$'\nHealth:\n'* &&
+  "$TOP" != *personal* ]]; then
+  echo 'ok 8 - top-level help groups every command under headings'
+else
+  echo "not ok 8 - top-level help is missing:$missing"
+fi

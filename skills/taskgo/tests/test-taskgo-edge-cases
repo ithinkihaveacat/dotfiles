@@ -5,7 +5,7 @@ set -euo pipefail
 source "$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 taskgo_test_init
 
-echo "1..30"
+echo "1..31"
 
 REPO="$TEST_ROOT/repo"
 init_base_repo "$REPO"
@@ -306,10 +306,33 @@ ORIGINAL_STATUS_CONTENT="$(cat "$MUT_REPO/proj/STATUS.md")"
 COMMIT_ERR="$(tg --root "$MUT_REPO" commit "proj: commit code" 2>&1 || true)"
 AFTER_STATUS_CONTENT="$(cat "$MUT_REPO/proj/STATUS.md")"
 STATUS_STAGED="$(git -C "$MUT_REPO" diff --cached --name-only | grep 'STATUS.md' || true)"
-if [[ "$COMMIT_ERR" == *'doctor found errors'* ]] && [ "$ORIGINAL_STATUS_CONTENT" = "$AFTER_STATUS_CONTENT" ] && [ -z "$STATUS_STAGED" ]; then
-  echo "ok 15 - commit does not mutate STATUS.md or index when doctor audit fails"
+# The finding is on STATUS.md, not in the commit: it is counted, not refused.
+COMMITTED="$(git -C "$MUT_REPO" log -1 --pretty=%s)"
+# A file in the commit that doctor finds broken (an open task whose due is
+# not a date) is refused, with nothing mutated.
+cat <<'EOF' >"$MUT_REPO/proj/tasks/TASK-AB002-bad-due.md"
+---
+id: TASK-AB002
+status: todo
+due: someday
+---
+
+# Bad Due Task
+EOF
+git -C "$MUT_REPO" add "$MUT_REPO/proj/tasks/TASK-AB002-bad-due.md"
+ORIGINAL_STATUS_CONTENT="$(cat "$MUT_REPO/proj/STATUS.md")"
+BAD_ERR="$(tg --root "$MUT_REPO" commit "proj: add a bad task" 2>&1 || true)"
+AFTER_STATUS_CONTENT="$(cat "$MUT_REPO/proj/STATUS.md")"
+STATUS_STAGED="$(git -C "$MUT_REPO" diff --cached --name-only | grep 'STATUS.md' || true)"
+if [[ "$COMMIT_ERR" == *'other finding(s) in proj; run taskgo doctor proj'* ]] &&
+  [[ "$COMMITTED" == *"commit code"* ]] &&
+  [[ "$BAD_ERR" == *'doctor found errors in the files to commit'* ]] &&
+  [[ "$BAD_ERR" == *'TASK-AB002-bad-due.md'* ]] &&
+  [ "$ORIGINAL_STATUS_CONTENT" = "$AFTER_STATUS_CONTENT" ] && [ -z "$STATUS_STAGED" ]; then
+  echo "ok 15 - commit refuses only findings on its own files, without mutating STATUS.md"
 else
-  echo "not ok 15 - commit does not mutate STATUS.md or index when doctor audit fails"
+  echo "not ok 15 - commit refuses only findings on its own files, without mutating STATUS.md"
+  printf '# %s\n' "$COMMIT_ERR" "$COMMITTED" "$BAD_ERR"
 fi
 
 # 53: trailers form a contiguous block without intervening blank lines
@@ -728,4 +751,24 @@ if [[ "$OUT_ROOT" == "$RESOLVED" ]] &&
   echo "ok 30 - root and doctor report the resolved control repository"
 else
   echo "not ok 30 - root and doctor report the resolved control repository"
+fi
+
+# A done task is history: a field value a rule now refuses is INFO, not a
+# WARN or FAIL, so rule changes do not cascade onto closed records.
+CLOSED_REPO="$TEST_ROOT/closed-repo"
+mkdir -p "$CLOSED_REPO/proj/tasks"
+git -C "$CLOSED_REPO" init -q
+cp "$MUT_REPO/AGENTS.md" "$CLOSED_REPO/AGENTS.md"
+printf '# Inbox\n' >"$CLOSED_REPO/INBOX.md"
+printf '# Proj\n' >"$CLOSED_REPO/proj/README.md"
+printf '%s\n' '---' 'id: TASK-AB003' 'status: done' 'due: someday' '---' '' \
+  '# Finish long ago' '' '## Outcome' '' 'Done.' >"$CLOSED_REPO/proj/tasks/TASK-AB003-old.md"
+(tg --root "$CLOSED_REPO" sync proj) >/dev/null 2>&1
+CLOSED_OUT="$(tg --root "$CLOSED_REPO" doctor proj 2>&1 || true)"
+if [[ "$CLOSED_OUT" == *"[INFO]  proj/tasks/TASK-AB003-old.md: "*"due"* ]] &&
+  [[ "$CLOSED_OUT" != *"[FAIL]  proj/tasks/TASK-AB003"* ]]; then
+  echo "ok 31 - doctor reports invalid fields on a done task as INFO"
+else
+  echo "not ok 31 - doctor reports invalid fields on a done task as INFO"
+  printf '# %s\n' "$CLOSED_OUT"
 fi

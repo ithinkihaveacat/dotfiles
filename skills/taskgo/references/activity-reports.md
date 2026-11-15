@@ -1,8 +1,13 @@
 # Activity Reports
 
-An **Activity Report** turns the private tracker (`tasks/`, Git history,
-`STATUS.md`) into a concise, outward-facing summary of accomplishments, partner
-impact, and next steps.
+Read this when the user asks for a weekly, monthly, or quarterly summary of
+tracked work. An **activity report** turns the private tracker (`tasks/`, Git
+history, `STATUS.md`) into a short, outward-facing summary of what was achieved,
+its impact, and what comes next.
+
+A control repository may set its own audience, grouping, and template in the
+local-policy part of its root `AGENTS.md`. Follow that when it exists; the rules
+below are the defaults.
 
 ## 1. Extraction & Data Segregation
 
@@ -11,11 +16,11 @@ Before drafting a report:
 - **Read Task Outcomes:** Read `## Outcome` and `## Findings` in relevant `done`
   and `cancelled` task records—do not summarize from task titles or `STATUS.md`
   alone.
-- **Redact Sensitive Details:** Never include API keys or embargoed product
-  names.
+- **Redact Sensitive Details:** Never include credentials, API keys, or
+  embargoed product names.
 - **Strip Private Identifiers:** Remove conversation and session URIs
   (`<agent>://`, `conversation://`), local branch names, and control-repository
-  paths. Link only to published external artifacts (PRs, CLs, issues, docs,
+  paths. Link only to published external artifacts (PRs, issues, docs,
   dashboards).
 - **Include Editorial Notes:** Append brief notes explaining thematic grouping,
   inclusions or omissions, and verification status.
@@ -29,18 +34,19 @@ Before drafting a report:
    single primary bullet. Put prerequisite plumbing or incidental fixes in a
    trailing clause or compact `Also, ...` sibling bullet—never split one
    initiative into four or five bullets.
-1. **One Bug, One Bullet:** Track a bug's full progression (Reported ->
-   Acknowledged -> Reproduced by Partner -> Fix in Progress -> Scheduled ->
-   Shipped) in a single bullet, naming its furthest downstream state.
+1. **One Bug, One Bullet:** Track a bug's whole progression in one bullet and
+   name the furthest state it reached (for example, reported, acknowledged, fix
+   in progress, shipped).
 1. **One Artifact, One Canonical Link:** Link the deliverable noun directly to
    its single most authoritative external URL; omit mirror links and hosting
    trivia.
-1. **Group by Domain or Stakeholder:** Group by external stakeholder, partner,
-   or problem domain rather than repository folders. Use short 2–3 word headings
-   (such as `Wear Widgets` or `AI Tooling`) and nest multiple deliverables under
-   each partner.
+1. **Group by Domain or Stakeholder:** Group by stakeholder or problem domain
+   rather than repository folders, using the project README's
+   `**Domain / Stakeholders:**` line where there is one. Use short 2–3 word
+   headings (such as `Build Tooling` or `Home Network`) and nest several
+   deliverables under each.
 1. **Scale by Horizon:** Keep each bullet to 1–2 sentences (~40 words):
-   - **Weekly:** Tactical deliverables and active partner milestone transitions.
+   - **Weekly:** Tactical deliverables and milestone transitions.
    - **Monthly:** At most 3–5 bullets per domain, consolidating tasks into
      milestones.
    - **Quarterly:** At most 2–3 bullets per domain focused on systemic outcomes;
@@ -49,19 +55,22 @@ Before drafting a report:
    for `blocked` tasks, name the dependency; for `cancelled` tasks, report the
    conclusive finding when it saves future effort.
 
-## 3. Output Template
+## 3. Example Template
+
+One possible layout, for a report to a team that tracks work by domain and
+stakeholder. A control repository's `AGENTS.md` may replace it.
 
 ```markdown
 - [Author Name / Handle]
     - Last [Week | Month]
-        - **[Domain / Focus Area 1 (e.g., Wear Widgets)]**
-            - **[Stakeholder / Partner A]**
+        - **[Domain / Focus Area 1]**
+            - **[Stakeholder A]**
                 - **[Deliverable / Milestone]**: [1-2 sentences on core mechanism, impact, and verification. Link deliverable directly].
-                - **[Downstream Milestone / Bug]**: [Root cause, empirical testbed verification, and upstream partner progression (e.g., acknowledged, reproduced, scheduled for release)].
+                - **[Downstream Milestone / Bug]**: [Root cause, verification, and furthest upstream state (e.g., acknowledged, scheduled for release)].
             - **[Platform / Core Subsystem]**
-                - **[Platform Fix / Investigation]**: [Empirical findings, test harness verification, and upstream tracking].
+                - **[Platform Fix / Investigation]**: [Findings, test verification, and upstream tracking].
         - **[Domain / Focus Area 2 (e.g., Tools & Infrastructure)]**
-            - **[Tooling Deliverable]**: [Capabilities added, CLI flags, package updates, and developer velocity impact].
+            - **[Tooling Deliverable]**: [Capabilities added and their impact].
             - Also, [incidental secondary fixes or upstream reports contributed along the way].
     - This [Week | Month]
         - **[Domain 1]**:

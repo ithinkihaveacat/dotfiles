@@ -112,45 +112,30 @@ AGENTS_DECL_RE = re.compile(
     r"(follows|structured|maintained|according to).*taskgo",
     re.IGNORECASE,
 )
-CANONICAL_AGENTS_MD = f"""\
-# Agent Instructions
+# The text taskgo manages inside the control repository's root AGENTS.md,
+# between BEGIN and END. Everything outside the markers is the repository's
+# own local policy, which fix preserves byte for byte.
+AGENTS_BLOCK_BODY = f"""\
+This repository follows taskgo: <{CANONICAL_URL}>.
 
-This repository follows taskgo:
-<{CANONICAL_URL}>.
-
-## Standing Rules
-
-- **Project and task onboarding:** When work touches a `taskgo` project or
-  unfinished task (`<project>` or `TASK-XXXXX`), run
-  `taskgo handoff <project|TASK-ID>`, read the files it names, and activate the
-  project's declared skills with
-  `taskgo skills <project> | skill --scope session add -`. When work extends to
-  other repositories or technology stacks not covered by active skills, discover
-  and add session skills via `skill catalog --json`.
-- **Declaring skills:** A project's required skills are declared in the
-  `skills:` list in `<project>/README.md` YAML frontmatter (`taskgo doctor`
-  validates the names) and activated per session (`skill --scope session add`),
-  rather than added to the control repository's workspace skills.
-- **Environments and constraints:** Before running build, test, or operational
-  commands, check `<project>/README.md` (including `**Target Environment:**`,
-  scope, map, and standing constraints) and the root `README.md` (when present)
-  for environment rules.
-- **Session continuity:** In this control repository, always cite the active
-  globally unique conversation/session ID without abbreviation as
-  `[<conversation-id>](<agent>://<conversation-id>)` (or
-  `conversation://<conversation-id>`) in `STATUS.md` `## Summary` and task
-  records. Pass `--conv <conversation-id>` to task- and commit-recording
-  subcommands (`taskgo create`, `taskgo update`, `taskgo checkpoint`,
-  `taskgo commit`) to record it in frontmatter and commit trailers; subcommands
-  like `taskgo sync`, `taskgo status`, `taskgo check`, and `taskgo doctor` do
-  not take `--conv`.
-- **Data segregation and paths:** Keep private tracker notes, `Conversation:`
-  trailers, and session links strictly inside this control repository—never in
-  commits, PRs, or files of external artifact repositories. Within tracker
-  files, use relative Markdown links (no `file://`) and `$HOME`-relative paths
-  (`~/...`) for local checkouts.
+- Start with `taskgo handoff <project|task>`. Add the skills it lists to your
+  session.
+- Declare the skills a project needs in the `skills:` list of its `README.md`.
+- Commits and tasks record your session. The CLI reads the session ID from the
+  environment. Pass `--conv` only when your harness exports none.
+- Rewrite a `STATUS.md` Summary as the project's current state, in a few
+  sentences. Never append a log of finished work.
+- Keep tracker data private: never copy it into other repositories. Use
+  relative links between tracker files.
+- Put local policy for this repository below this block. `taskgo fix` rewrites
+  only the text between the markers.
 """
-_FORMATTED_AGENTS_MD: str | None = None
+AGENTS_TITLE = "# Agent Instructions"
+# Whitespace-collapsed, formatted SHA-256 prefixes of the whole-file AGENTS.md
+# texts that earlier taskgo versions wrote. A marker-less file matching one is
+# replaced by the managed block instead of being kept as local policy.
+LEGACY_AGENTS_DIGESTS = frozenset({"9139cb218a5d24b4", "d415b48f0cedcdc9"})
+_AGENTS_BLOCK: str | None = None
 ID_PATTERN = re.compile(r"^TASK-[0-9A-F]{5}$")
 ID_IN_TEXT = re.compile(r"\bTASK-[0-9A-F]{5}\b")
 WRAP_WIDTH = 80
@@ -225,27 +210,26 @@ class TaskFrontmatter(TypedDict, total=False):
 
 RESOLVED_STATES = {TaskStatus.DONE.value, TaskStatus.CANCELLED.value}
 
-CANONICAL_AGENTS = ("jetski", "antigravity", "claude", "codex", "opencode")
+# The coding agents taskgo knows by name, and the environment variables each
+# exports its session ID in, in priority order: the first one set wins.
+# CONVERSATION_ID names no agent.
+CANONICAL_AGENTS = ("antigravity", "claude", "codex", "opencode")
 
-SESSION_VARS = (
-    "CLAUDE_CODE_SESSION_ID",
-    "CLAUDE_CODE_REMOTE_SESSION_ID",
-    "JETSKI_CONVERSATION_ID",
-    "ANTIGRAVITY_CONVERSATION_ID",
-    "ANTIGRAVITY_SESSION",
-    "CLAUDE_SESSION_ID",
-    "OPENCODE_SESSION_ID",
-    "CODEX_SESSION_ID",
-    "INVOKER_INFO_ROOT_SESSION_ID",
-    "CONVERSATION_ID",
+SESSION_VARS: tuple[tuple[str, str | None], ...] = (
+    ("CLAUDE_CODE_SESSION_ID", "claude"),
+    ("CLAUDE_CODE_REMOTE_SESSION_ID", "claude"),
+    ("ANTIGRAVITY_CONVERSATION_ID", "antigravity"),
+    ("ANTIGRAVITY_SESSION", "antigravity"),
+    ("CLAUDE_SESSION_ID", "claude"),
+    ("OPENCODE_SESSION_ID", "opencode"),
+    ("CODEX_SESSION_ID", "codex"),
+    ("CONVERSATION_ID", None),
 )
 
 
 def canonicalize_agent_name(name: str | None) -> str | None:
-    """Maps free-text or version-stamped agent names to canonical tokens.
-
-    Checks CANONICAL_AGENTS in priority order (first substring match wins).
-    """
+    """Maps free-text or version-stamped agent names to one of
+    CANONICAL_AGENTS (the first substring match wins)."""
     if not name:
         return None
     lower = name.lower()
@@ -256,27 +240,14 @@ def canonicalize_agent_name(name: str | None) -> str | None:
 
 
 def detect_agent_scheme() -> str:
-    """Detects the canonical agent platform scheme from runtime environment variables."""
-    for var in ("AI_AGENT", "INVOKER_INFO_NAME"):
-        c = canonicalize_agent_name(os.environ.get(var))
-        if c:
-            return c
-    if os.environ.get("JETSKI_CONVERSATION_ID"):
-        return "jetski"
-    if os.environ.get("ANTIGRAVITY_CONVERSATION_ID") or os.environ.get(
-        "ANTIGRAVITY_SESSION"
-    ):
-        return "antigravity"
-    if (
-        os.environ.get("CLAUDE_CODE_SESSION_ID")
-        or os.environ.get("CLAUDE_CODE_REMOTE_SESSION_ID")
-        or os.environ.get("CLAUDE_SESSION_ID")
-    ):
-        return "claude"
-    if os.environ.get("OPENCODE_SESSION_ID"):
-        return "opencode"
-    if os.environ.get("CODEX_SESSION_ID"):
-        return "codex"
+    """The agent's scheme, from AI_AGENT or else the first session variable
+    set; 'conversation' when neither names one."""
+    c = canonicalize_agent_name(os.environ.get("AI_AGENT"))
+    if c:
+        return c
+    for var, scheme in SESSION_VARS:
+        if scheme and os.environ.get(var):
+            return scheme
     return "conversation"
 
 
@@ -339,29 +310,14 @@ def get_active_session(
     if cli_arg:
         return normalize_conversation_id(cli_arg)
 
-    for var in SESSION_VARS:
+    for var, var_scheme in SESSION_VARS:
         val = os.environ.get(var)
         if val:
             parsed = parse_conversation_entry(val)
             if parsed:
                 scheme, conv_id = parsed
                 if not scheme or scheme == "conversation":
-                    if var in (
-                        "CLAUDE_CODE_SESSION_ID",
-                        "CLAUDE_CODE_REMOTE_SESSION_ID",
-                        "CLAUDE_SESSION_ID",
-                    ):
-                        scheme = "claude"
-                    elif var == "JETSKI_CONVERSATION_ID":
-                        scheme = "jetski"
-                    elif var in ("ANTIGRAVITY_CONVERSATION_ID", "ANTIGRAVITY_SESSION"):
-                        scheme = "antigravity"
-                    elif var == "CODEX_SESSION_ID":
-                        scheme = "codex"
-                    elif var == "OPENCODE_SESSION_ID":
-                        scheme = "opencode"
-                    else:
-                        scheme = detect_agent_scheme()
+                    scheme = var_scheme or detect_agent_scheme()
                 return scheme, conv_id
             print(
                 _tagged(
@@ -459,7 +415,11 @@ CONVENTIONAL_SUBJECT_RE = re.compile(
 
 
 def _truncate_subject_desc(text: str, budget: int) -> str:
-    """Truncate text to budget characters at a word boundary, with ellipsis."""
+    """Truncate text to budget characters at a word boundary, with ellipsis.
+
+    Only for descriptions taskgo generates itself: a caller's subject is
+    never truncated (see ensure_conventional_subject).
+    """
     if budget <= 3:
         return text[:budget]
     cut = text[: budget - 3].rstrip()
@@ -469,7 +429,11 @@ def _truncate_subject_desc(text: str, budget: int) -> str:
 
 
 def conventional_subject(desc: str, project_name: str | None) -> str:
-    """Build a conforming 'chore' subject for an auto-generated commit."""
+    """Build a conforming 'chore' subject for an auto-generated commit.
+
+    DESC is taskgo's own text, so it may be shortened to keep the subject
+    within SUBJECT_MAX_LEN: the scope is dropped first, then DESC is cut.
+    """
     scope = ""
     if project_name:
         scope = re.sub(r"[^a-z0-9-]+", "-", project_name.lower()).strip("-")
@@ -484,17 +448,39 @@ def conventional_subject(desc: str, project_name: str | None) -> str:
     return f"chore: {_truncate_subject_desc(desc, budget)}"
 
 
-def ensure_conventional_subject(subject: str, project_name: str | None) -> str:
-    """Rewrite a nonconforming commit subject into Conventional Commits form.
+def subject_too_long(subject: str, prefix_len: int, original: str | None) -> str:
+    """The refusal for an over-long SUBJECT whose 'type(scope): ' prefix is
+    PREFIX_LEN characters; ORIGINAL is the caller's text when taskgo
+    rewrote it into SUBJECT."""
+    desc_budget = SUBJECT_MAX_LEN - prefix_len
+    rewritten = (
+        f" (rewritten from {original!r}, which lacks a known 'type(scope): ' prefix)"
+        if original is not None
+        else ""
+    )
+    return (
+        f"commit subject is {len(subject)} characters, over the "
+        f"{SUBJECT_MAX_LEN}-character limit: {subject!r}{rewritten}. "
+        f"The prefix {subject[:prefix_len]!r} uses {prefix_len}, so shorten "
+        f"the description to {desc_budget} characters or fewer; nothing was "
+        "committed"
+    )
 
-    Deterministic and boring: conforming subjects pass through untouched
-    apart from lowercased type/scope; anything else becomes
-    chore(<project>): <subject>, truncated to the 50-character limit.
-    Prints a [WARN] whenever rewriting occurs so agents can adjust.
+
+def ensure_conventional_subject(
+    subject: str, project_name: str | None, warn: bool = True
+) -> str:
+    """Return SUBJECT in Conventional Commits form, or raise CommitSubjectError.
+
+    Conforming subjects pass through apart from a lowercased type. A subject
+    with an unknown type or no prefix becomes chore(<project>): <subject>,
+    with a [WARN]. A subject over SUBJECT_MAX_LEN, as given or as
+    rewritten, is refused rather than truncated: the error gives its length,
+    the limit, and the prefix's share, so the caller can retry once.
     """
     original = subject.strip()
     if not original:
-        die("commit subject must not be empty")
+        raise CommitSubjectError("commit subject must not be empty")
     match = CONVENTIONAL_SUBJECT_RE.match(original)
     if match:
         rebuilt = "{}{}{}: {}".format(
@@ -503,22 +489,10 @@ def ensure_conventional_subject(subject: str, project_name: str | None) -> str:
             match.group("bang"),
             match.group("desc").strip(),
         )
-        prefix_len = len(rebuilt) - len(match.group("desc"))
+        prefix_len = len(rebuilt) - len(match.group("desc").strip())
         if len(rebuilt) > SUBJECT_MAX_LEN:
-            truncated = rebuilt[:prefix_len] + _truncate_subject_desc(
-                match.group("desc"), SUBJECT_MAX_LEN - prefix_len
-            )
-            print(
-                _tagged(
-                    f"[WARN]  Truncated over-long commit subject (> {SUBJECT_MAX_LEN}):\n"
-                    f"[WARN]    {original}\n"
-                    f"[WARN]    -> {truncated}",
-                    sys.stderr,
-                ),
-                file=sys.stderr,
-            )
-            return truncated
-        if rebuilt != original:
+            raise CommitSubjectError(subject_too_long(rebuilt, prefix_len, None))
+        if rebuilt != original and warn:
             print(
                 _tagged(
                     f"[WARN]  Normalized commit subject case: {rebuilt}", sys.stderr
@@ -531,7 +505,19 @@ def ensure_conventional_subject(subject: str, project_name: str | None) -> str:
     # project name is used as the scope, so drop it.
     stripped = re.match(r"^[A-Za-z0-9._/-]+:[ \t]+(.+)$", original)
     desc = (stripped.group(1).strip() if stripped else original) or original
-    new = conventional_subject(desc, project_name)
+    scope = ""
+    if project_name:
+        scope = re.sub(r"[^a-z0-9-]+", "-", project_name.lower()).strip("-")
+    prefix = f"chore({scope}): " if scope else "chore: "
+    new = f"{prefix}{desc}"
+    if len(new) > SUBJECT_MAX_LEN:
+        # The scope is dropped before refusing, so the budget the error
+        # gives is the one a retry must meet.
+        new = f"chore: {desc}"
+        if len(new) > SUBJECT_MAX_LEN:
+            raise CommitSubjectError(subject_too_long(new, len("chore: "), original))
+    if not warn:
+        return new
     print(
         _tagged(
             "[WARN]  Rewrote nonconforming commit subject"
@@ -543,6 +529,21 @@ def ensure_conventional_subject(subject: str, project_name: str | None) -> str:
         file=sys.stderr,
     )
     return new
+
+
+def subject_or_die(
+    subject: str, project_name: str | None, command: str, warn: bool = True
+) -> str:
+    """ensure_conventional_subject for a CLI COMMAND: a refusal dies.
+
+    The project only chooses the scope, and an over-long scoped rewrite
+    falls back to 'chore: ', so a check with no project refuses exactly
+    the subjects the real one would: commands make it before any Git work.
+    """
+    try:
+        return ensure_conventional_subject(subject, project_name, warn)
+    except CommitSubjectError as e:
+        die(f"{command}: {e}")
 
 
 BODY_WRAP_WIDTH = 72
@@ -2435,14 +2436,17 @@ def normalize_wait_for_args(raw_list: list[str]) -> list[str]:
 # Version 2: wait_for also takes free text, so the gate type has no pattern.
 SCHEMA_VERSION = 2
 
-# The typed gates: those taskgo check can resolve or name precisely.
+# The typed gates: those taskgo check can resolve or name precisely. WORD/ID
+# (a lowercase word, a slash, an identifier, as issue/123 or pr/45) is an
+# opaque typed reference to an external tracker.
 GATE_PATTERN = (
-    r"^(?:\d{4}-\d{2}-\d{2}|b/\d+|cl/\d+"
+    r"^(?:\d{4}-\d{2}-\d{2}|[a-z][a-z0-9-]*/[A-Za-z0-9._-]+"
     r"|gh:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#\d+|@[A-Za-z0-9_.-]+|https?://\S+)$"
 )
-TYPED_GATE_PREFIXES = ("gh:", "b/", "cl/", "@", "http:", "https:")
-# Gates taskgo check resolves (dates) or polls (bugs, CLs, GitHub issues).
-CHECKED_GATE_PREFIXES = ("gh:", "b/", "cl/")
+TYPED_GATE_PREFIXES = ("gh:", "@", "http:", "https:")
+# Gates taskgo check resolves (dates) or polls (GitHub issues). WORD/ID
+# gates are tracked but never polled.
+CHECKED_GATE_PREFIXES = ("gh:",)
 DATE_SHAPE_RE = re.compile(r"^\d{4}-\d{1,2}-\d{1,2}$")
 
 
@@ -2467,7 +2471,7 @@ def gate_error(value: Any) -> str | None:
 
     A gate is a typed gate or one line of free text. Free text is refused
     when any word in it is a task ID, a gate taskgo check resolves (a date,
-    b/N, cl/N, gh:owner/repo#N), which would stop being checked, or looks
+    gh:owner/repo#N), which would stop being checked, or looks
     like a typed gate but is malformed, so a typo is caught instead of
     holding its task for ever. A handle or URL inside free text is kept:
     check does not poll those either way.
@@ -2491,7 +2495,8 @@ def gate_error(value: Any) -> str | None:
         if looks_typed and not is_typed_gate(word):
             return (
                 f"'{word}' looks like a typed gate but is malformed; typed gates are "
-                "YYYY-MM-DD, b/N, cl/N, gh:owner/repo#N, @handle, and http(s) URLs"
+                "YYYY-MM-DD, WORD/ID (such as issue/123), gh:owner/repo#N, "
+                "@handle, and http(s) URLs"
             )
     for word in words:
         checked = ISO_DATE_RE.match(word) or word.lower().startswith(
@@ -2538,8 +2543,9 @@ VALUE_TYPES: dict[str, ValueType] = {
         ISO_DATE_RE.pattern,
     ),
     "gate": ValueType(
-        "External or temporal gate: YYYY-MM-DD, b/N, cl/N, "
-        "gh:owner/repo#N, @handle, an http(s) URL, or, when none fits, one "
+        "External or temporal gate: YYYY-MM-DD, WORD/ID (an external "
+        "reference such as issue/123 or pr/45), gh:owner/repo#N, @handle, an "
+        "http(s) URL, or, when none fits, one "
         "line of free text naming the condition",
         _is_gate,
         metavar="GATE",
@@ -2992,7 +2998,7 @@ def unresolved_wait_for(row: TaskRow, today: date) -> list[str]:
     """Returns wait_for entries still holding ROW back as of TODAY.
 
     ISO dates (YYYY-MM-DD) hold a task back only while date > today.
-    Every other gate (b/..., cl/..., gh:..., @handle, a URL, free text)
+    Every other gate (WORD/ID, gh:..., @handle, a URL, free text)
     remains unresolved while present in frontmatter.
     """
     out: list[str] = []
@@ -3585,12 +3591,95 @@ def build_status_block(
     return "\n".join(lines)
 
 
+_AGENTS_BLOCK_RE = re.compile(
+    rf"^{re.escape(BEGIN)}[ \t]*$.*?^{re.escape(END)}[ \t]*$", re.MULTILINE | re.DOTALL
+)
+_AGENTS_MARKER_LINE_RE = re.compile(
+    rf"^(?:{re.escape(BEGIN)}|{re.escape(END)})[ \t]*\n?", re.MULTILINE
+)
+
+
+def agents_block() -> str:
+    """The managed AGENTS.md block, markers included, without a final newline."""
+    global _AGENTS_BLOCK
+    if _AGENTS_BLOCK is None:
+        _AGENTS_BLOCK = f"{BEGIN}\n\n{format_markdown(AGENTS_BLOCK_BODY)}\n{END}"
+    return _AGENTS_BLOCK
+
+
 def canonical_agents_md() -> str:
-    """Returns CANONICAL_AGENTS_MD normalized through format_markdown()."""
-    global _FORMATTED_AGENTS_MD
-    if _FORMATTED_AGENTS_MD is None:
-        _FORMATTED_AGENTS_MD = format_markdown(CANONICAL_AGENTS_MD)
-    return _FORMATTED_AGENTS_MD
+    """A new control repository's root AGENTS.md: a title and the block."""
+    return f"{AGENTS_TITLE}\n\n{agents_block()}\n"
+
+
+def is_legacy_agents_md(text: str) -> bool:
+    """True when TEXT is, modulo formatting, an AGENTS.md an older taskgo wrote."""
+    try:
+        normalized = " ".join(format_markdown(text).split())
+    except Exception:
+        normalized = " ".join(text.split())
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
+    return digest in LEGACY_AGENTS_DIGESTS
+
+
+def agents_md_state(text: str) -> str:
+    """Classifies root AGENTS.md TEXT by its managed block.
+
+    current: one well-formed block with the canonical text. stale: a block
+    with other text. malformed: a marker line without its partner. legacy:
+    no markers, and the whole file is an older canonical text. local: no
+    markers, other content.
+    """
+    blocks = list(_AGENTS_BLOCK_RE.finditer(text))
+    markers = len(_AGENTS_MARKER_LINE_RE.findall(text))
+    if len(blocks) == 1 and markers == 2:
+        return "current" if blocks[0].group(0) == agents_block() else "stale"
+    if markers:
+        return "malformed"
+    return "legacy" if is_legacy_agents_md(text) else "local"
+
+
+def agents_local_policy(text: str) -> str | None:
+    """The repository's own policy in root AGENTS.md TEXT: everything but
+    the managed block and the leading title, or None when nothing is left
+    (or the file is an older canonical text)."""
+    state = agents_md_state(text)
+    if state == "legacy":
+        return None
+    rest = _AGENTS_BLOCK_RE.sub("", text) if state in ("current", "stale") else text
+    rest = _AGENTS_MARKER_LINE_RE.sub("", rest).strip()
+    first, _, tail = rest.partition("\n")
+    if first.startswith("# "):
+        rest = tail.strip()
+    return rest or None
+
+
+def render_agents_md(text: str | None) -> str:
+    """TEXT with the managed block created or replaced.
+
+    Only the block changes: text outside the markers is kept byte for
+    byte. A file without markers gets the block after its leading H1 (or
+    at the top), with the rest of its content kept below as local policy;
+    an older canonical file is replaced outright.
+    """
+    if text is None or not text.strip():
+        return canonical_agents_md()
+    state = agents_md_state(text)
+    if state in ("current", "stale"):
+        m = _AGENTS_BLOCK_RE.search(text)
+        assert m is not None
+        return text[: m.start()] + agents_block() + text[m.end() :]
+    if state == "legacy":
+        return canonical_agents_md()
+    rest = _AGENTS_MARKER_LINE_RE.sub("", text) if state == "malformed" else text
+    rest = rest.lstrip("\n")
+    head = ""
+    first, sep, tail = rest.partition("\n")
+    if first.startswith("# "):
+        head = f"{first}\n\n"
+        rest = tail.lstrip("\n") if sep else ""
+    body = f"{agents_block()}\n"
+    return f"{head}{body}\n{rest}" if rest.strip() else f"{head}{body}"
 
 
 def has_taskgo_declaration(text: str) -> bool:
@@ -3906,7 +3995,9 @@ def audit_workspace(root: Path, target_project: str | None = None) -> list[Findi
 
 
 # Root files taskgo scaffolds and formats; other root Markdown is left alone.
-ROOT_RECORDS = ("AGENTS.md", "INBOX.md", "README.md")
+# Root records the formatting sweep covers. AGENTS.md is left out: outside
+# its managed block it holds the repository's own policy, in its own style.
+FORMATTED_ROOT_RECORDS = ("INBOX.md", "README.md")
 
 
 def is_record_file(rel: str) -> bool:
@@ -4005,11 +4096,16 @@ def audit_snapshot(
         return only is None or rel in only
 
     if only is None:
-        # 1. AGENTS.md check & remediation
+        # 1. AGENTS.md check & remediation. taskgo owns only the block
+        # between the markers; the rest is the repository's local policy.
         agents_file = "AGENTS.md"
 
         def remediate_agents() -> list[str]:
-            snap.write_markdown(agents_file, CANONICAL_AGENTS_MD)
+            current = snap.read_text(agents_file) if snap.is_file(agents_file) else None
+            rendered = render_agents_md(current)
+            if rendered == current:
+                return []
+            snap.write_text(agents_file, rendered)
             return [agents_file]
 
         if not snap.is_file(agents_file):
@@ -4026,6 +4122,7 @@ def audit_snapshot(
             agents_txt = snap.read_text(agents_file)
             needs_decl = not AGENTS_DECL_RE.search(agents_txt)
             needs_url = CANONICAL_URL not in agents_txt
+            state = agents_md_state(agents_txt)
 
             if needs_decl:
                 findings.append(
@@ -4047,21 +4144,38 @@ def audit_snapshot(
                         remediation=remediate_agents,
                     )
                 )
-            if (
-                not needs_decl
-                and not needs_url
-                and not target_project
-                and agents_txt != canonical_agents_md()
-            ):
+            if state == "malformed":
                 findings.append(
                     Finding(
                         category="root",
-                        severity="INFO",
-                        message="AGENTS.md: differs from canonical taskgo template (run fix)",
+                        severity="WARN",
+                        message=(
+                            f"AGENTS.md: unpaired {BEGIN} / {END} marker"
+                            " (fix rebuilds the block and keeps the other text)"
+                        ),
                         path=agents_file,
                         remediation=remediate_agents,
                     )
                 )
+            elif not needs_decl and not needs_url and not target_project:
+                message = {
+                    "stale": "AGENTS.md: taskgo block differs from canonical text (run fix)",
+                    "legacy": "AGENTS.md: older taskgo template; fix replaces it with the managed block",
+                    "local": (
+                        "AGENTS.md: no taskgo block; fix inserts one and keeps"
+                        " the existing text below it as local policy"
+                    ),
+                }.get(state)
+                if message:
+                    findings.append(
+                        Finding(
+                            category="root",
+                            severity="INFO",
+                            message=message,
+                            path=agents_file,
+                            remediation=remediate_agents,
+                        )
+                    )
 
         # 2. INBOX.md check & remediation
         inbox_file = "INBOX.md"
@@ -4273,14 +4387,17 @@ def audit_snapshot(
             task_findings: list[Finding] = []
 
             # Field values and keys come from the task schema; id and
-            # status get repair findings below.
+            # status get repair findings below. A done or cancelled task is
+            # history: a value a later rule refuses is noted, never a
+            # warning, so rule changes do not cascade onto closed records.
+            closed = str(fm.get("status", "")).strip().lower() in RESOLVED_STATES
             for spec, value in invalid_field_values(fm, TASK_SCHEMA):
                 if spec.name in ("id", "status"):
                     continue
                 task_findings.append(
                     Finding(
                         category="task",
-                        severity=spec.invalid,
+                        severity="INFO" if closed else spec.invalid,
                         message=f"{rel_path}: {describe_invalid(spec, value)}",
                         path=tf,
                         remediation=None,
@@ -4453,6 +4570,18 @@ def audit_snapshot(
                         )
                     )
 
+            advice = summary_length_advice(status_file, current_status)
+            if advice:
+                findings.append(
+                    Finding(
+                        category="status",
+                        severity="INFO",
+                        message=advice,
+                        path=status_file,
+                        remediation=None,
+                    )
+                )
+
             rows = [r for r in all_rows if r.project == name]
             active = sum(1 for r in rows if r.status == "in-progress")
             prose = re.sub(
@@ -4490,7 +4619,7 @@ def audit_snapshot(
 
     if not target_project and markdown:
         already_flagged = {f.path for f in findings if f.path}
-        for rmf in ROOT_RECORDS:
+        for rmf in FORMATTED_ROOT_RECORDS:
             if (
                 rmf not in already_flagged
                 and snap.is_file(rmf)
@@ -5379,6 +5508,9 @@ class ChangeSet:
     )
     # The task rows of the result, once the whole set has applied.
     rows: list[TaskRow] | None = None
+    # Advice about what the set did on the caller's behalf, such as a
+    # section's own heading it dropped, for the result's findings.
+    notes: list[str] = dataclass_field(default_factory=list)
 
     def touch(self, rel: str) -> None:
         if rel not in self.before:
@@ -5388,12 +5520,17 @@ class ChangeSet:
 
 
 def change_keys(change: dict[str, Any], required: tuple[str, ...], optional=()) -> None:
+    takes = ", ".join([*required, *(f"{k}?" for k in optional)])
     missing = [k for k in required if k not in change]
     if missing:
-        raise ChangeSetError(f"missing {', '.join(missing)}")
+        raise ChangeSetError(
+            f"missing {', '.join(missing)} ({change.get('op')} takes {takes})"
+        )
     unknown = sorted(set(change) - {"op", *required, *optional})
     if unknown:
-        raise ChangeSetError(f"unknown key {', '.join(unknown)}")
+        raise ChangeSetError(
+            f"unknown key {', '.join(unknown)} ({change.get('op')} takes {takes})"
+        )
 
 
 def change_str(value: Any, what: str, nullable: bool = False) -> str | None:
@@ -5827,7 +5964,7 @@ def apply_set(cs: ChangeSet, change: dict[str, Any]) -> None:
             expected = canonical_status(expected) or expected
         if expected != current:
             raise ChangeSetError(
-                f"{rel}: {field} is {current!r}, expected {expected!r}",
+                f"{rel}: {field} is now {current!r}, not {expected!r}",
                 "precondition",
             )
     value = change_str(change["value"], "value", nullable=field != "title")
@@ -5891,6 +6028,59 @@ def section_counts(body: str, schema: RecordSchema) -> dict[str, int]:
     return {s.name: len(section_spans(body, s)) for s in schema.sections}
 
 
+def strip_own_heading(text: str, name: str) -> str | None:
+    """TEXT without a leading heading or bold label naming section NAME
+    (such as '## Findings' or '**Goal:**'), or None when it has none."""
+    n = re.escape(name)
+    m = re.match(
+        rf"(?:#{{1,6}}[ \t]+{n}[ \t]*:?[ \t#]*(?:\n|$)|\*\*{n}(?::\*\*|\*\*:?))",
+        text,
+        re.IGNORECASE,
+    )
+    return text[m.end() :].strip() if m else None
+
+
+def section_bleed_message(rel: str, name: str, text: str, schema: RecordSchema) -> str:
+    """Why replacing section NAME of REL with TEXT would change its other
+    sections: the first line of TEXT that starts another one, and how to
+    fix the call."""
+    fences = fenced_spans(text)
+    runins = [s.name for s in schema.sections if s.form == "run-in"]
+    headings = [s.name for s in schema.sections if s.form == "heading"]
+    pos = 0
+    for number, line in enumerate(text.splitlines(keepends=True), 1):
+        if any(a <= pos < b for a, b in fences):
+            pos += len(line)
+            continue
+        pos += len(line)
+        h = re.match(r"(#{1,2})[ \t]+(.*?)[ \t#]*$", line.rstrip("\n"))
+        label = (
+            re.search(rf"(?<!\S)\*\*({'|'.join(map(re.escape, runins))}):\*\*", line)
+            if runins
+            else None
+        )
+        if h and h.group(2) in headings:
+            started = h.group(2)
+        elif label:
+            started = label.group(1)
+        else:
+            continue
+        shown = line.strip()
+        if len(shown) > 60:
+            shown = shown[:59] + "\u2026"
+        return (
+            f"text for {name} contains the line {shown!r} (line {number}), "
+            f"which would start the {started} section of {rel}; remove it, "
+            "or use a '###' subheading or plain text instead (to restructure "
+            "the record on purpose, use edit_file)"
+        )
+    return (
+        f"text for {name} would add or remove other sections of {rel}; send "
+        f"the {name} body only, without other sections' headings or bold "
+        "labels (to restructure the record on purpose, use edit_file)"
+    )
+
+
 def apply_replace_section(cs: ChangeSet, change: dict[str, Any]) -> None:
     change_keys(change, ("record", "section", "text", "expected_hash"))
     rel, schema = find_record(cs, change["record"])
@@ -5916,8 +6106,9 @@ def apply_replace_section(cs: ChangeSet, change: dict[str, Any]) -> None:
     current = section_hash(body[slice(*spans[0])]) if spans else None
     if expected != current:
         raise ChangeSetError(
-            f"{rel}: {name} has hash {current or 'none (absent)'}, "
-            f"expected {expected or 'none (absent)'}",
+            f"{rel}: {name} has changed since the hash you passed was read: "
+            f"its hash is now {current or 'none (the section is absent)'}, "
+            f"not {expected or 'none (absent)'}",
             "precondition",
         )
     if text is None and spec.required:
@@ -5926,6 +6117,13 @@ def apply_replace_section(cs: ChangeSet, change: dict[str, Any]) -> None:
     replacement = None
     if text is not None:
         text = text.strip()
+        stripped = strip_own_heading(text, name)
+        if stripped is not None:
+            text = stripped
+            cs.notes.append(
+                f"{rel}: the text for {name} began with its own heading or "
+                "label, which was dropped; send the section body only"
+            )
         if spec.form == "run-in":
             block = "\n" in text or text.startswith("1.")
             label = f"**{name}:**"
@@ -5950,10 +6148,7 @@ def apply_replace_section(cs: ChangeSet, change: dict[str, Any]) -> None:
     expected_counts = section_counts(body, schema)
     expected_counts[name] = 0 if replacement is None else 1
     if section_counts(format_markdown(new_body), schema) != expected_counts:
-        raise ChangeSetError(
-            f"text for {name} would add or remove other sections of {rel}; "
-            "supply the section body only, without its heading or run-in label"
-        )
+        raise ChangeSetError(section_bleed_message(rel, name, text or "", schema))
     cs.touch(rel)
     cs.snap.write_markdown(rel, join_record(data, new_body))
     cs.sections.append((rel, schema, name))
@@ -6037,7 +6232,8 @@ def apply_write_file(cs: ChangeSet, change: dict[str, Any]) -> None:
         )
     if (expected or "").lower() != (current or ""):
         raise ChangeSetError(
-            f"{rel}: blob is {current or 'none (absent)'}, expected {expected}",
+            f"{rel}: blob is now {current or 'none (absent)'}, not {expected}; "
+            "the file changed since you read it",
             "precondition",
         )
     try:
@@ -6069,7 +6265,9 @@ def apply_delete_file(cs: ChangeSet, change: dict[str, Any]) -> None:
         raise ChangeSetError(f"{rel}: no such file", "precondition")
     if expected.lower() != current:
         raise ChangeSetError(
-            f"{rel}: blob is {current}, expected {expected}", "precondition"
+            f"{rel}: blob is now {current}, not {expected}; the file changed "
+            "since you read it",
+            "precondition",
         )
     cs.snap.delete(rel)
 
@@ -6244,7 +6442,9 @@ def apply_edit_file(cs: ChangeSet, change: dict[str, Any]) -> None:
         )
     if expected is not None and expected.lower() != git_blob_sha(data):
         raise ChangeSetError(
-            f"{rel}: blob is {git_blob_sha(data)}, expected {expected}", "precondition"
+            f"{rel}: blob is now {git_blob_sha(data)}, not {expected}; the file "
+            "changed since you read it",
+            "precondition",
         )
 
     count = content.count(old)
@@ -6256,8 +6456,16 @@ def apply_edit_file(cs: ChangeSet, change: dict[str, Any]) -> None:
             count = content.count(old)
     if count == 0:
         hint = edit_near_miss(content, old)
+        advice = (
+            "; records are reformatted when written (Markdown, wrapped at 80 "
+            "columns), so copy old_string from the file as it is now (read "
+            "it again, or quote the text an earlier edit returned), not from "
+            "text you sent before"
+            if schema is not None
+            else ""
+        )
         raise ChangeSetError(
-            f"{rel}: old_string not found"
+            f"{rel}: old_string not found{advice}"
             + (f"; the closest text:\n{hint}" if hint else "; check whitespace"),
             "precondition",
         )
@@ -6402,7 +6610,14 @@ def validate_change_set(cs: ChangeSet) -> list[str]:
 
 
 def unknown_change(cs: ChangeSet, change: Any) -> None:
-    raise ChangeSetError(f"op must be one of: {', '.join(CHANGE_OPS)}")
+    if not isinstance(change, dict):
+        raise ChangeSetError("each change must be an object with an 'op' key")
+    given = "has no 'op' key" if "op" not in change else f"op {change['op']!r}"
+    raise ChangeSetError(
+        f"{given}; op must be one of: {', '.join(CHANGE_OPS)}, as in "
+        '{"op": "replace_section", "record": "TASK-XXXXX", "section": '
+        '"Findings", "text": "...", "expected_hash": "<hash from get_task>"}'
+    )
 
 
 CHANGE_HANDLERS: dict[str, Callable[[ChangeSet, dict[str, Any]], None]] = {
@@ -6441,7 +6656,8 @@ def apply_change_set(
         try:
             (handler or unknown_change)(cs, change)
         except ChangeSetError as e:
-            raise ChangeSetError(f"change {i} ({op}): {e}", e.kind) from None
+            where = f"change {i} ({op})" if isinstance(op, str) else f"change {i}"
+            raise ChangeSetError(f"{where}: {e}", e.kind) from None
     if conversation is not None:
         touched = [
             r for r in get_task_rows(cs.snap) if r.rel_path in cs.before and r.task_id
@@ -6484,7 +6700,8 @@ def change_set_result(cs: ChangeSet) -> dict[str, Any]:
     replacements, the lines of the first, and the file's lines afterwards,
     and, when formatting changed those lines, their text as it now stands
     (up to EDIT_TEXT_MAX_BYTES). Each section replace_section or a task
-    create wrote is listed with its new hash, ready for the next write.
+    create wrote is listed with its new hash, then every other section of
+    each task and STATUS.md the set changed, ready for the next write.
     """
     files = []
     for rel, (before, after) in cs.snap.diff().items():
@@ -6548,10 +6765,32 @@ def change_set_result(cs: ChangeSet) -> dict[str, Any]:
                         entry["text_omitted"] = True
             edits_out.append(entry)
         result["edits"] = edits_out
-    if cs.sections:
+    # Every section of each task and STATUS.md the set changed, so that the
+    # next write can name its current hash whichever section it edits:
+    # formatting a record can change sections the set did not write.
+    written = [(rel, schema, name) for rel, schema, name in cs.sections]
+    for rel, (_, after) in cs.snap.diff().items():
+        parts = rel.split("/")
+        if after is None:
+            continue
+        if len(parts) == 3 and parts[1] == "tasks" and rel.endswith(".md"):
+            schema = TASK_SCHEMA
+        elif len(parts) == 2 and parts[1] == "STATUS.md":
+            schema = STATUS_SCHEMA
+        else:
+            continue
+        written += [
+            (rel, schema, s.name)
+            for s in schema.sections
+            if s.form not in ("title", "generated")
+        ]
+    if written:
         ids = {r.rel_path: r.task_id for r in cs.rows or [] if r.task_id}
         latest: dict[tuple[str, str], str | None] = {}
-        for rel, schema, name in cs.sections:
+        explicit = {(rel, name) for rel, _, name in cs.sections}
+        for rel, schema, name in written:
+            if (rel, name) in latest:
+                continue
             hashes = [
                 s["hash"]
                 for s in (
@@ -6561,6 +6800,8 @@ def change_set_result(cs: ChangeSet) -> dict[str, Any]:
                 )
                 if s["name"] == name
             ]
+            if not hashes and (rel, name) not in explicit:
+                continue
             latest[(rel, name)] = hashes[0] if len(hashes) == 1 else None
         result["sections"] = [
             {"record": ids.get(rel, rel), "section": name, "hash": h}
@@ -7574,12 +7815,16 @@ def status_projection(
 
 
 def handoff_payload(
-    snap: TreeSnapshot, t: HandoffTarget, as_of: dict[str, Any]
+    snap: TreeSnapshot, t: HandoffTarget, as_of: dict[str, Any], mcp: bool = False
 ) -> dict[str, Any]:
     """Everything an agent reads before starting on T, in one object.
 
     The note stays the short pointer a person pastes; the files it names
-    ride beside it verbatim, as SNAP holds them.
+    ride beside it verbatim, as SNAP holds them. For an MCP caller (MCP),
+    who has no shell and already holds those files here, the note does not
+    send it to read them, the guide adds the writing rules the server
+    instructions leave out, and root AGENTS.md is reduced to the
+    repository's local policy, outside the managed block.
     """
     project = t.project
     all_rows = get_task_rows(snap)
@@ -7594,10 +7839,24 @@ def handoff_payload(
         source = f"the working tree (HEAD is {snap.rev[:12]})"
     else:
         source = "the working tree"
-    note += (
-        "\n\nThese paths are in the taskgo control repository; this payload "
-        f"carries them as of {source}.\n\n{MCP_DATA_CARE}"
-    )
+    has_plan = snap.is_file(f"{project}/PLAN.md")
+    if mcp:
+        # Its last paragraph sends the reader to files this payload holds.
+        paragraphs = note.split("\n\n")
+        if len(paragraphs) > 1 and paragraphs[-1].startswith("Read "):
+            paragraphs.pop()
+        note = "\n\n".join(paragraphs) + (
+            f"\n\nThis payload holds the project's files and tasks as of {source}, "
+            "with the section hashes writes need; act on it without reading "
+            "them again."
+        )
+        if not has_plan:
+            note += f" {project} has no PLAN.md."
+    else:
+        note += (
+            "\n\nThese paths are in the taskgo control repository; this payload "
+            f"carries them as of {source}.\n\n{MCP_DATA_CARE}"
+        )
     readme = handoff_file(snap, t.readme) if t.readme else None
     status_rel = f"{project}/STATUS.md"
     status = handoff_file(snap, status_rel) or {
@@ -7631,7 +7890,7 @@ def handoff_payload(
             else None
         ),
         "note": note,
-        "guide": MCP_GUIDE,
+        **({"guide": MCP_GUIDE} if mcp else {}),
         "findings": [{"severity": s, "message": m} for s, m in t.findings],
         "unverified_gates": unverified_gates(proj_rows),
         "frontmatter": (
@@ -7641,13 +7900,23 @@ def handoff_payload(
         "readme": readme,
         "status": status,
         "plan": handoff_file(snap, f"{project}/PLAN.md"),
-        "agents_md": handoff_file(snap, "AGENTS.md"),
+        **handoff_agents(snap, mcp),
         "tasks": {
             "in_progress": [task_row_json(r) for r in in_progress],
             "blocked": [task_row_json(r) for r in blocked],
             "ready": [task_row_json(r) for r in ready],
         },
     }
+
+
+def handoff_agents(snap: TreeSnapshot, mcp: bool) -> dict[str, Any]:
+    """Root AGENTS.md for a handoff: verbatim for the CLI; for an MCP
+    caller, only the repository's local policy, and nothing without one."""
+    if not mcp:
+        return {"agents_md": handoff_file(snap, "AGENTS.md")}
+    text = snap.read_text("AGENTS.md") if snap.is_file("AGENTS.md") else ""
+    policy = agents_local_policy(text) if text else None
+    return {"local_policy": policy} if policy else {}
 
 
 def tree_snapshot(root: Path, at: str | None) -> TreeSnapshot:
@@ -7764,12 +8033,9 @@ def cmd_doctor(
         print(
             _tagged(
                 """[INFO]  Agent semantic review
-        Check STATUS Summary is rewritten current state (not a session log) and matches tasks/Next.
-        Check active conversation ID ([<conversation-id>](<agent>://<conversation-id>)) is recorded in STATUS.md Summary or task Outcome.
-        Check PLAN is current direction, not accumulated history.
-        Check README/ADRs link to artifact or skill owners rather than copying their facts.
-        Check private tracker material has not leaked to public/shared artifacts.
-        After merges, check reconciled files express one coherent current state."""
+        STATUS Summary says where the project stands now, in a few sentences; Next is the next few actions.
+        PLAN is the current direction; README and ADRs link to owners rather than copying facts.
+        No tracker material has leaked into public or shared artifacts."""
             )
         )
 
@@ -7984,12 +8250,7 @@ def cmd_fix(
         print(f"SUMMARY: {commit_msg.strip()}")
 
 
-_BUG_URI_RE = re.compile(r"^b/(\d+)$", re.IGNORECASE)
-_CL_URI_RE = re.compile(r"^cl/(\d+)$", re.IGNORECASE)
 _GH_URI_RE = re.compile(r"^gh:([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#(\d+)$", re.IGNORECASE)
-
-_BUG_TERMINAL_STATES = {"FIXED", "WONT_FIX", "DUPLICATE", "OBSOLETE"}
-_CL_TERMINAL_STATES = {"MERGED", "SUBMITTED", "ABANDONED"}
 _GH_TERMINAL_STATES = {"CLOSED", "MERGED"}
 
 
@@ -8021,7 +8282,7 @@ def _is_offline() -> bool:
 
 
 def parse_iso_timestamp(value: Any) -> datetime | None:
-    """Parses an ISO 8601 or Perforce timestamp string into an aware UTC datetime."""
+    """Parses an ISO 8601 timestamp string into an aware UTC datetime."""
     if value is None or isinstance(value, bool):
         return None
     if isinstance(value, datetime):
@@ -8029,9 +8290,8 @@ def parse_iso_timestamp(value: Any) -> datetime | None:
     s = str(value).strip().strip("'\"")
     if not s:
         return None
-    normalized = re.sub(r"^(\d{4})/(\d{2})/(\d{2})\b", r"\1-\2-\3", s)
     try:
-        dt = datetime.fromisoformat(normalized)
+        dt = datetime.fromisoformat(s)
         return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
     except ValueError:
         return None
@@ -8105,77 +8365,13 @@ def _run_probe_cmd(cmd: list[str], timeout_sec: float = 10.0) -> str | None:
 def poll_external_uri(
     gate: str,
 ) -> tuple[str, bool, datetime | None, str | None] | None:
-    """Polls an external wait_for URI (`b/<id>`, `cl/<id>`, `gh:owner/repo#num`).
+    """Polls an external wait_for gate: gh:owner/repo#N with the gh CLI.
 
-    Returns `(canonical_status, is_terminal, modified_dt, modified_str)`, or `None`
-    when `gate` is not an external URI or when corp/network tools are unavailable.
+    Returns `(canonical_status, is_terminal, modified_dt, modified_str)`, or
+    `None` when the gate is not polled, offline, or gh is missing or fails.
     """
     if _is_offline():
         return None
-
-    if m_bug := _BUG_URI_RE.match(gate):
-        issues_bin = shutil.which("issues")
-        if not issues_bin:
-            default_issues = Path("/google/bin/releases/issues-cli/issues")
-            if default_issues.is_file() and os.access(default_issues, os.X_OK):
-                issues_bin = str(default_issues)
-        if not issues_bin:
-            return None
-        out = _run_probe_cmd(
-            [issues_bin, "readonly", "get-issue-metadata", m_bug.group(1)]
-        )
-        if out is None:
-            return None
-        raw_status: str | None = None
-        raw_mod: str | None = None
-        for line in out.splitlines():
-            key, sep, val = line.partition(":")
-            if not sep:
-                continue
-            k = key.strip().lower()
-            v = val.strip()
-            if k == "status":
-                raw_status = v
-            elif k == "last modified":
-                raw_mod = v
-        if not raw_status and not raw_mod:
-            return None
-        norm_status = (raw_status or "OPEN").upper().replace("-", "_").replace(" ", "_")
-        if norm_status == "WONTFIX":
-            norm_status = "WONT_FIX"
-        return (
-            norm_status,
-            norm_status in _BUG_TERMINAL_STATES,
-            parse_iso_timestamp(raw_mod),
-            raw_mod,
-        )
-
-    if m_cl := _CL_URI_RE.match(gate):
-        g4_bin = shutil.which("g4")
-        if not g4_bin:
-            return None
-        out = _run_probe_cmd([g4_bin, "describe", "-s", m_cl.group(1)])
-        if out is None:
-            return None
-        first_line = next((ln.strip() for ln in out.splitlines() if ln.strip()), "")
-        m_redir = re.match(r"^Change\s+\d+\s+is\s+([A-Za-z_-]+)", first_line)
-        if m_redir:
-            norm_status = m_redir.group(1).upper().replace("-", "_")
-            return norm_status, norm_status in _CL_TERMINAL_STATES, None, None
-        m_hdr = re.match(
-            r"^Change\s+\d+\s+by\s+\S+\s+on\s+(\d{4}/\d{2}/\d{2}\s+\d{2}:\d{2}:\d{2})(?:\s+\*([^*]+)\*)?",
-            first_line,
-        )
-        if not m_hdr:
-            return None
-        raw_mod = m_hdr.group(1)
-        norm_status = (m_hdr.group(2) or "SUBMITTED").strip().upper().replace("-", "_")
-        return (
-            norm_status,
-            norm_status in _CL_TERMINAL_STATES,
-            parse_iso_timestamp(raw_mod),
-            raw_mod,
-        )
 
     if m_gh := _GH_URI_RE.match(gate):
         gh_bin = shutil.which("gh")
@@ -8946,6 +9142,108 @@ def cmd_search(tokens: list[str]) -> None:
     sys.exit(0 if matched else 1)
 
 
+# A STATUS.md Summary says where the project stands now, for a reader
+# arriving cold, in a few sentences (about 800 characters). Past this much
+# prose, doctor and the writes that set it advise a rewrite; never blocking.
+SUMMARY_ADVISORY_CHARS = 1200
+
+
+def summary_length_advice(rel: str, content: str) -> str | None:
+    """Advice when the Summary of STATUS.md CONTENT (at REL) has grown past
+    SUMMARY_ADVISORY_CHARS of prose, link targets aside; None otherwise."""
+    texts = [
+        s["text"]
+        for s in record_sections(content, STATUS_SCHEMA)
+        if s["name"] == "Summary"
+    ]
+    if not texts:
+        return None
+    prose = texts[0].partition("\n")[2]
+    prose = re.sub(r"\]\([^)]*\)", "]", prose)
+    size = len(" ".join(prose.split()))
+    if size <= SUMMARY_ADVISORY_CHARS:
+        return None
+    return (
+        f"{rel}: Summary is {size} characters; rewrite it whole as where the "
+        "project stands now, in a few sentences (about 800 characters): what "
+        "it is, its state, what is in flight, what blocks it. Delete sentences "
+        "about finished work; done tasks and Git history keep them"
+    )
+
+
+def is_formatted_record(rel: str) -> bool:
+    """True when REL is Markdown taskgo formats: a project record (README,
+    PROJECT, STATUS, a task or decision) or a formatted root record."""
+    return is_record_file(rel) or rel in FORMATTED_ROOT_RECORDS
+
+
+def format_records(root: Path, rels: list[str]) -> list[str]:
+    """Formats the tracker records among RELS in the working tree, as edit
+    does; returns the ones that changed. A file that cannot be formatted
+    (such as broken frontmatter) is left for doctor to report."""
+    changed = []
+    for rel in rels:
+        path = root / rel
+        if not is_formatted_record(rel) or path.is_symlink() or not path.is_file():
+            continue
+        try:
+            current = path.read_text(encoding="utf-8")
+            formatted = format_markdown(current)
+        except Exception as e:
+            print(
+                _tagged(f"[WARN]  {rel}: not formatted: {e}", sys.stderr),
+                file=sys.stderr,
+            )
+            continue
+        if formatted != current:
+            atomic_write(path, formatted)
+            changed.append(rel)
+    return changed
+
+
+def commit_gate(root: Path, project: str, files: list[str], scope: str) -> None:
+    """Refuses a commit of FILES in PROJECT that doctor finds broken.
+
+    Only WARN and FAIL findings on the files being committed block, so one
+    old or unrelated record never holds up the rest. Schedule findings
+    (overdue, due soon, stale_after, cleared gates) never block, and nor
+    does a stale STATUS.md task block, which the commit regenerates. Every
+    other finding in the project is counted in one line, not refused.
+    """
+    committed = set(files)
+    findings = [
+        f
+        for f in audit_workspace(root, project)
+        if f.severity in ("WARN", "FAIL") and f.category != "schedule"
+    ]
+    blocking = [
+        f
+        for f in findings
+        if f.path in committed
+        and not (f.category == "status" and f.remediation is not None)
+    ]
+    others = len(findings) - len(blocking)
+    if others:
+        print(
+            _tagged(
+                f"[INFO]  {others} other finding(s) in {project}; run taskgo "
+                f"doctor {project}",
+                sys.stderr,
+            ),
+            file=sys.stderr,
+        )
+    if blocking:
+        for f in blocking:
+            print(
+                _tagged(f"[{f.severity}]".ljust(8) + f.message, sys.stderr),
+                file=sys.stderr,
+            )
+        die(
+            f"{scope}: doctor found errors in the files to commit; fix them, "
+            "or leave those files out"
+        )
+
+
 def cmd_checkpoint(
     task_id: str,
     subject: str,
@@ -8955,7 +9253,10 @@ def cmd_checkpoint(
     refs: list[str] | None = None,
     conv: str | None = None,
 ) -> None:
-    """Commit an authorized tracker checkpoint for TASK_ID."""
+    """Commit an authorized tracker checkpoint for TASK_ID.
+
+    Staged tracker records are formatted first, as edit formats them.
+    """
     paths_list = paths or []
     refs_list = refs or []
     session = get_active_session(conv)
@@ -8964,6 +9265,7 @@ def cmd_checkpoint(
     root = get_repo_root()
     if not ID_PATTERN.match(task_id):
         die(f"checkpoint: invalid task ID: {task_id}")
+    subject_or_die(subject, None, "checkpoint", warn=False)
 
     with repo_lock(root):
         # Index must be empty before pre-sync (--autostash would unstage staged changes)
@@ -9048,20 +9350,10 @@ def cmd_checkpoint(
             )
             die(f"checkpoint: unlisted project change: {unlisted[0]}")
 
-        # Run doctor in-process (ignore schedule advisories like overdue/stale tasks)
-        findings = audit_workspace(root, project_name)
-        blocking = [
-            f
-            for f in findings
-            if f.severity in ("WARN", "FAIL") and f.category != "schedule"
-        ]
-        if blocking:
-            for f in blocking:
-                print(
-                    _tagged(f"[{f.severity}]".ljust(8) + f.message, sys.stderr),
-                    file=sys.stderr,
-                )
-            die("checkpoint: doctor found errors")
+        # Format the records about to be committed, as edit does.
+        format_records(root, requested)
+
+        commit_gate(root, project_name, requested, "checkpoint")
 
         if session:
             scheme, c_id = session
@@ -9098,7 +9390,7 @@ def cmd_checkpoint(
                 if sf and sf not in requested:
                     die(f"checkpoint: refused staged path: {sf}")
 
-            subject = ensure_conventional_subject(subject, project_name)
+            subject = subject_or_die(subject, project_name, "checkpoint")
             wrapped_body = wrap_body(body)
             if body and wrapped_body != body:
                 print(
@@ -9136,10 +9428,15 @@ def cmd_commit(
     refs: list[str] | None = None,
     conv: str | None = None,
 ) -> None:
-    """Commit a logical transition with automatic project status synchronization."""
+    """Commit a logical transition with automatic project status synchronization.
+
+    Staged tracker records are formatted and re-staged, unless they also
+    have unstaged changes.
+    """
     refs_list = refs or []
     session = get_active_session(conv)
     conv_uri = f"{session[0]}://{session[1]}" if session else None
+    subject_or_die(subject, None, "commit", warn=False)
     root = get_repo_root()
     with repo_lock(root):
         diff_cached = run_git(["diff", "--cached", "--quiet"], check=False)
@@ -9170,22 +9467,22 @@ def cmd_commit(
         if len(projects) > 1:
             die("staged changes touch multiple projects")
 
+        # Format the staged records, as edit does. A file with unstaged
+        # changes too is left alone: re-staging it would commit them.
+        formattable = [
+            f
+            for f in staged_files
+            if is_formatted_record(f)
+            and run_git(["diff", "--quiet", "--", f], check=False).returncode == 0
+        ]
+        reformatted = format_records(root, formattable)
+        if reformatted:
+            run_git(["add", "--", *reformatted])
+
         if projects:
             project_name = next(iter(projects))
             require_project(snap, project_name)
-            findings = audit_workspace(root, project_name)
-            blocking = [
-                f
-                for f in findings
-                if f.severity in ("WARN", "FAIL") and f.category != "schedule"
-            ]
-            if blocking:
-                for f in blocking:
-                    print(
-                        _tagged(f"[{f.severity}]".ljust(8) + f.message, sys.stderr),
-                        file=sys.stderr,
-                    )
-                die("doctor found errors")
+            commit_gate(root, project_name, staged_files, "commit")
             if session:
                 scheme, c_id = session
                 for sf in staged_files:
@@ -9223,7 +9520,7 @@ def cmd_commit(
                 run_git(["add", f"{project_name}/STATUS.md"])
 
         project_for_scope = next(iter(projects)) if projects else None
-        subject = ensure_conventional_subject(subject, project_for_scope)
+        subject = subject_or_die(subject, project_for_scope, "commit")
         wrapped_body = wrap_body(body)
         if body and wrapped_body != body:
             print(
@@ -9262,48 +9559,39 @@ MCP_DATA_CARE = (
     "be public. Describe the work there in your own words, from the code."
 )
 
-# The handoff payload's guide: the skill's rules that writes through the
-# server most often miss, in the server's terms. The skill's references stay
-# the specification; keep this a digest of them.
-MCP_GUIDE = f"""\
-Keeping the tracker through these tools. The taskgo skill is the full
-specification; these are the rules writes most often miss.
-
-Current truth, not a log. Files say what is true now; Git keeps the history.
-Rewrite STATUS.md Summary and Next (replace_section) to the new state instead
-of adding a paragraph per session, and keep a task's Findings to what is now
-known, not a dated account of each step. Never add frontmatter fields such as
-created or updated.
-
-Tasks. The title is an imperative verb phrase; Goal says what should be true
-once done, and Criteria the observable end condition. Before work that may
-span sessions, set status in-progress. blocked_by goes on the task that is
-held, never on its blocker; wait_for holds external gates (a date, b/123,
-gh:owner/repo#1, @person, a URL), or, when none fits, one line saying what the
-task waits for; whoever sees it met removes it.
-
-Completing a task: set status done with an Outcome that gives a verdict
-against each criterion, then what shipped, with https URLs. Keep Problem,
-Cost, Goal, and Criteria as written; Outcome and Findings replace Sketch and
-Constraints; Next holds follow-ups.
-
-Before you stop: the task and STATUS.md Summary and Next say where things
-stand, so that a reader with nothing else can resume. Change the project
-README.md only if its identity, map, or standing rules changed.
-
-Attribution: pass conversation on every write, as <agent>://<session-id>
-with <agent> one of {", ".join(CANONICAL_AGENTS)} (claude for Claude Code).
-
-Where the skill names CLI steps: each write is one commit, so there is no
-checkpoint or commit step; STATUS.md task blocks are regenerated on every
-write, so there is no sync; --conv is the conversation argument; and in
-place of doctor, each write returns findings on what it touched. A new
-project is one create of kind project. Repairs across many files (fix,
-renames) are the CLI's: report what needs one instead of working around it."""
+# The handoff payload's guide for MCP callers: the skill's rules that writes
+# through the server most often miss, beyond those the server instructions
+# already give. The skill's references stay the specification; keep this a
+# digest of them.
+MCP_GUIDE = """\
+More rules for keeping the tracker (the server instructions give the rest):
+- Goal says what should be true once done; Criteria, the observable end
+  condition. Keep Problem, Cost, Goal, and Criteria as written. On done,
+  Outcome and Findings replace Sketch and Constraints; Next holds follow-ups.
+- Set status in-progress before work that may span sessions.
+- wait_for holds external gates (a date, WORD/ID such as issue/123,
+  gh:owner/repo#1, @person, a URL) or one line naming what the task waits
+  for; whoever sees it met removes it.
+- Findings say what is known now, not a dated account of each step.
+- Before you stop, make the task and STATUS.md Summary and Next say where
+  things stand. Change README.md only if the project's identity, map, or
+  standing rules changed.
+- skills names agent skills the project expects: activate them if your
+  harness has a skill manager; otherwise ignore them.
+- Repairs across many files (renames, format fixes) need the CLI: report
+  them rather than working around them."""
 
 
 class McpToolError(Exception):
     """A refusal reported to the MCP client as a tool error."""
+
+
+class CommitSubjectError(TaskgoError, McpToolError):
+    """A commit subject taskgo refuses (empty or over SUBJECT_MAX_LEN).
+
+    A TaskgoError, so the CLI dies with it, and an McpToolError, so the MCP
+    server returns its message as a tool error rather than an internal one.
+    """
 
 
 def skill_root() -> Path | None:
@@ -9421,30 +9709,40 @@ def help_text() -> str:
     root_dir, source = resolve_root_candidate()
     return f"""Usage: taskgo COMMAND [OPTIONS]
 
-Maintain a private Git-backed personal project/task control repo.
+Maintain a private Git-backed project/task control repo.
 
-Commands:
-  id                               Allocate a unique task ID
-  root                             Print the active control repository root
+Start:
+  handoff PROJECT|TASK_ID          Print agent instructions for a project or task
+  skills PROJECT [--json]          Print the skills a project declares
+
+Tasks:
   create PROJECT TITLE [OPTIONS]   Create a new task (--slug, --problem, etc.)
   update TASK_ID [OPTIONS]         Update task fields, status, or headings
   apply CHANGES.json [--dry-run]   Apply a change set to the working tree
   edit PATH [OPTIONS]              Replace exact text in a file (--old, --new)
+  id                               Allocate a unique task ID
+
+Read:
+  status [PROJECT|TASK_ID]         Show a task's or project's status
   list [PROJECT] [OPTIONS]         List tasks (--state ready for the frontier)
   info PROJECT [--json]            Show project metadata from README.md frontmatter
-  skills PROJECT [--json]          Print the skills a project declares
-  status [PROJECT|TASK_ID]         Show a task's or project's status
-  handoff PROJECT|TASK_ID          Print agent instructions for a project or task
-  sync [PROJECT]                   Update STATUS.md snapshot
-  check [PROJECT] [--json]         Sweep wait_for gates and date horizons
-  doctor [PROJECT]                 Run mechanical checks (read-only)
-  fix [PROJECT] [OPTIONS]          Auto-heal IDs, statuses, and snapshots
-  history PATH_OR_TASK_ID [FIELD]  Show frontmatter history
   read PATH [OPTIONS]              Print lines of a file (--start-line, --end-line)
   search [OPTIONS] GREP_ARGS...    Search file contents with git grep (--at, --json)
-  checkpoint TASK_ID SUBJECT [...] Commit an authorized tracker checkpoint (--all)
-  commit SUBJECT [OPTIONS]         Commit a logical transition
+  history PATH_OR_TASK_ID [FIELD]  Show frontmatter history
   schema [--json]                  Show the task, decision, and STATUS schema
+  root                             Print the active control repository root
+
+Commit:
+  checkpoint TASK_ID SUBJECT [...] Commit a task's changes (--all, --path)
+  commit SUBJECT [OPTIONS]         Commit what is staged, with STATUS.md synced
+
+Health:
+  doctor [PROJECT]                 Run mechanical checks (read-only)
+  fix [PROJECT] [OPTIONS]          Auto-heal IDs, statuses, snapshots, AGENTS.md
+  sync [PROJECT]                   Update STATUS.md snapshot
+  check [PROJECT] [--json]         Sweep wait_for gates and date horizons
+
+Server:
   mcp [OPTIONS]                    Serve the tracker to MCP clients
 
 Options:
@@ -9464,13 +9762,17 @@ Examples:
   taskgo create my-project "Add cache layer" --slug cache-layer --problem "High latency"
   taskgo update TASK-3A91F --status in-progress --sketch "Use in-memory dict"
   taskgo handoff TASK-3A91F
-  taskgo sync my-project
-  taskgo fix my-project
-  taskgo checkpoint TASK-3A91F "project: start diagnosis" --all"""
+  taskgo update TASK-3A91F --status done --outcome "Cache cut p99 to 8 ms"
+  taskgo checkpoint TASK-3A91F "feat(my-project): add cache" --all
+  taskgo fix my-project"""
 
 
 def add_set_field_options(parser: argparse.ArgumentParser, removable: bool) -> None:
-    """Adds --add-FIELD (and --remove-FIELD) options for the task set fields."""
+    """Adds --add-FIELD (and --remove-FIELD) options for the task set fields.
+
+    These change single values and keep the rest of the list; --set-wait-for
+    is the one option that replaces a whole list.
+    """
     for spec in TASK_SCHEMA.set_fields():
         if spec.option is None:
             continue
@@ -9481,7 +9783,10 @@ def add_set_field_options(parser: argparse.ArgumentParser, removable: bool) -> N
             action="append",
             default=None,
             metavar=vt.metavar,
-            help=f"Add to {spec.name} (repeatable; repeats are no-ops)",
+            help=(
+                f"Add one value to {spec.name}, keeping the others "
+                "(repeatable; repeats are no-ops)"
+            ),
         )
         if removable:
             parser.add_argument(
@@ -9490,7 +9795,10 @@ def add_set_field_options(parser: argparse.ArgumentParser, removable: bool) -> N
                 action="append",
                 default=None,
                 metavar=vt.metavar,
-                help=f"Remove from {spec.name} (repeatable; absent values are no-ops)",
+                help=(
+                    f"Remove one value from {spec.name}, keeping the others "
+                    "(repeatable; absent values are no-ops)"
+                ),
             )
 
 
@@ -9510,14 +9818,22 @@ assert tuple(
 ) == tuple(s.key for s in TASK_SCHEMA.sections if s.form != "title")
 
 
-def _add_conv(parser: argparse.ArgumentParser) -> None:
+CONV_HELP_RECORDS = (
+    "This session's conversation ID, for a harness that exports none: "
+    "recorded in the task's conversations and the Conversation: trailer "
+    "(default: the session ID in the environment)"
+)
+
+
+def _add_conv(parser: argparse.ArgumentParser, help_text: str) -> None:
     parser.add_argument(
         "--conv",
         "-C",
         "--conversation",
         dest="conv",
         default=None,
-        help="Active conversation or session ID",
+        metavar="ID",
+        help=help_text,
     )
 
 
@@ -9549,24 +9865,57 @@ def _add_project(
     parser.add_argument("project", **kw)
 
 
+GATE_FORMS = (
+    "YYYY-MM-DD, gh:OWNER/REPO#N, WORD/ID such as issue/123, @handle, URL, or free text"
+)
+
+
 def _add_task_edit_options(parser: argparse.ArgumentParser, *, removable: bool) -> None:
     for flags, help_text, dest in _TASK_SECTION_OPTIONS:
         kw: dict[str, Any] = {"default": None, "help": help_text}
         if dest:
             kw["dest"] = dest
         parser.add_argument(*flags, **kw)
-    _add_conv(parser)
-    parser.add_argument(
-        "--wait-for",
-        dest="wait_for",
-        action="append",
-        default=None,
-        metavar="GATE",
-        help=(
-            "External or temporal gate (YYYY-MM-DD, b/..., cl/..., gh:..., "
-            "@handle, URL, or free text)"
-        ),
-    )
+    if removable:
+        # update: --conv only adds; it does not read the environment.
+        _add_conv(
+            parser,
+            "Add ID to the task's conversations, like --add-conversation "
+            "(update does not read the session ID from the environment)",
+        )
+        parser.add_argument(
+            "--set-wait-for",
+            dest="wait_for",
+            action="append",
+            default=None,
+            metavar="GATE",
+            help=(
+                "Replace the whole wait_for list (repeatable; '' clears it); "
+                f"GATE is {GATE_FORMS}"
+            ),
+        )
+        # The old name of --set-wait-for, kept working for existing callers.
+        parser.add_argument(
+            "--wait-for",
+            dest="wait_for",
+            action="append",
+            default=None,
+            help=argparse.SUPPRESS,
+        )
+    else:
+        _add_conv(
+            parser,
+            "Record ID as the creating session, for a harness that exports "
+            "none (default: the session ID in the environment)",
+        )
+        parser.add_argument(
+            "--wait-for",
+            dest="wait_for",
+            action="append",
+            default=None,
+            metavar="GATE",
+            help=f"Initial gate (repeatable; same as --add-wait-for); GATE is {GATE_FORMS}",
+        )
     parser.add_argument(
         "--due",
         default=None,
@@ -9598,13 +9947,13 @@ def _add_commit_options(parser: argparse.ArgumentParser) -> None:
         default=[],
         help="External references (e.g. artifact@sha)",
     )
-    _add_conv(parser)
+    _add_conv(parser, CONV_HELP_RECORDS)
 
 
 def create_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="taskgo",
-        description="Maintain a private Git-backed personal project/task control repo.",
+        description="Maintain a private Git-backed project/task control repo.",
         formatter_class=HouseStyleHelpFormatter,
         add_help=False,
     )
@@ -9706,7 +10055,13 @@ than a few words.""",
   taskgo update TASK-3A91F --status in-progress
   taskgo update TASK-3A91F --expect-status todo --status in-progress
   taskgo update TASK-3A91F --add-blocked-by TASK-1627D --remove-wait-for 2026-10-13
-  taskgo update TASK-3A91F --sketch "Use in-memory dict" --findings "Latency reduced by 40%" """,
+  taskgo update TASK-3A91F --sketch "Use in-memory dict" --findings "Latency reduced by 40%"
+  taskgo update TASK-3A91F --status done --outcome "Cache cut p99 latency to 8 ms"
+  taskgo update TASK-3A91F --set-wait-for 2026-12-01 --set-wait-for issue/123
+
+List fields: --add-FIELD and --remove-FIELD change one value and keep the rest.
+--set-wait-for replaces the whole wait_for list ('' clears it). --conv adds one
+conversation, like --add-conversation.""",
     )
     p_update.add_argument("query", metavar="TASK_ID", help="Task ID or relative path")
     p_update.add_argument("--status", "-s", default=None, help="New task state")
@@ -9748,7 +10103,7 @@ than a few words.""",
             '    {"op": "set", "record": "TASK-3A91F", "field": "status",\n'
             '     "value": "blocked", "expected": "todo"}\n'
             "  ]}\n\n"
-            "The change-set format is in references/model.md (Change Sets)."
+            "The change-set format is in references/change-sets.md."
         ),
     )
     p_apply.add_argument(
@@ -10138,7 +10493,7 @@ task file's Git commit watermark, emitting nothing when no tasks trigger.""",
         epilog="""Examples:
   taskgo search TASK-084C7
   taskgo search -i -C2 'partner name' -- meta/ '*.md'
-  taskgo search -l -e b/123456 -e cl/123456
+  taskgo search -l -e issue/123 -e pr/45
   taskgo search -e TODO --and --not -e done --at HEAD~3 --json""",
     )
     _add_at(p_search, "Search commit REV instead of the working tree")
@@ -10154,15 +10509,20 @@ task file's Git commit watermark, emitting nothing when no tasks trigger.""",
         "checkpoint",
         "Commit an authorized tracker checkpoint for TASK_ID",
         (
-            "Commit an authorized tracker checkpoint for TASK_ID. Nonconforming"
-            " subjects are rewritten as 'chore(<project>): <subject>'"
-            " (truncated to 50 characters). Staged paths must belong to"
-            " TASK_ID's project; changes spanning projects (such as moving a"
+            "Commit an authorized tracker checkpoint for TASK_ID. The subject"
+            " must fit in 50 characters: a longer one is refused, with its"
+            " length and the prefix's share, before anything is staged. A"
+            " subject without a known 'type(scope): ' prefix is rewritten as"
+            " 'chore(<project>): <subject>', and refused if that is too long."
+            " Tracker records about to be committed are formatted first."
+            " Staged paths must belong to TASK_ID's project; changes spanning projects (such as moving a"
             " task) need a plain 'git commit'; see references/workflows.md."
         ),
         epilog="""Examples:
   taskgo checkpoint TASK-3A91F "chore(proj): start diagnosis" --all
-  taskgo checkpoint TASK-3A91F "docs(proj): update task" --path proj/tasks/TASK-3A91F-slug.md """,
+  taskgo checkpoint TASK-3A91F "docs(proj): update task" --path proj/tasks/TASK-3A91F-slug.md
+  taskgo checkpoint TASK-3A91F "feat(proj): close cache task" --all \\
+    --ref app@4f2c1d9""",
     )
     p_checkpoint.add_argument("task_id", metavar="TASK_ID", help="Target task ID")
     p_checkpoint.add_argument(
@@ -10170,7 +10530,7 @@ task file's Git commit watermark, emitting nothing when no tasks trigger.""",
         metavar="SUBJECT",
         help=(
             "Conventional Commits subject ('type(scope): description',"
-            " <= 50 chars; rewritten when nonconforming)"
+            " at most 50 characters, never truncated)"
         ),
     )
     p_checkpoint.add_argument(
@@ -10197,13 +10557,22 @@ task file's Git commit watermark, emitting nothing when no tasks trigger.""",
             "Commit a logical transition with automatic project status"
             " synchronization. Staged changes must touch at most one project;"
             " changes spanning projects (such as moving a task) need a plain"
-            " 'git commit'; see references/workflows.md."
+            " 'git commit'; see references/workflows.md. The subject rules are"
+            " checkpoint's: at most 50 characters, refused rather than"
+            " truncated. Staged tracker records are formatted and re-staged"
+            " (not ones that also have unstaged changes)."
         ),
+        epilog="""Examples:
+  git add proj/PLAN.md && taskgo commit "docs(proj): revise plan"
+  git add proj/tasks && taskgo commit "chore(proj): triage" """,
     )
     p_commit.add_argument(
         "subject",
         metavar="SUBJECT",
-        help="Conventional Commits subject line (rewritten when nonconforming)",
+        help=(
+            "Conventional Commits subject ('type(scope): description', at"
+            " most 50 characters, never truncated)"
+        ),
     )
     _add_commit_options(p_commit)
 

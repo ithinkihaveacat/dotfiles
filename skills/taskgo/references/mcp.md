@@ -1,210 +1,136 @@
 # MCP Server
 
+This page is for people who run or change the server. Callers learn everything
+they need from the server itself.
+
 `taskgo mcp` serves a control repository's committed state to MCP clients, and
 writes to it on their behalf. It is for agents that have a checkout of a code
-repository but not of the control repository, such as cloud sessions.
-`taskgo mcp` delegates to `scripts/taskgo-mcp` (discovered via the `SKILL.md`
-sentinel or `TASKGO_SKILL_DIR`), which carries the MCP, HTTP, and JWT
-dependencies and loads `scripts/taskgo` in-process so that the CLI script itself
-stays lightweight and both share the exact same snapshot, audit, and change-set
-implementation. Both `taskgo mcp` and `taskgo-mcp` are listed in
-`permissions/unsafe`.
+repository but not of the control repository, such as cloud sessions. One server
+serves one control repository.
 
-One server serves one control repository.
+`taskgo mcp` delegates to `scripts/taskgo-mcp`, found through the `SKILL.md`
+sentinel or `TASKGO_SKILL_DIR`. That script carries the MCP, HTTP, and JWT
+dependencies and loads `scripts/taskgo` in-process, so both share one snapshot,
+audit, and change-set implementation. Both `taskgo mcp` and `taskgo-mcp` are
+listed in `permissions/unsafe`. `taskgo mcp --help` lists every option; see
+[command-index.md](command-index.md).
 
-## Tools
+## Running the Server
 
-| Tool                 | Returns                                                                                                                          | CLI equivalent                  |
-| -------------------- | -------------------------------------------------------------------------------------------------------------------------------- | ------------------------------- |
-| `list_projects`      | Projects with task counts and in-progress and blocked IDs                                                                        | `taskgo status --json`          |
-| `list_tasks`         | Task rows, by project and state (`ready` included)                                                                               | `taskgo list --json`            |
-| `get_task`           | One task: frontmatter, sections with hashes, unresolved dependencies, Markdown                                                   | `taskgo status TASK_ID --json`  |
-| `get_project_status` | `STATUS.md`, its Summary and Next with hashes, the committed and a freshly computed block                                        | `taskgo status PROJECT`         |
-| `read_file`          | A UTF-8 file, whole or lines `start_line`..`end_line`, up to 256 KiB after a whole line                                          | `taskgo read --json`            |
-| `search_files`       | `git grep` lines and the files they name, up to 64 KiB; allowlisted options                                                      | `taskgo search --json`          |
-| `list_files`         | Files with blob SHAs, optionally under one directory                                                                             | `git ls-files -s`               |
-| `handoff`            | For a project or task: the note, a guide, findings, the files to read first verbatim, the skills, and the active and ready tasks | `taskgo handoff --json`         |
-| `get_task_history`   | Changes of one frontmatter field, following renames                                                                              | `taskgo history`                |
-| `create`             | Creates one task, decision, or project as one commit, and returns what it created and a new task's section hashes                | `taskgo create`, `taskgo apply` |
-| `apply_changes`      | Applies a change set as one commit                                                                                               | `taskgo apply`, commit          |
-| `edit_file`          | Replaces exact text in one file as one commit; reports lines and the new blob                                                    | `taskgo edit`, commit           |
+The official MCP Python SDK speaks the protocol, so the server supports every
+revision the pinned SDK does. The tests cover a 2026-07-28 client, which opens
+with `server/discover`, and a 2025-11-25 client, which opens with `initialize`.
 
-Each call fetches the branch (`main` by default) from the remote (`origin`),
-resolves it once, and reads only that commit, through a Git tree snapshot. It
-never reads the working tree, and changes it only as a `--local` server's write
-does (see [Writing to a checkout](#writing-to-a-checkout)). Every response
-carries `as_of`: the commit read, its commit time, today's date in the
-repository timezone, and `stale: true` when the commit is a head that could not
-be refreshed. Passing `as_of.commit` back as `at` keeps several calls on one
-commit, and skips the fetch when that commit is already present.
+**HTTP.** By default the server speaks MCP Streamable HTTP on
+`127.0.0.1:8789/mcp` (`--host`, `--port`, `--path`), statelessly: each POST
+carries one JSON-RPC message and gets one JSON response. There is no
+server-initiated stream and no session, so other methods on the endpoint get
+405\. `GET /up` answers 200 with the server's version and commit, without
+authentication and without reading the repository, for a reverse proxy's health
+check. It is not logged.
 
-To spare the remote a round trip per call, a read within `--fetch-ttl` seconds
-(5 by default) of the last fetch, or of the server's own push, uses that head
-without fetching. Bursts of calls fetch once, and a read after a write sees the
-write at once; a push from elsewhere can go unseen for up to the TTL.
-`--fetch-ttl 0` fetches for every call, and for every write before it applies.
-The cache is the remote-tracking ref and a timestamp in memory, so a restart
-only costs a fetch.
+**stdio.** `--stdio` serves one local client on standard input and output,
+without authentication. A stdio server for agents on the same machine as the
+user's checkout is usually started with `--local` (see
+[Writing to a checkout](#writing-to-a-checkout)), so their writes land on the
+checkout's branch with no remote in between:
 
-When the fetch fails (the remote is unreachable, or it times out after a
-minute), an unpinned read is served the head last fetched, or last pushed by
-this server, if there is one, and its `as_of` carries `"stale": true`; the
-failure is logged on standard error. Unpinned reads within `--fetch-ttl` seconds
-of the failure are served the same way without fetching again, so an unreachable
-remote costs one fetch (at most a minute) per TTL, not one per call; with
-`--fetch-ttl 0`, every read tries. A read with nothing fetched yet, a pinned
-read whose commit is not present, and every write fail instead: nothing is
-written over a head that may have moved.
+```json
+{"command": "taskgo", "args": ["--root", "/home/me/projects", "mcp", "--local", "--stdio"]}
+```
 
-`wait_for` gates other than dates are reported as `unverified_gates`. The server
-does not poll them and, like the CLI, treats them as still holding. `handoff` on
-a checkout also warns about uncommitted changes; the server reads only commits,
-so it never does.
+### Configuration
 
-## Handoff
+| Option                          | Environment                                       | Default                            |
+| ------------------------------- | ------------------------------------------------- | ---------------------------------- |
+| `--remote REMOTE`               |                                                   | `origin`                           |
+| `--branch BRANCH`               |                                                   | `main`                             |
+| `--fetch-ttl SECS`              |                                                   | `5`                                |
+| `--no-fetch` or `--local`       |                                                   | fetch from the remote              |
+| `--auth {access,none}`          |                                                   | `access`                           |
+| `--access-team`, `--access-aud` | `TASKGO_MCP_ACCESS_TEAM`, `TASKGO_MCP_ACCESS_AUD` | none                               |
+| `--log FILE`                    | `TASKGO_MCP_LOG`                                  | `$XDG_STATE_HOME/taskgo/mcp.jsonl` |
 
-`handoff(target)` is the first call of a session: `target` is a project name or
-a task ID, and one round trip returns what the workflow reads before acting.
+Flags win over variables. Without `XDG_STATE_HOME`, the log is
+`~/.local/state/taskgo/mcp.jsonl`. `--root` (before `mcp`) or `TASKGO_ROOT`
+chooses the repository, as for every command.
 
-- `note`: the short handoff note, as `taskgo handoff` prints it, with
-  repository-relative paths and the data-care rule.
-- `guide`: how to keep the tracker through the server's tools: a digest of the
-  rules in this skill that writes most often miss (rewriting STATUS.md prose
-  instead of appending, completing a task, where `blocked_by` goes, the
-  `conversation` URI), and how the CLI steps the skill names map to the tools.
-  It is the same for every target; the skill stays the specification.
-- `findings` and `unverified_gates`: readiness and audit findings, and the
-  project's unverified gates.
-- `frontmatter`: the project `README.md` frontmatter as YAML parses it, with no
-  key filtered or renamed (`{}` without one).
-- `skills`: the agent skills that frontmatter declares, normalized to a list of
-  names as the `skill` CLI resolves them (`[]` without any). The note says how
-  to activate them; a client without a skill manager ignores them.
-- `readme`, `plan`, `agents_md`: the project `README.md` (or `PROJECT.md`),
-  `PLAN.md`, and the root `AGENTS.md`, each `{path, blob, content, truncated}`
-  or null when absent. Content is the file's bytes, cut after a whole line at
-  256 KiB as `read_file` cuts it.
-- `status`: `STATUS.md` the same way, plus its `sections` with hashes (for
-  `replace_section`), `committed_block`, `live_block` (the task block computed
-  now), and `block_current` (the same projection `get_project_status` returns).
-- `tasks`: the project's `in_progress`, `blocked` (as the `STATUS.md` snapshot
-  counts them), and `ready` rows, as `list_tasks` returns them.
-- `task`: for a task ID, the record as `get_task` returns it; null for a
-  project. Done and cancelled tasks are refused.
+## Reads
 
-`blob` values serve as `expected_blob` for `edit_file`, `write_file`, and
-`delete_file`. `read_file` content is the file's bytes, so it can be quoted in
-`old_string` as it is; `line_numbers: true` prefixes each line with its number
-and `: ` (as in `7: text`), counted against the 256 KiB, for citing lines or
-choosing a range, and leaves the content no longer the file's bytes.
+Each call fetches the branch from the remote, resolves it once, and reads only
+that commit, through a Git tree snapshot. It never reads the working tree, and
+changes it only as a `--local` server's write does. Every response carries
+`as_of`: the commit read, its commit time, today's date in the repository
+timezone, and `stale: true` when the commit is a head that could not be
+refreshed.
+
+A read within `--fetch-ttl` seconds of the last fetch, or of the server's own
+push, uses that head without fetching. Bursts of calls fetch once, and a read
+after a write sees the write at once; a push from elsewhere can go unseen for up
+to the TTL. `--fetch-ttl 0` fetches for every call, and for every write before
+it applies. The cache lives in memory, so a restart costs only a fetch.
+
+When a fetch fails (the remote is unreachable, or it times out after a minute),
+an unpinned read is served the head last fetched or pushed, marked stale, and
+the failure is logged. Reads within the TTL of the failure are served the same
+way without trying again. A read with nothing fetched yet, a pinned read whose
+commit is not present, and every write fail instead.
+
+`--no-fetch` serves the local branch without fetching, and does not write.
 
 ## Writes
 
-`create`, `apply_changes`, and `edit_file` take a change set (see
-[Change Sets](model.md#change-sets); `create` is a set with one `create`, and
-`edit_file` a set with one `edit_file`) and make it one commit on the branch, or
-nothing:
+`create`, `apply_changes`, and `edit_file` each make one commit on the branch,
+or nothing. A write needs:
 
-1. Apply the set over the head, in memory, as `taskgo apply` does: every
-   precondition (expected value, section hash, blob SHA) is checked against that
-   head, the whole result is validated, and the affected `STATUS.md` blocks are
-   regenerated. The head is the cached one when the server has fetched or pushed
-   since it started, and `--fetch-ttl` is not 0; otherwise the server fetches it
-   first. A refusal over a cached head (a failed precondition or validation, no
-   change, no commit authority) fetches and applies the set again over the
-   fetched head; a malformed set fails at once.
-1. Commit the result without a working tree, through a temporary index, with the
-   head as the only parent.
-1. Push it without force, which also checks that a cached head is still the
-   head: a write in steady state is one round trip. If the remote refuses
-   (another push got there first), fetch again: when the commit is on the branch
-   after all, the push did land; otherwise apply the set again over the new
-   head, so its preconditions are checked against what is now there. After five
-   refused pushes, not counting a first push over a cached head, the write fails
-   and nothing is written.
+- `AGENTS.md` at the head declaring `taskgo`;
+- a commit identity: `user.name` and `user.email`, or the `GIT_AUTHOR_*` and
+  `GIT_COMMITTER_*` variables (the server never guesses one);
+- a remote, or `--local`.
 
-A write that lands, or is recognized as a retry, returns `findings`: advice,
-never a refusal, since the commit is already on the branch. They are `doctor`'s
-findings at the commit, without its formatting checks, on the files the write
-touched or naming a task in them (such as a `blocked_by` edge it resolved in
-another project), and, for each project where the write changed an existing task
-but left `STATUS.md`'s Summary and Next as they were, an `INFO` reminder to
-rewrite them if the project's state or next steps changed. A `STATUS.md` whose
-task snapshot alone the write regenerated, because a task it changed holds one
-in another project, does not count as touched. A write that changes nothing
-returns none. The audit checks only what the write touched and the tasks a
-touched task holds, and reuses the change set's tree and task rows rather than
-reading the commit again. They stand in for running `taskgo doctor`, which a
-client without a checkout cannot; `taskgo apply` and `taskgo edit` are
-unchanged.
+The server applies the [change set](change-sets.md) over the head in memory, as
+`taskgo apply` does, commits the result through a temporary index with the head
+as its only parent, and pushes it without force. If the remote refuses the push
+(another writer got there first), the server fetches. When its commit is on the
+branch after all, the push did land; otherwise it applies the set again over the
+new head, so preconditions are checked against what is there now. After five
+refused pushes the write fails and nothing is written.
 
-Parsed task rows, frontmatter YAML, per-task structural audit findings, and
-Markdown-format verdicts are cached in memory (`_ROW_CACHE`, `_YAML_FM_CACHE`,
-`_TASK_AUDIT_CACHE`, and `_FORMAT_CACHE`), keyed by path and a Git blob SHA
-computed from the bytes parsed. Historical task IDs across Git history
-(`task_ids_in_history`) are cached both in memory (`_HISTORY_CACHE`) and on disk
-under `${XDG_CACHE_HOME:-~/.cache}/taskgo/history/`, keyed by the repository's
-common Git directory and commit tips with incremental `git log` updates when
-refs advance. A blob SHA names the content, so an entry cannot go stale, the
-path is in the key because a rename keeps the SHA, and the in-memory caches are
-least-recently-used. Immutable commit snapshots answer from their blob SHAs
-without reading; a working tree is read first, so a file that changes between a
-hash and a read cannot store one version's result under another's SHA. A read,
-parse, or format failure is not cached. A long-lived server therefore parses the
-tracker once: on a synthetic 10,000-task tracker a warm `apply_change_set` takes
-under a second and a handoff around a second, where one cold parse pass is 20 s.
-A fresh process still pays one full parse, because validation and the handoff's
-duplicate-ID check read every row. At 100,000 tasks, revisit the Markdown text
-each snapshot holds and the tree listing each new commit reads.
-
-Tool failures return `isError: true` with the diagnostic in both
-`content[0].text` and `structuredContent.error.message`. Change-set refusals
-name the failing change and operation; section validation also names the section
-and explains the body-only text contract. Read either diagnostic before changing
-arguments; removing valid conversation attribution does not fix section text.
-
-Calls are serialized, so the server's own writes never race each other; pushes
+Calls are serialized, so the server's own writes never race each other. Pushes
 from CLI checkouts race with them on equal terms, through the remote's refusal
 of a non-fast-forward push.
 
-`edit_file` names its target by text, not by hash: applied again over a moved
-head, it matches `old_string` afresh, so an edit lands beside another writer's
-change to a different part of the same file, and `old_string` that is no longer
-there is a precondition failure. Pass `expected_blob` (from `read_file` or
-`list_files`) to refuse any change made since the file was read. A miss returns
-a unified diff of `old_string` against the closest lines of the file.
-
-Commits read like CLI commits: the configured owner as author and committer (the
-server refuses to write without `user.name` and `user.email`, or the
-`GIT_AUTHOR_*` and `GIT_COMMITTER_*` variables, and never guesses one), a
-Conventional Commits subject scoped to the project (the caller's, or one derived
-from the changes), an optional body, and the trailers the caller asks for:
-`Conversation:` for its session URI, which also joins the conversations of every
-task the write touches, and `Ref:` for each reference. After those, every commit
-carries `Request-Id:`, the write's `request_id`, and `Request-Digest:`, the
-first 16 hex digits of the SHA-256 of its other arguments as sorted JSON. Writes
-are refused unless `AGENTS.md` at the head declares `taskgo`, and a server
-started with `--no-fetch` does not write.
-
-Every write takes a `request_id`. The server keeps, in memory, the digest of the
-request's arguments and each commit it built for it, for a day. A request whose
-ID it has seen reports the earlier commit, when that commit is on the branch,
-instead of writing again, so a client that lost a reply can retry safely; such a
-retry always fetches, and does not trust a cached head. The same ID with
-different arguments is refused. The table is in memory, but the recognition
-survives a restart: a write whose ID is not in memory first looks for its
-`Request-Id:` trailer in the last 200 commits behind the head: a commit found
-with the same `Request-Digest:` is reported as `replayed: true`, from what the
-commit records (its subject, the records it created, and the files it changed,
-but not its `edits` or `sections`, so read the file or record again before
-editing it), and one with another digest is refused as a reused ID. A retry is
-thus recorded once across restarts, as long as its commit is within those 200.
-
 Each write logs a line to standard error for each push attempt, with the request
-ID, the commit, and the head it was built on, or Git's reason for a refusal, and
-for each retry it recognizes.
+ID, the commit, and the head it was built on, or Git's reason for a refusal. It
+also logs each retry it recognizes.
 
-A push from a checkout that the server has moved past is refused as a
+### Commit Trailers
+
+Commits read like CLI commits: the configured owner as author and committer, a
+Conventional Commits subject scoped to the project, an optional body, and these
+trailers:
+
+- `Conversation:` and `Ref:`, when the caller passes a session URI or
+  references.
+- `MCP-Client:`, on every commit: the client's name and version from its MCP
+  `clientInfo` when the session kept it (over stdio), else its HTTP
+  `User-Agent`. It makes a write attributable to a client without a
+  conversation.
+- `Request-Id:`, the write's `request_id`, and `Request-Digest:`, the first 16
+  hex digits of the SHA-256 of its other arguments as sorted JSON.
+
+### Retries
+
+The server remembers each `request_id` in memory for a day. A request whose ID
+it has seen reports the earlier commit, when that commit is on the branch,
+instead of writing again. The same ID with different arguments is refused. After
+a restart, the server looks for the `Request-Id:` trailer in the last 200
+commits behind the head: a match with the same `Request-Digest:` is reported as
+`replayed: true`, and one with another digest is refused as a reused ID.
+
+### Conflicts in a Checkout
+
+A push from a checkout the server has moved past is refused as a
 non-fast-forward; `git pull --rebase` brings the checkout up to date. When both
 sides changed one project's `STATUS.md`, the rebase stops on its generated
 block. Take the upstream file, regenerate it, and continue:
@@ -216,128 +142,29 @@ git add alpha/STATUS.md
 git rebase --continue
 ```
 
-### Writing to a checkout
+### Writing to a Checkout
 
-`--local` serves a checkout on the same machine, with no remote: typically a
-`--stdio` server pointed at the user's own control repository (`--root`), for
-agents working in other workspaces there, which have no clone of it and no
-tunnel to a hosted server. Tool calls serialize with the CLI on
-`<git-dir>/taskgo.lock`. Reads see the local branch as it is, for every call,
-with no fetch and no cache. A write commits as above, through a temporary index,
-and then moves the local branch to the commit instead of pushing it,
-compare-and-swap style: the move is refused if the branch is no longer at the
-head the set was applied over (a commit from the CLI got there first), and the
-server then applies the set again over the new head, as after a refused push.
-Before moving, the server requires the checkout to have the branch checked out,
-no unfinished Git operation (`rebase`, `merge`, `cherry-pick`, `revert`) or
-unmerged files, and no uncommitted change (staged, unstaged, or untracked) to
-any path the commit touches; other dirty paths do not matter. After moving, it
-brings the index and working tree from the old head to the new one for the
-touched paths only (`git read-tree -m -u`), which also removes files the commit
-deletes, so the checkout shows the commit as if it had been made there and the
-CLI goes on working with no rebase. The checkout is never pushed; that stays
-with the user. `--local` and `--no-fetch` exclude each other.
+`--local` serves a checkout on the same machine, with no remote. It suits a
+`--stdio` server pointed at the user's own control repository, for agents in
+other workspaces that have no clone of it. `--local` and `--no-fetch` exclude
+each other.
 
-## Transports
+Tool calls serialize with the CLI on `<git-dir>/taskgo.lock`. Reads see the
+local branch as it is, with no fetch and no cache. A write commits as above,
+then moves the local branch to the commit instead of pushing it. The move is
+refused if the branch has moved since the write read it (a CLI commit got there
+first); the server then applies the set again, as after a refused push.
 
-The official MCP Python SDK speaks the protocol, so the server supports every
-revision the pinned SDK does: 2026-07-28, whose clients open with
-`server/discover`, and the earlier revisions back to 2024-11-05, whose clients
-open with `initialize`.
+Before moving, the server requires:
 
-By default the server speaks MCP Streamable HTTP on `127.0.0.1:8789/mcp`,
-statelessly: each POST carries one JSON-RPC message and gets one JSON response.
-There is no server-initiated stream and no session, so `GET` and `DELETE` on the
-endpoint get 405. A POST whose `Accept` header does not admit `application/json`
-(`*/*` does) gets 406. `GET /up` answers 200 without authentication and without
-reading the repository, for a reverse proxy's health check. `--stdio` serves one
-local client on standard input and output instead, without authentication. A
-stdio server for agents on the same machine as the user's checkout is usually
-started with `--local` (see [Writing to a checkout](#writing-to-a-checkout)), so
-that their writes land on the checkout's branch without a remote in between:
+- the branch checked out;
+- no unfinished rebase, merge, cherry-pick, or revert, and no unmerged files;
+- no uncommitted change (staged, unstaged, or untracked) to any path the commit
+  touches. Other dirty paths do not matter.
 
-```json
-{"command": "taskgo", "args": ["--root", "/home/me/projects", "mcp", "--local", "--stdio"]}
-```
-
-## Logging
-
-Every request, except the health check, is logged twice: as a line on standard
-error, and as a JSON record appended to the request log, once it is answered.
-The line:
-
-```text
-taskgo mcp: request transport=http http=POST method=tools/call tool=get_task outcome=ok status=200 ms=41 commit=1a2b3c4d5e6f agent=example-client/1.0
-taskgo mcp: request transport=http http=POST outcome=refused status=403 ms=1 reason="Access token expired" agent=example-client/1.0
-```
-
-Fields appear in that order, and only when they apply: `transport` (`http` or
-`stdio`), the HTTP verb, the JSON-RPC `method`, the `tool`, the `outcome`, the
-HTTP `status`, the duration in `ms`, the `commit` a tool call read or wrote, the
-`reason` for anything but `ok`, and the client's `User-Agent`. The outcome is
-`ok`, `tool-error` (the call failed and the client got an error result),
-`rpc-error` (an unknown method, a parse error, a malformed message), `refused`
-(an HTTP refusal: authentication, a wrong host or path, a request too large), or
-`error` (the reply could not be sent). A refused request's body is never read,
-so it has no method. A value that is not a plain token, such as an unknown
-method or tool name from a client, is quoted as JSON and truncated, so it cannot
-break or forge a line. A JSON-RPC error's reason is a fixed phrase for its code
-(`method not found`, `parse error`), not the error's message, which can quote
-the request.
-
-The record has the same fields, under the same names (`agent` for the
-`User-Agent`), plus:
-
-- `ts`: when the request came, in UTC with milliseconds;
-- `args`: a tool call's identifying arguments, each shortened to one line of 60
-  characters: `target`, `project`, `id`, `state`, `path`, `prefix`, `field`,
-  `kind`, `slug`, the line range and flags, the search's `args` and `paths`,
-  `at`, and `request_id`, and for `apply_changes`, each change's operation and
-  target (`2: set TASK-3A91F status, edit_file proj/PLAN.md`). Arguments that
-  carry text (titles, sections, bodies, file content, `old_string` and
-  `new_string`, values) and conversation links are left out;
-- `bytes`: the size of a successful tool call's result;
-- `caller`: an opaque key for the caller, a hash of the Access token's
-  identifying claims (`sub`, `email`, and an OAuth client claim if there is
-  one), or of a stdio server's process; HTTP with `--auth none` has none;
-- `version`: the server's version.
-
-```json
-{"ts":"2026-10-13T08:22:11.547Z","transport":"http","http":"POST","method":"tools/call","tool":"list_tasks","args":{"project":"proj","state":"ready"},"outcome":"ok","status":200,"ms":33,"bytes":1597,"commit":"af97eff1c9d2","agent":"Claude-User","caller":"3f9c0a1b2d","version":"0.14.1"}
-```
-
-The request log is `--log FILE`, else `TASKGO_MCP_LOG`, else
-`$XDG_STATE_HOME/taskgo/mcp.jsonl` (`~/.local/state/taskgo/mcp.jsonl`), over
-either transport, so stdio servers keep one too. At 8 MiB the file is renamed
-`FILE.1`, and older ones move up to `FILE.4`, which is dropped: at most 40 MiB.
-Several servers can share a file, as stdio servers do by default; each append
-and rotation locks it. Logging never fails a request: if the file cannot be
-written, the server says so once on standard error and keeps logging lines
-there.
-
-Lines and records name requests, never their content: no task text, file
-content, edits, or tokens. A record's `args` can still hold a short private
-detail, such as a project name, a path, or a search pattern; the log stays on
-the server's host and behind the endpoint's check, and is not for copying into
-artifact repositories. An authentication refusal gives its reason (no token, bad
-signature, wrong audience or issuer, expired). A tool error gives its message,
-with every quoted value elided, since a failed precondition quotes the record's
-current value, which can be a title. Write attempts log the lines described
-under [Writes](#writes) first. The first request with each kind of valid Access
-token (a browser's, a client's) also logs the names, not the values, of its
-claims, which say what a caller key could be built from.
-
-**Reading the log.** `mcp logs` reads these records: lines by default, `--json`,
-`--summary` for statistics, `--since` to limit the window, `--server taskgo` for
-this server alone, and `--serve` for one live page across servers; on app1 that
-page is <https://logs.hupsista.com/>. The record format is kept in
-`skills/agent-config/references/mcp-logs.md`. The records are JSON lines, so
-`jq` reads them too:
-
-```sh
-mcp logs --summary --since 1d
-jq -r 'select(.outcome != "ok") | [.ts, .agent, .tool, .reason] | @tsv' ~/.local/state/taskgo/mcp.jsonl
-```
+After moving, it updates the index and working tree for the touched paths only
+(`git read-tree -m -u`), so the checkout shows the commit as if it had been made
+there. The server never pushes the checkout; that stays with the user.
 
 ## Authentication
 
@@ -346,66 +173,129 @@ Cloudflare Tunnel, with Managed OAuth enabled so that MCP clients can sign in
 through a browser and then use refreshable tokens. Access forwards each
 authorized request with a `Cf-Access-Jwt-Assertion` header. The server verifies
 its RS256 signature against the team's certificates, its issuer (the team
-domain), its audience (the application's AUD tag), and its expiry, and refuses
-anything else: 401 without a token, 403 with a bad one.
+domain), its audience (the application's AUD tag), and its expiry. It answers
+401 without a token and 403 with a bad one.
 
-Configure the check with `--access-team` and `--access-aud`, or with
-`TASKGO_MCP_ACCESS_TEAM` and `TASKGO_MCP_ACCESS_AUD`. The server refuses to
-start without them unless given `--auth none`, which serves only requests
-addressed to a loopback name and only on a loopback address. Keep `--auth none`
-for local testing: a tunnel to a loopback port that preserves the `Host` header
-is still refused, but one that rewrites it to `localhost` is not.
+Configure the check with `--access-team` and `--access-aud`, or their
+environment variables. The server refuses to start without them unless given
+`--auth none`. That serves only requests addressed to a loopback name, and only
+on a loopback address. Keep `--auth none` for local testing: a tunnel to a
+loopback port that keeps the `Host` header is still refused, but one that
+rewrites it to `localhost` is not.
+
+## Request Log
+
+Every request except the health check is logged twice once it is answered: as a
+line on standard error, and as a JSON record appended to the request log.
+
+```text
+taskgo mcp: request transport=http http=POST method=tools/call tool=get_task outcome=ok status=200 ms=41 commit=1a2b3c4d5e6f agent=example-client/1.0
+taskgo mcp: request transport=http http=POST outcome=refused status=403 ms=1 reason="Access token expired" agent=example-client/1.0
+```
+
+Fields appear in this order, and only when they apply:
+
+- `transport`: `http` or `stdio`;
+- `http`: the HTTP verb;
+- `method`, `tool`: the JSON-RPC method and the tool called;
+- `outcome`: `ok`, `tool-error` (the client got an error result), `rpc-error`
+  (an unknown method, a parse error, a malformed message), `refused` (an HTTP
+  refusal: authentication, a wrong host or path, a request too large), or
+  `error` (the reply could not be sent);
+- `status`, `ms`: the HTTP status and the duration;
+- `commit`: the commit a tool call read or wrote;
+- `fetch`, `stale`: a fetch that failed during the request, and whether a read
+  was served a stale head because of it;
+- `reason`: why, for any outcome but `ok`;
+- `agent`: the client's `User-Agent`.
+
+A refused request's body is never read, so it has no method. Client-supplied
+values that are not plain tokens are quoted as JSON and truncated, so they
+cannot break or forge a line.
+
+The record has the same fields, plus:
+
+- `ts`: when the request came, in UTC with milliseconds;
+- `args`: a tool call's identifying arguments (project, task, path, search,
+  `request_id`, and each `apply_changes` change's operation and target), each
+  shortened to one line of 60 characters;
+- `bytes`: the size of a successful tool call's result;
+- `caller`: an opaque key for the caller, a hash of the Access token's
+  identifying claims, or of a stdio server's process; HTTP with `--auth none`
+  has none;
+- `version`: the server's version.
+
+```json
+{"ts":"2026-10-13T08:22:11.547Z","transport":"http","http":"POST","method":"tools/call","tool":"list_tasks","args":{"project":"proj","state":"ready"},"outcome":"ok","status":200,"ms":33,"bytes":1597,"commit":"af97eff1c9d2","agent":"Claude-User","caller":"3f9c0a1b2d","version":"0.16.0"}
+```
+
+The log is written over either transport, so stdio servers keep one too. At 8
+MiB the file is renamed `FILE.1`, and older ones move up to `FILE.4`, which is
+dropped: at most 40 MiB. Several servers can share a file; each append and
+rotation locks it. Logging never fails a request: if the file cannot be written,
+the server says so once on standard error and keeps logging lines there.
+
+Lines and records name requests, never their content: no task text, file
+content, edits, or tokens. A record's `args` can still hold a short private
+detail, such as a project name, a path, or a search pattern, so keep the log on
+the server's host. The first request with each kind of valid Access token also
+logs the names, not the values, of its claims.
+
+**Reading the log.** `mcp logs` (in the `agent-config` skill) reads these
+records; its format reference is `skills/agent-config/references/mcp-logs.md`.
+The records are JSON lines, so `jq` reads them too:
+
+```sh
+mcp logs --summary --since 1d --server taskgo
+jq -r 'select(.outcome != "ok") | [.ts, .agent, .tool, .reason] | @tsv' ~/.local/state/taskgo/mcp.jsonl
+```
+
+## Caller Surface
+
+The server describes itself to callers, and that is the source of truth. Read
+these in the code rather than restating them here:
+
+- `mcp_instructions()` in `scripts/taskgo-mcp`: the `initialize` instructions,
+  which carry the workflow, the write rules, and data care. Some clients cache
+  the tool list for weeks, so rules that matter also live in the instructions
+  and in error messages.
+- Each tool's title, description, schema, and annotations, in
+  `scripts/taskgo-mcp`.
+- The `handoff` payload's `guide`: `MCP_GUIDE` in `scripts/taskgo`.
+- Error messages, written so a caller can fix its call in one retry. Tool
+  failures return `isError: true` with the message in both `content[0].text` and
+  `structuredContent.error.message`.
+
+The tools mirror CLI commands (`get_task` and `taskgo status TASK_ID --json`,
+`handoff` and `taskgo handoff --json`, `apply_changes` and `taskgo apply`), and
+`tests/compare-cli` checks that they agree. Writes take a change set; see
+[change-sets.md](change-sets.md).
 
 ## Testing
 
-From the skill directory:
+The test suite runs the server checks: `test-taskgo-mcp`, which runs
+`compare-cli` and `protocol-check` on a synthetic tracker and `auth-check`, and
+`test-taskgo-mcp-write`, which checks writes against a local bare repository
+with and without the fetch cache. From the repository root:
 
 ```sh
-tests/make-synthetic /tmp/synth                        # a synthetic tracker
+prove skills/taskgo/tests/test-taskgo-mcp skills/taskgo/tests/test-taskgo-mcp-write
+```
+
+To try a server by hand, from the skill directory:
+
+```sh
+tests/make-synthetic /tmp/synth
 scripts/taskgo --root /tmp/synth mcp --no-fetch --auth none &
-tests/compare-cli http://127.0.0.1:8789/mcp /tmp/synth # server versus CLI
+tests/compare-cli http://127.0.0.1:8789/mcp /tmp/synth   # server versus CLI
 tests/mcp-call http://127.0.0.1:8789/mcp list_tasks '{"state":"ready"}'
-tests/auth-check                                       # Access JWTs, the log
 ```
 
-`protocol-check` needs the SDK, so run it with the interpreter of
-`scripts/taskgo-mcp`'s script environment:
+`compare-cli` prints only check names and counts, never file contents, so it is
+safe to run against a private tracker.
 
-```sh
-py=$(uv python find --script scripts/taskgo-mcp)
-"$py" tests/protocol-check /tmp/synth   # both protocol eras, both transports
-```
+## Data Care
 
-`compare-cli` asks the server for its commit, checks that commit out into a
-temporary clone, and compares every tool's output with the CLI's there. It
-prints only check names and counts, never file contents, so it is safe to run
-against a private tracker. `tests/test-taskgo-mcp-write` serves a throwaway
-tracker pushed to a local bare repository and checks the writes: concurrent
-writers, a lost push reply, a head that moves before every push, refusals, a
-stale CLI checkout that recovers by rebase, the cached head (reads within the
-TTL, writes over a stale cached head, and a retry after a lost reply), a read
-served a stale head when the remote cannot be fetched, a retry recognized from
-its `Request-Id:` trailer by a new server, and a `--local` server on a checkout
-(a write lands on the local branch and in the working tree, is refused over a
-dirty touched file or a detached HEAD, and is applied again after a CLI commit
-gets in first; one write goes over `--stdio`); run it again with `--fetch-ttl 0`
-to check the servers without a cache. `protocol-check` connects the SDK's own
-client as a 2026-07-28 client and as a 2025-11-25 one, over HTTP and over
-`--stdio`. `auth-check` also checks that the request log holds one record per
-request and no token. The test suite (`prove skills/taskgo/tests/test-*`) runs
-`compare-cli` and `protocol-check` on a synthetic tracker, `auth-check`, and
-`test-taskgo-mcp-write` both ways.
-
-The MCP Inspector works against a local server:
-
-```sh
-npx @modelcontextprotocol/inspector --cli http://127.0.0.1:8789/mcp \
-  --transport http --method tools/list
-```
-
-## Data care
-
-Everything the server returns is private tracker content. Its MCP instructions,
-every write tool's description, and every handoff note tell the client never to
-copy it into artifact repositories. The host running the server holds a clone of
-the control repository, so the same care applies to the host.
+Everything the server returns is private tracker content. The host running the
+server holds a clone of the control repository, so the same care applies to the
+host.

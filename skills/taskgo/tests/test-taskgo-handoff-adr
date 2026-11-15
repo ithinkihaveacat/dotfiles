@@ -5,7 +5,7 @@ set -euo pipefail
 source "$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 taskgo_test_init
 
-echo "1..26"
+echo "1..27"
 
 # Test 105: Claude Code env vars map to canonical claude scheme without annotations
 AGENT_REPO="$TEST_ROOT/agent-repo"
@@ -47,7 +47,7 @@ fi
 BEFORE_FM="$(cat "$AGENT_REPO/proj/tasks/TASK-A6E01-agent-task.md")"
 printf '\nUnlisted file\n' >"$AGENT_REPO/proj/unlisted.txt"
 set +e
-(AI_AGENT="jetski" JETSKI_CONVERSATION_ID="77778888-9999-0000-1111-222233334444" tg --root "$AGENT_REPO" checkpoint TASK-A6E01 "chore(proj): will abort" 2>/dev/null)
+(tg --root "$AGENT_REPO" checkpoint TASK-A6E01 "chore(proj): will abort" --conv "myagent://77778888-9999-0000-1111-222233334444" 2>/dev/null)
 CP_EXIT=$?
 set -e
 AFTER_FM="$(cat "$AGENT_REPO/proj/tasks/TASK-A6E01-agent-task.md")"
@@ -623,6 +623,7 @@ assert d["readme"]["truncated"] is False
 assert d["status"]["content"] == show("proj/STATUS.md")
 assert d["status"]["block_current"] is True
 assert d["agents_md"]["content"] == show("AGENTS.md")
+assert "guide" not in d and "local_policy" not in d, d.keys()
 assert d["plan"] is None
 ready = [r["id"] for r in d["tasks"]["ready"]]
 blocked = [r["id"] for r in d["tasks"]["blocked"]]
@@ -960,3 +961,38 @@ else
 fi
 
 # --- skills ----------------------------------------------------------------
+
+# Test 27: only publicly known agents' session variables are built in; an
+# unknown agent's variable is ignored, and AGENTS.md local policy excludes the
+# managed block.
+if SV_OUT=$(
+  "$TASKGO_PY" - "$BIN" 2>&1 <<'PY'
+import importlib.machinery
+import importlib.util
+import os
+import sys
+
+loader = importlib.machinery.SourceFileLoader("taskgo_under_test", sys.argv[1])
+tg = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+loader.exec_module(tg)
+assert set(tg.CANONICAL_AGENTS) == {"antigravity", "claude", "codex", "opencode"}
+sid = "11112222-3333-4444-5555-666677778888"
+os.environ["MYAGENT_SESSION_ID"] = "aaaabbbb-cccc-dddd-eeee-ffff00001111"
+assert tg.get_active_conversation_id() is None
+os.environ["CODEX_SESSION_ID"] = sid
+assert tg.get_active_conversation_id() == f"codex://{sid}"
+os.environ["AI_AGENT"] = "MyAgent 2.1"
+assert tg.detect_agent_scheme() == "codex"
+block = tg.agents_block()
+assert tg.agents_local_policy(f"# Agent Instructions\n\n{block}\n") is None
+policy = tg.agents_local_policy(f"# Agent Instructions\n\n{block}\n\nUse British spelling.\n")
+assert policy == "Use British spelling.", policy
+assert tg.agents_local_policy("# Notes\n\nKeep it short.\n") == "Keep it short."
+print("ok")
+PY
+) && [[ "$SV_OUT" == ok ]]; then
+  echo 'ok 27 - only known agents are built in; AGENTS.md local policy excludes the block'
+else
+  echo 'not ok 27 - only known agents are built in; AGENTS.md local policy excludes the block'
+  printf '# %s\n' "$SV_OUT"
+fi

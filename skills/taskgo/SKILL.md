@@ -1,131 +1,57 @@
 ---
 name: taskgo
 description: >-
-  Maintains a private Git-backed personal project and task control repository
-  using concise current Markdown, derived Git history, ADRs, and status synchronization.
-  Use when tracking tasks, updating project status (STATUS.md), managing ADRs,
-  synchronizing tracker state, handing tasks to agents, or generating
-  human-facing activity reports (weekly/monthly/quarterly).
+  Tracks projects and tasks in a private Git-backed control repository of
+  Markdown records (STATUS.md, tasks/TASK-XXXXX-*.md, decisions/, INBOX.md)
+  through the taskgo CLI or MCP tools. Use when the user wants to add, start,
+  update, block, close, or hand off a task; asks what to work on next or what is
+  blocked or due; mentions a TASK-XXXXX ID, a tracked project, or the control
+  repo; records a decision (ADR); or wants a weekly, monthly, or quarterly
+  activity report from tracked work. Use at the start and end of work on a
+  tracked project even if taskgo is not named.
 compatibility: Requires Python 3.11+ (via uv) and git.
 ---
 
 # taskgo
 
-taskgo manages a private **control repository** spanning multiple projects.
-Humans read current Markdown; agents edit it, operate Git, reconstruct history,
-and generate summaries.
+taskgo keeps a private **control repository** of projects and tasks in Markdown.
 
-## Tool Execution
+Run `taskgo <command>` if it is on `$PATH`, or
+`<skill-dir>/scripts/taskgo <command>`, where `<skill-dir>` holds this
+`SKILL.md`. The root is `-R DIR` (before the command), else `$TASKGO_ROOT`, else
+`~/.projects`; `taskgo root` prints it. When the control repository is not your
+workspace and your harness has the taskgo MCP tools, you may use those instead.
 
-`taskgo` is bundled in `scripts/taskgo` within this skill directory
-(`taskgo mcp` delegates to `scripts/taskgo-mcp`, which carries the MCP, HTTP,
-and JWT dependencies; both `taskgo mcp` and `taskgo-mcp` are listed in
-`permissions/unsafe`, and `TASKGO_SKILL_DIR` overrides `SKILL.md` discovery when
-either script is copied outside the skill tree). Commands operate on a fixed
-control repository root, resolved in this order:
+## Core Rules
 
-1. `--root DIR` / `-R DIR` (must appear before the command)
-1. the `TASKGO_ROOT` environment variable
-1. the default `~/.projects`
-
-Root resolution never depends on the current working directory. Run
-`taskgo root` or `taskgo doctor` to see the resolved root:
-
-1. **On `$PATH`:** `taskgo <command>`
-1. **Skill-relative:** `<skill-dir>/scripts/taskgo <command>`
-
-Read-only commands (`status`, `list`, `handoff`, `doctor`, `read`, `search`,
-etc.) work when the repository is mounted read-only. Mutating commands
-(`create`, `update`, `apply`, `edit`, `sync`, `fix`, `checkpoint`, `commit`)
-need write access to the working tree, and commands that stage or commit changes
-(`create`, `checkpoint`, `commit`, `fix`) also need write access to `.git/`.
-
-## Core Invariants
-
-1. **Current Truth:** `HEAD` describes current belief; Git owns administrative
-   history. Rewrite files to the new state rather than accumulating journals in
-   Markdown.
-1. **Data Segregation:** Private tracker information must not leak into public
-   or shared artifact repositories. `Conversation:` trailers and session URLs
-   belong strictly in the control repository. Prefer `$HOME`-relative paths
-   (`~/...`) for local checkouts.
-1. **Link Portability:** Internal links use relative Markdown paths (no
-   `file://`). External references use canonical `https://` URLs or unlinked
-   monospace text.
-1. **STATUS.md:** Self-contained projection of current operational state and
-   next steps.
-1. **Commit Authority:** The `taskgo` declaration in the control repository's
-   committed `AGENTS.md` (maintained by `taskgo fix`) authorizes guarded tracker
-   commits (`create`, `checkpoint`, `commit`, `fix`, and `mcp` writes).
-   Cross-project restructuring (such as moving a task between projects) may use
-   a plain `git commit`; ask first or report it clearly afterwards. See
-   [Commit Authority](references/workflows.md#commit-authority). Never rewrite
-   artifact history.
-1. **No Administrative Metadata:** Never invent frontmatter fields like
-   `created`, `updated`, or `blocked_since`, or duplicate `Project:`, `Task:`,
-   or `Event:` trailers.
+1. **Current truth.** Files describe what is true now; Git holds the history.
+   Rewrite files to the new state; never append journal entries.
+1. **Data segregation.** Tracker notes, `Conversation:` trailers, and session
+   links stay in the control repository. Never put them in artifact repository
+   files, commits, or PRs.
+1. **Links.** Relative Markdown links inside the tracker (no `file://`), `~/...`
+   for local checkouts, canonical `https://` URLs elsewhere.
+1. **No invented metadata.** No `created`, `updated`, or `blocked_since`
+   frontmatter; no `Project:` or `Task:` trailers.
+1. **One owner per fact.** Link to the
+   [owner](references/model.md#where-knowledge-lives) instead of copying.
+1. **Local policy.** The root `AGENTS.md` holds a taskgo-managed block and,
+   outside it, this repository's own rules (time zone, report format,
+   environment, data care). Follow both.
+1. **Guarded commits.** That block authorises `create`, `checkpoint`, `commit`,
+   and `fix` to commit. Changes across projects need a plain `git commit`; see
+   [Workflows](references/workflows.md#plain-git-commit).
 
 ## Tasks
 
-IDs are globally unique `TASK-XXXXX` (five hex digits). Task files are
-`tasks/TASK-XXXXX-<slug>.md`. Pass `--slug` (max 32 chars) when creating tasks
-if the title is long.
+IDs are `TASK-XXXXX` (five hex digits), in `tasks/TASK-XXXXX-<slug>.md`. Pass
+`--slug` (32 characters at most) when the title is long. States are `todo`,
+`in-progress`, `blocked`, `done`, and `cancelled`.
 
-Preferred states: `todo`, `in-progress`, `blocked`, `done`, `cancelled`.
+Use only the labels and sections in these templates. Do not add one-off headings
+or bold labels; put that text under the nearest section.
 
-### Dependencies & Scheduling
-
-A task may declare internal task graph edges (`blocked_by`) as well as external
-or temporal scheduling fields (`wait_for`, `due`, and `stale_after`):
-
-```yaml
-blocked_by: [TASK-1627D]
-wait_for: [b/123456, 2026-10-13]
-due: 2026-10-15
-stale_after: 2026-11-01
-```
-
-- **`blocked_by`** — Internal `TASK-XXXXX` graph edges only. Record the edge on
-  the task that is *held*, never on the blocker; remove resolved edges from open
-  tasks when `taskgo doctor` reports them (or re-plan if cancelled).
-- **`wait_for`** — External or temporal gates keeping a task off the ready
-  frontier: ISO cool-down dates (`YYYY-MM-DD`, resolved once `today >= date`),
-  issue/CL URIs (`b/...`, `cl/...`, `gh:owner/repo#num`), human handles
-  (`@reviewer`), or `http(s)` URLs. Prefer one of these typed gates; when none
-  fits, write the condition as one line of free text
-  (`ShellCheck release with SC2337`). `taskgo check` resolves dates and polls
-  issue and CL URIs; handles, URLs and free text hold the task until someone
-  removes them. Free text is refused when a word in it is a task ID (use
-  `blocked_by`), looks like a typed gate but is malformed (`gh:owner/repo 82`,
-  `2026-1-3`), or is a gate `check` resolves (`b/1 fixed upstream`): give that
-  gate as its own entry. Handles and URLs may appear inside free text.
-- **`due`** — Committed completion deadline (`YYYY-MM-DD`). `taskgo doctor`
-  emits `[FAIL]` when overdue (`due < today`) and `[INFO]` within 48 hours;
-  `taskgo list --state ready` sorts approaching `due` dates first.
-- **`stale_after`** — Relevance cutoff (`YYYY-MM-DD`) after which
-  `taskgo doctor` emits `[WARN]` prompting re-scoping or cancellation.
-
-Dates are floating calendar days with no zone. Only "today" depends on a zone:
-`TASKGO_TODAY=YYYY-MM-DD` wins, then an IANA `timezone:` (such as
-`Europe/London`) in the root `README.md` frontmatter, then the machine's local
-date. Set the repository zone so UTC machines (cloud sessions, servers) agree
-with local ones; `taskgo doctor` fails on an unknown zone, and taskgo then uses
-the local date.
-
-Edit these lists with `--add-blocked-by`, `--add-wait-for`, and
-`--add-conversation` on `create` or `update`, and the matching `--remove-*`
-options on `update`; repeats and absent values are no-ops. `update` refuses an
-added blocker that is unknown, the task itself, or closes a `blocked_by` cycle.
-`taskgo schema` lists every field, its value type, and each record kind's
-sections; `doctor` checks frontmatter against it.
-
-`status: blocked` is allowed without warning when either `blocked_by` or
-`wait_for` has unresolved entries. Run `taskgo check [PROJECT] [--json]` to
-sweep open tasks against `today` and their task-scoped Git commit watermark,
-emitting only tasks with elapsed dates, approaching/overdue deadlines, stale
-cutoffs, or upstream URI activity/resolution.
-
-### Planning & In-Progress Task Template
+### Open Task Template
 
 ```markdown
 ---
@@ -147,10 +73,8 @@ conversations:
 **Constraints:** (optional) Boundaries on the solution.
 ```
 
-Use Cost when it adds useful prioritization context. Problem may appear without
-Cost; the rationale may already be clear in Problem or Goal. Multi-session
-`in-progress` or `blocked` tasks may add `## Findings` and `## Next` to record
-current discoveries and remaining work for handoff.
+Add Cost when it helps set priority. An `in-progress` or `blocked` task that
+spans sessions may add `## Findings` and `## Next` for the next agent.
 
 ### Completed Task Template
 
@@ -179,190 +103,109 @@ Key technical discoveries, trade-offs, reproduction steps, downstream momentum.
 Immediate follow-up actions.
 ```
 
-On completion, keep Problem, Cost, Goal, and Criteria as written, so the record
-still states what the task set out to do. Replace Sketch and Constraints with
-Outcome and Findings. Marking a task done needs Outcome text:
-`taskgo update --status done` and `taskgo create --status done` refuse without
-`--outcome`, as `apply` and the MCP server do. `taskgo doctor` reports a done
-task without Outcome text as `[INFO]`; older records predate the rule and are
-repaired when next completed, not migrated in bulk.
+**On completion,** keep Problem, Cost, Goal, and Criteria as written. Delete
+Sketch and Constraints (`update` cannot; use `taskgo edit` or your file tools):
+Outcome and Findings replace them. Marking a task done needs `--outcome`; the
+CLI refuses without it.
 
-## Project README & Decisions
+## STATUS.md
 
-See **[Where Knowledge Lives](references/model.md#where-knowledge-lives)** for
-which file, repository, or skill owns each kind of fact.
+- `## Summary`: where the project stands now, for a reader arriving cold. Say
+  what it is, its current state, what is in flight, and what blocks it, in a few
+  sentences (about 100 words). Rewrite it whole each time. Delete sentences
+  about finished work: done tasks and Git history keep that. Link to tasks
+  rather than restating them. Never narrate versions or sessions. `doctor` notes
+  a Summary over 1,200 characters.
 
-- **Project README (`<project>/README.md`):** The stable, private description of
-  the project, changing over months: **identity** (purpose, scope), **map**
-  (where everything lives, and which source is canonical), and **standing
-  rules**. Unlike an artifact repository's README, it does not describe the
-  code. See [Project README](references/model.md#project-readme) for the
-  placement test and skeleton. Optional YAML frontmatter holds project-level
-  configuration, such as the agent `skills` to work on the project, named as the
-  `skill` CLI resolves them (a catalog short name, optionally `namespace:name`):
-  ```markdown
-  ---
-  skills:
-    - coding-standards
-    - local:notes
-  ---
+  Bad: "Done so far: parser, cache. The server now streams. The server now
+  retries." Good: "The compiler streams manifests; cold start is the open
+  question ([TASK-3A91F](tasks/TASK-3A91F-cold-start.md)). Nothing is blocked."
 
-  # Project Name
-  ```
-  `taskgo skills <project>` prints the list; `taskgo handoff` carries it in its
-  note; `taskgo doctor` warns about a name the catalog does not have.
-- **Decisions:** Lightweight Nygard-style ADRs (`decisions/*.md`) for private or
-  cross-artifact decisions. Newer ADRs record `supersedes: [<old-adr>]` in YAML
-  frontmatter to retire older ADRs; edit an accepted ADR in place only for
-  typos, status updates, broken links, or implementation notes.
-- **STATUS.md:** The self-contained operational projection.
-  - `## Summary`: Human/agent prose for current situation and active session
-    citation (`[<conversation-id>](<agent>://<conversation-id>)`). Rewrite it;
-    never append a paragraph per session.
-  - `<!-- taskgo:begin/end -->`: Mechanically maintained via `taskgo sync`
-    (projects `In progress`, `Blocked`, `Due soon` when open tasks are due
-    within 7 days, active `Decisions` when `decisions/*.md` exist, and task
-    state counts).
-  - `## Next`: Immediate next actions.
+- The block between `<!-- taskgo:begin -->` and `<!-- taskgo:end -->` is
+  generated (in-progress, blocked, due-soon tasks, active decisions, counts). Do
+  not edit it by hand; `taskgo sync` and the commit commands refresh it.
 
-## Agent Workflow
+- `## Next`: the next few concrete actions, not a backlog.
 
-See **[Agent Workflows & Handoff](references/workflows.md)** for detailed
-protocols on commit authority, session attribution, and Agent Handoff. To hand a
-task to an isolated worker that cannot read the control repository, see
-**[Task Export](references/export.md)**.
+Sessions are recorded in commit trailers and each task's `conversations`, not in
+the Summary.
 
-- **Before work:** run `taskgo handoff <project|TASK_ID>` and follow its note:
-  it names the entry-point files to read (`STATUS.md` and the task record for an
-  unfinished task; `README.md`, `STATUS.md`, and `PLAN.md` for a project) and
-  the project's skills (`--json` and the MCP `handoff` tool inline all of those
-  plus the root `AGENTS.md`).
-  1. Read `AGENTS.md`, the project `README.md`, and the files the note names.
-  1. **Activate the project's skills** if your harness has a skill manager:
-     ```bash
-     taskgo skills <project> | skill --scope session add -
-     ```
-     Pipe the whole list: a skill that is already active is reported and
-     skipped. The session scope leaves workspace skill links and repository
-     files untouched; harness details (when the skills become usable, what to do
-     when there is no session directory) are the `skill` CLI's, in the
-     `agent-config` skill and its output.
-- **CLI or MCP:** when the control repository is the session's workspace, use
-  the CLI. Elsewhere, prefer the `taskgo` MCP tools when the harness has them
-  (`handoff` returns the same note and files); otherwise the CLI with `--root`.
-- **After work:** update files, task frontmatter (`conversations`), and
-  `STATUS.md` prose (`Summary` & `Next`). Fold durable domain findings that
-  outlive the task into `<project>/references/`, or into the artifact repository
-  or skill that owns the fact. Keep reference pages discoverable from the
-  `README.md` map, directly or through a reference index. Update the project
-  `README.md` only if identity, map, or standing rules changed. Run
-  `taskgo sync` and `taskgo doctor`. Optionally commit using
-  `taskgo checkpoint`. Ensure the project is left in a strict **handoff-ready**
-  state.
+## Start and Finish
 
-### Activity Reporting
+**Before work:**
 
-See **[Activity Reports](references/activity-reports.md)** for generating
-external impact summaries.
+1. Run `taskgo handoff <project|TASK_ID>`. Read the root `AGENTS.md`, the
+   project `README.md`, and the files the note names.
+1. If your harness has a skill manager, activate the project's skills:
+   `taskgo skills <project> | skill --scope session add -`. Otherwise read each
+   skill's `SKILL.md`.
+1. For work that may span sessions, mark the task `in-progress` and commit that
+   first (`taskgo update TASK --status in-progress`, then
+   `taskgo checkpoint TASK "chore(<project>): start …"`). A small task finished
+   in one go may go straight from `todo` to `done`.
 
-## CLI
+**After work:**
 
-Commands operate on the control repo selected by `--root`, `$TASKGO_ROOT`, or
-`~/.projects`. See the **[Command Index](references/command-index.md)** for full
-help details and subcommand options.
+1. Update the task: `--findings` and `--next` while open, or `--status done`
+   with `--outcome` (a verdict against each criterion) when finished.
 
-```text
-taskgo id
-taskgo root
-taskgo create PROJECT TITLE [--slug SLUG] [--conv ID] [--status STATE] [--wait-for GATE] [--add-blocked-by ID] [--add-wait-for GATE] [--add-conversation URI] [--due YYYY-MM-DD] [--stale-after YYYY-MM-DD] [--problem TEXT] [--cost TEXT] [--goal TEXT] [--criteria TEXT] [--sketch TEXT] [--constraints TEXT] [--outcome TEXT] [--findings TEXT] [--next TEXT] [--no-commit] [--dry-run]
-taskgo update TASK_ID [--slug SLUG] [--conv ID] [--status STATE] [--expect-status STATE] [--wait-for GATE] [--add-|--remove-blocked-by ID] [--add-|--remove-wait-for GATE] [--add-|--remove-conversation URI] [--due YYYY-MM-DD] [--stale-after YYYY-MM-DD] [--title TITLE] [--problem TEXT] [--cost TEXT] [--goal TEXT] [--criteria TEXT] [--sketch TEXT] [--constraints TEXT] [--outcome TEXT] [--findings TEXT] [--next TEXT]
-taskgo apply CHANGES.json [--dry-run]
-taskgo edit PATH (--old TEXT | --old-file F) (--new TEXT | --new-file F) [--replace-all] [--expected-blob SHA] [--dry-run] [--json]
-taskgo list [PROJECT] [--state STATE] [--json]
-taskgo info PROJECT [--json]
-taskgo skills PROJECT [--json]
-taskgo status [PROJECT|TASK_ID] [--at REV] [--json]
-taskgo handoff PROJECT|TASK_ID [--at REV] [--json]
-taskgo sync [PROJECT]
-taskgo check [PROJECT] [--json]
-taskgo doctor [PROJECT]
-taskgo fix [PROJECT] [--dry-run] [--no-commit]
-taskgo history PATH_OR_TASK_ID [FIELD]
-taskgo read PATH [--start-line N] [--end-line N] [--at REV] [--json] [-n]
-taskgo search [--at REV] [--json] GREP_ARGS... [-- PATHS...]
-taskgo checkpoint TASK_ID SUBJECT [--conv ID] [--all] [--path PATH]... [--body TEXT] [--ref REF]...
-taskgo commit SUBJECT [--conv ID] [--body TEXT] [--ref REF]...
-taskgo schema [--json]
-taskgo mcp [--host HOST] [--port PORT] [--path PATH] [--remote REMOTE] [--branch BRANCH] [--no-fetch | --local] [--fetch-ttl SECS] [--auth access|none] [--access-team DOMAIN] [--access-aud TAG] [--stdio] [--log FILE]
-```
+1. Fold durable findings into `<project>/references/`, or into the artifact
+   repository or skill that owns them, and link them from the task. Change the
+   project `README.md` only if its identity, map, or rules changed, and
+   `PLAN.md` only if the direction changed.
 
-- `create`: Allocate ID, write record, sync STATUS, optionally commit.
-- `create` and `update` accept `--cost TEXT` for the consequences of leaving a
-  task undone. Cost is optional, including when Problem is present.
-- `update`: Edit task in-place. If using `--slug`, the rename is left
-  uncommitted; commit with `checkpoint --all` to stage both old and new paths.
-  Field edits replace only the named run-in (such as `**Goal:**`, moved into its
-  own paragraph) or the `##` section whose heading matches exactly, and refuse
-  when the label or heading appears more than once. `--expect-status STATE`
-  makes the update conditional: it changes nothing and exits non-zero unless the
-  current state is STATE. Unknown states are refused, not reset to `todo`.
-- `apply`: Apply a change set (JSON typed operations: create, set, add, remove,
-  replace_section, write_file, delete_file, edit_file) to the working tree, all
-  or none, with preconditions, whole-set validation, and STATUS regeneration for
-  affected projects. It is the MCP server's write semantics, offline; it does
-  not commit. See [Change Sets](references/model.md#change-sets).
-- `edit`: Replace exact text in one file (a change set of one `edit_file`):
-  Caxton-style `search_and_replace` with verbatim bytes, a CRLF retry, near-miss
-  diffs, and record validation. Assets keep their bytes and mode; tasks,
-  decisions, and STATUS.md stay valid and are formatted. Does not commit.
-- `handoff` (or `handover`; `dispatch`, its former name, still works): Emit
-  agent handoff instructions for a project or task in the working tree (or at
-  `--at REV`), warning on stderr about uncommitted state or missing scaffolding;
-  the note ends with the project's skills and how to activate them; `--json`
-  inlines the onboarding files, the `skills` list, a guide to keeping the
-  tracker through the MCP tools, and active/ready queues in one payload,
-  matching the MCP `handoff` tool.
-- `skills`: Print the skills a project's README frontmatter declares, one per
-  line (`--json` for an array), for `skill --scope session add -`.
-- `read`: Print UTF-8 file slices (`--start-line`, `--end-line`, `-n` /
-  `--line-numbers`, `--at REV`, `--json`) up to 256 KiB per read, cut at line
-  boundaries, matching the MCP `read_file` tool.
-- `search`: Search tracked files in the working tree or `--at REV` via an
-  allowlisted `git grep` wrapper with 64 KiB output and 1 KiB line caps, exiting
-  0 on match, 1 on no match, and 2 on error, matching `search_files`.
-- `schema`: The declarative field and section schema for tasks, decisions, and
-  `STATUS.md`. `--json` is the conformance form for other implementations.
-- `fix`: Auto-heal IDs, normalize status aliases, generate STATUS, synchronize
-  root `AGENTS.md` with the canonical `taskgo` template, format the Markdown of
-  tracker records (root `AGENTS.md`, `INBOX.md`, and `README.md`; each project's
-  `README.md`, `PROJECT.md`, `STATUS.md`, `tasks/`, and `decisions/`), and
-  commit repairs by default. Other documents are left as their owners wrote
-  them.
-- `checkpoint`: Safe automatic-commit path requiring the `taskgo` declaration in
-  committed `AGENTS.md`. Expects a `<= 50`-char Conventional Commits `SUBJECT`
-  (`type(scope): description`; nonconforming subjects are rewritten as
-  `chore(<project>): <subject>` and truncated).
-- Remote sync by default: when the repository and `.git/` are writable, CLI
-  reads and writes serialize on `<git-dir>/taskgo.lock`, fetch the upstream
-  tracking branch (`@{u}`), and fast-forward or rebase with `--autostash` when
-  behind; commands that create a commit (`create`, `checkpoint`, `commit`,
-  `fix`) also push to the remote. Pass `--offline` (or set `AGENT_OFFLINE=1`) to
-  skip remote Git fetch and push.
-- `mcp`: Serve committed state to MCP clients and write their change sets as
-  commits: by default from and to a remote, for cloud agents without a checkout
-  of the control repository; with `--local`, on a checkout's own branch, for
-  agents in other workspaces on the same machine. The server writes a request
-  record for each call; `mcp logs` reads them, and on app1 the shared page is at
-  <https://logs.hupsista.com/>. See [MCP Server](references/mcp.md).
+1. Rewrite the Summary and Next of `<project>/STATUS.md` with `taskgo edit` or
+   your file tools.
+
+1. Commit the task change and the `STATUS.md` prose together, in one commit:
+
+   ```bash
+   taskgo checkpoint TASK-3A91F "feat(compiler): stream manifests" --all \
+     --ref compiler@1a2b3c4
+   ```
+
+   `checkpoint` syncs the generated block, formats the records, records the
+   session, and refuses while `taskgo doctor` reports problems in the files it
+   commits; other findings in the project are counted, not refused. Subjects are
+   Conventional Commits of at most 50 characters, prefix included.
+
+1. Leave the project [handoff-ready](references/workflows.md#handoff-ready).
+
+## Common Commands
+
+| Command                                        | Use                                                  |
+| ---------------------------------------------- | ---------------------------------------------------- |
+| `taskgo handoff PROJECT\|TASK_ID`              | Onboarding note: files to read, skills to activate   |
+| `taskgo status [PROJECT\|TASK_ID]`             | Current state of a task or project                   |
+| `taskgo list [PROJECT] --state ready`          | Tasks ready to start                                 |
+| `taskgo create PROJECT TITLE --goal …`         | New task (commits)                                   |
+| `taskgo update TASK --findings … --next …`     | Change state (`--status`) or sections in place       |
+| `taskgo update TASK --status done --outcome …` | Close a task                                         |
+| `taskgo edit PATH --old … --new …`             | Exact-text edit; validates and formats records       |
+| `taskgo sync [PROJECT]`                        | Refresh generated `STATUS.md` blocks                 |
+| `taskgo doctor [PROJECT]`                      | Read-only checks; non-zero on problems               |
+| `taskgo checkpoint TASK SUBJECT`               | Guarded commit for one task (`commit`: staged files) |
+
+Everything else, including every option, is in
+[the command index](references/command-index.md) and `taskgo <command> --help`.
+`read`, `search`, `edit`, and `apply` mirror the MCP tools for agents without a
+checkout; with a checkout, your own file tools are fine for reading.
+
+## Scheduling
+
+Most tasks need none of `blocked_by` (tasks holding this one; set it on the task
+that is held), `wait_for` (a date, issue, person, or condition), `due`, or
+`stale_after`. Read [Scheduling Fields](references/model.md#scheduling-fields)
+before you set them.
 
 ## Reference Material
 
-- **[Command Index](references/command-index.md)** — Detailed subcommand
-  synopsis and options
-- **[Model & Architecture](references/model.md)**
-- **[Agent Workflows & Handoff](references/workflows.md)**
-- **[Task Export](references/export.md)** — Delegating tasks to isolated workers
-  without control repository access
-- **[Activity Reports](references/activity-reports.md)**
-- **[MCP Server](references/mcp.md)** — `taskgo mcp` tools, authentication,
-  logging, and testing
+| Read                                               | When                                                                             |
+| -------------------------------------------------- | -------------------------------------------------------------------------------- |
+| [Command index](references/command-index.md)       | You need a command or option not shown above                                     |
+| [Model](references/model.md)                       | Placing a file or fact, writing a project README or ADR, setting schedule fields |
+| [Workflows](references/workflows.md)               | Plain `git` commits (renaming or removing a project), handoff, tracing sessions  |
+| [Change sets](references/change-sets.md)           | Writing a file for `apply`, or the exact `edit` and MCP write rules              |
+| [Activity reports](references/activity-reports.md) | Writing a weekly, monthly, or quarterly report                                   |
+| [Task export](references/export.md)                | Handing a task to a worker without the control repository                        |
+| [MCP server](references/mcp.md)                    | Running, debugging, or changing `taskgo mcp`                                     |

@@ -35,30 +35,40 @@ The block below is `taskgo --help`, kept in sync by `command-index-format`.
 ```text
 Usage: taskgo COMMAND [OPTIONS]
 
-Maintain a private Git-backed personal project/task control repo.
+Maintain a private Git-backed project/task control repo.
 
-Commands:
-  id                               Allocate a unique task ID
-  root                             Print the active control repository root
+Start:
+  handoff PROJECT|TASK_ID          Print agent instructions for a project or task
+  skills PROJECT [--json]          Print the skills a project declares
+
+Tasks:
   create PROJECT TITLE [OPTIONS]   Create a new task (--slug, --problem, etc.)
   update TASK_ID [OPTIONS]         Update task fields, status, or headings
   apply CHANGES.json [--dry-run]   Apply a change set to the working tree
   edit PATH [OPTIONS]              Replace exact text in a file (--old, --new)
+  id                               Allocate a unique task ID
+
+Read:
+  status [PROJECT|TASK_ID]         Show a task's or project's status
   list [PROJECT] [OPTIONS]         List tasks (--state ready for the frontier)
   info PROJECT [--json]            Show project metadata from README.md frontmatter
-  skills PROJECT [--json]          Print the skills a project declares
-  status [PROJECT|TASK_ID]         Show a task's or project's status
-  handoff PROJECT|TASK_ID          Print agent instructions for a project or task
-  sync [PROJECT]                   Update STATUS.md snapshot
-  check [PROJECT] [--json]         Sweep wait_for gates and date horizons
-  doctor [PROJECT]                 Run mechanical checks (read-only)
-  fix [PROJECT] [OPTIONS]          Auto-heal IDs, statuses, and snapshots
-  history PATH_OR_TASK_ID [FIELD]  Show frontmatter history
   read PATH [OPTIONS]              Print lines of a file (--start-line, --end-line)
   search [OPTIONS] GREP_ARGS...    Search file contents with git grep (--at, --json)
-  checkpoint TASK_ID SUBJECT [...] Commit an authorized tracker checkpoint (--all)
-  commit SUBJECT [OPTIONS]         Commit a logical transition
+  history PATH_OR_TASK_ID [FIELD]  Show frontmatter history
   schema [--json]                  Show the task, decision, and STATUS schema
+  root                             Print the active control repository root
+
+Commit:
+  checkpoint TASK_ID SUBJECT [...] Commit a task's changes (--all, --path)
+  commit SUBJECT [OPTIONS]         Commit what is staged, with STATUS.md synced
+
+Health:
+  doctor [PROJECT]                 Run mechanical checks (read-only)
+  fix [PROJECT] [OPTIONS]          Auto-heal IDs, statuses, snapshots, AGENTS.md
+  sync [PROJECT]                   Update STATUS.md snapshot
+  check [PROJECT] [--json]         Sweep wait_for gates and date horizons
+
+Server:
   mcp [OPTIONS]                    Serve the tracker to MCP clients
 
 Options:
@@ -78,9 +88,9 @@ Examples:
   taskgo create my-project "Add cache layer" --slug cache-layer --problem "High latency"
   taskgo update TASK-3A91F --status in-progress --sketch "Use in-memory dict"
   taskgo handoff TASK-3A91F
-  taskgo sync my-project
+  taskgo update TASK-3A91F --status done --outcome "Cache cut p99 to 8 ms"
+  taskgo checkpoint TASK-3A91F "feat(my-project): add cache" --all
   taskgo fix my-project
-  taskgo checkpoint TASK-3A91F "project: start diagnosis" --all
 ```
 
 <!-- /generated -->
@@ -94,7 +104,7 @@ Usage: taskgo create [-h] [--slug SLUG] [--status STATUS] [--problem PROBLEM]
                      [--cost COST] [--goal GOAL] [--criteria CRITERIA]
                      [--sketch SKETCH] [--constraints CONSTRAINTS]
                      [--outcome OUTCOME] [--findings FINDINGS]
-                     [--next NEXT_STEPS] [--conv CONV] [--wait-for GATE]
+                     [--next NEXT_STEPS] [--conv ID] [--wait-for GATE]
                      [--due YYYY-MM-DD] [--stale-after YYYY-MM-DD]
                      [--add-blocked-by TASK_ID] [--add-wait-for GATE]
                      [--add-conversation URI] [--no-commit] [--dry-run]
@@ -123,18 +133,24 @@ Options:
   --outcome OUTCOME     Outcome description
   --findings FINDINGS   Findings
   --next NEXT_STEPS     Next steps
-  --conv, -C, --conversation CONV
-                        Active conversation or session ID
-  --wait-for GATE       External or temporal gate (YYYY-MM-DD, b/..., cl/...,
-                        gh:..., @handle, URL, or free text)
+  --conv, -C, --conversation ID
+                        Record ID as the creating session, for a harness that
+                        exports none (default: the session ID in the
+                        environment)
+  --wait-for GATE       Initial gate (repeatable; same as --add-wait-for);
+                        GATE is YYYY-MM-DD, gh:OWNER/REPO#N, WORD/ID such as
+                        issue/123, @handle, URL, or free text
   --due YYYY-MM-DD      Committed completion deadline (YYYY-MM-DD)
   --stale-after YYYY-MM-DD
                         Relevance cutoff date (YYYY-MM-DD)
   --add-blocked-by TASK_ID
-                        Add to blocked_by (repeatable; repeats are no-ops)
-  --add-wait-for GATE   Add to wait_for (repeatable; repeats are no-ops)
+                        Add one value to blocked_by, keeping the others
+                        (repeatable; repeats are no-ops)
+  --add-wait-for GATE   Add one value to wait_for, keeping the others
+                        (repeatable; repeats are no-ops)
   --add-conversation URI
-                        Add to conversations (repeatable; repeats are no-ops)
+                        Add one value to conversations, keeping the others
+                        (repeatable; repeats are no-ops)
   --no-commit           Do not commit created task
   --dry-run             Preview allocation without modifying files
 
@@ -162,7 +178,7 @@ Usage: taskgo update [-h] [--status STATUS] [--expect-status STATE]
                      [--cost COST] [--goal GOAL] [--criteria CRITERIA]
                      [--sketch SKETCH] [--constraints CONSTRAINTS]
                      [--outcome OUTCOME] [--findings FINDINGS]
-                     [--next NEXT_STEPS] [--conv CONV] [--wait-for GATE]
+                     [--next NEXT_STEPS] [--conv ID] [--set-wait-for GATE]
                      [--due YYYY-MM-DD] [--stale-after YYYY-MM-DD]
                      [--add-blocked-by TASK_ID] [--remove-blocked-by TASK_ID]
                      [--add-wait-for GATE] [--remove-wait-for GATE]
@@ -193,33 +209,45 @@ Options:
   --outcome OUTCOME     Outcome description
   --findings FINDINGS   Findings
   --next NEXT_STEPS     Next steps
-  --conv, -C, --conversation CONV
-                        Active conversation or session ID
-  --wait-for GATE       External or temporal gate (YYYY-MM-DD, b/..., cl/...,
-                        gh:..., @handle, URL, or free text)
+  --conv, -C, --conversation ID
+                        Add ID to the task's conversations, like --add-
+                        conversation (update does not read the session ID from
+                        the environment)
+  --set-wait-for GATE   Replace the whole wait_for list (repeatable; '' clears
+                        it); GATE is YYYY-MM-DD, gh:OWNER/REPO#N, WORD/ID such
+                        as issue/123, @handle, URL, or free text
   --due YYYY-MM-DD      Committed completion deadline (YYYY-MM-DD)
   --stale-after YYYY-MM-DD
                         Relevance cutoff date (YYYY-MM-DD)
   --add-blocked-by TASK_ID
-                        Add to blocked_by (repeatable; repeats are no-ops)
+                        Add one value to blocked_by, keeping the others
+                        (repeatable; repeats are no-ops)
   --remove-blocked-by TASK_ID
-                        Remove from blocked_by (repeatable; absent values are
-                        no-ops)
-  --add-wait-for GATE   Add to wait_for (repeatable; repeats are no-ops)
+                        Remove one value from blocked_by, keeping the others
+                        (repeatable; absent values are no-ops)
+  --add-wait-for GATE   Add one value to wait_for, keeping the others
+                        (repeatable; repeats are no-ops)
   --remove-wait-for GATE
-                        Remove from wait_for (repeatable; absent values are
-                        no-ops)
+                        Remove one value from wait_for, keeping the others
+                        (repeatable; absent values are no-ops)
   --add-conversation URI
-                        Add to conversations (repeatable; repeats are no-ops)
+                        Add one value to conversations, keeping the others
+                        (repeatable; repeats are no-ops)
   --remove-conversation URI
-                        Remove from conversations (repeatable; absent values
-                        are no-ops)
+                        Remove one value from conversations, keeping the
+                        others (repeatable; absent values are no-ops)
 
 Examples:
   taskgo update TASK-3A91F --status in-progress
   taskgo update TASK-3A91F --expect-status todo --status in-progress
   taskgo update TASK-3A91F --add-blocked-by TASK-1627D --remove-wait-for 2026-10-13
   taskgo update TASK-3A91F --sketch "Use in-memory dict" --findings "Latency reduced by 40%"
+  taskgo update TASK-3A91F --status done --outcome "Cache cut p99 latency to 8 ms"
+  taskgo update TASK-3A91F --set-wait-for 2026-12-01 --set-wait-for issue/123
+
+List fields: --add-FIELD and --remove-FIELD change one value and keep the rest.
+--set-wait-for replaces the whole wait_for list ('' clears it). --conv adds one
+conversation, like --add-conversation.
 ```
 
 <!-- /generated -->
@@ -257,7 +285,7 @@ Example CHANGES.json:
      "value": "blocked", "expected": "todo"}
   ]}
 
-The change-set format is in references/model.md (Change Sets).
+The change-set format is in references/change-sets.md.
 ```
 
 <!-- /generated -->
@@ -586,7 +614,7 @@ options:
 Examples:
   taskgo search TASK-084C7
   taskgo search -i -C2 'partner name' -- meta/ '*.md'
-  taskgo search -l -e b/123456 -e cl/123456
+  taskgo search -l -e issue/123 -e pr/45
   taskgo search -e TODO --and --not -e done --at HEAD~3 --json
 ```
 
@@ -598,16 +626,15 @@ Examples:
 
 ```text
 Usage: taskgo checkpoint [-h] [--all] [--path PATHS] [--body BODY]
-                         [--ref REFS] [--conv CONV]
+                         [--ref REFS] [--conv ID]
                          TASK_ID SUBJECT
 
-Commit an authorized tracker checkpoint for TASK_ID. Nonconforming subjects are rewritten as 'chore(<project>): <subject>' (truncated to 50 characters). Staged paths must belong to TASK_ID's project; changes spanning projects (such as moving a task) need a plain 'git commit'; see references/workflows.md.
+Commit an authorized tracker checkpoint for TASK_ID. The subject must fit in 50 characters: a longer one is refused, with its length and the prefix's share, before anything is staged. A subject without a known 'type(scope): ' prefix is rewritten as 'chore(<project>): <subject>', and refused if that is too long. Tracker records about to be committed are formatted first. Staged paths must belong to TASK_ID's project; changes spanning projects (such as moving a task) need a plain 'git commit'; see references/workflows.md.
 
 Arguments:
   TASK_ID               Target task ID
   SUBJECT               Conventional Commits subject ('type(scope):
-                        description', <= 50 chars; rewritten when
-                        nonconforming)
+                        description', at most 50 characters, never truncated)
 
 Options:
   -h, --help            Display this help message and exit
@@ -615,12 +642,17 @@ Options:
   --path, -p PATHS      Explicit project files to stage
   --body, -b BODY       Plain-text commit body (hard-wrapped to 72 columns)
   --ref, -r REFS        External references (e.g. artifact@sha)
-  --conv, -C, --conversation CONV
-                        Active conversation or session ID
+  --conv, -C, --conversation ID
+                        This session's conversation ID, for a harness that
+                        exports none: recorded in the task's conversations and
+                        the Conversation: trailer (default: the session ID in
+                        the environment)
 
 Examples:
   taskgo checkpoint TASK-3A91F "chore(proj): start diagnosis" --all
   taskgo checkpoint TASK-3A91F "docs(proj): update task" --path proj/tasks/TASK-3A91F-slug.md
+  taskgo checkpoint TASK-3A91F "feat(proj): close cache task" --all \
+    --ref app@4f2c1d9
 ```
 
 <!-- /generated -->
@@ -630,20 +662,27 @@ Examples:
 <!-- generated: ../scripts/taskgo commit --help -->
 
 ```text
-Usage: taskgo commit [-h] [--body BODY] [--ref REFS] [--conv CONV] SUBJECT
+Usage: taskgo commit [-h] [--body BODY] [--ref REFS] [--conv ID] SUBJECT
 
-Commit a logical transition with automatic project status synchronization. Staged changes must touch at most one project; changes spanning projects (such as moving a task) need a plain 'git commit'; see references/workflows.md.
+Commit a logical transition with automatic project status synchronization. Staged changes must touch at most one project; changes spanning projects (such as moving a task) need a plain 'git commit'; see references/workflows.md. The subject rules are checkpoint's: at most 50 characters, refused rather than truncated. Staged tracker records are formatted and re-staged (not ones that also have unstaged changes).
 
 Arguments:
-  SUBJECT               Conventional Commits subject line (rewritten when
-                        nonconforming)
+  SUBJECT               Conventional Commits subject ('type(scope):
+                        description', at most 50 characters, never truncated)
 
 Options:
   -h, --help            Display this help message and exit
   --body, -b BODY       Plain-text commit body (hard-wrapped to 72 columns)
   --ref, -r REFS        External references (e.g. artifact@sha)
-  --conv, -C, --conversation CONV
-                        Active conversation or session ID
+  --conv, -C, --conversation ID
+                        This session's conversation ID, for a harness that
+                        exports none: recorded in the task's conversations and
+                        the Conversation: trailer (default: the session ID in
+                        the environment)
+
+Examples:
+  git add proj/PLAN.md && taskgo commit "docs(proj): revise plan"
+  git add proj/tasks && taskgo commit "chore(proj): triage"
 ```
 
 <!-- /generated -->

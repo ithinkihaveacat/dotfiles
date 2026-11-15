@@ -57,8 +57,6 @@ UNSET_ENV = (
     "NO_COLOR",
     "FORCE_COLOR",
     "AI_AGENT",
-    "INVOKER_INFO_NAME",
-    "JETSKI_CONVERSATION_ID",
     "ANTIGRAVITY_CONVERSATION_ID",
     "ANTIGRAVITY_SESSION",
     "CLAUDE_CODE_SESSION_ID",
@@ -67,7 +65,6 @@ UNSET_ENV = (
     "CLAUDE_PROJECT_ID",
     "OPENCODE_SESSION_ID",
     "CODEX_SESSION_ID",
-    "INVOKER_INFO_ROOT_SESSION_ID",
     "CONVERSATION_ID",
     "GIT_EDITOR",
 )
@@ -382,15 +379,13 @@ def http_checks(tap: Tap, tracker: Tracker, http: Http) -> None:
     tap.check(
         "1: create returns the new task's section hashes",
         a[0]
-        and a[1]["sections"]
-        == [
-            {
-                "record": new_id,
-                "section": "Goal",
-                "hash": section_hash(call, new_id, "Goal"),
-            }
-        ]
-        and "sections" not in b[1],
+        and a[1]["sections"][0]
+        == {
+            "record": new_id,
+            "section": "Goal",
+            "hash": section_hash(call, new_id, "Goal"),
+        }
+        and all(s["record"] != new_id for s in b[1].get("sections", [])),
         a,
     )
 
@@ -1481,8 +1476,11 @@ def local_checks(tap: Tap, tg, seed: Path, tmp: Path) -> None:
         and head() == got["commit"]
         and git(co, "rev-parse", "main^") == before
         and dirty() == ""
-        and (co / got["created"][0]["path"]).is_file(),
-        (got, dirty(), err_text),
+        and (co / got["created"][0]["path"]).is_file()
+        # Without a conversation, the commit still names its client.
+        and "\nMCP-Client: " in git(co, "log", "-1", "--format=%B")
+        and "Conversation:" not in git(co, "log", "-1", "--format=%B"),
+        (got, dirty(), err_text, git(co, "log", "-1", "--format=%B")),
     )
 
     both = subprocess.run(
@@ -1798,7 +1796,7 @@ def edit_checks(tap: Tap, tg, seed: Path, tmp: Path) -> None:
             "path": "alpha/tasks/TASK-AA001-one.md",
             "old_string": "**Goal:** One goal.",
             "new_string": "**Goal:** One   goal,   edited.",
-            "conversation": "jetski://00000000-0000-4000-8000-0000000000e4",
+            "conversation": "webchat://00000000-0000-4000-8000-0000000000e4",
         },
     )
     task = tracker.show("alpha/tasks/TASK-AA001-one.md")
@@ -1867,7 +1865,10 @@ def section_input_checks(tap: Tap, tg, seed: Path, tmp: Path) -> None:
             "text": text,
             "expected_hash": None,
         }
-        for name, text in (("Findings", "Observed."), ("Next", "## Next\n\nVerify."))
+        for name, text in (
+            ("Findings", "Observed."),
+            ("Next", "Verify.\n\n## Findings\n\nAgain."),
+        )
     ]
     args = {
         "request_id": "section-input",
@@ -1884,8 +1885,8 @@ def section_input_checks(tap: Tap, tg, seed: Path, tmp: Path) -> None:
         raw.get("isError")
         and raw.get("structuredContent", {}).get("error", {}).get("message") == message
         and "change 2 (replace_section)" in message
-        and "text for Next" in message
-        and "body only" in message
+        and "text for Next contains the line '## Findings' (line 3)" in message
+        and "edit_file" in message
         and tracker.head() == before,
         raw,
     )
@@ -1899,6 +1900,31 @@ def section_input_checks(tap: Tap, tg, seed: Path, tmp: Path) -> None:
         and "codex://synthetic-session" in text
         and text.count("## Findings") == 1
         and text.count("## Next") == 1,
+        got,
+    )
+    hashes = {(x["record"], x["section"]): x["hash"] for x in got["sections"]}
+    ok, got = call(
+        "apply_changes",
+        {
+            "request_id": "section-own-heading",
+            "changes": [
+                {
+                    "op": "replace_section",
+                    "record": "TASK-AA001",
+                    "section": "Next",
+                    "text": "## Next\n\nVerified.",
+                    "expected_hash": hashes[("TASK-AA001", "Next")],
+                }
+            ],
+        },
+    )
+    text = tracker.show("alpha/tasks/TASK-AA001-one.md")
+    tap.check(
+        "a section's own heading is dropped with a finding, not refused",
+        ok
+        and text.count("## Next") == 1
+        and "Verified." in text
+        and any("its own heading" in f["message"] for f in got["findings"]),
         got,
     )
 
@@ -1917,6 +1943,21 @@ def findings_checks(tap: Tap, tg, seed: Path, tmp: Path) -> None:
 
     ok, got = call("handoff", {"target": "alpha"})
     tap.check("handoff carries the guide", ok and got["guide"] == tg.MCP_GUIDE, got)
+    tap.check(
+        "an MCP handoff sends the caller to no file or shell it already has",
+        ok
+        and "agents_md" not in got
+        and "before acting" not in got["note"]
+        and "skill --scope" not in json.dumps(got)
+        and "has no PLAN.md" not in got["note"],
+        got,
+    )
+    ok, got = call("handoff", {"target": "beta"})
+    tap.check(
+        "an MCP handoff says when a project has no PLAN.md",
+        ok and got["plan"] is None and "beta has no PLAN.md." in got["note"],
+        got,
+    )
 
     ok, got = call(
         "apply_changes",
