@@ -135,10 +135,16 @@ the Summary.
 **Before work:**
 
 1. Run `taskgo handoff <project|TASK_ID>`. Read the root `AGENTS.md`, the
-   project `README.md`, and the files the note names.
-1. If your harness has a skill manager, activate the project's skills:
-   `taskgo skills <project> | skill --scope session add -`. Otherwise read each
-   skill's `SKILL.md`.
+   project `README.md`, and the files the note names. Task handoff accepts only
+   unfinished work; to investigate a completed or cancelled task, hand off its
+   project and read the task record directly.
+1. Reuse the project's skills already available in your environment. Load
+   missing ones through a supported discovery/loading mechanism, or locate and
+   read their `SKILL.md` files directly. If the optional `skill` CLI is
+   installed and supports session scope in your launcher, you can use
+   `taskgo skills <project> | skill --scope session add -`. Its
+   `skill resolve <NAME>` command may also help locate local skills. Neither
+   command is required by taskgo.
 1. For work that may span sessions, mark the task `in-progress` and commit that
    first (`taskgo update TASK --status in-progress`, then
    `taskgo checkpoint TASK "chore(<project>): start …"`). A small task finished

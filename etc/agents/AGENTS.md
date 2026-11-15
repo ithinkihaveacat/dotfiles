@@ -15,9 +15,13 @@ workflows, helper scripts, and local conventions.
 - **Load session-specific skills when relevant**: Default skills cover only
   baseline workflows. Whenever work touches—or later shifts to—a repository or
   technology stack not covered by active skills, delegate a subagent to check
-  `skill catalog --json` and activate matching skills with
-  `skill --scope session add <NAME>...` (or use other skill-search tools if
-  available).
+  `skill catalog --json` (or other skill-search tools). Reuse skills already
+  provided by the harness. Load missing skills through its skill loader, or use
+  `skill --scope session add <NAME>...` only when this launcher supports session
+  scope (Claude wrapper or Antigravity). OpenCode and Codex do not support that
+  CLI scope: resolve local skills with `skill resolve <NAME>` and read the
+  resulting `SKILL.md` instead. Do not install workspace/user skills merely to
+  work around missing session support.
 - **Skill symlinks and relative paths**: Installed skill directories are
   symlinks, so cross-skill links (`../<sibling>/...`) must be resolved against
   the symlink's `realpath` (or activated via `skill --scope session add`), and

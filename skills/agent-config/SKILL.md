@@ -529,9 +529,9 @@ skill --scope defaults add coding-standards
 
 ### Adding Per-Session Skills (Ephemeral / Temporary / Scratch)
 
-Install a skill temporarily for the active conversation session (also referred
-to as *per-session*, *ephemeral*, *session-scoped*, *temporary*, or *scratch*
-skills):
+With a supported launcher (Claude wrapper or Antigravity), install a skill
+temporarily for the active conversation session (also referred to as
+*per-session*, *ephemeral*, *session-scoped*, *temporary*, or *scratch* skills):
 
 ```bash
 skill --scope session add coding-standards
@@ -553,13 +553,20 @@ current turn, as the harness injects it into `<skills>` only on subsequent turns
 (the command says so after adding). Either way the repository's `.envrc` and
 `.git/info/exclude` are left untouched.
 
+OpenCode and Codex do not support this CLI's session scope. Reuse skills already
+provided by the harness and use its skill loader for missing ones. For a local
+skill outside that loader's inventory, run `skill resolve NAME` and read the
+resolved directory's `SKILL.md` directly. Harness-provided skills need not exist
+in the CLI catalog. Do not create workspace/user links merely to work around
+missing session support.
+
 If `skill --scope session` fails naming `AGENT_SESSION_DIR`, this agent has no
 session directory of its own: Claude was not started through the `claude`
 wrapper (for example, a `claude remote-control` server), was resumed with
 `--continue` or the `--resume` picker, or the caller is a nested agent; Codex
 has no session scope at all. Under Antigravity, pass `-C <artifactDir>`.
-Otherwise fall back to the workspace scope, or ask the user. Which launchers
-support session skills, and what a new launcher needs to, is in
+Otherwise read the resolved `SKILL.md` directly, or ask the user. Which
+launchers support session skills, and what a new launcher needs to, is in
 [Launchers and per-session skills](references/model.md#launchers-and-per-session-skills).
 
 ### Managing Permissions by Hand
