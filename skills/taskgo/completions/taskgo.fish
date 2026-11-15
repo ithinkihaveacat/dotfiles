@@ -76,10 +76,10 @@ complete -f -c taskgo -n '__fish_seen_subcommand_from create' -l constraints -x 
 complete -f -c taskgo -n '__fish_seen_subcommand_from create' -l outcome -x -d 'Outcome description'
 complete -f -c taskgo -n '__fish_seen_subcommand_from create' -l findings -x -d Findings
 complete -f -c taskgo -n '__fish_seen_subcommand_from create' -l next -x -d 'Next steps'
-complete -f -c taskgo -n '__fish_seen_subcommand_from create' -s C -l conv -l conversation -x -d 'Active conversation or session ID'
+complete -f -c taskgo -n '__fish_seen_subcommand_from create' -s C -l conv -l conversation -x -d 'Creating session ID (default: from environment)'
 complete -f -c taskgo -n '__fish_seen_subcommand_from create' -l no-commit -d 'Create task and sync without committing'
 complete -f -c taskgo -n '__fish_seen_subcommand_from create' -l dry-run -d 'Preview task path without creating files'
-complete -f -c taskgo -n '__fish_seen_subcommand_from create' -l wait-for -x -d 'External or temporal gate'
+complete -f -c taskgo -n '__fish_seen_subcommand_from create' -l wait-for -x -d 'Initial gate (same as --add-wait-for)'
 complete -f -c taskgo -n '__fish_seen_subcommand_from create' -l due -x -d 'Committed completion deadline (YYYY-MM-DD)'
 complete -f -c taskgo -n '__fish_seen_subcommand_from create' -l stale-after -x -d 'Relevance cutoff date (YYYY-MM-DD)'
 complete -f -c taskgo -n '__fish_seen_subcommand_from create' -l add-blocked-by -x -a '(__fish_taskgo_tasks)' -d 'Add a blocked_by edge'
@@ -106,8 +106,8 @@ complete -f -c taskgo -n '__fish_seen_subcommand_from update' -l constraints -x 
 complete -f -c taskgo -n '__fish_seen_subcommand_from update' -l outcome -x -d 'Outcome description'
 complete -f -c taskgo -n '__fish_seen_subcommand_from update' -l findings -x -d Findings
 complete -f -c taskgo -n '__fish_seen_subcommand_from update' -l next -x -d 'Next steps'
-complete -f -c taskgo -n '__fish_seen_subcommand_from update' -s C -l conv -l conversation -x -d 'Active conversation or session ID'
-complete -f -c taskgo -n '__fish_seen_subcommand_from update' -l wait-for -x -d 'External or temporal gate'
+complete -f -c taskgo -n '__fish_seen_subcommand_from update' -s C -l conv -l conversation -x -d 'Add a conversation (like --add-conversation)'
+complete -f -c taskgo -n '__fish_seen_subcommand_from update' -l set-wait-for -x -d 'Replace the whole wait_for list'
 complete -f -c taskgo -n '__fish_seen_subcommand_from update' -l due -x -d 'Committed completion deadline (YYYY-MM-DD)'
 complete -f -c taskgo -n '__fish_seen_subcommand_from update' -l stale-after -x -d 'Relevance cutoff date (YYYY-MM-DD)'
 
@@ -147,12 +147,16 @@ complete -f -c taskgo -n '__fish_seen_subcommand_from checkpoint' -s a -l all -d
 complete -c taskgo -n '__fish_seen_subcommand_from checkpoint' -s p -l path -r -d 'Include additional modified project file'
 complete -f -c taskgo -n '__fish_seen_subcommand_from checkpoint' -s b -l body -x -d 'Commit body'
 complete -f -c taskgo -n '__fish_seen_subcommand_from checkpoint' -s r -l ref -x -d 'External reference URL/ID'
-complete -f -c taskgo -n '__fish_seen_subcommand_from checkpoint' -s C -l conv -l conversation -x -d 'Active conversation or session ID'
+complete -f -c taskgo -n '__fish_seen_subcommand_from checkpoint' -s C -l conv -l conversation -x -d 'Session ID (default: from environment)'
+complete -f -c taskgo -n '__fish_seen_subcommand_from checkpoint' -l status-summary -x -d 'Replace STATUS.md Summary prose'
+complete -f -c taskgo -n '__fish_seen_subcommand_from checkpoint' -l status-next -x -d 'Replace STATUS.md Next prose'
 
 # commit options
 complete -f -c taskgo -n '__fish_seen_subcommand_from commit' -s b -l body -x -d 'Commit body'
 complete -f -c taskgo -n '__fish_seen_subcommand_from commit' -s r -l ref -x -d 'External reference URL/ID'
-complete -f -c taskgo -n '__fish_seen_subcommand_from commit' -s C -l conv -l conversation -x -d 'Active conversation or session ID'
+complete -f -c taskgo -n '__fish_seen_subcommand_from commit' -s C -l conv -l conversation -x -d 'Session ID (default: from environment)'
+complete -f -c taskgo -n '__fish_seen_subcommand_from commit' -l status-summary -x -d 'Replace STATUS.md Summary prose'
+complete -f -c taskgo -n '__fish_seen_subcommand_from commit' -l status-next -x -d 'Replace STATUS.md Next prose'
 
 # schema options
 complete -f -c taskgo -n '__fish_seen_subcommand_from schema' -s j -l json -d 'Output as JSON'
