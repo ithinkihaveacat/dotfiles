@@ -129,8 +129,10 @@ picgo mcp --http
   gate: an agent receives bytes through MCP and never needs a public URL.
 - HEIC needs the pinned `pillow-heif`; without it `picgo doctor` warns and a
   HEIC upload is refused.
-- The PWA is one HTML file with no service worker. On iOS, Share → Add to Home
-  Screen; on Android, the browser's install prompt may be absent.
+- The PWA is one HTML file with no service worker. Tiles keep each item's own
+  aspect ratio, so nothing is cropped; tap one to open it full size, and use the
+  arrows (or the left and right keys) to move between the ten. On iOS, Share →
+  Add to Home Screen; on Android, the browser's install prompt may be absent.
 - Behind Cloudflare Access, an expired browser session makes the PWA report
   "network or session error": the request is redirected to the login page and
   gets no HTTP response. Reload the page, sign in, and retry.
