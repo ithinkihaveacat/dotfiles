@@ -153,9 +153,12 @@ only when named with --with or --only. Git update failures stop the run before
 applying anything. Other feature failures are reported and the remaining
 features still run; the exit status is non-zero if any failed.
 
-Git updates only fast-forward. Incoming changes require confirmation, or an
-explicit --accept-updates for automation. Divergence is never repaired here.
-Use --apply to apply the current checkout without fetching or updating Git.
+Git updates fast-forward by default. When local commits have diverged and every
+one of them is unpublished, a clean merge is offered instead: with explicit
+interactive approval, or --integrate for automation. This installer never
+rebases, resets, or stashes. Incoming changes require confirmation, or an
+explicit --accept-updates for automation. Use --apply to apply the current
+checkout without fetching or updating Git.
 
 On Linux, restart-warnings checks this user's native Claude and OpenCode
 processes against the installed executables, including updates installed by
@@ -184,6 +187,8 @@ OPTIONS:
   --apply       Apply the current checkout without Git updates
   --accept-updates
                 Accept incoming fast-forwards without prompting (agent hosts)
+  --integrate   Merge incoming commits into diverged local commits when they are
+                unpublished and the merge is clean; never rebases or resets
   --verbose     Print each wrapped command to stderr before running it
 
 FEATURES:
@@ -257,6 +262,7 @@ NON_INTERACTIVE=0
 NO_INPUT=0
 APPLY_ONLY=0
 ACCEPT_UPDATES=0
+INTEGRATE=0
 PRUNE=0
 DRY_RUN=0
 PROFILE=""
@@ -323,6 +329,10 @@ while [[ $# -gt 0 ]]; do
       ACCEPT_UPDATES=1
       shift
       ;;
+    --integrate)
+      INTEGRATE=1
+      shift
+      ;;
     -n | --dry-run)
       DRY_RUN=1
       shift
@@ -367,8 +377,9 @@ fi
 
 # Resolve the selection to a space-separated list in FEATURES order.
 if [ "$APPLY_ONLY" = 1 ]; then
-  if [ "$ACCEPT_UPDATES" = 1 ] || [[ " $ONLY $WITH " == *" git-pull "* ]]; then
-    echo "error: --apply cannot be combined with --accept-updates or an explicit git-pull feature" >&2
+  if [ "$ACCEPT_UPDATES" = 1 ] || [ "$INTEGRATE" = 1 ] ||
+    [[ " $ONLY $WITH " == *" git-pull "* ]]; then
+    echo "error: --apply cannot be combined with --accept-updates, --integrate, or an explicit git-pull feature" >&2
     exit 1
   fi
   WITHOUT="$WITHOUT git-pull"
@@ -791,12 +802,13 @@ link_overlay_path() {
 
 # Pull each source repo to its upstream before applying. Fails loudly on detached
 # HEAD, dirty tracked files when updates are incoming, missing/gone upstreams,
-# non-default branches, or diverged local commits. Plan approved fast-forwards
-# without changing any checkout; feature_git_pull applies only after all pass.
+# non-default branches, or divergence that cannot be merged safely. Plans
+# approved fast-forwards and merges without changing any checkout;
+# feature_git_pull applies only after all pass.
 git_up() {
   local dir=$1
   local name git_dir state branch upstream remote default_ref counts behind ahead
-  local before target reply changes
+  local before target reply changes unpublished merge_tree
   [ -e "$dir/.git" ] || return 0
   name=$(basename "$dir")
 
@@ -868,18 +880,94 @@ git_up() {
   fi
   read -r behind ahead <<<"$counts"
 
+  # Commits reachable from HEAD but from no remote branch: unpublished work that
+  # no other checkout or review branch can see. If it cannot be determined,
+  # treat the commits as published so divergence still stops the run.
+  if ! unpublished=$(git -C "$dir" rev-list --count HEAD --not --remotes 2>/dev/null); then
+    unpublished=0
+  fi
+
   if [ "$behind" -eq 0 ]; then
     if [ "$ahead" -gt 0 ]; then
-      echo "note: $dir ($branch) is ahead of $upstream by $ahead local commit(s); nothing incoming"
+      if [ "$unpublished" -gt 0 ]; then
+        echo "warning: $dir ($branch) has $unpublished unpublished commit(s) ahead of $upstream; publish with 'git push-pr' in $dir" >&2
+      else
+        echo "note: $dir ($branch) is ahead of $upstream by $ahead published commit(s); nothing incoming" >&2
+      fi
     fi
     return 0
   fi
 
   if [ "$ahead" -gt 0 ]; then
-    echo "error: $dir ($branch) has diverged from $upstream ($ahead local, $behind incoming commits)" >&2
-    echo "hint: inspect git status and git log --graph --oneline --all in $dir; integrate separately, then retry" >&2
-    echo "hint: an earlier squash merge may contain the same changes; this installer never rebases or resets" >&2
-    return 1
+    if [ "$unpublished" -ne "$ahead" ]; then
+      echo "error: $dir ($branch) has diverged from $upstream ($ahead local, $behind incoming commits)" >&2
+      echo "hint: inspect git status and git log --graph --oneline --all in $dir; integrate separately, then retry" >&2
+      echo "hint: an earlier squash merge may contain the same changes; this installer never rebases or resets" >&2
+      return 1
+    fi
+
+    # Every local commit is unpublished, so a merge keeps each one as it is.
+    # Plan the merge only if the two sides combine without conflicts.
+    case "$(git -C "$dir" merge-tree -h 2>&1)" in
+      *--write-tree*) ;;
+      *)
+        echo "error: $dir ($branch) has diverged from $upstream, and this git cannot plan a merge (needs 2.38+)" >&2
+        echo "hint: integrate separately in $dir, then retry" >&2
+        return 1
+        ;;
+    esac
+    if ! merge_tree=$(git -C "$dir" merge-tree --write-tree HEAD "$upstream" 2>/dev/null); then
+      echo "error: $dir ($branch) has diverged from $upstream and the two sides conflict ($ahead local, $behind incoming commits)" >&2
+      echo "hint: integrate separately in $dir; this installer never resolves conflicts, rebases, or resets" >&2
+      return 1
+    fi
+    merge_tree=${merge_tree%%$'\n'*}
+
+    changes=$(git -C "$dir" status --porcelain) || return 1
+    if [ -n "$changes" ]; then
+      echo "error: $dir has uncommitted changes and $behind incoming commit(s); commit or stash before updating" >&2
+      return 1
+    fi
+
+    before=$(git -C "$dir" rev-parse HEAD) || return 1
+    target=$(git -C "$dir" rev-parse "$upstream") || return 1
+    echo "Diverged: $dir ($branch) has $ahead unpublished commit(s); incoming from $upstream:" >&2
+    git -C "$dir" --no-pager log --oneline "$before..$target" >&2 || return 1
+    git -C "$dir" --no-pager -c diff.relative=false diff --stat "$before...$target" >&2 || return 1
+    echo "Local commits kept by the merge:" >&2
+    git -C "$dir" --no-pager log --oneline "$target..$before" >&2 || return 1
+    if [ "$INTEGRATE" != 1 ]; then
+      if [ "$NON_INTERACTIVE" = 1 ]; then
+        echo "error: divergence requires interactive approval or --integrate; use --apply for the current checkout" >&2
+        return 1
+      fi
+      while true; do
+        printf 'Merge %s into %s in %s? [y/N/d] ' "$upstream" "$branch" "$name" >&2
+        reply=""
+        read -r reply || reply=""
+        case "$reply" in
+          [yY] | [yY][eE][sS])
+            break
+            ;;
+          [dD] | [dD][iI][fF][fF])
+            git -C "$dir" --no-pager -c diff.relative=false diff "$before...$target" >&2 || return 1
+            ;;
+          *)
+            echo "Merge declined for $name; stopping before applying. Use --apply to apply the current checkout." >&2
+            return 1
+            ;;
+        esac
+      done
+    fi
+
+    GIT_UPDATE_DIRS+=("$dir")
+    GIT_UPDATE_HEADS+=("$before")
+    GIT_UPDATE_TARGETS+=("$target")
+    GIT_UPDATE_BRANCHES+=("$branch")
+    GIT_UPDATE_UPSTREAMS+=("$upstream")
+    GIT_UPDATE_MODES+=("merge")
+    GIT_UPDATE_TREES+=("$merge_tree")
+    return 0
   fi
 
   changes=$(git -C "$dir" status --porcelain) || return 1
@@ -921,14 +1009,20 @@ git_up() {
   GIT_UPDATE_HEADS+=("$before")
   GIT_UPDATE_TARGETS+=("$target")
   GIT_UPDATE_BRANCHES+=("$branch")
+  GIT_UPDATE_UPSTREAMS+=("$upstream")
+  GIT_UPDATE_MODES+=("ff")
+  GIT_UPDATE_TREES+=("")
 }
 
 # Recheck the plan before each update. Never roll back earlier fast-forwards if
 # something changes or fails: stop, report it, and leave diagnosis to the caller.
 function git_apply_updates {
-  local i dir changes
+  local i dir changes mode target tree upstream
   for ((i = 0; i < ${#GIT_UPDATE_DIRS[@]}; i++)); do
     dir=${GIT_UPDATE_DIRS[$i]}
+    mode=${GIT_UPDATE_MODES[$i]:-ff}
+    target=${GIT_UPDATE_TARGETS[$i]}
+    upstream=${GIT_UPDATE_UPSTREAMS[$i]:-}
     changes=$(git -C "$dir" status --porcelain) || return 1
     if [ "$(git -C "$dir" rev-parse HEAD)" != "${GIT_UPDATE_HEADS[$i]}" ] ||
       [ "$(git -C "$dir" symbolic-ref --quiet --short HEAD)" != "${GIT_UPDATE_BRANCHES[$i]}" ] ||
@@ -936,7 +1030,25 @@ function git_apply_updates {
       echo "error: $dir changed after approval; stopping without applying features; earlier repositories may have advanced" >&2
       return 1
     fi
-    if ! x git -C "$dir" merge --ff-only --no-autostash "${GIT_UPDATE_TARGETS[$i]}"; then
+    if [ "$mode" = merge ]; then
+      # The same merge must still apply, producing the tree approved earlier.
+      if ! tree=$(git -C "$dir" merge-tree --write-tree HEAD "$target" 2>/dev/null); then
+        echo "error: $dir no longer merges cleanly; stopping without applying features; earlier repositories may have advanced" >&2
+        return 1
+      fi
+      tree=${tree%%$'\n'*}
+      if [ "$tree" != "${GIT_UPDATE_TREES[$i]}" ]; then
+        echo "error: $dir merge result changed after approval; stopping without applying features; earlier repositories may have advanced" >&2
+        return 1
+      fi
+      if ! x git -C "$dir" merge --no-edit \
+        -m "Merge $upstream into ${GIT_UPDATE_BRANCHES[$i]}" "$target"; then
+        git -C "$dir" merge --abort 2>/dev/null || true
+        echo "error: merge failed for $dir; earlier repositories may have advanced; no rollback attempted" >&2
+        return 1
+      fi
+      echo "note: merged $upstream into ${GIT_UPDATE_BRANCHES[$i]} in $dir; publish with 'git push-pr' in $dir" >&2
+    elif ! x git -C "$dir" merge --ff-only --no-autostash "$target"; then
       echo "error: fast-forward failed for $dir; earlier repositories may have advanced; no rollback attempted" >&2
       return 1
     fi
@@ -949,6 +1061,9 @@ function feature_git_pull {
   GIT_UPDATE_HEADS=()
   GIT_UPDATE_TARGETS=()
   GIT_UPDATE_BRANCHES=()
+  GIT_UPDATE_UPSTREAMS=()
+  GIT_UPDATE_MODES=()
+  GIT_UPDATE_TREES=()
   if [ "$INSTALL_REEXEC" = 1 ]; then
     return 0
   fi

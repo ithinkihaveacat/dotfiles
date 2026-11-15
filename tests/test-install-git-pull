@@ -42,6 +42,8 @@ SRCDIRS=()
 INSTALL_REEXEC=0
 # shellcheck disable=SC2034
 ACCEPT_UPDATES=1
+# shellcheck disable=SC2034
+INTEGRATE=0
 x() { "$@"; }
 heading() { :; }
 is_offline() { return 1; }
@@ -63,6 +65,7 @@ check() {
 }
 is() { [[ "$1" == "$2" ]]; }
 has() { [[ "$1" == *"$2"* ]]; }
+lacks() { [[ "$1" != *"$2"* ]]; }
 
 make_remote_and_clone() {
   local name=$1
@@ -80,15 +83,18 @@ make_remote_and_clone() {
 }
 
 run_git_up() {
-  local dir=$1 non_inter=$2 reply=${3:-}
+  local dir=$1 non_inter=$2 reply=${3:-} integrate=${4:-0}
   GIT_UPDATE_DIRS=()
   GIT_UPDATE_HEADS=()
   GIT_UPDATE_TARGETS=()
   GIT_UPDATE_BRANCHES=()
+  GIT_UPDATE_UPSTREAMS=()
+  GIT_UPDATE_MODES=()
+  GIT_UPDATE_TREES=()
   status=0
   output=$(
     exec 2>&1
-    NON_INTERACTIVE="$non_inter" git_up "$dir" <<<"$reply" && git_apply_updates
+    NON_INTERACTIVE="$non_inter" INTEGRATE="$integrate" git_up "$dir" <<<"$reply" && git_apply_updates
   ) || status=$?
 }
 
@@ -242,25 +248,90 @@ git -C "$SHALLOW_ADMIN" push -q --force origin main >/dev/null 2>&1
 run_git_up "$SHALLOW_CLONE" 0 "n"
 check "shallow rewritten history stops rather than guessing" is "$status" 1
 
-# 9. Interactive divergence is refused even when the caller answers yes.
+# 9. Unpublished divergence: refused without consent, merged with it.
 make_remote_and_clone "inter-ahead"
 echo "local only" >"$TMP/inter-ahead/local.txt"
 git -C "$TMP/inter-ahead" add local.txt
 git -C "$TMP/inter-ahead" commit -q -m "feat: local wip"
+local_head=$(git -C "$TMP/inter-ahead" rev-parse HEAD)
 echo "remote only" >"$TMP/inter-ahead/remote.txt"
 echo "remote only" >"$TMP/inter-ahead-admin/remote.txt"
 rm -f "$TMP/inter-ahead/remote.txt"
 git -C "$TMP/inter-ahead-admin" add remote.txt
 git -C "$TMP/inter-ahead-admin" commit -q -m "feat: remote parallel"
 git -C "$TMP/inter-ahead-admin" push -q origin main >/dev/null 2>&1
+
+run_git_up "$TMP/inter-ahead" 1
+check "non-interactive divergence needs --integrate" is "$status" 1
+check "non-interactive divergence names --integrate" has "$output" "--integrate"
+check "non-interactive divergence leaves HEAD unchanged" \
+  is "$(git -C "$TMP/inter-ahead" rev-parse HEAD)" "$local_head"
+
+run_git_up "$TMP/inter-ahead" 0 "n"
+check "declining the merge stops the run" is "$status" 1
+check "declined merge leaves HEAD unchanged" \
+  is "$(git -C "$TMP/inter-ahead" rev-parse HEAD)" "$local_head"
+
 run_git_up "$TMP/inter-ahead" 0 $'d\ny'
-check "interactive divergence explains the state" has "$output" "has diverged"
-check "interactive divergence requires separate integration" has "$output" "integrate separately"
-check "interactive divergence does not offer to rebase" \
-  is "$status" 1
-is_anc=0
-git -C "$TMP/inter-ahead" merge-base --is-ancestor origin/main HEAD || is_anc=$?
-check "interactive divergence leaves local history intact" is "$status:$is_anc" "1:1"
+check "approving the merge succeeds" is "$status" 0
+check "merge preview names the incoming commit" has "$output" "feat: remote parallel"
+check "merge preview shows the incoming diffstat" has "$output" "remote.txt | 1 +"
+check "merge keeps the local commit as an ancestor" \
+  git -C "$TMP/inter-ahead" merge-base --is-ancestor "$local_head" HEAD
+check "merge has two parents" \
+  is "$(git -C "$TMP/inter-ahead" rev-list --parents -n 1 HEAD | awk '{print NF}')" 3
+check "merge brings in both sides" \
+  is "$(cat "$TMP/inter-ahead/local.txt" "$TMP/inter-ahead/remote.txt")" \
+  $'local only\nremote only'
+check "merge leaves a clean tree" is "$(git -C "$TMP/inter-ahead" status --porcelain)" ""
+
+# 9a. --integrate performs the same merge without prompting.
+make_remote_and_clone "auto-integrate"
+echo "local" >"$TMP/auto-integrate/local.txt"
+git -C "$TMP/auto-integrate" add local.txt
+git -C "$TMP/auto-integrate" commit -q -m "feat: keep me"
+keep_head=$(git -C "$TMP/auto-integrate" rev-parse HEAD)
+echo "remote" >"$TMP/auto-integrate-admin/remote.txt"
+git -C "$TMP/auto-integrate-admin" add remote.txt
+git -C "$TMP/auto-integrate-admin" commit -q -m "feat: incoming"
+git -C "$TMP/auto-integrate-admin" push -q origin main >/dev/null 2>&1
+run_git_up "$TMP/auto-integrate" 1 "" 1
+check "--integrate merges unpublished divergence non-interactively" is "$status" 0
+check "--integrate preserves the local commit" \
+  git -C "$TMP/auto-integrate" merge-base --is-ancestor "$keep_head" HEAD
+check "--integrate says to publish the merge" has "$output" "git push-pr"
+check "--integrate names the upstream in the merge subject" \
+  has "$(git -C "$TMP/auto-integrate" log -1 --format=%s)" "Merge origin/main into main"
+
+# 9b. Divergence that conflicts is refused even with --integrate.
+make_remote_and_clone "integrate-conflict"
+echo "local version" >"$TMP/integrate-conflict/file.txt"
+git -C "$TMP/integrate-conflict" commit -q -am "feat: local edit"
+conflict_head=$(git -C "$TMP/integrate-conflict" rev-parse HEAD)
+echo "remote version" >"$TMP/integrate-conflict-admin/file.txt"
+git -C "$TMP/integrate-conflict-admin" commit -q -am "feat: remote edit"
+git -C "$TMP/integrate-conflict-admin" push -q origin main >/dev/null 2>&1
+run_git_up "$TMP/integrate-conflict" 1 "" 1
+check "conflicting divergence fails even with --integrate" is "$status" 1
+check "conflicting divergence says the sides conflict" has "$output" "conflict"
+check "conflicting divergence leaves HEAD unchanged" \
+  is "$(git -C "$TMP/integrate-conflict" rev-parse HEAD)" "$conflict_head"
+check "conflicting divergence leaves no merge in progress" \
+  test ! -e "$TMP/integrate-conflict/.git/MERGE_HEAD"
+
+# 9c. Unpublished work is reported before it can become divergence.
+make_remote_and_clone "unpublished"
+echo "wip" >"$TMP/unpublished/wip.txt"
+git -C "$TMP/unpublished" add wip.txt
+git -C "$TMP/unpublished" commit -q -m "feat: unpublished wip"
+run_git_up "$TMP/unpublished" 1
+check "unpublished commits warn" is "$status" 0
+check "unpublished warning says to publish" has "$output" "git push-pr"
+check "unpublished warning is marked as a warning" has "$output" "warning:"
+git -C "$TMP/unpublished" push -q origin HEAD:refs/heads/pr-wip >/dev/null 2>&1
+run_git_up "$TMP/unpublished" 1
+check "published commits do not warn" is "$status" 0
+check "published commits are reported without a warning" lacks "$output" "warning:"
 
 # 10. Dirty working tree: allowed when nothing incoming (behind=0), fails when updates arrive
 make_remote_and_clone "dirty"
@@ -390,6 +461,9 @@ GIT_UPDATE_DIRS=()
 GIT_UPDATE_HEADS=()
 GIT_UPDATE_TARGETS=()
 GIT_UPDATE_BRANCHES=()
+GIT_UPDATE_UPSTREAMS=()
+GIT_UPDATE_MODES=()
+GIT_UPDATE_TREES=()
 NON_INTERACTIVE=1 git_up "$TMP/consent" >/dev/null 2>&1
 approved_target=$(git -C "$TMP/consent" rev-parse origin/main)
 git -C "$TMP/consent" update-ref refs/remotes/origin/main HEAD
@@ -408,6 +482,9 @@ GIT_UPDATE_DIRS=()
 GIT_UPDATE_HEADS=()
 GIT_UPDATE_TARGETS=()
 GIT_UPDATE_BRANCHES=()
+GIT_UPDATE_UPSTREAMS=()
+GIT_UPDATE_MODES=()
+GIT_UPDATE_TREES=()
 NON_INTERACTIVE=1 git_up "$TMP/approval-race" >/dev/null 2>&1
 before_head=$(git -C "$TMP/approval-race" rev-parse HEAD)
 echo "local edit after approval" >>"$TMP/approval-race/file.txt"
@@ -429,6 +506,9 @@ check "apply and accept-updates cannot be combined" is "$status" 1
 status=0
 output=$("$INSTALL_SH" --apply --only git-pull --dry-run 2>&1) || status=$?
 check "apply and explicit git-pull cannot be combined" is "$status" 1
+status=0
+output=$("$INSTALL_SH" --apply --integrate --dry-run 2>&1) || status=$?
+check "apply and integrate cannot be combined" is "$status" 1
 
 # 13. End-to-end self-reexec: when git-pull updates install.sh, remaining features
 #     execute from the newly updated install.sh on disk without re-running git-pull.

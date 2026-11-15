@@ -377,21 +377,26 @@ ready PR whose relevant checks passed for that SHA; do not use `--admin` or
 Publishing and merging do not activate changes on other machines. Run
 `./install.sh` deliberately to inspect incoming commits and a diffstat; enter
 `d` for the full diff, `y` to approve, or anything else to stop. All overlays
-are checked and approved before any checkout advances. Dirty incoming updates,
-unfinished Git operations, and divergence stop the run. Failed updates stop
-before applying features. If an update fails after earlier repositories
-advanced, they stay advanced: no rollback or history repair is attempted.
+are checked and approved before any checkout advances. Dirty incoming updates
+and unfinished Git operations stop the run. Failed updates stop before applying
+features. If an update fails after earlier repositories advanced, they stay
+advanced: no rollback or history repair is attempted.
 
 The installer never rebases, resets, or stashes, regardless of `pull.rebase`.
-Diagnose unusual states separately using `git status` and
-`git log --graph --oneline --all`. In particular, old squash-merged local
-commits need individual reconciliation, not a blanket reset. Local commits with
-no incoming updates are left intact and reported.
+When local commits have diverged from upstream, the run stops unless every local
+commit is unpublished and the two sides merge cleanly; in that case it offers a
+merge, keeping each local commit as it is (`--integrate` accepts that for
+automation). Local commits that are already published, including old
+squash-merged ones, still stop the run for individual reconciliation. Diagnose
+those using `git status` and `git log --graph --oneline --all`. Local commits
+with no incoming updates are left intact; unpublished ones are reported with a
+warning that names the `git push-pr` command.
 
 Macs, work computers, and server host configuration should use manual
 interactive updates, not unattended pulls. Agent hosts can explicitly accept
 fast-forwards with `./install.sh --accept-updates --no-input`; `--no-input`
-alone does not approve incoming code. `--apply` skips only Git updates; use
+alone does not approve incoming code, and `--integrate` is the further explicit
+choice to merge unpublished divergence. `--apply` skips only Git updates; use
 `AGENT_OFFLINE=1` to skip network-dependent features too. The installer does not
 update `~/.ssh`.
 
