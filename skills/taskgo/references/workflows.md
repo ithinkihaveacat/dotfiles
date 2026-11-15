@@ -1,159 +1,89 @@
-# Agent Workflows & Handoff
+# Commits, Handoff, and Sessions
 
-Standard agent workflows, commit authority rules, session attribution, and
-handoff protocols for `taskgo`.
+Read this before committing anything the guarded commands cannot express, when
+you hand a task to another agent, or when you need to trace which session made a
+change. The everyday start and finish steps are in [SKILL.md](../SKILL.md).
 
-## Standard Agent Workflow
+## Commit Authority
 
-Before starting work:
+A control repository whose committed root `AGENTS.md` declares taskgo grants
+standing authority for the guarded commits: `create`, `checkpoint`, `commit`,
+`fix`, and MCP writes. taskgo manages only the block between
+`<!-- taskgo:begin -->` and `<!-- taskgo:end -->` in that file: `taskgo fix`
+writes it and `taskgo doctor` checks it. Everything outside the block is the
+repository's own local policy, such as timezone notes, report audience and
+format, environment rules, default skills, and data-care rules. taskgo preserves
+it; read it before you work.
 
-1. Run `taskgo handoff <project|TASK_ID>` (or the MCP `handoff` tool) and read
-   the onboarding files it names (`STATUS.md` and the task record for an
-   unfinished task, or `README.md`, `STATUS.md`, and `PLAN.md` for a project;
-   `--json` and the MCP `handoff` tool inline those files plus the root
-   `AGENTS.md`). Check the generated `### Decisions` block in `STATUS.md` for
-   active ADRs in `decisions/`.
-1. **Activate the project's skills** if the harness has a skill manager:
-   ```bash
-   taskgo skills <project> | skill --scope session add -
-   ```
-   Pipe the whole list; `skill` skips skills already linked in the workspace and
-   leaves repository files untouched. If `skill --scope session` reports no
-   session directory, ask before adding skills to the workspace. Without a skill
-   manager, read each skill's `SKILL.md` directly.
-1. Inspect linked artifact repositories under their own instructions, consult
-   relevant `<project>/references/` pages linked from the project map or task,
-   and check `<project>/scripts/` before writing new scratch helpers.
+- Commit state as it really was. When the user asks for `--no-commit`, or the
+  repository's first `AGENTS.md` is not yet committed, leave changes
+  uncommitted. Never create retrospective commits for states that did not exist
+  at the time.
+- Never rewrite artifact repository history.
 
-### Commit Authority
+### Commit Subjects
 
-A control repository whose committed `AGENTS.md` declares `taskgo` (maintained
-by `taskgo fix`) grants standing authority for guarded `create`, `checkpoint`,
-`commit`, `fix`, and `mcp` write operations in the control repository:
+Guarded commits use Conventional Commits: `type(scope): description`, at most 50
+characters *including* the prefix, with the project as the scope
+(`fix(compiler): stream manifest parsing`). The CLI refuses an over-long subject
+and reports its length; shorten it and run the command again. A subject with an
+unknown type is rewritten as `chore(<project>): …`. Bodies are plain text,
+wrapped at 72 columns. Put linked artifact commits in `--ref` trailers
+(`--ref repo@sha`).
 
-1. Commit a meaningful `in-progress` transition before artifact work that may
-   span sessions; commit completion with `Ref:` trailers for linked artifact
-   commits. A small task completed atomically may go directly `todo` -> `done`.
-   Pass `--conv <conversation-id>` or verify `conversations` frontmatter and
-   `STATUS.md` cite the full active session identifier.
-1. When `--no-commit` is requested (or before a brand-new repository's initial
-   `AGENTS.md` is committed), keep changes uncommitted; never create
-   retrospective state commits that did not reflect reality at the time.
+### Plain `git commit`
 
-#### Plain `git commit`
+Prefer the guarded commands: they enforce subject rules, sync `STATUS.md`,
+format the Markdown they commit, run the doctor checks, and add trailers. Raw
+Git on the control repository is still supported, and it is the right tool when
+a change cannot be expressed through them. `checkpoint` and `commit` refuse
+changes that span more than one project, so these need a plain `git commit`:
 
-Prefer the guarded commands; they enforce subject rules, sync `STATUS.md`, and
-add trailers. Some legitimate restructuring cannot be expressed through them
-(for example, `checkpoint` and `commit` refuse changes spanning more than one
-project, so moving a task or merging projects needs something else). For such
-operations, use a plain `git commit`. Work out what the change requires from the
-invariants in this skill rather than waiting for a documented procedure.
+- moving a task between projects;
+- renaming, merging, or removing a project;
+- other large restructuring across the tree.
 
-Plain `git commit` is outside the guarded commands, so tell the human: ask
-before committing when practical, and otherwise say clearly afterwards what you
-committed and why the guarded commands could not do it. Leave the tracker as
-coherent as a guarded commit would (`taskgo sync` and `taskgo doctor` clean for
-every affected project, only the affected paths staged, a Conventional Commits
-subject, and a `Conversation:` trailer).
+Work out what the change needs from the invariants in SKILL.md rather than
+waiting for a documented procedure. Then:
 
-### After Meaningful Work
+1. Run `taskgo doctor`, and `taskgo fix` to repair what it can (IDs, status
+   aliases, `STATUS.md` blocks, formatting).
+1. Stage only the affected paths. Use a Conventional Commits subject and a
+   `Conversation: <agent>://<id>` trailer.
+1. Tell the user. Ask before committing when practical; otherwise say clearly
+   afterwards what you committed and why the guarded commands could not do it.
 
-1. Rewrite specific files to the new current truth, saving repeatable scratch
-   helpers in `<project>/scripts/` (and the `README.md` map).
-1. Update affected task record(s) (e.g. mark `done` with `## Outcome` and
-   `## Findings`, recording `[<conversation-id>](<agent>://<conversation-id>)`).
-   A completed task keeps Problem, Cost, Goal, and Criteria; Outcome and
-   Findings replace Sketch and Constraints, and the Outcome gives a verdict
-   against each criterion. If the task produced domain findings, playbooks, or
-   architectural syntheses that future tasks in the project will need, fold them
-   into a topic page in `<project>/references/`, or update the existing owner in
-   an artifact repository or skill. Update maintained claims in place and keep
-   pages discoverable from the `README.md` map, directly or through a reference
-   index, rather than leaving them buried in a completed task record. When a
-   task relies on or updates a reference page, link that path from the task's
-   `Sketch` or `Findings`.
-1. Update `STATUS.md` prose (`## Summary` captures the new baseline, active
-   session link, and recent outcome; `## Next` reflects immediate next actions);
-   `PLAN.md` only if intended direction changed. Rewrite the Summary rather than
-   appending a paragraph per session: outcomes of earlier sessions belong in
-   their task records and commit history.
-1. Update the project `README.md` only if identity, map (including new
-   `references/` or `docs/` pages), or standing rules changed. If the work
-   changed or corrected understanding of a system described by a knowledge skill
-   or an artifact repository's documentation, update that owner and record its
-   commit with a `Ref:` trailer rather than copying the new facts into the
-   tracker.
-1. Run `taskgo sync PROJECT` after semantic edits are coherent.
-1. Run `taskgo doctor PROJECT` and review any affected reference pages for
-   outdated claims or broken links.
-1. Commit a coherent transition when practical using `checkpoint` with `--conv`
-   when standing authority is present. Subjects follow the workspace commit
-   standard (Conventional Commits, `type(scope): description`, at most 50
-   characters).
+### Branches and Merges
 
-### Handoff-Ready State
-
-Before leaving or completing a task, double-check that the project is left in a
-strict **handoff-ready** state. A reader can understand the operational state
-and find the information needed to resume without recovering the conversation.
-Keep state and next actions in the tracker; link to reference pages for
-supporting knowledge.
-
-1. **Handoff-ready tracker:** State, next actions, and full session/conversation
-   IDs (`[<conversation-id>](<agent>://<conversation-id>)`) needed to resume are
-   written into the task/STATUS/PLAN. Supporting findings and decisions are
-   recorded there or linked from it, not left only in the conversation.
-1. **Handoff-ready artifacts:** Tracker claims match actual artifact-repo state.
-
-## Session Attribution & Environment Variables
-
-When creating tasks or committing (`create`, `checkpoint`, `commit` with or
-without `--conv`), `taskgo` automatically detects the active session ID and
-agent scheme from runtime environment variables in priority order:
-
-1. `CLAUDE_CODE_SESSION_ID` / `CLAUDE_CODE_REMOTE_SESSION_ID` (`claude://`)
-1. `JETSKI_CONVERSATION_ID` (`jetski://`)
-1. `ANTIGRAVITY_CONVERSATION_ID` / `ANTIGRAVITY_SESSION` (`antigravity://`)
-1. `CLAUDE_SESSION_ID` (`claude://`)
-1. `OPENCODE_SESSION_ID` (`opencode://`)
-1. `CODEX_SESSION_ID` (`codex://`)
-1. `INVOKER_INFO_ROOT_SESSION_ID` / `CONVERSATION_ID` paired with `AI_AGENT` or
-   `INVOKER_INFO_NAME` platform name (falling back to `conversation://` when no
-   canonical agent scheme is detected)
-
-To inspect session history or correlate commits with agent sessions, query Git:
-
-```bash
-# Find all commits associated with a specific session ID
-git log --grep='Conversation:.*<conversation-id>'
-
-# List commits and associated session URIs for a specific task
-git log --grep='TASK-XXXXX' --format='%h %s %(trailers:key=Conversation,valueonly)'
-```
+Separate branches or worktrees are fine for parallel work. Resolve a merge by
+reconciling files to one intended current state; `STATUS.md` may be rewritten
+freely. Stable paths and accepted ADR text are defaults, not reasons to keep a
+broken merge. `taskgo doctor` reports duplicate task IDs after a merge. Avoid
+squash merges when intermediate state changes matter, because squashing erases
+them.
 
 ## Agent Handoff
 
-When assigning a selected task to an agent that can read the control repository,
-generate its instructions with `taskgo handoff TASK_ID`
-(`taskgo handoff PROJECT` points an agent at a project and lists its in-progress
-and ready tasks without choosing one). Choose the task deliberately;
-`taskgo list PROJECT --state ready` shows the ready frontier, while `## Next` in
-`STATUS.md` normally identifies the intended next action.
+To point an agent that can read the control repository at work, run
+`taskgo handoff TASK_ID`. `taskgo handoff PROJECT` names the project and lists
+its in-progress and ready tasks without choosing one. (An isolated worker that
+cannot read the tracker needs a [task export](export.md) instead.)
 
-Use the generated output without embellishment. It projects the task ID,
-project, title, and `Goal` from the task record in the working tree (or at
-`--at REV`), and ends with the project's skills when its README declares any,
-with the command that activates them. The command writes the note to stdout and
-readiness findings to stderr. Repair `[WARN]` or `[FAIL]` findings before
-handing off. `--json` prints the payload the MCP `handoff` tool returns: the
-note with the onboarding files (`AGENTS.md`, `README.md`, `STATUS.md`,
-`PLAN.md`, and the task record) inlined, the `guide`, the `skills` list, and the
-active and ready task queues.
+- Choose the task yourself. `taskgo list PROJECT --state ready` shows the ready
+  tasks; `## Next` in `STATUS.md` usually names the intended next action.
+- Pass the note on unchanged. It gives the task ID, project, title, `Goal`, the
+  files to read, and the project's skills with the command that activates them.
+  The note goes to stdout; readiness findings go to stderr.
+- Fix `[WARN]` and `[FAIL]` findings before handing off.
+- A long note, or one that needs extra facts, means the tracker is not
+  handoff-ready. Repair the tracker; do not add to the note.
+- When you stop after substantial work and a successor task is clear, leave
+  everything handoff-ready and include the note in your final reply. The note is
+  chat output, not a tracked file.
 
-When yielding after substantial work with a clear successor task, leave the
-tracker and artifact repositories handoff-ready and include the generated note
-in the final response. The note remains chat output rather than a tracked
-artifact.
+`--json` prints the payload the MCP `handoff` tool returns: the same note with
+the files it names inlined, plus the root `AGENTS.md`, the `skills` list, a
+guide to the MCP tools, and the active and ready task queues.
 
 ```console
 $ taskgo handoff TASK-3A91F
@@ -171,4 +101,34 @@ activate them for this session with the command below (adding one that is
 already active is harmless); otherwise read each skill's SKILL.md.
 
   taskgo skills compiler | skill --scope session add -
+```
+
+### Handoff-Ready
+
+A project is handoff-ready when a reader can understand its state and resume
+without the conversation:
+
+1. **Tracker:** state, next actions, and full session IDs
+   (`[<conversation-id>](<agent>://<conversation-id>)`) are in the task,
+   `STATUS.md`, or `PLAN.md`. Findings and decisions are recorded there or
+   linked from there, not left only in the chat.
+1. **Artifacts:** tracker claims match the real state of the artifact
+   repositories.
+
+## Session Attribution
+
+`create`, `checkpoint`, and `commit` record the active session in the task's
+`conversations` frontmatter and a `Conversation:` commit trailer. The CLI
+detects the session ID from the agent's environment, for example
+`CLAUDE_CODE_SESSION_ID` (`claude://`) or `CODEX_SESSION_ID` (`codex://`). Pass
+`--conv <id>` only when the harness exports no session ID.
+
+To trace sessions through Git:
+
+```bash
+# Commits made in one session
+git log --grep='Conversation:.*<conversation-id>'
+
+# Commits for one task, with their session URIs
+git log --grep='TASK-XXXXX' --format='%h %s %(trailers:key=Conversation,valueonly)'
 ```
