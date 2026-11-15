@@ -59,7 +59,7 @@ Read:
   root                             Print the active control repository root
 
 Commit:
-  checkpoint TASK_ID SUBJECT [...] Commit a task's changes (--all, --status-summary)
+  checkpoint TASK_ID SUBJECT [...] Commit a task's changes (--all, --path)
   commit SUBJECT [OPTIONS]         Commit what is staged, with STATUS.md synced
 
 Health:
@@ -94,8 +94,7 @@ Examples:
   taskgo update TASK-3A91F --status in-progress --sketch "Use in-memory dict"
   taskgo handoff TASK-3A91F
   taskgo update TASK-3A91F --status done --outcome "Cache cut p99 to 8 ms"
-  taskgo checkpoint TASK-3A91F "feat(my-project): add cache" --all \
-    --status-next "Measure cold starts"
+  taskgo checkpoint TASK-3A91F "feat(my-project): add cache" --all
   taskgo fix my-project
 ```
 
@@ -632,11 +631,10 @@ Examples:
 
 ```text
 Usage: taskgo checkpoint [-h] [--all] [--path PATHS] [--body BODY]
-                         [--ref REFS] [--status-summary TEXT]
-                         [--status-next TEXT] [--conv ID]
+                         [--ref REFS] [--conv ID]
                          TASK_ID SUBJECT
 
-Commit an authorized tracker checkpoint for TASK_ID. The subject must fit in 50 characters: a longer one is refused, with its length and the prefix's share, before anything is staged. A subject without a known 'type(scope): ' prefix is rewritten as 'chore(<project>): <subject>', and refused if that is too long. Tracker records about to be committed are formatted first. --status-summary and --status-next replace the project's STATUS.md prose in the same commit. Staged paths must belong to TASK_ID's project; changes spanning projects (such as moving a task) need a plain 'git commit'; see references/workflows.md.
+Commit an authorized tracker checkpoint for TASK_ID. The subject must fit in 50 characters: a longer one is refused, with its length and the prefix's share, before anything is staged. A subject without a known 'type(scope): ' prefix is rewritten as 'chore(<project>): <subject>', and refused if that is too long. Tracker records about to be committed are formatted first. Staged paths must belong to TASK_ID's project; changes spanning projects (such as moving a task) need a plain 'git commit'; see references/workflows.md.
 
 Arguments:
   TASK_ID               Target task ID
@@ -649,12 +647,6 @@ Options:
   --path, -p PATHS      Explicit project files to stage
   --body, -b BODY       Plain-text commit body (hard-wrapped to 72 columns)
   --ref, -r REFS        External references (e.g. artifact@sha)
-  --status-summary TEXT
-                        Replace the project's STATUS.md Summary with TEXT, in
-                        the same commit: where the project stands now, in a
-                        few sentences
-  --status-next TEXT    Replace the project's STATUS.md Next with TEXT, in the
-                        same commit: the next few concrete actions
   --conv, -C, --conversation ID
                         This session's conversation ID, for a harness that
                         exports none: recorded in the task's conversations and
@@ -664,8 +656,8 @@ Options:
 Examples:
   taskgo checkpoint TASK-3A91F "chore(proj): start diagnosis" --all
   taskgo checkpoint TASK-3A91F "docs(proj): update task" --path proj/tasks/TASK-3A91F-slug.md
-  taskgo checkpoint TASK-3A91F "feat(proj): close cache task" \
-    --status-summary "Cache shipped; p99 is 8 ms." --status-next "Measure cold starts."
+  taskgo checkpoint TASK-3A91F "feat(proj): close cache task" --all \
+    --ref app@4f2c1d9
 ```
 
 <!-- /generated -->
@@ -675,11 +667,9 @@ Examples:
 <!-- generated: ../scripts/taskgo commit --help -->
 
 ```text
-Usage: taskgo commit [-h] [--body BODY] [--ref REFS] [--status-summary TEXT]
-                     [--status-next TEXT] [--conv ID]
-                     SUBJECT
+Usage: taskgo commit [-h] [--body BODY] [--ref REFS] [--conv ID] SUBJECT
 
-Commit a logical transition with automatic project status synchronization. Staged changes must touch at most one project; changes spanning projects (such as moving a task) need a plain 'git commit'; see references/workflows.md. The subject rules are checkpoint's: at most 50 characters, refused rather than truncated. Staged tracker records are formatted and re-staged (not ones that also have unstaged changes). --status-summary and --status-next need the staged changes to touch one project.
+Commit a logical transition with automatic project status synchronization. Staged changes must touch at most one project; changes spanning projects (such as moving a task) need a plain 'git commit'; see references/workflows.md. The subject rules are checkpoint's: at most 50 characters, refused rather than truncated. Staged tracker records are formatted and re-staged (not ones that also have unstaged changes).
 
 Arguments:
   SUBJECT               Conventional Commits subject ('type(scope):
@@ -689,12 +679,6 @@ Options:
   -h, --help            Display this help message and exit
   --body, -b BODY       Plain-text commit body (hard-wrapped to 72 columns)
   --ref, -r REFS        External references (e.g. artifact@sha)
-  --status-summary TEXT
-                        Replace the project's STATUS.md Summary with TEXT, in
-                        the same commit: where the project stands now, in a
-                        few sentences
-  --status-next TEXT    Replace the project's STATUS.md Next with TEXT, in the
-                        same commit: the next few concrete actions
   --conv, -C, --conversation ID
                         This session's conversation ID, for a harness that
                         exports none: recorded in the task's conversations and
@@ -703,7 +687,7 @@ Options:
 
 Examples:
   git add proj/PLAN.md && taskgo commit "docs(proj): revise plan"
-  git add proj/tasks && taskgo commit "chore(proj): triage" --status-next "Start TASK-3A91F."
+  git add proj/tasks && taskgo commit "chore(proj): triage"
 ```
 
 <!-- /generated -->

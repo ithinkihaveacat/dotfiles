@@ -9309,55 +9309,6 @@ def summary_length_advice(rel: str, content: str) -> str | None:
     )
 
 
-def set_status_prose(
-    snap: Snapshot, project: str, summary: str | None, next_text: str | None
-) -> bool:
-    """Replaces the hand-written Summary and Next of PROJECT's STATUS.md.
-
-    The same replace_section an MCP apply_changes makes, with the current
-    section hash as its precondition: the caller holds the repository lock.
-    The generated block is kept. Returns True when the file changed; raises
-    ChangeSetError on a refusal (a duplicated section, text carrying the
-    block markers or another section's heading).
-    """
-    rel = f"{project}/STATUS.md"
-    cs = ChangeSet(OverlaySnapshot(snap), {}, [], {}, [])
-    for name, text in (("Summary", summary), ("Next", next_text)):
-        if text is None:
-            continue
-        spec = next(sec for sec in STATUS_SCHEMA.sections if sec.name == name)
-        _, body = split_record(cs.snap.read_text(rel))
-        spans = section_spans(body, spec)
-        expected = section_hash(body[slice(*spans[0])]) if len(spans) == 1 else None
-        apply_replace_section(
-            cs,
-            {"record": rel, "section": name, "text": text, "expected_hash": expected},
-        )
-    if rel not in cs.before:
-        return False
-    new = cs.snap.read_text(rel)
-    if summary is not None and (advice := summary_length_advice(rel, new)):
-        print(_tagged(f"[INFO]  {advice}", sys.stderr), file=sys.stderr)
-    if new == cs.before[rel]:
-        return False
-    snap.write_text(rel, new)
-    return True
-
-
-def status_prose_or_die(
-    snap: Snapshot,
-    project: str,
-    summary: str | None,
-    next_text: str | None,
-    command: str,
-) -> bool:
-    """set_status_prose for a CLI COMMAND: a refusal dies."""
-    try:
-        return set_status_prose(snap, project, summary, next_text)
-    except ChangeSetError as e:
-        die(f"{command}: STATUS.md prose: {e}")
-
-
 def is_formatted_record(rel: str) -> bool:
     """True when REL is Markdown taskgo formats: a project record (README,
     PROJECT, STATUS, a task or decision) or a formatted root record."""
@@ -9439,14 +9390,10 @@ def cmd_checkpoint(
     body: str = "",
     refs: list[str] | None = None,
     conv: str | None = None,
-    status_summary: str | None = None,
-    status_next: str | None = None,
 ) -> None:
     """Commit an authorized tracker checkpoint for TASK_ID.
 
-    STATUS_SUMMARY and STATUS_NEXT replace the project's STATUS.md Summary
-    and Next prose in the same commit. Staged tracker records are formatted
-    first, as edit formats them.
+    Staged tracker records are formatted first, as edit formats them.
     """
     paths_list = paths or []
     refs_list = refs or []
@@ -9493,11 +9440,8 @@ def cmd_checkpoint(
                 die(f"checkpoint: path not found: {p_arg}")
             requested.append(p_clean)
 
-        # Synchronize status for project, then apply any new Summary/Next.
+        # Synchronize status for project
         sync_status(snap, project_name)
-        status_prose_or_die(
-            snap, project_name, status_summary, status_next, "checkpoint"
-        )
 
         # Find project changes
         diff_proj = [
@@ -9621,20 +9565,15 @@ def cmd_commit(
     body: str = "",
     refs: list[str] | None = None,
     conv: str | None = None,
-    status_summary: str | None = None,
-    status_next: str | None = None,
 ) -> None:
     """Commit a logical transition with automatic project status synchronization.
 
-    STATUS_SUMMARY and STATUS_NEXT replace the STATUS.md Summary and Next
-    prose of the one project the staged changes touch. Staged tracker
-    records are formatted and re-staged, unless they also have unstaged
-    changes.
+    Staged tracker records are formatted and re-staged, unless they also
+    have unstaged changes.
     """
     refs_list = refs or []
     session = get_active_session(conv)
     conv_uri = f"{session[0]}://{session[1]}" if session else None
-    wants_prose = status_summary is not None or status_next is not None
     subject_or_die(subject, None, "commit", warn=False)
     root = get_repo_root()
     with repo_lock(root):
@@ -9665,12 +9604,6 @@ def cmd_commit(
         }
         if len(projects) > 1:
             die("staged changes touch multiple projects")
-        if wants_prose and len(projects) != 1:
-            die(
-                "commit: --status-summary and --status-next apply to the one "
-                "project the staged changes touch, but they touch none; stage "
-                "a file under the project, or use checkpoint TASK-ID"
-            )
 
         # Format the staged records, as edit does. A file with unstaged
         # changes too is left alone: re-staging it would commit them.
@@ -9721,11 +9654,7 @@ def cmd_commit(
                     ),
                     file=sys.stderr,
                 )
-            synced = sync_status(snap, project_name)
-            prose = status_prose_or_die(
-                snap, project_name, status_summary, status_next, "commit"
-            )
-            if synced or prose:
+            if sync_status(snap, project_name):
                 run_git(["add", f"{project_name}/STATUS.md"])
 
         project_for_scope = next(iter(projects)) if projects else None
@@ -9942,7 +9871,7 @@ Read:
   root                             Print the active control repository root
 
 Commit:
-  checkpoint TASK_ID SUBJECT [...] Commit a task's changes (--all, --status-summary)
+  checkpoint TASK_ID SUBJECT [...] Commit a task's changes (--all, --path)
   commit SUBJECT [OPTIONS]         Commit what is staged, with STATUS.md synced
 
 Health:
@@ -9977,8 +9906,7 @@ Examples:
   taskgo update TASK-3A91F --status in-progress --sketch "Use in-memory dict"
   taskgo handoff TASK-3A91F
   taskgo update TASK-3A91F --status done --outcome "Cache cut p99 to 8 ms"
-  taskgo checkpoint TASK-3A91F "feat(my-project): add cache" --all \\
-    --status-next "Measure cold starts"
+  taskgo checkpoint TASK-3A91F "feat(my-project): add cache" --all
   taskgo fix my-project"""
 
 
@@ -10161,26 +10089,6 @@ def _add_commit_options(parser: argparse.ArgumentParser) -> None:
         action="append",
         default=[],
         help="External references (e.g. artifact@sha)",
-    )
-    parser.add_argument(
-        "--status-summary",
-        dest="status_summary",
-        metavar="TEXT",
-        default=None,
-        help=(
-            "Replace the project's STATUS.md Summary with TEXT, in the same "
-            "commit: where the project stands now, in a few sentences"
-        ),
-    )
-    parser.add_argument(
-        "--status-next",
-        dest="status_next",
-        metavar="TEXT",
-        default=None,
-        help=(
-            "Replace the project's STATUS.md Next with TEXT, in the same "
-            "commit: the next few concrete actions"
-        ),
     )
     _add_conv(parser, CONV_HELP_RECORDS)
 
@@ -10750,16 +10658,14 @@ task file's Git commit watermark, emitting nothing when no tasks trigger.""",
             " subject without a known 'type(scope): ' prefix is rewritten as"
             " 'chore(<project>): <subject>', and refused if that is too long."
             " Tracker records about to be committed are formatted first."
-            " --status-summary and --status-next replace the project's"
-            " STATUS.md prose in the same commit. Staged paths must belong to"
-            " TASK_ID's project; changes spanning projects (such as moving a"
+            " Staged paths must belong to TASK_ID's project; changes spanning projects (such as moving a"
             " task) need a plain 'git commit'; see references/workflows.md."
         ),
         epilog="""Examples:
   taskgo checkpoint TASK-3A91F "chore(proj): start diagnosis" --all
   taskgo checkpoint TASK-3A91F "docs(proj): update task" --path proj/tasks/TASK-3A91F-slug.md
-  taskgo checkpoint TASK-3A91F "feat(proj): close cache task" \\
-    --status-summary "Cache shipped; p99 is 8 ms." --status-next "Measure cold starts." """,
+  taskgo checkpoint TASK-3A91F "feat(proj): close cache task" --all \\
+    --ref app@4f2c1d9""",
     )
     p_checkpoint.add_argument("task_id", metavar="TASK_ID", help="Target task ID")
     p_checkpoint.add_argument(
@@ -10797,12 +10703,11 @@ task file's Git commit watermark, emitting nothing when no tasks trigger.""",
             " 'git commit'; see references/workflows.md. The subject rules are"
             " checkpoint's: at most 50 characters, refused rather than"
             " truncated. Staged tracker records are formatted and re-staged"
-            " (not ones that also have unstaged changes). --status-summary and"
-            " --status-next need the staged changes to touch one project."
+            " (not ones that also have unstaged changes)."
         ),
         epilog="""Examples:
   git add proj/PLAN.md && taskgo commit "docs(proj): revise plan"
-  git add proj/tasks && taskgo commit "chore(proj): triage" --status-next "Start TASK-3A91F." """,
+  git add proj/tasks && taskgo commit "chore(proj): triage" """,
     )
     p_commit.add_argument(
         "subject",
@@ -11031,8 +10936,6 @@ def main(argv: list[str] | None = None) -> None:
             body=args.body,
             refs=args.refs,
             conv=getattr(args, "conv", None),
-            status_summary=args.status_summary,
-            status_next=args.status_next,
         )
     elif args.command == "commit":
         cmd_commit(
@@ -11040,8 +10943,6 @@ def main(argv: list[str] | None = None) -> None:
             body=args.body,
             refs=args.refs,
             conv=getattr(args, "conv", None),
-            status_summary=args.status_summary,
-            status_next=args.status_next,
         )
     else:
         print(help_text())

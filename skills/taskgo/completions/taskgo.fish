@@ -148,15 +148,11 @@ complete -c taskgo -n '__fish_seen_subcommand_from checkpoint' -s p -l path -r -
 complete -f -c taskgo -n '__fish_seen_subcommand_from checkpoint' -s b -l body -x -d 'Commit body'
 complete -f -c taskgo -n '__fish_seen_subcommand_from checkpoint' -s r -l ref -x -d 'External reference URL/ID'
 complete -f -c taskgo -n '__fish_seen_subcommand_from checkpoint' -s C -l conv -l conversation -x -d 'Session ID (default: from environment)'
-complete -f -c taskgo -n '__fish_seen_subcommand_from checkpoint' -l status-summary -x -d 'Replace STATUS.md Summary prose'
-complete -f -c taskgo -n '__fish_seen_subcommand_from checkpoint' -l status-next -x -d 'Replace STATUS.md Next prose'
 
 # commit options
 complete -f -c taskgo -n '__fish_seen_subcommand_from commit' -s b -l body -x -d 'Commit body'
 complete -f -c taskgo -n '__fish_seen_subcommand_from commit' -s r -l ref -x -d 'External reference URL/ID'
 complete -f -c taskgo -n '__fish_seen_subcommand_from commit' -s C -l conv -l conversation -x -d 'Session ID (default: from environment)'
-complete -f -c taskgo -n '__fish_seen_subcommand_from commit' -l status-summary -x -d 'Replace STATUS.md Summary prose'
-complete -f -c taskgo -n '__fish_seen_subcommand_from commit' -l status-next -x -d 'Replace STATUS.md Next prose'
 
 # schema options
 complete -f -c taskgo -n '__fish_seen_subcommand_from schema' -s j -l json -d 'Output as JSON'

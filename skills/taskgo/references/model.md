@@ -241,8 +241,3 @@ lists every field and section.
 `Europe/London`) in the root `README.md` frontmatter, then the machine's local
 date. Set the repository zone so cloud sessions on UTC agree with local ones.
 `taskgo doctor` fails on an unknown zone.
-
-______________________________________________________________________
-
-Design reasons and code structure, for people changing taskgo:
-[internals.md](internals.md).

@@ -154,12 +154,13 @@ the Summary.
    project `README.md` only if its identity, map, or rules changed, and
    `PLAN.md` only if the direction changed.
 
+1. Rewrite the Summary and Next of `<project>/STATUS.md` with `taskgo edit` or
+   your file tools.
+
 1. Commit the task change and the `STATUS.md` prose together, in one commit:
 
    ```bash
    taskgo checkpoint TASK-3A91F "feat(compiler): stream manifests" --all \
-     --status-summary "Manifests stream; cold start is next." \
-     --status-next "Benchmark cold start on the large fixture." \
      --ref compiler@1a2b3c4
    ```
 
@@ -207,4 +208,4 @@ before you set them.
 | [Change sets](references/change-sets.md)           | Writing a file for `apply`, or the exact `edit` and MCP write rules              |
 | [Activity reports](references/activity-reports.md) | Writing a weekly, monthly, or quarterly report                                   |
 | [Task export](references/export.md)                | Handing a task to a worker without the control repository                        |
-| [MCP server](references/mcp.md)                    | Running or debugging `taskgo mcp`, or using the MCP tools                        |
+| [MCP server](references/mcp.md)                    | Running, debugging, or changing `taskgo mcp`                                     |
