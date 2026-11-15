@@ -24,7 +24,6 @@ import json
 import os
 import posixpath
 import re
-import shlex
 import shutil
 import signal
 import subprocess
@@ -213,10 +212,10 @@ RESOLVED_STATES = {TaskStatus.DONE.value, TaskStatus.CANCELLED.value}
 
 # The coding agents taskgo knows by name, and the environment variables each
 # exports its session ID in, in priority order: the first one set wins.
-# CONVERSATION_ID names no agent. TASKGO_SESSION_VARS adds others.
+# CONVERSATION_ID names no agent.
 CANONICAL_AGENTS = ("antigravity", "claude", "codex", "opencode")
 
-BUILTIN_SESSION_VARS: tuple[tuple[str, str | None], ...] = (
+SESSION_VARS: tuple[tuple[str, str | None], ...] = (
     ("CLAUDE_CODE_SESSION_ID", "claude"),
     ("CLAUDE_CODE_REMOTE_SESSION_ID", "claude"),
     ("ANTIGRAVITY_CONVERSATION_ID", "antigravity"),
@@ -226,52 +225,15 @@ BUILTIN_SESSION_VARS: tuple[tuple[str, str | None], ...] = (
     ("CODEX_SESSION_ID", "codex"),
     ("CONVERSATION_ID", None),
 )
-SESSION_VARS_ENV = "TASKGO_SESSION_VARS"
-_SESSION_VAR_WARNED: set[str] = set()
-_SESSION_VAR_RE = re.compile(r"^([a-z][a-z0-9+.-]*)=([A-Za-z_][A-Za-z0-9_]*)$")
-
-
-def configured_session_vars() -> list[tuple[str, str]]:
-    """(variable, scheme) pairs from TASKGO_SESSION_VARS, a space-separated
-    list of SCHEME=VARIABLE entries that teaches taskgo agents it does not
-    know by name. A malformed entry is ignored with a warning."""
-    out = []
-    for entry in os.environ.get(SESSION_VARS_ENV, "").split():
-        m = _SESSION_VAR_RE.match(entry)
-        if m is None:
-            if entry in _SESSION_VAR_WARNED:
-                continue
-            _SESSION_VAR_WARNED.add(entry)
-            print(
-                _tagged(
-                    f"[WARN]  Ignoring {SESSION_VARS_ENV} entry {entry!r} "
-                    "(expected SCHEME=VARIABLE, such as myagent=MYAGENT_SESSION_ID)",
-                    sys.stderr,
-                ),
-                file=sys.stderr,
-            )
-            continue
-        out.append((m.group(2), m.group(1)))
-    return out
-
-
-def session_vars() -> list[tuple[str, str | None]]:
-    """The session variables in priority order: those TASKGO_SESSION_VARS
-    names, in its order, then the built-in ones it does not name."""
-    configured = configured_session_vars()
-    named = {var for var, _ in configured}
-    return [*configured, *((v, s) for v, s in BUILTIN_SESSION_VARS if v not in named)]
 
 
 def canonicalize_agent_name(name: str | None) -> str | None:
-    """Maps free-text or version-stamped agent names to a known scheme: one
-    TASKGO_SESSION_VARS names, then CANONICAL_AGENTS, in order (the first
-    substring match wins)."""
+    """Maps free-text or version-stamped agent names to one of
+    CANONICAL_AGENTS (the first substring match wins)."""
     if not name:
         return None
     lower = name.lower()
-    configured = [scheme for _, scheme in configured_session_vars()]
-    for agent in (*configured, *CANONICAL_AGENTS):
+    for agent in CANONICAL_AGENTS:
         if agent in lower:
             return agent
     return None
@@ -283,7 +245,7 @@ def detect_agent_scheme() -> str:
     c = canonicalize_agent_name(os.environ.get("AI_AGENT"))
     if c:
         return c
-    for var, scheme in session_vars():
+    for var, scheme in SESSION_VARS:
         if scheme and os.environ.get(var):
             return scheme
     return "conversation"
@@ -348,7 +310,7 @@ def get_active_session(
     if cli_arg:
         return normalize_conversation_id(cli_arg)
 
-    for var, var_scheme in session_vars():
+    for var, var_scheme in SESSION_VARS:
         val = os.environ.get(var)
         if val:
             parsed = parse_conversation_entry(val)
@@ -2482,8 +2444,8 @@ GATE_PATTERN = (
     r"|gh:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#\d+|@[A-Za-z0-9_.-]+|https?://\S+)$"
 )
 TYPED_GATE_PREFIXES = ("gh:", "@", "http:", "https:")
-# Gates taskgo check always resolves (dates) or polls (GitHub issues). A
-# WORD/ID gate is polled only where TASKGO_GATE_CHECK_<WORD> names a checker.
+# Gates taskgo check resolves (dates) or polls (GitHub issues). WORD/ID
+# gates are tracked but never polled.
 CHECKED_GATE_PREFIXES = ("gh:",)
 DATE_SHAPE_RE = re.compile(r"^\d{4}-\d{1,2}-\d{1,2}$")
 
@@ -8289,77 +8251,7 @@ def cmd_fix(
 
 
 _GH_URI_RE = re.compile(r"^gh:([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#(\d+)$", re.IGNORECASE)
-_WORD_ID_RE = re.compile(r"^([a-z][a-z0-9-]*)/([A-Za-z0-9._-]+)$")
-
 _GH_TERMINAL_STATES = {"CLOSED", "MERGED"}
-# The states a gate checker may report that mean the gate no longer holds
-# its task, when it prints no 'resolved:' line.
-GATE_CHECK_TERMINAL_STATES = {
-    "ABANDONED",
-    "CANCELLED",
-    "CLOSED",
-    "DONE",
-    "DUPLICATE",
-    "FIXED",
-    "MERGED",
-    "OBSOLETE",
-    "RESOLVED",
-    "SUBMITTED",
-    "WONT_FIX",
-}
-GATE_CHECK_ENV = "TASKGO_GATE_CHECK_"
-
-
-def gate_checker_var(word: str) -> str:
-    """The variable naming the checker of WORD/ID gates."""
-    return GATE_CHECK_ENV + word.upper().replace("-", "_")
-
-
-def gate_checker(word: str) -> list[str] | None:
-    """The command, as an argv prefix, that TASKGO_GATE_CHECK_<WORD> names,
-    or None when it is unset or empty."""
-    value = os.environ.get(gate_checker_var(word), "").strip()
-    if not value:
-        return None
-    try:
-        argv = shlex.split(value)
-    except ValueError:
-        return None
-    return argv or None
-
-
-def parse_gate_check(out: str) -> tuple[str, bool, datetime | None, str | None] | None:
-    """A gate checker's output, as poll_external_uri returns it.
-
-    The checker prints 'KEY: VALUE' lines; others are ignored. 'status' is
-    the upstream state, normalized to upper case with '_' for '-' and
-    spaces; 'modified' (or 'last modified') an ISO timestamp of its last
-    change; 'resolved' yes or no says whether the gate still holds its
-    task, and without it a state in GATE_CHECK_TERMINAL_STATES resolves it.
-    None when it gives neither a status nor a time.
-    """
-    raw_status = raw_mod = raw_resolved = None
-    for line in out.splitlines():
-        key, sep, val = line.partition(":")
-        if not sep:
-            continue
-        k, v = key.strip().lower(), val.strip()
-        if k == "status":
-            raw_status = v
-        elif k in ("modified", "last modified"):
-            raw_mod = v
-        elif k == "resolved":
-            raw_resolved = v.lower()
-    if not raw_status and not raw_mod:
-        return None
-    norm = (raw_status or "OPEN").upper().replace("-", "_").replace(" ", "_")
-    if norm == "WONTFIX":
-        norm = "WONT_FIX"
-    if raw_resolved is not None:
-        terminal = raw_resolved in ("yes", "true", "1", "on")
-    else:
-        terminal = norm in GATE_CHECK_TERMINAL_STATES
-    return norm, terminal, parse_iso_timestamp(raw_mod), raw_mod
 
 
 @dataclass(slots=True, frozen=True)
@@ -8390,7 +8282,7 @@ def _is_offline() -> bool:
 
 
 def parse_iso_timestamp(value: Any) -> datetime | None:
-    """Parses an ISO 8601 or Perforce timestamp string into an aware UTC datetime."""
+    """Parses an ISO 8601 timestamp string into an aware UTC datetime."""
     if value is None or isinstance(value, bool):
         return None
     if isinstance(value, datetime):
@@ -8398,9 +8290,8 @@ def parse_iso_timestamp(value: Any) -> datetime | None:
     s = str(value).strip().strip("'\"")
     if not s:
         return None
-    normalized = re.sub(r"^(\d{4})/(\d{2})/(\d{2})\b", r"\1-\2-\3", s)
     try:
-        dt = datetime.fromisoformat(normalized)
+        dt = datetime.fromisoformat(s)
         return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
     except ValueError:
         return None
@@ -8474,23 +8365,13 @@ def _run_probe_cmd(cmd: list[str], timeout_sec: float = 10.0) -> str | None:
 def poll_external_uri(
     gate: str,
 ) -> tuple[str, bool, datetime | None, str | None] | None:
-    """Polls an external wait_for gate: gh:owner/repo#N with the gh CLI, or
-    WORD/ID with the command TASKGO_GATE_CHECK_<WORD> names, run as
-    'COMMAND ID' (see parse_gate_check for its output).
+    """Polls an external wait_for gate: gh:owner/repo#N with the gh CLI.
 
     Returns `(canonical_status, is_terminal, modified_dt, modified_str)`, or
-    `None` when the gate is not polled, offline, or the poller is missing or
-    fails.
+    `None` when the gate is not polled, offline, or gh is missing or fails.
     """
     if _is_offline():
         return None
-
-    if m_word := _WORD_ID_RE.match(gate):
-        argv = gate_checker(m_word.group(1))
-        if argv is None:
-            return None
-        out = _run_probe_cmd([*argv, m_word.group(2)])
-        return parse_gate_check(out) if out is not None else None
 
     if m_gh := _GH_URI_RE.match(gate):
         gh_bin = shutil.which("gh")
@@ -8649,25 +8530,6 @@ def cmd_check(
             if triggers:
                 wm_str, _ = get_wm()
                 triggered_entries.append((row, wm_str, triggers))
-
-    unchecked = sorted(
-        {
-            m.group(1)
-            for row in rows
-            if row.status not in RESOLVED_STATES
-            for gate in row.wait_for
-            if (m := _WORD_ID_RE.match(gate)) and gate_checker(m.group(1)) is None
-        }
-    )
-    for word in unchecked:
-        print(
-            _tagged(
-                f"[INFO]  No checker configured for {word}/ gates; set "
-                f"{gate_checker_var(word)} to poll them",
-                sys.stderr,
-            ),
-            file=sys.stderr,
-        )
 
     if not triggered_entries:
         return
@@ -9893,11 +9755,6 @@ Options:
 Environment:
   Root: {display_path(root_dir)}
   Source: {source}
-  TASKGO_SESSION_VARS  Space-separated SCHEME=VARIABLE entries naming more
-                  agents' session variables, checked before the built-in ones
-  TASKGO_GATE_CHECK_<WORD>  Command 'check' runs as 'COMMAND ID' to poll
-                  WORD/ID wait_for gates; it prints 'status:' and optionally
-                  'modified:' and 'resolved: yes|no' lines
 
 Examples:
   taskgo id

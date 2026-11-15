@@ -212,13 +212,11 @@ stale_after: 2026-11-01
   today reaches it), an issue reference (`issue/123`, `gh:owner/repo#12`), a
   handle (`@reviewer`), or an `http(s)` URL. Otherwise write the condition as
   one line of free text (`ShellCheck release with SC2337`). `taskgo check`
-  resolves dates and polls `gh:` issues with the `gh` CLI. It polls a `WORD/ID`
-  gate only when `TASKGO_GATE_CHECK_<WORD>` names a checker command, which it
-  runs as `COMMAND ID`; the command prints `status: STATE` and optionally
-  `modified: TIMESTAMP` and `resolved: yes|no`. Without a checker, `check` notes
-  the gate and leaves it holding. Handles, URLs, and free text hold the task
-  until someone removes them. The CLI refuses free text that contains a task ID
-  or a gate it would rather see as its own entry, and says why.
+  resolves dates and polls `gh:` issues with the `gh` CLI; other typed
+  references are tracked but not polled. Those, handles, URLs, and free text
+  hold the task until someone removes them. The CLI refuses free text that
+  contains a task ID or a gate it would rather see as its own entry, and says
+  why.
 - **`due`:** a committed deadline. `taskgo doctor` reports `[FAIL]` when it has
   passed and `[INFO]` within 48 hours; `taskgo list --state ready` sorts near
   deadlines first.

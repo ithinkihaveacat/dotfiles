@@ -81,11 +81,6 @@ Options:
 Environment:
   Root: ~/.projects
   Source: default
-  TASKGO_SESSION_VARS  Space-separated SCHEME=VARIABLE entries naming more
-                  agents' session variables, checked before the built-in ones
-  TASKGO_GATE_CHECK_<WORD>  Command 'check' runs as 'COMMAND ID' to poll
-                  WORD/ID wait_for gates; it prints 'status:' and optionally
-                  'modified:' and 'resolved: yes|no' lines
 
 Examples:
   taskgo id
