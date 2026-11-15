@@ -34,7 +34,8 @@ writing to `stdout` when no arguments are provided.
   `command-index.md` files (marker comments; supports `--check` and `--all`).
 - **`scripts/kotlin-format`**: Format Kotlin files using `ktfmt` with kotlinlang
   style.
-- **`scripts/json-format`**: Format JSON files using `jq`.
+- **`scripts/json-format`**: Format JSON files using `jq` (`--check` checks
+  formatting without writing).
 - **`scripts/xml-format`**: Format XML files using `xmllint`.
 
 Always prefer the helper scripts in `scripts/` over raw tool invocations to

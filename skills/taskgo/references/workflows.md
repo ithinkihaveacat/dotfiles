@@ -104,9 +104,11 @@ Read /path/to/compiler/STATUS.md and the task record
 (/path/to/compiler/tasks/TASK-3A91F-manifest-loader.md) before acting, and form your
 own view of the approach.
 
-Skills: coding-standards, local:notes. If your harness has a skill manager,
-activate them for this session with the command below (adding one that is
-already active is harmless); otherwise read each skill's SKILL.md.
+Skills: coding-standards, local:notes. Reuse skills already provided by your
+harness; load missing ones through its skill loader. The command below is only
+for launchers with CLI session support (Claude wrapper or Antigravity), not
+OpenCode or Codex. Otherwise use `skill resolve <NAME>` and read each local
+skill's SKILL.md.
 
   taskgo skills compiler | skill --scope session add -
 ```

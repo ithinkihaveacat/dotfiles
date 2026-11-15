@@ -22,11 +22,11 @@ as long as a tool is internally consistent. This repo fixes one order for its
 - **Verb Consistency:** Do not switch verbs for similar actions. If `list` is
   used for users, do not use `get` for databases.
 
-| **Do This**                       | **Avoid This**                                              |
-| --------------------------------- | ----------------------------------------------------------- |
-| `tool create user --name="alice"` | `tool create-user --name="alice"` (hyphenated commands)     |
-| `tool list databases`             | `tool show-dbs` (inconsistent verb/abbreviation)            |
-| `tool delete config --id=5`       | `tool remove config -i 5` (synonyms like remove vs. delete) |
+| **Do This**                       | **Avoid This**                                                                 |
+| --------------------------------- | ------------------------------------------------------------------------------ |
+| `tool create user --name="alice"` | `tool create-user --name="alice"` (hyphenated commands in kubectl-style tools) |
+| `tool list databases`             | `tool show-dbs` (inconsistent verb/abbreviation)                               |
+| `tool delete config --id=5`       | `tool remove config -i 5` (synonyms like remove vs. delete)                    |
 
 For simpler, focused tools that don't warrant the full `kubectl` structure, use
 one of the two specialized patterns in Appendix A instead.
@@ -384,8 +384,11 @@ actions**._
 - **Implicit Meaning:** "(On the domain of) **packagename**, **launch** the
   instance **com.foo**."
 
-The first argument must be a verb; the `[Instance]` may be omitted, as in
-`skill doctor`.
+The first argument normally names an action; the `[Instance]` may be omitted, as
+in `skill doctor`. Compound verbs such as `reset-permissions` are allowed.
+Resource-list and information commands may use nouns such as `tiles` or
+`version`, as in the `packagename` reference below. The kubectl-style
+prohibition on hyphenated commands does not apply to this pattern.
 
 #### Reference Implementation: `packagename`
 
