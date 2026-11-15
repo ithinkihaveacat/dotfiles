@@ -169,8 +169,10 @@ In scope, and explicitly out of scope.
 Completed tasks stay in `tasks/` as permanent records with `status: done`.
 `STATUS.md` keeps context bounded: its generated block lists only `In progress`,
 `Blocked`, `Due soon` (open tasks due within 7 days), and active `Decisions`,
-with state counts. Completed work is summed up in `## Summary` prose, not
-listed. If a record is ever removed from the working tree, `taskgo history`
+with state counts. `## Summary` says where the project stands now in a few
+sentences; it is rewritten whole, not appended to, and finished work leaves it
+(done tasks and Git history keep that). `## Next` is the next few concrete
+actions. If a record is ever removed from the working tree, `taskgo history`
 reads it from Git.
 
 ## ADR Lifecycle
@@ -210,10 +212,13 @@ stale_after: 2026-11-01
   today reaches it), an issue reference (`issue/123`, `gh:owner/repo#12`), a
   handle (`@reviewer`), or an `http(s)` URL. Otherwise write the condition as
   one line of free text (`ShellCheck release with SC2337`). `taskgo check`
-  resolves dates and polls the issue references it can read. Handles, URLs, and
-  free text hold the task until someone removes them. The CLI refuses free text
-  that contains a task ID or a gate it would rather see as its own entry, and
-  says why.
+  resolves dates and polls `gh:` issues with the `gh` CLI. It polls a `WORD/ID`
+  gate only when `TASKGO_GATE_CHECK_<WORD>` names a checker command, which it
+  runs as `COMMAND ID`; the command prints `status: STATE` and optionally
+  `modified: TIMESTAMP` and `resolved: yes|no`. Without a checker, `check` notes
+  the gate and leaves it holding. Handles, URLs, and free text hold the task
+  until someone removes them. The CLI refuses free text that contains a task ID
+  or a gate it would rather see as its own entry, and says why.
 - **`due`:** a committed deadline. `taskgo doctor` reports `[FAIL]` when it has
   passed and `[INFO]` within 48 hours; `taskgo list --state ready` sorts near
   deadlines first.
@@ -236,11 +241,6 @@ lists every field and section.
 `Europe/London`) in the root `README.md` frontmatter, then the machine's local
 date. Set the repository zone so cloud sessions on UTC agree with local ones.
 `taskgo doctor` fails on an unknown zone.
-
-## Change Sets
-
-The change-set format for `taskgo apply`, `taskgo edit`, and MCP writes is in
-[change-sets.md](change-sets.md).
 
 ______________________________________________________________________
 

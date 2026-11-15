@@ -110,13 +110,25 @@ CLI refuses without it.
 
 ## STATUS.md
 
-- `## Summary`: the current situation and a link to the active session,
-  `[<conversation-id>](<agent>://<conversation-id>)`. Rewrite it; never add a
-  paragraph per session.
+- `## Summary`: where the project stands now, for a reader arriving cold. Say
+  what it is, its current state, what is in flight, and what blocks it, in a few
+  sentences (about 100 words). Rewrite it whole each time. Delete sentences
+  about finished work: done tasks and Git history keep that. Link to tasks
+  rather than restating them. Never narrate versions or sessions. `doctor` notes
+  a Summary over 1,200 characters.
+
+  Bad: "Done so far: parser, cache. The server now streams. The server now
+  retries." Good: "The compiler streams manifests; cold start is the open
+  question ([TASK-3A91F](tasks/TASK-3A91F-cold-start.md)). Nothing is blocked."
+
 - The block between `<!-- taskgo:begin -->` and `<!-- taskgo:end -->` is
   generated (in-progress, blocked, due-soon tasks, active decisions, counts). Do
   not edit it by hand; `taskgo sync` and the commit commands refresh it.
-- `## Next`: the immediate next actions.
+
+- `## Next`: the next few concrete actions, not a backlog.
+
+Sessions are recorded in commit trailers and each task's `conversations`, not in
+the Summary.
 
 ## Start and Finish
 
@@ -146,13 +158,14 @@ CLI refuses without it.
 
    ```bash
    taskgo checkpoint TASK-3A91F "feat(compiler): stream manifests" --all \
-     --status-summary "Streaming parser landed ([<id>](<agent>://<id>))." \
+     --status-summary "Manifests stream; cold start is next." \
      --status-next "Benchmark cold start on the large fixture." \
      --ref compiler@1a2b3c4
    ```
 
    `checkpoint` syncs the generated block, formats the records, records the
-   session, and refuses while `taskgo doctor` reports problems. Subjects are
+   session, and refuses while `taskgo doctor` reports problems in the files it
+   commits; other findings in the project are counted, not refused. Subjects are
    Conventional Commits of at most 50 characters, prefix included.
 
 1. Leave the project [handoff-ready](references/workflows.md#handoff-ready).

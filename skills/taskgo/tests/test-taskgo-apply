@@ -154,7 +154,7 @@ cs = apply(
 assert "## Outcome\n\nDone." in cs.snap.read_text(TASK)
 refused("validation", "has no Outcome",
         {"op": "set", "record": "TASK-AA001", "field": "status", "value": "done"})
-refused("precondition", "status is 'todo', expected 'done'",
+refused("precondition", "status is now 'todo', not 'done'",
         {"op": "set", "record": "TASK-AA001", "field": "status", "value": "todo",
          "expected": "done"})
 refused("validation", "cycle",
@@ -178,10 +178,33 @@ refused("invalid", "cannot set 'id'",
 refused("invalid", "unknown project",
         {"op": "create", "kind": "task", "project": "delta",
          "sections": {"title": "T"}})
-refused("invalid", "would add or remove other sections",
+refused("invalid", "contains the line '## Next' (line 3), which would start the Next section",
         {"op": "replace_section", "record": "TASK-AA001", "section": "Goal",
          "text": "One.\n\n## Next\n\nMore.",
          "expected_hash": section_hash(TASK, "Goal")})
+refused("invalid", "contains the line '**Criteria:** Two.' (line 3)",
+        {"op": "replace_section", "record": "TASK-AA001", "section": "Goal",
+         "text": "One.\n\n**Criteria:** Two.",
+         "expected_hash": section_hash(TASK, "Goal")})
+refused("invalid", "has no 'op' key; op must be one of",
+        {"record": "TASK-AA001", "field": "due", "value": None})
+refused("invalid", "missing expected_hash (replace_section takes record, section, text, expected_hash)",
+        {"op": "replace_section", "record": "TASK-AA001", "section": "Goal", "text": "x"})
+# A section's own heading or label at the start of its text is dropped, with
+# a note, rather than refused.
+own = apply({"op": "replace_section", "record": "TASK-AA001", "section": "Goal",
+             "text": "**Goal:** Own label.", "expected_hash": section_hash(TASK, "Goal")})
+assert "**Goal:** Own label." in own.snap.read_text(TASK), own.snap.read_text(TASK)
+assert own.notes and "began with its own heading" in own.notes[0], own.notes
+own = apply({"op": "replace_section", "record": "TASK-AA001", "section": "Findings",
+             "text": "## Findings\n\nFound.", "expected_hash": None})
+assert own.snap.read_text(TASK).count("## Findings") == 1 and own.notes
+# A long Summary draws advice, never a refusal; link targets do not count.
+long_summary = "# S\n\n## Summary\n\n" + "The project is fine. " * 70 + "\n\n## Next\n\nShip.\n"
+advice = tg.summary_length_advice("alpha/STATUS.md", long_summary)
+assert advice and "rewrite it whole" in advice and "Summary is 1469 characters" in advice, advice
+linked = "# S\n\n## Summary\n\n[x](" + "a" * 2000 + ")\n\n## Next\n\nShip.\n"
+assert tg.summary_length_advice("alpha/STATUS.md", linked) is None
 refused("invalid", "cannot replace section 'title'",
         {"op": "replace_section", "record": "TASK-AA001", "section": "title",
          "text": "X", "expected_hash": None})
@@ -355,7 +378,7 @@ refused("invalid", "expected_blob must be a string",
 refused("precondition", "no such file",
         {"op": "delete_file", "path": "alpha/nope.md",
          "expected_blob": blob("alpha/PLAN.md")})
-refused("precondition", "expected 0000",
+refused("precondition", "not 0000",
         {"op": "delete_file", "path": "alpha/PLAN.md", "expected_blob": "0000"})
 refused("invalid", "controlled state",
         {"op": "delete_file", "path": "alpha/tasks/TASK-AA001-first.md",
@@ -363,7 +386,7 @@ refused("invalid", "controlled state",
 refused("invalid", "unknown key content",
         {"op": "delete_file", "path": "alpha/PLAN.md",
          "expected_blob": blob("alpha/PLAN.md"), "content": "x"})
-refused("precondition", "blob is none (absent)",
+refused("precondition", "blob is now none (absent)",
         write("alpha/nope.md", "x\n", blob("alpha/PLAN.md")))
 # Executables are assets: a write keeps the mode, and executable sets it.
 cs = apply(write("alpha/run.sh", "#!/bin/sh\necho hi\n", blob("alpha/run.sh")))
@@ -546,7 +569,12 @@ want = {}
 for rel, rid in ((TASK, "TASK-AA001"), (cs.created[0]["path"], new_id)):
     for s in tg.record_sections(cs.snap.read_text(rel), tg.TASK_SCHEMA):
         want[(rid, s["name"])] = s["hash"]
-assert got == {k: want[k] for k in [("TASK-AA001", "Goal"), (new_id, "Goal"), (new_id, "Next")]}, got
+# Written sections first, then every other section of each task and
+# STATUS.md the set changed, so the next write has every current hash.
+assert list(got)[:3] == [("TASK-AA001", "Goal"), (new_id, "Goal"), (new_id, "Next")], got
+tasks = {k: v for k, v in got.items() if k[0].startswith("TASK-")}
+assert tasks == {k: v for k, v in want.items() if k[1] != "title"}, got
+assert ("alpha/STATUS.md", "Summary") in got, got
 
 # Exactly one match, unless replace_all.
 refused("invalid", "occurs 2 times",
@@ -577,7 +605,7 @@ assert cs.snap.read_text("alpha/crlf.txt") == "one\r\ndeux\n"
 cs = apply(edit("alpha/run.sh", "#!/bin/sh", "#!/bin/bash"))
 assert cs.snap.is_executable("alpha/run.sh")
 assert cs.snap.read_text("alpha/run.sh") == "#!/bin/bash\n"
-refused("precondition", "expected 0000",
+refused("precondition", "not 0000",
         edit("alpha/PLAN.md", "First", "x", expected_blob="0000"))
 blob = tg.git_blob_sha((repo / "alpha/PLAN.md").read_bytes())
 apply(edit("alpha/PLAN.md", "First", "x", expected_blob=blob.upper()))

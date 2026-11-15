@@ -108,10 +108,10 @@ already active is harmless); otherwise read each skill's SKILL.md.
 A project is handoff-ready when a reader can understand its state and resume
 without the conversation:
 
-1. **Tracker:** state, next actions, and full session IDs
-   (`[<conversation-id>](<agent>://<conversation-id>)`) are in the task,
-   `STATUS.md`, or `PLAN.md`. Findings and decisions are recorded there or
-   linked from there, not left only in the chat.
+1. **Tracker:** state and next actions are in the task, `STATUS.md`, or
+   `PLAN.md`. Findings and decisions are recorded there or linked from there,
+   not left only in the chat. Sessions are recorded in commit trailers and each
+   task's `conversations`.
 1. **Artifacts:** tracker claims match the real state of the artifact
    repositories.
 
@@ -120,8 +120,11 @@ without the conversation:
 `create`, `checkpoint`, and `commit` record the active session in the task's
 `conversations` frontmatter and a `Conversation:` commit trailer. The CLI
 detects the session ID from the agent's environment, for example
-`CLAUDE_CODE_SESSION_ID` (`claude://`) or `CODEX_SESSION_ID` (`codex://`). Pass
-`--conv <id>` only when the harness exports no session ID.
+`CLAUDE_CODE_SESSION_ID` (`claude://`) or `CODEX_SESSION_ID` (`codex://`). To
+teach it another agent, set `TASKGO_SESSION_VARS` to space-separated
+`SCHEME=VARIABLE` entries, such as `myagent=MYAGENT_SESSION_ID`; those are
+checked first, in order. Pass `--conv <id>` only when the harness exports no
+session ID. Any `<scheme>://<id>` URI is valid, including a chat URL.
 
 To trace sessions through Git:
 

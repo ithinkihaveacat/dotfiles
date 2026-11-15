@@ -81,6 +81,11 @@ Options:
 Environment:
   Root: ~/.projects
   Source: default
+  TASKGO_SESSION_VARS  Space-separated SCHEME=VARIABLE entries naming more
+                  agents' session variables, checked before the built-in ones
+  TASKGO_GATE_CHECK_<WORD>  Command 'check' runs as 'COMMAND ID' to poll
+                  WORD/ID wait_for gates; it prints 'status:' and optionally
+                  'modified:' and 'resolved: yes|no' lines
 
 Examples:
   taskgo id
@@ -645,10 +650,11 @@ Options:
   --body, -b BODY       Plain-text commit body (hard-wrapped to 72 columns)
   --ref, -r REFS        External references (e.g. artifact@sha)
   --status-summary TEXT
-                        Replace the project's STATUS.md Summary prose with
-                        TEXT and commit it in the same commit
-  --status-next TEXT    Replace the project's STATUS.md Next prose with TEXT
-                        and commit it in the same commit
+                        Replace the project's STATUS.md Summary with TEXT, in
+                        the same commit: where the project stands now, in a
+                        few sentences
+  --status-next TEXT    Replace the project's STATUS.md Next with TEXT, in the
+                        same commit: the next few concrete actions
   --conv, -C, --conversation ID
                         This session's conversation ID, for a harness that
                         exports none: recorded in the task's conversations and
@@ -684,10 +690,11 @@ Options:
   --body, -b BODY       Plain-text commit body (hard-wrapped to 72 columns)
   --ref, -r REFS        External references (e.g. artifact@sha)
   --status-summary TEXT
-                        Replace the project's STATUS.md Summary prose with
-                        TEXT and commit it in the same commit
-  --status-next TEXT    Replace the project's STATUS.md Next prose with TEXT
-                        and commit it in the same commit
+                        Replace the project's STATUS.md Summary with TEXT, in
+                        the same commit: where the project stands now, in a
+                        few sentences
+  --status-next TEXT    Replace the project's STATUS.md Next with TEXT, in the
+                        same commit: the next few concrete actions
   --conv, -C, --conversation ID
                         This session's conversation ID, for a harness that
                         exports none: recorded in the task's conversations and

@@ -1,5 +1,9 @@
 # MCP Server
 
+This page is for people who operate or change the server. Callers learn
+everything they need from the server itself: its instructions, tool descriptions
+and schemas, results, and error messages.
+
 `taskgo mcp` serves a control repository's committed state to MCP clients, and
 writes to it on their behalf. It is for agents that have a checkout of a code
 repository but not of the control repository, such as cloud sessions.
@@ -57,33 +61,65 @@ read whose commit is not present, and every write fail instead: nothing is
 written over a head that may have moved.
 
 `wait_for` gates other than dates are reported as `unverified_gates`. The server
-does not poll them and, like the CLI, treats them as still holding. `handoff` on
-a checkout also warns about uncommitted changes; the server reads only commits,
-so it never does.
+does not poll them (only `taskgo check` does) and, like the CLI, treats them as
+still holding. `handoff` on a checkout also warns about uncommitted changes; the
+server reads only commits, so it never does.
+
+## Caller Surface
+
+The `initialize` instructions are short (about 1,500 characters) and carry what
+a caller must know before its first call, most important first: what the
+repository is (with the title of its root `README.md`, read at startup), the
+workflow (`handoff` first; `get_task` for tasks, not `read_file`; which write
+tool for which change), the write rules (one commit or nothing; pass the hash or
+blob read; after a write, use the hashes it returned; re-read, merge, and retry
+when refused; a fresh `request_id` per write), the core writing rules, and data
+care. Some clients cache the tool list for weeks, so rules that matter also live
+in the instructions and in error messages.
+
+Each tool has a `title`, and a description that says when to use it, what it
+returns, and the one rule callers most often miss. Schemas give `enum`s for
+`state`, `kind`, and each change's `op`; `changes` items are a flat object with
+`op` required and the other keys described, without `anyOf` or `oneOf`, which
+some clients do not support. Write tools are annotated idempotent (by
+`request_id`); `apply_changes` and `edit_file` are marked destructive, since
+they can delete or overwrite files, though every write is a revertible commit.
+
+Error messages are written so that a caller can fix its call in one retry. A
+stale section hash or blob says to read the record again, merge, and retry, and
+that the hashes the caller's own last write returned are current. Text for
+`replace_section` that begins with the section's own heading or bold label has
+it dropped, with an `INFO` finding; text that would start another section names
+the offending line and points to `edit_file` for a deliberate restructure. An
+`edit_file` miss says that records are reformatted on write, so `old_string` is
+copied from the latest read or result. Unknown projects and tasks point to
+`list_projects` and `list_tasks`.
 
 ## Handoff
 
 `handoff(target)` is the first call of a session: `target` is a project name or
 a task ID, and one round trip returns what the workflow reads before acting.
 
-- `note`: the short handoff note, as `taskgo handoff` prints it, with
-  repository-relative paths and the data-care rule.
-- `guide`: how to keep the tracker through the server's tools: a digest of the
-  rules in this skill that writes most often miss (rewriting STATUS.md prose
-  instead of appending, completing a task, where `blocked_by` goes, the
-  `conversation` URI), and how the CLI steps the skill names map to the tools.
-  It is the same for every target; the skill stays the specification.
+- `note`: the short handoff note, as `taskgo handoff` prints it, without the
+  paragraph that sends the reader to files the payload already holds, and with a
+  line saying the payload holds them, and when the project has no `PLAN.md`.
+- `guide`: the writing rules the server instructions leave out (Goal and
+  Criteria, `in-progress`, `wait_for` gates, what to leave before stopping,
+  skills). It is the same for every target; the skill stays the specification.
+  `taskgo handoff --json` has no guide.
 - `findings` and `unverified_gates`: readiness and audit findings, and the
   project's unverified gates.
 - `frontmatter`: the project `README.md` frontmatter as YAML parses it, with no
   key filtered or renamed (`{}` without one).
 - `skills`: the agent skills that frontmatter declares, normalized to a list of
-  names as the `skill` CLI resolves them (`[]` without any). The note says how
-  to activate them; a client without a skill manager ignores them.
-- `readme`, `plan`, `agents_md`: the project `README.md` (or `PROJECT.md`),
-  `PLAN.md`, and the root `AGENTS.md`, each `{path, blob, content, truncated}`
-  or null when absent. Content is the file's bytes, cut after a whole line at
-  256 KiB as `read_file` cuts it.
+  names as the `skill` CLI resolves them (`[]` without any). The guide says how
+  to treat them; a client without a skill manager ignores them.
+- `readme`, `plan`: the project `README.md` (or `PROJECT.md`) and `PLAN.md`,
+  each `{path, blob, content, truncated}` or null when absent. Content is the
+  file's bytes, cut after a whole line at 256 KiB as `read_file` cuts it.
+- `local_policy`: the root `AGENTS.md` outside its managed block and title, the
+  repository's own rules; absent when there are none. (`taskgo handoff --json`
+  returns the whole file as `agents_md` instead.)
 - `status`: `STATUS.md` the same way, plus its `sections` with hashes (for
   `replace_section`), `committed_block`, `live_block` (the task block computed
   now), and `block_current` (the same projection `get_project_status` returns).
@@ -101,7 +137,7 @@ choosing a range, and leaves the content no longer the file's bytes.
 ## Writes
 
 `create`, `apply_changes`, and `edit_file` take a change set (see
-[Change Sets](model.md#change-sets); `create` is a set with one `create`, and
+[change-sets.md](change-sets.md); `create` is a set with one `create`, and
 `edit_file` a set with one `edit_file`) and make it one commit on the branch, or
 nothing:
 
@@ -123,20 +159,25 @@ nothing:
    refused pushes, not counting a first push over a cached head, the write fails
    and nothing is written.
 
+A write that lands returns `sections`: the new hash of every section of each
+task and `STATUS.md` it changed (written sections first), since formatting a
+record can change sections the write did not name.
+
 A write that lands, or is recognized as a retry, returns `findings`: advice,
 never a refusal, since the commit is already on the branch. They are `doctor`'s
 findings at the commit, without its formatting checks, on the files the write
 touched or naming a task in them (such as a `blocked_by` edge it resolved in
 another project), and, for each project where the write changed an existing task
 but left `STATUS.md`'s Summary and Next as they were, an `INFO` reminder to
-rewrite them if the project's state or next steps changed. A `STATUS.md` whose
-task snapshot alone the write regenerated, because a task it changed holds one
-in another project, does not count as touched. A write that changes nothing
-returns none. The audit checks only what the write touched and the tasks a
-touched task holds, and reuses the change set's tree and task rows rather than
-reading the commit again. They stand in for running `taskgo doctor`, which a
-client without a checkout cannot; `taskgo apply` and `taskgo edit` are
-unchanged.
+rewrite them if the project's state or next steps changed. A Summary over 1,200
+characters of prose draws an `INFO` asking for a rewrite, as `doctor` does; a
+section heading the write dropped draws one too. A `STATUS.md` whose task
+snapshot alone the write regenerated, because a task it changed holds one in
+another project, does not count as touched. A write that changes nothing returns
+none. The audit checks only what the write touched and the tasks a touched task
+holds, and reuses the change set's tree and task rows rather than reading the
+commit again. They stand in for running `taskgo doctor`, which a client without
+a checkout cannot; `taskgo apply` and `taskgo edit` are unchanged.
 
 Parsed task rows, frontmatter YAML, per-task structural audit findings, and
 Markdown-format verdicts are cached in memory (`_ROW_CACHE`, `_YAML_FM_CACHE`,
@@ -159,9 +200,8 @@ each snapshot holds and the tree listing each new commit reads.
 
 Tool failures return `isError: true` with the diagnostic in both
 `content[0].text` and `structuredContent.error.message`. Change-set refusals
-name the failing change and operation; section validation also names the section
-and explains the body-only text contract. Read either diagnostic before changing
-arguments; removing valid conversation attribution does not fix section text.
+name the failing change and operation, and say what to send instead (see
+[Caller Surface](#caller-surface)).
 
 Calls are serialized, so the server's own writes never race each other; pushes
 from CLI checkouts race with them on equal terms, through the remote's refusal
@@ -180,11 +220,16 @@ server refuses to write without `user.name` and `user.email`, or the
 Conventional Commits subject scoped to the project (the caller's, or one derived
 from the changes), an optional body, and the trailers the caller asks for:
 `Conversation:` for its session URI, which also joins the conversations of every
-task the write touches, and `Ref:` for each reference. After those, every commit
-carries `Request-Id:`, the write's `request_id`, and `Request-Digest:`, the
-first 16 hex digits of the SHA-256 of its other arguments as sorted JSON. Writes
-are refused unless `AGENTS.md` at the head declares `taskgo`, and a server
-started with `--no-fetch` does not write.
+task the write touches, and `Ref:` for each reference. `conversation` is
+optional and takes any `<scheme>://<id>` URI with a lowercase scheme and an ID
+of 16 or more characters, such as a chat URL; callers are told never to invent
+one. Every commit then carries `MCP-Client:`, the client's name and version from
+its `clientInfo` when the session kept it (over stdio), else its HTTP
+`User-Agent`, so a write is attributable to a client without a conversation;
+then `Request-Id:`, the write's `request_id`, and `Request-Digest:`, the first
+16 hex digits of the SHA-256 of its other arguments as sorted JSON. Writes are
+refused unless `AGENTS.md` at the head declares `taskgo`, and a server started
+with `--no-fetch` does not write.
 
 Every write takes a `request_id`. The server keeps, in memory, the digest of the
 request's arguments and each commit it built for it, for a day. A request whose
@@ -327,10 +372,10 @@ under [Writes](#writes) first. The first request with each kind of valid Access
 token (a browser's, a client's) also logs the names, not the values, of its
 claims, which say what a caller key could be built from.
 
-**Reading the log.** `mcp logs` reads these records: lines by default, `--json`,
-`--summary` for statistics, `--since` to limit the window, `--server taskgo` for
-this server alone, and `--serve` for one live page across servers; on app1 that
-page is <https://logs.hupsista.com/>. The record format is kept in
+**Reading the log.** `mcp logs` (in the `agent-config` skill) reads these
+records: lines by default, `--json`, `--summary` for statistics, `--since` to
+limit the window, `--server taskgo` for this server alone, and `--serve` for one
+live page across servers. The record format is kept in
 `skills/agent-config/references/mcp-logs.md`. The records are JSON lines, so
 `jq` reads them too:
 
@@ -405,7 +450,7 @@ npx @modelcontextprotocol/inspector --cli http://127.0.0.1:8789/mcp \
 
 ## Data care
 
-Everything the server returns is private tracker content. Its MCP instructions,
-every write tool's description, and every handoff note tell the client never to
-copy it into artifact repositories. The host running the server holds a clone of
-the control repository, so the same care applies to the host.
+Everything the server returns is private tracker content. Its MCP instructions
+tell the client never to copy it into artifact repositories, once, rather than
+every tool description. The host running the server holds a clone of the control
+repository, so the same care applies to the host.

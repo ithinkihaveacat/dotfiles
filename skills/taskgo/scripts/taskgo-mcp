@@ -98,18 +98,15 @@ def load_cli() -> Any:
 
 _cli = load_cli()
 from taskgo_cli import (  # noqa: E402
-    CANONICAL_AGENTS,
     CANONICAL_URL,
-    EDIT_TEXT_MAX_BYTES,
+    CHANGE_OPS,
+    COMMIT_TYPES,
     ID_PATTERN,
     MCP_DATA_CARE,
     MCP_FETCH_TTL,
     READ_MAX_BYTES,
-    SEARCH_LINE_MAX_BYTES,
-    SEARCH_MAX_BYTES,
     STATUS_SCHEMA,
     TASK_SCHEMA,
-    WRITE_FILE_MAX_BYTES,
     ChangeSet,
     ChangeSetError,
     GitTreeSnapshot,
@@ -126,6 +123,7 @@ from taskgo_cli import (  # noqa: E402
     die_scoped,
     display_path,
     ensure_conventional_subject,
+    extract_title,
     field_history,
     field_is_valid,
     file_versions,
@@ -178,7 +176,7 @@ from taskgo_cli import (  # noqa: E402
 # Cloudflare Access authenticates callers in front of the server; McpGate
 # checks the Access JWT on every HTTP request before the SDK sees it.
 
-MCP_SERVER_VERSION = "0.15.0"
+MCP_SERVER_VERSION = "0.16.0"
 MCP_MAX_FILE_BYTES = READ_MAX_BYTES
 MCP_MAX_REQUEST_BYTES = 1024 * 1024
 MCP_FETCH_TIMEOUT = 60
@@ -198,6 +196,10 @@ MCP_REQUEST_SCAN = 200
 MCP_REQUEST_ID_TRAILER = "Request-Id"
 MCP_REQUEST_DIGEST_TRAILER = "Request-Digest"
 MCP_REQUEST_DIGEST_LEN = 16
+# The trailer naming the client that made a write (its MCP clientInfo name,
+# or else its HTTP User-Agent), and its longest value.
+MCP_CLIENT_TRAILER = "MCP-Client"
+MCP_CLIENT_MAX = 80
 MCP_CERTS_TTL = 3600
 MCP_LOOPBACK = ("localhost", "127.0.0.1", "::1")
 # Answers GET and HEAD with 200 and the server's version and source commit,
@@ -238,38 +240,43 @@ MCP_LOG_ARG_MAX = 60
 # JWT claims that identify a caller, hashed into a record's caller key.
 MCP_CALLER_CLAIMS = ("sub", "email", "client_id", "azp")
 
-MCP_UNVERIFIED = (
-    "External wait_for gates (bugs, changes, issues, people, free text) are not checked by "
-    "this server; each is reported as unverified and treated as still holding "
-    "its task. Run 'taskgo check' locally to poll them."
-)
 
-MCP_INSTRUCTIONS = f"""\
-This server reads and writes a taskgo control repository: a private Git
-repository of Markdown that tracks projects, tasks (TASK-XXXXX), decisions,
-and each project's STATUS.md.
+def mcp_instructions(name: str | None = None) -> str:
+    """The server instructions: what callers must know before their first
+    call, most important first. NAME is the control repository's title, as
+    its root README.md gives it, when there is one."""
+    what = (
+        f'"{name}", a taskgo control repository'
+        if name
+        else ("a taskgo control repository")
+    )
+    return f"""\
+This server reads and writes {what}: a private Git repository of
+Markdown that tracks projects, tasks (TASK-XXXXX), decisions, and each
+project's STATUS.md.
 
-Start with handoff(target), a project name or a task ID: one call returns
-the project's README.md, STATUS.md, PLAN.md, the root AGENTS.md, its active
-and ready tasks, and the task record. list_projects and list_tasks (state
-'ready' for workable tasks) find a target. Every response names the commit
-it read in as_of.commit; pass it as 'at' to keep several reads on the same
-commit. handoff.skills names the agent skills the project expects: activate
-them if your harness has a skill manager (adding one already active is
-harmless), otherwise ignore them. Before your first write, read
-handoff.guide: how to keep the tracker current.
+Workflow: when starting or resuming work, call handoff(target) first, with a
+project name or task ID. Find targets with list_projects and
+list_tasks(state: "ready"). Read a task with get_task, not read_file. Use
+create for a new task; apply_changes for status, task sections, and
+STATUS.md Summary and Next; edit_file only for other text.
 
-create and apply_changes record progress: each call is one commit on main,
-or nothing. Edits name the section hash or blob SHA they replace, as read
-from get_task, get_project_status, or list_files, and are refused if it no
-longer holds; read again and retry. Each write returns findings on the
-files and tasks it touched: advice, since the write has landed. Pass a
-fresh request_id for each write and the same one when retrying it after an
-unclear outcome, so that it is recorded once.
+Writes: each write is one commit, or nothing. Pass the section hash or blob
+you read. After a write, use the hashes and text it returned. If a write is
+refused as stale, read again, merge, and retry. Use a fresh request_id for
+each write; reuse one only to retry a write whose outcome was unclear.
 
-{MCP_DATA_CARE}
+Writing rules: records say what is true now, not a log; Git keeps the
+history. Rewrite STATUS.md Summary (where the project stands now, in a few
+sentences) and Next (the next few actions) whole; never append. Setting a
+task done needs an Outcome with a verdict against each criterion.
+blocked_by goes on the task that is held. Titles are imperative verb
+phrases. Never invent frontmatter fields.
 
-{MCP_UNVERIFIED}"""
+{MCP_DATA_CARE}"""
+
+
+MCP_INSTRUCTIONS = mcp_instructions()
 
 
 def status_prose(
@@ -752,12 +759,12 @@ def mcp_find_task(snap: GitTreeSnapshot, task_id: Any) -> TaskRow:
     try:
         return find_task_row(snap, task_id)
     except TaskgoError as e:
-        raise McpToolError(str(e)) from None
+        raise McpToolError(f"{e}; list_tasks lists the tasks") from None
 
 
 def mcp_project(snap: GitTreeSnapshot, project: Any) -> str:
     if not isinstance(project, str) or not is_project(snap, project):
-        raise McpToolError(f"unknown project: {project}")
+        raise McpToolError(f"unknown project: {project}; list_projects names them")
     return project
 
 
@@ -862,8 +869,10 @@ def mcp_handoff(r: McpRead, args: dict[str, Any]) -> dict[str, Any]:
     try:
         t = resolve_handoff(r.snap, args.get("target"))
     except TaskgoError as e:
-        raise McpToolError(str(e)) from None
-    return handoff_payload(r.snap, t, r.as_of())
+        raise McpToolError(
+            f"{e}; list_projects names the projects, list_tasks the tasks"
+        ) from None
+    return handoff_payload(r.snap, t, r.as_of(), mcp=True)
 
 
 def mcp_get_task_history(r: McpRead, args: dict[str, Any]) -> dict[str, Any]:
@@ -891,13 +900,11 @@ def mcp_get_task_history(r: McpRead, args: dict[str, Any]) -> dict[str, Any]:
 
 MCP_AT = {
     "type": "string",
-    "description": (
-        "Commit SHA to read. Omit to read the head of main; pass the 'commit' "
-        "from an earlier response to keep several reads on one commit."
-    ),
+    "description": "Commit to read (an earlier as_of.commit); default the head.",
 }
 MCP_TASK_ID = {"type": "string", "description": "Task ID, TASK-XXXXX."}
 MCP_PROJECT = {"type": "string", "description": "Project name."}
+MCP_STATES = ("todo", "in-progress", "blocked", "done", "cancelled")
 
 
 @dataclass(slots=True, frozen=True)
@@ -906,6 +913,7 @@ class McpTool:
     result; a write tool's handler maps the arguments to a change set."""
 
     name: str
+    title: str
     description: str
     properties: dict[str, Any]
     required: tuple[str, ...]
@@ -931,6 +939,7 @@ class McpTool:
             schema["required"] = list(self.required)
         return {
             "name": self.name,
+            "title": self.title,
             "description": self.description,
             "inputSchema": schema,
             "annotations": annotations,
@@ -970,109 +979,125 @@ def mcp_edit_doc(args: dict[str, Any]) -> dict[str, Any]:
 MCP_WRITE_PROPERTIES = {
     "request_id": {
         "type": "string",
-        "description": (
-            "A fresh ID for this write, such as a UUID. Reuse it only to retry "
-            "this same write after an unclear outcome: a write that already "
-            "landed is then reported again, not recorded twice."
-        ),
+        "description": "Fresh per write; reuse only to retry an unclear outcome.",
     },
     "subject": {
         "type": "string",
         "description": (
-            "Commit subject, as Conventional Commits 'type(scope): description' "
-            "in up to 50 characters; derived from the changes when omitted."
+            "Optional; derived when omitted. 'type(scope): text', at most 50 "
+            f"characters in all; type one of {', '.join(COMMIT_TYPES)}."
         ),
     },
-    "body": {"type": "string", "description": "Commit body, plain text."},
+    "body": {"type": "string", "description": "Optional commit body."},
     "conversation": {
         "type": "string",
         "description": (
-            "Your session URI, as <agent>://<id>, where <agent> is one of "
-            f"{', '.join(CANONICAL_AGENTS)} (claude for Claude Code) and <id> "
-            "your session ID: recorded in a Conversation: trailer and in the "
-            "conversations of every task the write touches."
+            "Optional: your real session ID or chat URL if you know it, as "
+            "<scheme>://<id>; never invent one."
         ),
     },
     "refs": {
         "type": "array",
         "items": {"type": "string"},
-        "description": (
-            "External references, such as artifact commits (repo@sha) or pull "
-            "request URLs, each recorded in a Ref: trailer."
-        ),
+        "description": "Optional references, such as repo@sha or PR URLs.",
     },
+}
+
+MCP_CHANGE_ITEM = {
+    "type": "object",
+    "properties": {
+        "op": {"type": "string", "enum": list(CHANGE_OPS)},
+        "record": {
+            "type": "string",
+            "description": "Task ID, '$ref', decision path, or <project>/STATUS.md.",
+        },
+        "section": {"type": "string"},
+        "text": {"description": "Body without heading; null removes."},
+        "expected_hash": {"description": "Hash last read or returned; null if absent."},
+        "field": {"type": "string"},
+        "value": {"description": "null clears."},
+        "expected": {},
+        "values": {"type": "array", "items": {"type": "string"}},
+        "kind": {"type": "string", "enum": ["task", "decision", "project"]},
+        "project": {"type": "string"},
+        "ref": {"type": "string"},
+        "slug": {"type": "string"},
+        "fields": {"type": "object"},
+        "sections": {"type": "object"},
+        "path": {"type": "string"},
+        "content": {"type": "string"},
+        "old_string": {"type": "string"},
+        "new_string": {"type": "string"},
+        "replace_all": {"type": "boolean"},
+        "expected_blob": {"type": "string"},
+        "executable": {"type": "boolean"},
+    },
+    "required": ["op"],
 }
 
 
 MCP_TOOLS = [
     McpTool(
         "list_projects",
-        "List the projects in the taskgo control repository, with task counts "
-        "and in-progress and blocked task IDs (as 'taskgo status --json').",
+        "List projects",
+        "Find a project to work on. Returns each project with task counts and "
+        "its in-progress and blocked task IDs.",
         {},
         (),
         mcp_list_projects,
     ),
     McpTool(
         "list_tasks",
-        "List tasks, optionally for one project and one state (as 'taskgo list "
-        "--json'). State 'ready' means todo with no unresolved blocked_by or "
-        "wait_for, soonest due date first.",
+        "List tasks",
+        "Find tasks, optionally in one project and one state. State 'ready' "
+        "means todo with nothing unresolved in blocked_by or wait_for, soonest "
+        "due first. Returns task rows; read one with get_task. External "
+        "wait_for gates are not checked here: they are listed as unverified.",
         {
             "project": MCP_PROJECT,
-            "state": {
-                "type": "string",
-                "description": "todo, in-progress, blocked, done, cancelled, or ready.",
-            },
+            "state": {"type": "string", "enum": [*MCP_STATES, "ready"]},
         },
         (),
         mcp_list_tasks,
     ),
     McpTool(
         "get_task",
-        "Read one task record by ID: frontmatter, sections with hashes, "
-        "unresolved dependencies, and the full Markdown.",
+        "Read a task",
+        "Read one task before changing it. Returns its frontmatter, each "
+        "section with the hash apply_changes needs, unresolved dependencies, "
+        "and the Markdown. Use this, not read_file, for task records.",
         {"id": MCP_TASK_ID},
         ("id",),
         mcp_get_task,
     ),
     McpTool(
         "get_project_status",
-        "Read a project's STATUS.md: Summary and Next with hashes, the committed "
-        "task snapshot block, and a freshly computed block for today (they "
-        "differ when dates have moved since the last sync).",
+        "Read project status",
+        "Read a project's STATUS.md before rewriting its Summary or Next. "
+        "Returns Summary and Next with their hashes, the content, and the "
+        "task block as committed and as computed today.",
         {"project": MCP_PROJECT},
         ("project",),
         mcp_get_project_status,
     ),
     McpTool(
         "read_file",
-        "Read a UTF-8 text file in the control repository by its "
-        "repository-relative path, whole or as lines start_line..end_line "
-        "(1-indexed, inclusive; lines end at '\\n'). Returns at most "
-        f"{MCP_MAX_FILE_BYTES // 1024} KiB of content, cut after a whole line: "
-        "when truncated is true, end_line is the last line returned, so read "
-        "on from end_line + 1. blob is the SHA of the whole file. content is "
-        "the file's bytes, ready to quote in edit_file; line_numbers prefixes "
-        "each line with its number and ': ' instead.",
+        "Read a file",
+        "Read another file, such as a project document; handoff already "
+        "returns README.md, STATUS.md, and PLAN.md, and tasks are read with "
+        "get_task. Returns content and blob, at most "
+        f"{MCP_MAX_FILE_BYTES // 1024} KiB: when truncated is true, read on "
+        "from end_line + 1.",
         {
             "path": {
                 "type": "string",
-                "description": "Path such as 'taskgo/PLAN.md'.",
+                "description": "Repository-relative path, such as 'alpha/notes.md'.",
             },
-            "start_line": {
-                "type": "integer",
-                "description": "First line to read, from 1; default 1.",
-            },
-            "end_line": {
-                "type": "integer",
-                "description": "Last line to read, inclusive; default the last.",
-            },
+            "start_line": {"type": "integer", "description": "From 1."},
+            "end_line": {"type": "integer", "description": "Inclusive."},
             "line_numbers": {
                 "type": "boolean",
-                "description": "Prefix each line with its number, as '7: text'; "
-                "default false. Strip the prefixes before quoting text in "
-                "edit_file.",
+                "description": "Prefix lines with '7: '; strip before quoting.",
             },
         },
         ("path",),
@@ -1080,28 +1105,21 @@ MCP_TOOLS = [
     ),
     McpTool(
         "search_files",
-        "Search file contents in the control repository with git grep (as "
-        "'taskgo search --json'). args are git grep arguments, one per item: "
-        "one bare pattern, or patterns given with -e; options such as -i, "
-        "-w, -F, -E, -P, -C N, -l, -c, -m N, --and, --or, and --not; then "
-        "optionally '--' and pathspecs. Other options are refused. Returns "
-        "grep-style output (path:line:text for matches, path-line-text for "
-        "context), with repository-relative paths that read_file accepts; "
-        "files, the paths it names; and truncated, true when the output "
-        f"stopped at {SEARCH_MAX_BYTES // 1024} KiB. Lines over "
-        f"{SEARCH_LINE_MAX_BYTES} bytes are cut. No match gives empty output.",
+        "Search files",
+        "Search file contents with git grep. args are git grep arguments, one "
+        "per item: a pattern or -e patterns, options such as -i, -w, -F, -E, "
+        "-C N, -l; then optionally '--' and pathspecs. Returns grep-style "
+        "lines with paths read_file accepts; empty when nothing matches.",
         {
             "args": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "git grep arguments, such as ['-i', 'TODO'] or "
-                "['-e', 'b/123', '--', 'meta/'].",
+                "description": "Such as ['-i', 'cache'].",
             },
             "paths": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "Pathspecs to search, such as 'meta/' or "
-                "'*.md', added to any after '--' in args; default all files.",
+                "description": "Pathspecs, such as 'alpha/'; default all files.",
             },
         },
         ("args",),
@@ -1109,8 +1127,10 @@ MCP_TOOLS = [
     ),
     McpTool(
         "list_files",
-        "List the files in the control repository, or under one directory, "
-        "with their blob SHAs.",
+        "List files",
+        "List files, all or under one directory, with their blobs (for "
+        "write_file and delete_file). handoff already returns README.md, "
+        "STATUS.md, and PLAN.md; read tasks with get_task.",
         {
             "prefix": {
                 "type": "string",
@@ -1122,19 +1142,12 @@ MCP_TOOLS = [
     ),
     McpTool(
         "handoff",
-        "Start here: the handoff (or handover) for a project or an unfinished "
-        "task, to call first when asked to start, resume, or take over work "
-        "on one: everything to read before acting, in one call (as 'taskgo "
-        "handoff --json'). target is a project name or a task ID. Returns "
-        "the short handoff note; "
-        "readiness and audit findings; the project's README.md frontmatter, "
-        "parsed but unfiltered, and the agent skills it declares (skills); "
-        "README.md, STATUS.md (with Summary and Next "
-        "hashes and a live task block), PLAN.md, and the root AGENTS.md "
-        "verbatim, each with its blob and cut as read_file cuts it; the "
-        "project's in-progress, blocked, and ready tasks; and, for a task ID, "
-        "the task as get_task returns it (task is null for a project). Done "
-        "and cancelled tasks are refused.",
+        "Start or resume work",
+        "Call first when starting, resuming, or taking over work on a project "
+        "or an unfinished task. Returns everything to read in one call: the "
+        "note, findings, README.md, STATUS.md with section hashes, PLAN.md, "
+        "local policy, the project's active and ready tasks, and the task "
+        "with its section hashes. Do not re-read what it returned.",
         {
             "target": {
                 "type": "string",
@@ -1146,47 +1159,32 @@ MCP_TOOLS = [
     ),
     McpTool(
         "get_task_history",
-        "Show how one frontmatter field of a task (default 'status') changed "
-        "across commits, following renames (as 'taskgo history').",
+        "Read task history",
+        "See how one frontmatter field of a task, default status, changed "
+        "across commits. Returns each change with its date and commit.",
         {
             "id": MCP_TASK_ID,
-            "field": {
-                "type": "string",
-                "description": "Frontmatter field; default 'status'.",
-            },
+            "field": {"type": "string", "description": "Default 'status'."},
         },
         ("id",),
         mcp_get_task_history,
     ),
     McpTool(
         "create",
-        "Create one task, a decision, or a project, as one commit on main, and "
-        "return what it created (a task's ID, a decision's or project's path) "
-        "and, for a task, sections: each written section's hash, ready for "
-        "replace_section. It is apply_changes with a single create. Task fields: status "
-        "(default todo), due, stale_after, blocked_by, wait_for, conversations. "
-        "Task sections: Problem, Cost, Goal, Criteria, Sketch, Constraints, "
-        "Outcome, Findings, Next. A decision needs sections Context, Decision, "
-        "and Consequences. A project (kind project, project its new directory "
-        "name, title its README heading) takes one field, skills, and no "
-        "sections or slug; it gets a README.md and a STATUS.md.\n\n"
-        f"{MCP_DATA_CARE}",
+        "Create a task",
+        "Create one task (or a decision or a project) as one commit. Returns "
+        "its ID or path and each written section's hash. Task fields: status, "
+        "due, stale_after, blocked_by, wait_for. Task sections: Problem, Cost, "
+        "Goal, Criteria, Sketch, Constraints, Outcome, Findings, Next. A "
+        "decision needs Context, Decision, and Consequences; a project takes "
+        "only the field skills.",
         {
             "project": MCP_PROJECT,
-            "title": {
-                "type": "string",
-                "description": "Title, as an imperative verb phrase.",
-            },
-            "kind": {
-                "type": "string",
-                "description": "task (default), decision, or project.",
-            },
-            "fields": {"type": "object", "description": "Frontmatter fields."},
-            "sections": {
-                "type": "object",
-                "description": 'Section texts by name, such as {"Goal": "..."}.',
-            },
-            "slug": {"type": "string", "description": "File name slug; optional."},
+            "title": {"type": "string", "description": "An imperative verb phrase."},
+            "kind": {"type": "string", "enum": ["task", "decision", "project"]},
+            "fields": {"type": "object"},
+            "sections": {"type": "object", "description": '{"Goal": "..."}'},
+            "slug": {"type": "string"},
             **MCP_WRITE_PROPERTIES,
         },
         ("project", "title", "request_id"),
@@ -1195,48 +1193,29 @@ MCP_TOOLS = [
     ),
     McpTool(
         "apply_changes",
-        "Apply a change set as one commit on main, or nothing (as 'taskgo "
-        "apply', then a commit and push). Changes apply in order, each seeing "
-        "the ones before it:\n"
-        "- create {kind: task|decision|project, project, ref?, slug?, fields?, "
-        "sections}: sections.title is required; later changes name the record "
-        "'$ref'. kind project {project, fields?: {skills}, sections: {title}} "
-        "creates a new project's README.md and STATUS.md; later changes in "
-        "the set can create its tasks.\n"
-        "- set {record, field, value, expected?}: status, due, stale_after, or "
-        "title; expected guards the current value. Setting status done needs "
-        "the task's Outcome, giving a verdict against each criterion.\n"
+        "Update records",
+        "Change task status and sections, STATUS.md Summary and Next, and "
+        "project files, as one commit or nothing. Each change needs 'op', as "
+        '{"op": "replace_section", "record": "TASK-XXXXX", "section": '
+        '"Findings", "text": "...", "expected_hash": "<hash>"}. Ops:\n'
+        "- set {record, field, value, expected?}: status, due, stale_after, "
+        "title; status done needs an Outcome.\n"
         "- add, remove {record, field, values}: blocked_by, wait_for, "
-        "conversations; supersedes on decisions.\n"
+        "conversations.\n"
         "- replace_section {record, section, text, expected_hash}: a task "
-        "section or STATUS.md Summary or Next; expected_hash from get_task or "
-        "get_project_status, null if absent; text null removes it. Supply "
-        "the section body only, without its heading or run-in label. Summary "
-        "and Next are rewritten to the current state, never appended to. The "
-        "result's sections list each section's new hash, for the next write.\n"
-        "- write_file {path, content, expected_blob?, executable?}: a whole "
-        "project file outside tasks/, decisions/, and STATUS.md, or INBOX.md; "
-        "without expected_blob the file must be new, and to overwrite one "
-        "expected_blob is its blob from read_file or list_files; executable "
-        "true or false sets the file's mode, omitted keeps it.\n"
-        "- delete_file {path, expected_blob}: deletes such a file whose blob "
-        "is expected_blob.\n"
-        "- edit_file {path, old_string, new_string, replace_all?, "
-        "expected_blob?}: exact text replacement, as the edit_file tool does, "
-        "with the same edits in the result.\n"
-        "A record is a task ID, a '$ref', a decision path, or "
-        "'<project>/STATUS.md'. The result must validate (known blockers, no "
-        "cycles, an Outcome on done tasks); the affected STATUS.md blocks are "
-        "regenerated. Records are reformatted (Markdown, wrapped at 80 "
-        "columns), so their text may differ from what was sent. The result "
-        "lists findings on what the write touched.\n\n"
-        f"{MCP_DATA_CARE}",
+        "section, or STATUS.md Summary (where the project stands now, a few "
+        "sentences) or Next; the body only, rewritten whole. Prefer it to "
+        "edit_file for these.\n"
+        "- create {kind, project, ref?, slug?, fields?, sections}: sections.title "
+        "required; later changes name it '$ref'.\n"
+        "- write_file {path, content, expected_blob?, executable?}, "
+        "delete_file {path, expected_blob}: project files outside tasks/, "
+        "decisions/, and STATUS.md.\n"
+        "- edit_file: as the edit_file tool.\n"
+        "Records are reformatted on write; the result returns every changed "
+        "section's new hash and findings.",
         {
-            "changes": {
-                "type": "array",
-                "items": {"type": "object"},
-                "description": "The changes, each an object with an 'op'.",
-            },
+            "changes": {"type": "array", "items": MCP_CHANGE_ITEM},
             **MCP_WRITE_PROPERTIES,
         },
         ("changes", "request_id"),
@@ -1246,46 +1225,19 @@ MCP_TOOLS = [
     ),
     McpTool(
         "edit_file",
-        "Replace exact text in one file as one commit on main (apply_changes "
-        "with a single edit_file). old_string must occur exactly once, or set "
-        "replace_all. Bytes match verbatim; when nothing matches in a CRLF "
-        "file and old_string has bare '\\n' line ends, both strings are "
-        "retried with CRLF. A miss returns a diff against the closest text. "
-        "Edits a project asset (an executable keeps its mode), INBOX.md, a "
-        "task, a decision, or a project's STATUS.md outside its generated "
-        "block; a record must still validate (same id, known status, "
-        "parseable frontmatter, no duplicated section, known blockers) and is "
-        "then reformatted (Markdown, wrapped at 80 columns), so its text may "
-        "differ from new_string. Files up to "
-        f"{WRITE_FILE_MAX_BYTES // 1024} KiB. Returns edits: "
-        "occurrences_replaced, the start_line and end_line of the first "
-        "replacement, total_lines, the new blob, and reformatted; when that is "
-        "true, text holds those lines as they now stand (or text_omitted is "
-        f"true past {EDIT_TEXT_MAX_BYTES} bytes: read them back). Quote that "
-        "text, not new_string, in a later edit of those lines; with "
-        "replace_all it covers the first replacement only. reformatted is "
-        "judged after the whole write, so a later edit of the same lines in "
-        "it counts too.\n\n"
-        f"{MCP_DATA_CARE}",
+        "Edit text",
+        "Replace exact text in a file as one commit: for text that "
+        "apply_changes has no op for, such as a project document. old_string "
+        "must occur once, or set replace_all; a miss shows the closest text. "
+        "Records are reformatted (wrapped at 80 columns), so quote text from "
+        "the latest read or the edits.text this returns, not your earlier "
+        "new_string.",
         {
-            "path": {
-                "type": "string",
-                "description": "Path such as 'taskgo/PLAN.md'.",
-            },
-            "old_string": {
-                "type": "string",
-                "description": "The exact text to replace; not empty.",
-            },
-            "new_string": {"type": "string", "description": "The replacement."},
-            "replace_all": {
-                "type": "boolean",
-                "description": "Replace every occurrence; default false.",
-            },
-            "expected_blob": {
-                "type": "string",
-                "description": "Refuse unless the file's blob SHA is this "
-                "(from read_file or list_files); optional.",
-            },
+            "path": {"type": "string"},
+            "old_string": {"type": "string"},
+            "new_string": {"type": "string"},
+            "replace_all": {"type": "boolean"},
+            "expected_blob": {"type": "string", "description": "Optional guard."},
             **MCP_WRITE_PROPERTIES,
         },
         ("path", "old_string", "new_string", "request_id"),
@@ -1359,6 +1311,16 @@ MCP_CHANGE_ERRORS = {
     "precondition": "precondition failed",
     "validation": "validation failed",
 }
+# What to do next, after the message, when it is the same for every refusal
+# of a kind.
+MCP_CHANGE_ADVICE = {
+    "precondition": (
+        ". Read the record again (get_task, get_project_status, handoff, or "
+        "read_file), merge your change into what is there now, and retry with "
+        "the hash or blob it returns. After a write of your own, the hashes "
+        "and blobs that write returned are the current ones."
+    ),
+}
 
 
 @dataclass(slots=True)
@@ -1400,7 +1362,8 @@ def mcp_commit_args(args: dict[str, Any]) -> McpCommitArgs:
             TASK_SCHEMA.field("conversations"), conv
         ):
             raise McpToolError(
-                f"conversation {conv!r} is not a session URI, as <agent>://<id>"
+                f"conversation {conv!r} is not a session URI, as <scheme>://<id> "
+                "with an ID of 16 or more characters; omit it if you have none"
             )
     refs = args.get("refs") or []
     if not isinstance(refs, list):
@@ -1455,7 +1418,25 @@ def mcp_request_digest(args: dict[str, Any]) -> str:
     ).hexdigest()
 
 
-def mcp_commit_message(cs: ChangeSet, c: McpCommitArgs, rid: str, digest: str) -> str:
+def mcp_client_name(value: Any) -> str | None:
+    """VALUE, a client's name or User-Agent, as one short trailer value;
+    None when there is nothing usable."""
+    text = " ".join(str(value or "").split())
+    text = "".join(ch for ch in text if ch.isprintable())
+    if not text:
+        return None
+    return (
+        text if len(text) <= MCP_CLIENT_MAX else text[: MCP_CLIENT_MAX - 1] + "\u2026"
+    )
+
+
+def mcp_commit_message(
+    cs: ChangeSet,
+    c: McpCommitArgs,
+    rid: str,
+    digest: str,
+    client: str | None = None,
+) -> str:
     """The message a CLI checkpoint of CS would carry, plus the request's
     trailers.
 
@@ -1463,7 +1444,9 @@ def mcp_commit_message(cs: ChangeSet, c: McpCommitArgs, rid: str, digest: str) -
     files regenerated only because a task they list changed. The trailers
     Request-Id and Request-Digest (a prefix of the arguments' digest) let a
     server that has forgotten RID, as after a restart, find the commit it
-    made for it and tell a retry from a reused ID.
+    made for it and tell a retry from a reused ID. MCP-Client names the
+    client that wrote, so every commit is attributable to one even without
+    a conversation.
     """
     rels = [
         rel
@@ -1481,6 +1464,8 @@ def mcp_commit_message(cs: ChangeSet, c: McpCommitArgs, rid: str, digest: str) -
         lines += ["", wrap_body(c.body)]
     trailers = [f"Conversation: {c.conversation}"] if c.conversation else []
     trailers += [f"Ref: {r}" for r in c.refs]
+    if client:
+        trailers.append(f"{MCP_CLIENT_TRAILER}: {client}")
     trailers += [
         f"{MCP_REQUEST_ID_TRAILER}: {rid}",
         f"{MCP_REQUEST_DIGEST_TRAILER}: {digest[:MCP_REQUEST_DIGEST_LEN]}",
@@ -1770,7 +1755,8 @@ class McpServer:
                 )
                 with lock_ctx:
                     if tool.writes:
-                        result = self.write(tool, args)
+                        client = mcp_client_name(params.get("client") or event.agent)
+                        result = self.write(tool, args, client)
                         sha = result["as_of"]["commit"]
                     else:
                         sha, stale = self.reader.resolve_for_read(args.get("at"))
@@ -1800,7 +1786,9 @@ class McpServer:
             "isError": False,
         }
 
-    def write(self, tool: McpTool, args: dict[str, Any]) -> dict[str, Any]:
+    def write(
+        self, tool: McpTool, args: dict[str, Any], client: str | None = None
+    ) -> dict[str, Any]:
         """Applies a write tool's change set as one commit on the branch.
 
         The set applies over the head and is pushed without force. The head
@@ -1814,7 +1802,9 @@ class McpServer:
         commit is on the branch, instead of writing again; one not in memory
         is looked for in the trailers of the commits behind the head first.
         Without a remote (--local), the local branch is the head, read for
-        every write, and moving it is the push. Called with the lock held.
+        every write, and moving it is the push. CLIENT, the caller's MCP
+        client name or HTTP User-Agent, is recorded in a trailer. Called
+        with the lock held.
         """
         reader, cfg = self.reader, self.reader.cfg
         unknown = sorted(set(args) - set(tool.properties))
@@ -1920,6 +1910,11 @@ class McpServer:
                     continue
                 raise McpToolError(
                     f"{MCP_CHANGE_ERRORS[e.kind]}: {e}; nothing was written"
+                    + (
+                        ""
+                        if "old_string" in str(e)
+                        else MCP_CHANGE_ADVICE.get(e.kind, "")
+                    )
                 ) from None
             if not cs.snap.diff():
                 if not fetched:
@@ -1937,7 +1932,7 @@ class McpServer:
                     "replayed": False,
                     "findings": [],
                 }
-            message = mcp_commit_message(cs, commit_args, rid, digest)
+            message = mcp_commit_message(cs, commit_args, rid, digest, client)
             sha = reader.commit(snap, cs, message)
             pushes += 1
             result = {
@@ -2009,6 +2004,9 @@ class McpServer:
         except Exception as e:
             mcp_log(f"findings for {sha[:12]} failed: {type(e).__name__}: {e}")
             findings = []
+        if cs is not None:
+            notes = [{"severity": "INFO", "message": n} for n in cs.notes]
+            findings = notes + findings
         return {
             "as_of": McpRead(reader, snap, committed).as_of(),
             **result,
@@ -2075,6 +2073,28 @@ def mcp_rpc_reason(code: Any) -> str:
     return MCP_RPC_ERRORS.get(code, f"error {mcp_log_value(code)}")
 
 
+def mcp_context_client(ctx: Any) -> str | None:
+    """The clientInfo name (and version) the client gave at initialize,
+    when the session kept it, as over stdio; None otherwise."""
+    try:
+        info = ctx.session.client_params.client_info
+    except AttributeError:
+        return None
+    name = getattr(info, "name", None)
+    version = getattr(info, "version", None)
+    return f"{name}/{version}" if name and version else name
+
+
+def mcp_repo_title(reader: McpReader) -> str | None:
+    """The control repository's title, from the root README.md at the head
+    the server has, for the instructions; None without one."""
+    res = reader.git("show", f"{reader.branch_ref()}:README.md")
+    if res.returncode != 0:
+        return None
+    title = extract_title(res.stdout).strip()
+    return title if title and len(title) <= 80 and '"' not in title else None
+
+
 def mcp_sdk_server(server: McpServer) -> Any:
     """SERVER's tools behind the MCP SDK's low-level server, which speaks the
     protocol: every revision the SDK supports, over either transport."""
@@ -2091,7 +2111,11 @@ def mcp_sdk_server(server: McpServer) -> Any:
 
     async def call_tool(ctx: Any, params: Any) -> Any:
         event = MCP_EVENT.get() or McpEvent("none", time.monotonic())
-        raw = {"name": params.name, "arguments": params.arguments}
+        raw = {
+            "name": params.name,
+            "arguments": params.arguments,
+            "client": mcp_context_client(ctx),
+        }
         # In a worker thread, so a long fetch or push holds up only the calls
         # queued behind it on the lock, not the event loop.
         result = await anyio.to_thread.run_sync(server.call_tool, raw, event)
@@ -2128,7 +2152,7 @@ def mcp_sdk_server(server: McpServer) -> Any:
     sdk = Server(
         "taskgo",
         version=MCP_SERVER_VERSION,
-        instructions=MCP_INSTRUCTIONS,
+        instructions=mcp_instructions(mcp_repo_title(server.reader)),
         on_list_tools=list_tools,
         on_call_tool=call_tool,
     )
