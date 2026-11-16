@@ -104,7 +104,7 @@ ______________________________________________________________________
 - **Media & Sync Services:**
   `<List companion playback or synchronization services if relevant>`
 - **Remote Compose Payload Archival (`D13`):**
-  `<Status and relative paths of exported binary .rc / .rcdoc payloads captured via DUMP_RC_DOC (or adb-tile-dump if available) for deterministic replay and regression diffing>`
+  `<Status and relative paths of exported binary .rc / .rcdoc payloads captured via DUMP_RC_DOC (or adb-tile-dump if available; requires renderer >= 1.6.6.13 and root/userdebug—mark N/A on user builds or older 1.6.5.41.* .emu renderers) for deterministic replay and regression diffing>`
 
 ### Resource Dimensions & Localization Overview (`D12`)
 

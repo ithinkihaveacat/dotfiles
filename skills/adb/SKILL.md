@@ -113,16 +113,27 @@ With `--vertical`, `adb-tile-add`, `adb-tile-remove`, and `adb-tiles` target the
 standalone renderer's vertical carousel (`WidgetTrayActivity`, `.emu`, `.exp`,
 and `.dev` renderer flavors) instead of the SysUI carousel (`--vertical`
 supports only `LARGE` and `SMALL` container types). Tray widgets are addressed
-by numeric widget ID:
+by numeric widget ID (starting at `10001`, up to `25` widgets) or component
+name:
 
 ```bash
+scripts/adb-tile-add --vertical --type LARGE com.example/.MyWidgetService
 scripts/adb-tiles --vertical            # => 10001 LARGE com.example/.MyWidgetService
 scripts/adb-tile-remove --vertical --all  # reset the tray before a capture
 scripts/adb-tile-dump -o widget.rc 10001 > widget.meta.json
 ```
 
-`adb-tile-dump` needs root to read the document (`adb root` on emulators, `su`
-on userdebug builds); user builds cannot export.
+- **Renderer version and root guards**: `adb-tile-add --vertical` and
+  `adb-tile-remove --vertical <ID|COMPONENT>` work on all tray-capable renderer
+  builds (including the `1.6.5.41.*` `.emu` renderer bundled in the Wear OS 7.1
+  Beta RC1 emulator; on `.emu` builds where `Log.d` is stripped by ProGuard,
+  `adb-tile-add --vertical` checks for post-render `Log.e` / crash failures
+  without timing out on `Log.d`). By contrast, `adb-tiles --vertical`,
+  `adb-tile-remove --vertical --all`, and `adb-tile-dump` require a renderer
+  build with `GET_WIDGETS` / `DUMP_RC_DOC` (`>= 1.6.6.13`) and exit with a clear
+  version message on older `.emu` builds. `adb-tile-dump` also requires root
+  (`adb root` on `userdebug` emulators or `su` on `userdebug` devices) to read
+  the cached `.rc` file; `user` builds cannot export `.rc` files.
 
 > [!NOTE] **Tile Indexing (`Index=[0]`)**: When adding a new tile using
 > `scripts/adb-tile-add`, the output often indicates `Index=[0]`. This means the
