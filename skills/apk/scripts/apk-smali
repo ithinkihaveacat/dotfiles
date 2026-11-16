@@ -33,6 +33,15 @@ DEX_MAGIC = b"dex\n"
 DEX_NAME_RE = re.compile(r"^classes(\d*)\.dex$")
 APKTOOL_SMALI_DIR_RE = re.compile(r"^smali(?:_classes(\d+))?$")
 INVOKE_RE = re.compile(r"^\s*invoke-[\w/-]+\s+\{[^}]*\},\s*([^\s,]+)")
+CONST_STRING_RE = re.compile(
+    r'^\s*const-string(?:/jumbo)?\s+\w+,\s*"((?:[^"\\]|\\.)*)"'
+)
+FIELD_STRING_RE = re.compile(r'^\s*\.field\b[^=]*=\s*"((?:[^"\\]|\\.)*)"')
+FIELD_OP_RE = re.compile(
+    r"^\s*[is](?:get|put)(?:-[\w]+)?\s+[^,]+,(?:\s*[^,]+,)?\s*([^\s,]+)"
+)
+SMALI_ESCAPE_RE = re.compile(r'\\(u[0-9a-fA-F]{4}|["\\nrtbf\'])')
+PRIMITIVE_DESCRIPTORS = frozenset(("V", "Z", "B", "S", "C", "I", "F", "J", "D"))
 
 # =============================================================================
 # HELP TEXT
@@ -158,6 +167,11 @@ Predicates:
   --declares METHOD         The class declares METHOD.
   --calls [CLASS]->METHOD   A method of the class invokes METHOD (invoke-*).
                             Omit CLASS to match any receiver type.
+  --field PATTERN           The class declares or accesses a field matching
+                            [CLASS->][NAME][:TYPE] (e.g. cacheSize,
+                            :Lcom/example/Repository;, or Foo->bar:I).
+  --string PATTERN          A string literal in the class (const-string or
+                            static field initializer) contains PATTERN.
   --annotated-with CLASS    The class carries a class-level annotation of
                             type CLASS.
   --extends CLASS           The class's direct superclass (.super) is CLASS.
@@ -166,10 +180,14 @@ Predicates:
   METHOD is NAME, NAME(PARAMS) (any return type), or NAME(PARAMS)RETURN, for
   example onTrimMemory, onTrimMemory(I), or onTrimMemory(I)V. CLASS is a type
   descriptor (Lcom/example/Foo;) or a dotted name (com.example.Foo).
+  --field and --string may be given more than once.
 
 Options:
+  --package, --pkg PREFIX   Restrict search to classes under package PREFIX
+                            (e.g. com.example.feature) before reading entries.
   --methods                 Print the matching methods (CLASS->METHOD) instead
-                            of classes; requires --declares or --calls.
+                            of classes; requires --declares, --calls, --field,
+                            or --string.
   -h, --help                Display this help message and exit.
 
 Exit Status:
@@ -183,6 +201,9 @@ Examples:
 
   # Methods that call any onTrimMemory, whatever the receiver
   {PROG} find "$TREE" --calls '->onTrimMemory' --methods
+
+  # Methods referencing a URI path within a specific package
+  {PROG} find "$TREE" --package com.example --string '/sync/status' --methods
 
   # Services that are also annotated with an (obfuscated) annotation type
   {PROG} find app-smali.zip --extends 'Landroid/app/Service;' \\
@@ -207,7 +228,7 @@ Usage: {PROG} show WHAT TREE CLASS [ARGUMENTS] [OPTIONS]
 Print part of a class from a smali tree.
 
 Commands:
-  class                Print the whole .smali file of CLASS.
+  class                Print the whole .smali file of one or more classes.
   method               Print the body of a method, optionally with the
                        same-class methods it calls.
   annotations          Print the class-level annotations of CLASS.
@@ -219,11 +240,13 @@ Arguments:
                        (com.example.Foo).
 
 Options:
+  -n, --line-numbers   Prefix printed smali lines with 1-based file line
+                       numbers (for class, method, and annotations).
   -h, --help           Display this help message and exit.
 
 Examples:
   {PROG} show class "$TREE" com.example.MyWidgetService
-  {PROG} show method "$TREE" com.example.MyService 'onTrimMemory(I)V'
+  {PROG} show method -n "$TREE" com.example.MyService 'onTrimMemory(I)V'
   {PROG} show annotations "$TREE" 'Lcom/example/MyWidgetService;'
   {PROG} show hierarchy "$TREE" com.example.MyWidgetService
 
@@ -247,27 +270,29 @@ Try '{PROG} show --help' for more information.
 """
 
 HELP_SHOW_CLASS = f"""\
-Usage: {PROG} show class TREE CLASS
+Usage: {PROG} show class [OPTIONS] TREE CLASS...
 
-Print the whole .smali file of CLASS.
+Print the whole .smali file of each CLASS. When multiple classes are given,
+each block is preceded by a '# DESCRIPTOR' header line.
 
 Arguments:
-  TREE         A directory or ZIP archive of .smali files.
-  CLASS        A type descriptor (Lcom/example/Foo;) or a dotted name
-               (com.example.Foo).
+  TREE                 A directory or ZIP archive of .smali files.
+  CLASS...             One or more type descriptors (Lcom/example/Foo;) or
+                       dotted names (com.example.Foo).
 
 Options:
-  -h, --help   Display this help message and exit.
+  -n, --line-numbers   Prefix each line with its 1-based .smali line number.
+  -h, --help           Display this help message and exit.
 
 Examples:
   {PROG} show class "$TREE" com.example.MyWidgetService
-  {PROG} show class app-smali.zip 'La/b;'
+  {PROG} show class -n app-smali.zip 'La/b;' 'Lcom/example/MyService;'
 """
 
 SHORT_SHOW_CLASS = f"""\
-Usage: {PROG} show class TREE CLASS
+Usage: {PROG} show class [OPTIONS] TREE CLASS...
 
-Print the whole .smali file of CLASS.
+Print the whole .smali file of one or more classes.
 
 Examples:
   {PROG} show class "$TREE" com.example.MyWidgetService
@@ -282,17 +307,18 @@ Print the full .method ... .end method body of METHOD in CLASS. All overloads
 are printed when METHOD omits the parameter list.
 
 Arguments:
-  TREE           A directory or ZIP archive of .smali files.
-  CLASS          A type descriptor (Lcom/example/Foo;) or a dotted name
-                 (com.example.Foo).
-  METHOD         NAME, NAME(PARAMS), or NAME(PARAMS)RETURN, for example
-                 onTrimMemory(I)V.
+  TREE                 A directory or ZIP archive of .smali files.
+  CLASS                A type descriptor (Lcom/example/Foo;) or a dotted name
+                       (com.example.Foo).
+  METHOD               NAME, NAME(PARAMS), or NAME(PARAMS)RETURN, for example
+                       onTrimMemory(I)V.
 
 Options:
-  --depth N      Also print methods of CLASS that the printed methods invoke,
-                 following calls N levels deep; each method is printed once.
-                 (default: 0)
-  -h, --help     Display this help message and exit.
+  --depth N            Also print methods of CLASS that the printed methods
+                       invoke, following calls N levels deep; each method is
+                       printed once. (default: 0)
+  -n, --line-numbers   Prefix each line with its 1-based .smali line number.
+  -h, --help           Display this help message and exit.
 
 Examples:
   # The body of an override
@@ -320,17 +346,18 @@ Print the class-level .annotation blocks of CLASS, including their values
 (for example the class literals an annotation references).
 
 Arguments:
-  TREE           A directory or ZIP archive of .smali files.
-  CLASS          A type descriptor (Lcom/example/Foo;) or a dotted name
-                 (com.example.Foo).
+  TREE                 A directory or ZIP archive of .smali files.
+  CLASS                A type descriptor (Lcom/example/Foo;) or a dotted name
+                       (com.example.Foo).
 
 Options:
-  --all          Include Lkotlin/Metadata; and Ldalvik/annotation/* blocks,
-                 which are hidden by default.
-  --members      Also print field and method annotations; each group is
-                 preceded by a '# CLASS', '# CLASS->FIELD' or
-                 '# CLASS->METHOD' comment line.
-  -h, --help     Display this help message and exit.
+  --all                Include Lkotlin/Metadata; and Ldalvik/annotation/*
+                       blocks, which are hidden by default.
+  --members            Also print field and method annotations; each group is
+                       preceded by a '# CLASS', '# CLASS->FIELD' or
+                       '# CLASS->METHOD' comment line.
+  -n, --line-numbers   Prefix each line with its 1-based .smali line number.
+  -h, --help           Display this help message and exit.
 
 Examples:
   # Runtime annotations on a service declared in AndroidManifest.xml
@@ -427,12 +454,16 @@ class Spec:
     positionals: list[str]
     flags: dict[str, str | None] = field(default_factory=dict)  # name -> metavar
     aliases: dict[str, str] = field(default_factory=dict)
+    repeatable: set[str] = field(default_factory=set)
+    variadic: bool = False
 
 
-def parse_args(argv: list[str], spec: Spec) -> tuple[list[str], dict[str, str | bool]]:
+def parse_args(
+    argv: list[str], spec: Spec
+) -> tuple[list[str], dict[str, str | bool | list[str]]]:
     """Parse GNU-style options (anywhere, --opt=value, '--') per spec."""
     positionals: list[str] = []
-    options: dict[str, str | bool] = {}
+    options: dict[str, str | bool | list[str]] = {}
     i = 0
     only_positionals = False
     while i < len(argv):
@@ -461,10 +492,15 @@ def parse_args(argv: list[str], spec: Spec) -> tuple[list[str], dict[str, str | 
             i += 1
         else:
             raise UsageError(f"option '{name}' requires an argument")
+        if name in spec.repeatable:
+            existing = options.setdefault(name, [])
+            if isinstance(existing, list):
+                existing.append(value)
+            continue
         if name in options:
             raise UsageError(f"option '{name}' given more than once")
         options[name] = value
-    if len(positionals) > len(spec.positionals):
+    if not spec.variadic and len(positionals) > len(spec.positionals):
         extra = positionals[len(spec.positionals)]
         raise UsageError(f"unexpected argument '{extra}'")
     return positionals, options
@@ -487,6 +523,30 @@ def to_descriptor(name: str) -> str:
     return "L" + name.replace(".", "/") + ";"
 
 
+def to_type_descriptor(name: str) -> str:
+    """Convert a field type (primitive, array, dotted class, or descriptor) to DEX form."""
+    name = name.strip()
+    if not name or " " in name or "(" in name or ">" in name:
+        raise UsageError(f"not a type descriptor: '{name}'")
+    if name in PRIMITIVE_DESCRIPTORS:
+        return name
+    if name.startswith("["):
+        inner = name.lstrip("[")
+        return "[" * (len(name) - len(inner)) + to_type_descriptor(inner)
+    return to_descriptor(name)
+
+
+def normalize_package_prefix(prefix: str) -> str:
+    """Normalize a dotted or slash package prefix to 'com/example/'."""
+    p = prefix.strip()
+    if p.startswith("L") and ("/" in p or p.endswith(";")):
+        p = p[1:]
+    p = p.rstrip(";").replace(".", "/").strip("/")
+    if not p or " " in p or "(" in p or ">" in p:
+        raise UsageError(f"not a package prefix: '{prefix}'")
+    return p + "/"
+
+
 def descriptor_path(descriptor: str) -> str:
     return descriptor[1:-1] + ".smali"
 
@@ -495,7 +555,10 @@ def check_method_pattern(pattern: str) -> str:
     if not pattern or "->" in pattern or " " in pattern:
         raise UsageError(f"not a method name or signature: '{pattern}'")
     if "(" in pattern and ")" not in pattern:
-        raise UsageError(f"unterminated parameter list in '{pattern}'")
+        raise UsageError(
+            f"unterminated parameter list in '{pattern}' "
+            "(omit '(' to match any overload, or close with ')')"
+        )
     return pattern
 
 
@@ -536,23 +599,98 @@ class CallPattern:
         return self.method is None or method_matches(self.method, signature)
 
 
+@dataclass(slots=True, frozen=True)
+class FieldPattern:
+    owner: str | None  # class descriptor, or None for any owner
+    name: str | None  # field name, or None for any name
+    type_desc: str | None  # field type descriptor, or None for any type
+
+    @classmethod
+    def parse(cls, text: str) -> FieldPattern:
+        if "->" in text:
+            owner_text, _, rest = text.partition("->")
+            owner = to_descriptor(owner_text) if owner_text else None
+        else:
+            owner, rest = None, text
+        if ":" in rest:
+            name_text, _, type_text = rest.partition(":")
+            if not type_text:
+                raise UsageError(f"missing field type after ':' in '{text}'")
+            name = name_text or None
+            type_desc = to_type_descriptor(type_text)
+        else:
+            name = rest or None
+            type_desc = None
+        if name is not None and (
+            " " in name or "(" in name or ")" in name or ";" in name
+        ):
+            raise UsageError(
+                f"not a field pattern: '{text}' "
+                "(expected [CLASS->][NAME][:TYPE], e.g. 'cacheSize' or ':Lcom/example/Repo;')"
+            )
+        if owner is None and name is None and type_desc is None:
+            raise UsageError(f"empty field pattern: '{text}'")
+        return cls(owner, name, type_desc)
+
+    def matches(self, target: str) -> bool:
+        owner, sep, sig = target.partition("->")
+        if not sep:
+            return False
+        fname, fsep, ftype = sig.partition(":")
+        if not fsep:
+            return False
+        if self.owner is not None and owner != self.owner:
+            return False
+        if self.name is not None and fname != self.name:
+            return False
+        return self.type_desc is None or ftype == self.type_desc
+
+
 # =============================================================================
 # SMALI PARSING
 # =============================================================================
+
+_ESCAPE_MAP = {
+    "n": "\n",
+    "r": "\r",
+    "t": "\t",
+    "b": "\b",
+    "f": "\f",
+    '"': '"',
+    "'": "'",
+    "\\": "\\",
+}
+
+
+def unescape_smali_string(raw: str) -> str:
+    if "\\" not in raw:
+        return raw
+
+    def _sub(match: re.Match[str]) -> str:
+        esc = match.group(1)
+        if esc.startswith("u"):
+            return chr(int(esc[1:], 16))
+        return _ESCAPE_MAP.get(esc, esc)
+
+    return SMALI_ESCAPE_RE.sub(_sub, raw)
 
 
 @dataclass(slots=True)
 class Annotation:
     type: str
     lines: list[str]
+    start_line: int = 1
 
 
 @dataclass(slots=True)
 class Member:
     signature: str  # name(params)return for methods, name:type for fields
     lines: list[str]
+    start_line: int = 1
     annotations: list[Annotation] = field(default_factory=list)
     invokes: list[str] = field(default_factory=list)
+    strings: list[str] = field(default_factory=list)
+    field_refs: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -579,7 +717,7 @@ def read_annotation(lines: list[str], i: int) -> tuple[Annotation, int]:
     while i < len(lines) and lines[i].strip() != ".end annotation":
         i += 1
     block = lines[start : i + 1]
-    return Annotation(annotation_type(lines[start]), block), i + 1
+    return Annotation(annotation_type(lines[start]), block, start + 1), i + 1
 
 
 def parse_smali(text: str, path: str) -> SmaliClass:
@@ -619,14 +757,19 @@ def field_signature(line: str) -> str:
 
 
 def parse_field(lines: list[str], i: int, cls: SmaliClass) -> int:
-    member = Member(field_signature(lines[i]), [lines[i]])
+    member = Member(field_signature(lines[i]), [lines[i]], start_line=i + 1)
+    str_match = FIELD_STRING_RE.match(lines[i])
+    if str_match:
+        member.strings.append(unescape_smali_string(str_match.group(1)))
     cls.fields.append(member)
     j = i + 1
     while j < len(lines) and not lines[j].strip():
         j += 1
     # A field with annotations is a block closed by '.end field'.
     if j < len(lines) and lines[j].strip().startswith(".annotation "):
-        while j < len(lines):
+        while k := j:
+            if k >= len(lines):
+                break
             stripped = lines[j].strip()
             if stripped.startswith(".annotation "):
                 annotation, j = read_annotation(lines, j)
@@ -642,7 +785,7 @@ def parse_field(lines: list[str], i: int, cls: SmaliClass) -> int:
 
 
 def parse_method(lines: list[str], i: int, cls: SmaliClass) -> int:
-    member = Member(lines[i].split()[-1], [])
+    member = Member(lines[i].split()[-1], [], start_line=i + 1)
     cls.methods.append(member)
     in_param = False
     j = i
@@ -666,6 +809,14 @@ def parse_method(lines: list[str], i: int, cls: SmaliClass) -> int:
             match = INVOKE_RE.match(line)
             if match:
                 member.invokes.append(match.group(1))
+        elif stripped.startswith("const-string"):
+            str_match = CONST_STRING_RE.match(line)
+            if str_match:
+                member.strings.append(unescape_smali_string(str_match.group(1)))
+        elif stripped.startswith(("iget", "iput", "sget", "sput")):
+            f_match = FIELD_OP_RE.match(line)
+            if f_match:
+                member.field_refs.append(f_match.group(1))
         elif stripped.startswith("."):
             # Any other directive ends a .param block that had no annotations.
             in_param = False
@@ -684,6 +835,14 @@ def precedence_key(relpath: str) -> tuple[int, str]:
     if match:
         return (int(match.group(1) or 1), relpath)
     return (0, relpath)
+
+
+def entry_class_relpath(relpath: str) -> str:
+    """Strip an apktool smali/ or smali_classesN/ root prefix if present."""
+    first, sep, rest = relpath.partition("/")
+    if sep and APKTOOL_SMALI_DIR_RE.match(first):
+        return rest
+    return relpath
 
 
 def contains_dex(names: list[str]) -> bool:
@@ -740,8 +899,12 @@ class SmaliTree:
             raise ToolError(f"{self.display_path(relpath)}: {e}") from e
         return data.decode("utf-8", errors="replace")
 
-    def texts(self) -> Iterator[tuple[str, str]]:
+    def texts(self, packages: list[str] | None = None) -> Iterator[tuple[str, str]]:
         for relpath in self.entries:
+            if packages:
+                cls_rel = entry_class_relpath(relpath)
+                if not any(cls_rel.startswith(p) for p in packages):
+                    continue
             yield relpath, self.read(relpath)
 
     def lookup(self, descriptor: str) -> SmaliClass | None:
@@ -782,9 +945,12 @@ class SmaliTree:
 class FindQuery:
     declares: str | None = None
     calls: CallPattern | None = None
+    fields: list[FieldPattern] = field(default_factory=list)
+    strings: list[str] = field(default_factory=list)
     annotated_with: str | None = None
     extends: str | None = None
     implements: str | None = None
+    packages: list[str] = field(default_factory=list)
 
     def needles(self) -> list[str]:
         """Literal substrings every matching file must contain (a cheap prefilter)."""
@@ -796,12 +962,34 @@ class FindQuery:
                 out.append(self.calls.owner + "->")
             if self.calls.method:
                 out.append("->" + self.calls.method.split("(", 1)[0])
+        for fp in self.fields:
+            if fp.owner:
+                out.append(fp.owner)
+            if fp.name:
+                out.append(fp.name + ":")
+            if fp.type_desc:
+                out.append(":" + fp.type_desc)
+        for s in self.strings:
+            if (
+                s
+                and s.isascii()
+                and '"' not in s
+                and "\\" not in s
+                and "\n" not in s
+                and "\r" not in s
+                and "\t" not in s
+            ):
+                out.append(s)
         for descriptor in (self.annotated_with, self.extends, self.implements):
             if descriptor:
                 out.append(descriptor)
         return out
 
     def class_matches(self, cls: SmaliClass) -> bool:
+        if self.packages and not any(
+            cls.descriptor.startswith("L" + p) for p in self.packages
+        ):
+            return False
         if self.extends and cls.superclass != self.extends:
             return False
         if self.implements and self.implements not in cls.interfaces:
@@ -810,14 +998,40 @@ class FindQuery:
             a.type == self.annotated_with for a in cls.annotations
         )
 
-    def method_matches(self, method: Member) -> bool:
+    def class_data_matches(self, cls: SmaliClass) -> bool:
+        for s in self.strings:
+            if not (
+                any(s in lit for f in cls.fields for lit in f.strings)
+                or any(s in lit for m in cls.methods for lit in m.strings)
+            ):
+                return False
+        for fp in self.fields:
+            if not (
+                any(fp.matches(f"{cls.descriptor}->{f.signature}") for f in cls.fields)
+                or any(fp.matches(ref) for m in cls.methods for ref in m.field_refs)
+            ):
+                return False
+        if self.declares or self.calls:
+            return any(self._declares_and_calls_match(m) for m in cls.methods)
+        return True
+
+    def _declares_and_calls_match(self, method: Member) -> bool:
         if self.declares and not method_matches(self.declares, method.signature):
             return False
         return not self.calls or any(self.calls.matches(t) for t in method.invokes)
 
+    def method_matches(self, method: Member) -> bool:
+        if not self._declares_and_calls_match(method):
+            return False
+        if any(not any(s in lit for lit in method.strings) for s in self.strings):
+            return False
+        return all(
+            any(fp.matches(ref) for ref in method.field_refs) for fp in self.fields
+        )
+
     @property
     def has_method_predicate(self) -> bool:
-        return bool(self.declares or self.calls)
+        return bool(self.declares or self.calls or self.fields or self.strings)
 
 
 def cmd_find(argv: list[str]) -> int:
@@ -833,11 +1047,16 @@ def cmd_find(argv: list[str]) -> int:
         flags={
             "--declares": "METHOD",
             "--calls": "PATTERN",
+            "--field": "PATTERN",
+            "--string": "PATTERN",
             "--annotated-with": "CLASS",
             "--extends": "CLASS",
             "--implements": "CLASS",
+            "--package": "PREFIX",
             "--methods": None,
         },
+        aliases={"--pkg": "--package"},
+        repeatable={"--field", "--string", "--package"},
     )
     try:
         positionals, options = parse_args(argv, spec)
@@ -847,26 +1066,39 @@ def cmd_find(argv: list[str]) -> int:
             query.declares = check_method_pattern(str(options["--declares"]))
         if "--calls" in options:
             query.calls = CallPattern.parse(str(options["--calls"]))
+        if "--field" in options:
+            raw_fields = options["--field"]
+            assert isinstance(raw_fields, list)
+            query.fields = [FieldPattern.parse(f) for f in raw_fields]
+        if "--string" in options:
+            raw_strings = options["--string"]
+            assert isinstance(raw_strings, list)
+            query.strings = list(raw_strings)
         if "--annotated-with" in options:
             query.annotated_with = to_descriptor(str(options["--annotated-with"]))
         if "--extends" in options:
             query.extends = to_descriptor(str(options["--extends"]))
         if "--implements" in options:
             query.implements = to_descriptor(str(options["--implements"]))
+        if "--package" in options:
+            raw_pkgs = options["--package"]
+            assert isinstance(raw_pkgs, list)
+            query.packages = [normalize_package_prefix(p) for p in raw_pkgs]
         need(
             bool(
                 query.has_method_predicate
                 or query.annotated_with
                 or query.extends
                 or query.implements
+                or query.packages
             ),
-            "a predicate is required (--declares, --calls, --annotated-with, "
-            "--extends, or --implements)",
+            "a predicate is required (--declares, --calls, --field, --string, "
+            "--annotated-with, --extends, --implements, or --package)",
         )
         list_methods = bool(options.get("--methods"))
         need(
             not list_methods or query.has_method_predicate,
-            "--methods requires --declares or --calls",
+            "--methods requires --declares, --calls, --field, or --string",
         )
     except UsageError as e:
         return usage_error(name, str(e), "find", code=2)
@@ -875,21 +1107,17 @@ def cmd_find(argv: list[str]) -> int:
         tree = SmaliTree(positionals[0])
         needles = query.needles()
         results: set[str] = set()
-        for relpath, text in tree.texts():
+        for relpath, text in tree.texts(query.packages or None):
             if not all(n in text for n in needles):
                 continue
             cls = parse_smali(text, relpath)
             if not query.class_matches(cls):
                 continue
-            if not query.has_method_predicate:
-                results.add(cls.descriptor)
-                continue
-            methods = [m for m in cls.methods if query.method_matches(m)]
-            if not methods:
-                continue
             if list_methods:
-                results.update(f"{cls.descriptor}->{m.signature}" for m in methods)
-            else:
+                methods = [m for m in cls.methods if query.method_matches(m)]
+                if methods:
+                    results.update(f"{cls.descriptor}->{m.signature}" for m in methods)
+            elif query.class_data_matches(cls):
                 results.add(cls.descriptor)
     except ToolError as e:
         print(f"{name}: {e}", file=sys.stderr)
@@ -910,6 +1138,15 @@ def is_noise(annotation: Annotation) -> bool:
     )
 
 
+def format_lines(lines: list[str], start_line: int, numbered: bool) -> str:
+    if not numbered:
+        return "\n".join(lines)
+    return "\n".join(
+        f"{start_line + idx:6d}: {line}" if line else f"{start_line + idx:6d}:"
+        for idx, line in enumerate(lines)
+    )
+
+
 def show_class(argv: list[str]) -> int:
     name = f"{PROG} show class"
     if wants_help(argv):
@@ -919,17 +1156,33 @@ def show_class(argv: list[str]) -> int:
         sys.stderr.write(SHORT_SHOW_CLASS)
         return 1
     try:
-        positionals, _ = parse_args(argv, Spec(positionals=["TREE", "CLASS"]))
-        need(len(positionals) == 2, "TREE and CLASS required")
-        descriptor = to_descriptor(positionals[1])
+        spec = Spec(
+            positionals=["TREE", "CLASS"],
+            flags={"--line-numbers": None},
+            aliases={"-n": "--line-numbers"},
+            variadic=True,
+        )
+        positionals, options = parse_args(argv, spec)
+        need(len(positionals) >= 2, "TREE and CLASS required")
+        descriptors = [to_descriptor(c) for c in positionals[1:]]
+        numbered = bool(options.get("--line-numbers"))
     except UsageError as e:
         return usage_error(name, str(e), "show class")
     try:
-        cls = SmaliTree(positionals[0]).load(descriptor)
+        tree = SmaliTree(positionals[0])
+        classes = [tree.load(d) for d in descriptors]
     except ToolError as e:
         print(f"{name}: {e}", file=sys.stderr)
         return e.code
-    sys.stdout.write(cls.text if cls.text.endswith("\n") else cls.text + "\n")
+    if len(classes) == 1 and not numbered:
+        text = classes[0].text
+        sys.stdout.write(text if text.endswith("\n") else text + "\n")
+        return 0
+    blocks = []
+    for cls in classes:
+        body = format_lines(cls.text.splitlines(), 1, numbered)
+        blocks.append(f"# {cls.descriptor}\n{body}" if len(classes) > 1 else body)
+    sys.stdout.write("\n\n".join(blocks) + "\n")
     return 0
 
 
@@ -942,7 +1195,11 @@ def show_method(argv: list[str]) -> int:
         sys.stderr.write(SHORT_SHOW_METHOD)
         return 1
     try:
-        spec = Spec(positionals=["TREE", "CLASS", "METHOD"], flags={"--depth": "N"})
+        spec = Spec(
+            positionals=["TREE", "CLASS", "METHOD"],
+            flags={"--depth": "N", "--line-numbers": None},
+            aliases={"-n": "--line-numbers"},
+        )
         positionals, options = parse_args(argv, spec)
         need(len(positionals) == 3, "TREE, CLASS, and METHOD required")
         descriptor = to_descriptor(positionals[1])
@@ -953,6 +1210,7 @@ def show_method(argv: list[str]) -> int:
             f"--depth: not a non-negative integer: '{depth_text}'",
         )
         depth = int(depth_text)
+        numbered = bool(options.get("--line-numbers"))
     except UsageError as e:
         return usage_error(name, str(e), "show method")
     try:
@@ -984,7 +1242,10 @@ def show_method(argv: list[str]) -> int:
                 if callee is not None and callee.signature not in seen:
                     next_level.append(callee)
         level = next_level
-    sys.stdout.write("\n\n".join("\n".join(m.lines) for m in printed) + "\n")
+    sys.stdout.write(
+        "\n\n".join(format_lines(m.lines, m.start_line, numbered) for m in printed)
+        + "\n"
+    )
     return 0
 
 
@@ -998,11 +1259,14 @@ def show_annotations(argv: list[str]) -> int:
         return 1
     try:
         spec = Spec(
-            positionals=["TREE", "CLASS"], flags={"--all": None, "--members": None}
+            positionals=["TREE", "CLASS"],
+            flags={"--all": None, "--members": None, "--line-numbers": None},
+            aliases={"-n": "--line-numbers"},
         )
         positionals, options = parse_args(argv, spec)
         need(len(positionals) == 2, "TREE and CLASS required")
         descriptor = to_descriptor(positionals[1])
+        numbered = bool(options.get("--line-numbers"))
     except UsageError as e:
         return usage_error(name, str(e), "show annotations")
     try:
@@ -1028,7 +1292,7 @@ def show_annotations(argv: list[str]) -> int:
     for header, group in groups:
         if not group:
             continue
-        body = "\n\n".join("\n".join(a.lines) for a in group)
+        body = "\n\n".join(format_lines(a.lines, a.start_line, numbered) for a in group)
         blocks.append(f"# {header}\n{body}" if options.get("--members") else body)
     if blocks:
         sys.stdout.write("\n\n".join(blocks) + "\n")

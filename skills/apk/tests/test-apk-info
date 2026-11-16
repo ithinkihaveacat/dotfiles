@@ -1,0 +1,245 @@
+#!/usr/bin/env bash
+
+# Tests: skills/apk/tests/test-apk-info
+#
+# Hermetic tests for apk-info libraries (unzip fast path), split-APK archive and
+# directory handling across apk-info, apk-decode, apk-launcher-icon-extract, and
+# apk-install-and-launch, apk-decode -s flag, and avd-to-png parent creation.
+
+set -euo pipefail
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+SCRIPTS="$DIR/../scripts"
+
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
+
+MOCK_BIN="$TMP/mock-bin"
+WORK="$TMP/work"
+mkdir -p "$MOCK_BIN" "$WORK"
+export MOCK_LOG="$TMP/mock.log"
+
+PYTHON=$(command -v python3)
+
+# Mock apkanalyzer: supports manifest subcommands, fails if 'files' is called
+# during 'apk-info libraries' (proving libraries uses unzip, not JVM spawns).
+cat >"$MOCK_BIN/apkanalyzer" <<'EOF'
+#!/usr/bin/env bash
+echo "apkanalyzer $*" >>"$MOCK_LOG"
+case "$1 $2" in
+  "manifest application-id")
+    echo "com.example.app"
+    ;;
+  "manifest print")
+    cat <<'XML'
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.example.app">
+  <application android:icon="@drawable/ic_launcher">
+    <activity android:name=".MainActivity">
+      <intent-filter>
+        <action android:name="android.intent.action.MAIN"/>
+        <category android:name="android.intent.category.LAUNCHER"/>
+      </intent-filter>
+    </activity>
+  </application>
+</manifest>
+XML
+    ;;
+  "files "*)
+    echo "mock apkanalyzer: unexpected files subcommand: $*" >&2
+    exit 99
+    ;;
+esac
+EOF
+
+cat >"$MOCK_BIN/apktool" <<'EOF'
+#!/usr/bin/env bash
+echo "apktool $*" >>"$MOCK_LOG"
+out=""
+prev=""
+for a in "$@"; do
+  if [[ "$prev" == "-o" ]]; then
+    out="$a"
+  fi
+  prev="$a"
+done
+mkdir -p "$out/res/drawable-xxxhdpi"
+cat >"$out/AndroidManifest.xml" <<'XML'
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.example.app">
+  <application android:icon="@drawable/ic_launcher"/>
+</manifest>
+XML
+printf 'PNGDATA' >"$out/res/drawable-xxxhdpi/ic_launcher.png"
+EOF
+
+cat >"$MOCK_BIN/adb" <<'EOF'
+#!/usr/bin/env bash
+echo "adb ${ANDROID_SERIAL:-none} $*" >>"$MOCK_LOG"
+if [[ "${1:-}" == "get-state" ]]; then
+  if [[ "${MOCK_MULTI_DEVICE:-0}" == "1" && -z "${ANDROID_SERIAL:-}" ]]; then
+    echo "error: more than one device/emulator" >&2
+    exit 1
+  fi
+  echo "device"
+  exit 0
+fi
+exit 0
+EOF
+
+cat >"$MOCK_BIN/rsvg-convert" <<'EOF'
+#!/usr/bin/env bash
+out=""
+prev=""
+for a in "$@"; do
+  [[ "$prev" == "-o" ]] && out="$a"
+  prev="$a"
+done
+printf 'PNG' >"$out"
+EOF
+
+chmod +x "$MOCK_BIN/apkanalyzer" "$MOCK_BIN/apktool" "$MOCK_BIN/adb" "$MOCK_BIN/rsvg-convert"
+
+mkzip() {
+  "$PYTHON" - "$@" <<'EOF'
+import sys, zipfile
+with zipfile.ZipFile(sys.argv[1], "w") as z:
+    for spec in sys.argv[2:]:
+        name, _, content = spec.partition("=")
+        if content.startswith("@"):
+            z.write(content[1:], name)
+        else:
+            z.writestr(name, content)
+EOF
+}
+
+TESTNUM=0
+ok() {
+  TESTNUM=$((TESTNUM + 1))
+  echo "ok $TESTNUM - $1"
+}
+not_ok() {
+  TESTNUM=$((TESTNUM + 1))
+  echo "not ok $TESTNUM - $1"
+  [[ -n "${2:-}" ]] && printf '%s\n' "$2" | sed 's/^/# /'
+}
+
+# Build fixture APKs and split containers
+mkzip "$WORK/base.apk" \
+  "AndroidManifest.xml=bin" \
+  "META-INF/androidx.wear.compose_compose-foundation.version=1.5.0" \
+  "META-INF/androidx.core_core.version=1.16.0" \
+  "assets/whs.properties=version = 1.1.0-alpha02"
+mkzip "$WORK/empty.apk" "AndroidManifest.xml=bin"
+mkzip "$WORK/config.arm64_v8a.apk" "lib/arm64-v8a/libfoo.so=elf"
+
+mkdir -p "$WORK/split-dir"
+cp "$WORK/base.apk" "$WORK/split-dir/base.apk"
+cp "$WORK/config.arm64_v8a.apk" "$WORK/split-dir/config.arm64_v8a.apk"
+
+mkzip "$WORK/base-name.zip" \
+  "base.apk=@$WORK/base.apk" \
+  "config.arm64_v8a.apk=@$WORK/config.arm64_v8a.apk"
+mkzip "$WORK/master-name.apks" \
+  "splits/base-master.apk=@$WORK/base.apk" \
+  "splits/base-arm64_v8a.apk=@$WORK/config.arm64_v8a.apk"
+mkzip "$WORK/legacy-split.zip" \
+  "app-base-split.apk=@$WORK/base.apk"
+
+# 1. apk-info libraries --json uses unzip (0 apkanalyzer calls) and parses .version + whs.properties
+: >"$MOCK_LOG"
+OUT=$(PATH="$MOCK_BIN:$PATH" "$SCRIPTS/apk-info" libraries --json "$WORK/base.apk")
+if [[ "$(jq -r '."androidx.core_core" + " " + .whs' <<<"$OUT")" == "1.16.0 1.1.0-alpha02" ]] &&
+  [[ ! -s "$MOCK_LOG" ]]; then
+  ok "apk-info libraries --json reads versions via unzip with zero apkanalyzer calls"
+else
+  not_ok "apk-info libraries --json reads versions via unzip with zero apkanalyzer calls" "$OUT / $(cat "$MOCK_LOG")"
+fi
+
+# 2. apk-info libraries --only queries single library without apkanalyzer
+: >"$MOCK_LOG"
+OUT=$(PATH="$MOCK_BIN:$PATH" "$SCRIPTS/apk-info" libraries --only androidx.wear.compose_compose-foundation "$WORK/base.apk")
+if [[ "$OUT" == "1.5.0" && ! -s "$MOCK_LOG" ]]; then
+  ok "apk-info libraries --only resolves version via unzip"
+else
+  not_ok "apk-info libraries --only resolves version via unzip" "$OUT"
+fi
+
+# 3. apk-info libraries --json returns {} when no version files exist
+OUT=$(PATH="$MOCK_BIN:$PATH" "$SCRIPTS/apk-info" libraries --json "$WORK/empty.apk")
+if [[ "$OUT" == "{}" ]]; then
+  ok "apk-info libraries --json prints {} when META-INF/*.version is absent"
+else
+  not_ok "apk-info libraries --json prints {} when META-INF/*.version is absent" "$OUT"
+fi
+
+# 4. Split directory and base.apk / base-master.apk / *-base-split.apk archives work in apk-info
+SPLIT_OK=1
+for INPUT in "$WORK/split-dir" "$WORK/base-name.zip" "$WORK/master-name.apks" "$WORK/legacy-split.zip"; do
+  PKG=$(PATH="$MOCK_BIN:$PATH" "$SCRIPTS/apk-info" package "$INPUT")
+  [[ "$PKG" == "com.example.app" ]] || SPLIT_OK=0
+done
+if [[ $SPLIT_OK -eq 1 ]]; then
+  ok "apk-info accepts split directories and base.apk / base-master.apk / *-base-split.apk archives"
+else
+  not_ok "apk-info accepts split directories and base.apk / base-master.apk / *-base-split.apk archives"
+fi
+
+# 5. apk-decode passes -s to apktool and supports split directory & base.apk zip
+: >"$MOCK_LOG"
+DEC1=$(PATH="$MOCK_BIN:$PATH" "$SCRIPTS/apk-decode" -o "$WORK/dec-dir" "$WORK/split-dir")
+DEC2=$(PATH="$MOCK_BIN:$PATH" "$SCRIPTS/apk-decode" -o "$WORK/dec-zip" "$WORK/base-name.zip")
+LOG_CONTENT=$(<"$MOCK_LOG")
+if [[ "$DEC1" == "$WORK/dec-dir" && "$DEC2" == "$WORK/dec-zip" &&
+  "$LOG_CONTENT" == *"apktool d -s "* ]]; then
+  ok "apk-decode passes -s to apktool and accepts split directories and base.apk archives"
+else
+  not_ok "apk-decode passes -s to apktool and accepts split directories and base.apk archives" "$LOG_CONTENT"
+fi
+
+# 6. apk-launcher-icon-extract creates missing --output dir and handles base.apk zip & split dir
+if command -v xpath >/dev/null 2>&1 && command -v xmllint >/dev/null 2>&1; then
+  PATH="$MOCK_BIN:$PATH" "$SCRIPTS/apk-launcher-icon-extract" -o "$WORK/new-icons" "$WORK/base-name.zip" 2>/dev/null
+  PATH="$MOCK_BIN:$PATH" "$SCRIPTS/apk-launcher-icon-extract" -o "$WORK/dir-icons" "$WORK/split-dir/" 2>/dev/null
+  if [[ -f "$WORK/new-icons/base-name-launcher-icon.png" && -f "$WORK/dir-icons/split-dir-launcher-icon.png" ]]; then
+    ok "apk-launcher-icon-extract creates --output directory and supports base.apk archives and split dirs"
+  else
+    not_ok "apk-launcher-icon-extract creates --output directory and supports base.apk archives and split dirs"
+  fi
+else
+  ok "apk-launcher-icon-extract # SKIP xpath or xmllint not installed"
+fi
+
+# 7. apk-install-and-launch supports -s/--serial, multi-device error, split directory, and base.apk zip
+if command -v xpath >/dev/null 2>&1; then
+  : >"$MOCK_LOG"
+  ERR_MULTI=$(MOCK_MULTI_DEVICE=1 PATH="$MOCK_BIN:$PATH" "$SCRIPTS/apk-install-and-launch" "$WORK/base.apk" 2>&1 || true)
+  PATH="$MOCK_BIN:$PATH" "$SCRIPTS/apk-install-and-launch" -s watch-1 "$WORK/split-dir" >/dev/null 2>&1
+  PATH="$MOCK_BIN:$PATH" "$SCRIPTS/apk-install-and-launch" --serial watch-2 "$WORK/master-name.apks" >/dev/null 2>&1
+  LOG_CONTENT=$(<"$MOCK_LOG")
+  if [[ "$ERR_MULTI" == *"more than one device connected"* &&
+    "$LOG_CONTENT" == *"adb watch-1 install-multiple"* &&
+    "$LOG_CONTENT" == *"adb watch-2 install-multiple"* ]]; then
+    ok "apk-install-and-launch supports -s/--serial and split directories/archives"
+  else
+    not_ok "apk-install-and-launch supports -s/--serial and split directories/archives" "$ERR_MULTI / $LOG_CONTENT"
+  fi
+else
+  ok "apk-install-and-launch # SKIP xpath not installed"
+fi
+
+# 8. avd-to-png creates missing parent directories for -o / --output
+mkdir -p "$WORK/res/values"
+cat >"$WORK/ic_vec.xml" <<'XML'
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp" android:height="24dp"
+    android:viewportWidth="24" android:viewportHeight="24">
+  <path android:fillColor="#FF0000" android:pathData="M0,0h24v24h-24z"/>
+</vector>
+XML
+PATH="$MOCK_BIN:$PATH" "$SCRIPTS/avd-to-png" -o "$WORK/missing/nested/vec.png" "$WORK/ic_vec.xml" "$WORK/res" 2>/dev/null
+if [[ -f "$WORK/missing/nested/vec.png" ]]; then
+  ok "avd-to-png creates missing parent directories for --output"
+else
+  not_ok "avd-to-png creates missing parent directories for --output"
+fi
+
+echo "1..$TESTNUM"

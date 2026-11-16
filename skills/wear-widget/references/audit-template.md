@@ -16,7 +16,7 @@
 > 1. **Dimension 2 (Surface Form & Container Size):** Iterate through all
 >    supported surface forms and container sizes:
 >    - **Full-Screen Widget (Tile Compatibility Mode):** Standalone full-screen
->      tile translation (on Wear OS $\\le$ 6 or via a FULLSCREEN `DEBUG_SURFACE`
+>      tile translation (on Wear OS ≤ 6 or via a FULLSCREEN `DEBUG_SURFACE`
 >      `add-tile` broadcast, such as `adb-tile-add --type FULLSCREEN` if
 >      available).
 >    - **Modular "Real" Widgets:** Partial-height modular containers on Wear OS

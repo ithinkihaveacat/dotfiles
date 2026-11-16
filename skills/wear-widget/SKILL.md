@@ -39,13 +39,21 @@ analysis and ADB device management tools where applicable.
 
 ### Decompile the APK
 
-Decompile the APK to decode binary manifests, layouts, and resource values into
-readable plain-text formats using `apktool` (or a workspace APK decoding helper
-such as `apk-decode` if available):
+Decode binary manifests, layouts, and resource values into readable plain-text
+formats using `apk-decode` / `apktool d -s`, or fall back to `jadx --no-src`,
+`aapt2 dump`, or `apk-info` when `apktool` is not installed:
 
 ```bash
-apktool d <app_name>.apk -o <output_dir>
+# Preferred (skips DEX disassembly for fast resource decoding)
+apktool d -s <app_name>.apk -o <output_dir>
 # (Or run `apk-decode <app_name>.apk` if available in your workspace)
+
+# Fallbacks when apktool is not installed:
+jadx --no-src -d <output_dir> <app_name>.apk
+aapt2 dump xmltree <app_name>.apk --file AndroidManifest.xml
+aapt2 dump resources <app_name>.apk
+# (Or run `apk-info tiles <app_name>.apk`, `apk-info manifest <app_name>.apk`,
+# and `apk-info file <app_name>.apk res/xml/<widget_info>.xml` if available)
 ```
 
 ### Identify Tile & Widget Services in the Manifest

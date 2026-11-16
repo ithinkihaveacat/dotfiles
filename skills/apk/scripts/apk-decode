@@ -1,21 +1,28 @@
 #!/usr/bin/env bash
 
+# Tests: skills/apk/tests/test-apk-info
+
+set -euo pipefail
+
 usage() {
   cat <<EOF
 Usage: $(basename "$0") [OPTIONS] APK_FILE
 
-Decodes an APK file using apktool and outputs the directory path.
+Decodes an APK file, split-APK archive, or split directory using apktool and
+outputs the directory path.
 
-This script uses 'apktool d' to decode the APK's resources.
-The path to the output directory is printed to standard output.
+This script uses 'apktool d -s' to decode the APK's resources without
+disassembling DEX bytecode. The path to the output directory is printed to
+standard output.
 
 Arguments:
-  APK_FILE          Path to an APK file.
+  APK_FILE          Path to an APK file, split-APK archive (.zip/.apks), or
+                    directory containing a base APK.
 
 Options:
   -o, --output DIR  The directory to decode the APK into.
                     (defaults to a new temporary directory)
-  --help            Display this help message and exit
+  -h, --help        Display this help message and exit
 
 Examples:
   # Decode an APK into a new temporary directory
@@ -30,6 +37,23 @@ EOF
 
 OUTPUT_DIR=""
 OUTPUT_DIR_USER=""
+TMPDIR_EXTRACT=""
+
+cleanup() {
+  if [ -n "${TMPDIR_EXTRACT:-}" ] && [ -d "$TMPDIR_EXTRACT" ]; then
+    rm -rf -- "$TMPDIR_EXTRACT"
+  fi
+}
+trap cleanup EXIT
+
+is_base_apk_name() {
+  local lower_name
+  lower_name=$(basename "$1" | tr '[:upper:]' '[:lower:]')
+  case "$lower_name" in
+    base.apk | *-base-split.apk | *base-master.apk) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 
 # Manual parsing for --output, compatible with macOS getopt
 while [[ $# -gt 0 ]]; do
@@ -38,13 +62,17 @@ while [[ $# -gt 0 ]]; do
       usage
       ;;
     -o | --output)
-      if [ -z "$2" ]; then
+      if [ -z "${2:-}" ]; then
         echo "$(basename "$0"): --output option requires an argument" >&2
         exit 1
       fi
       OUTPUT_DIR="$2"
       OUTPUT_DIR_USER=1
       shift 2
+      ;;
+    -*)
+      echo "$(basename "$0"): unknown option: $1" >&2
+      exit 1
       ;;
     *)
       break # First non-option argument is the APK_FILE
@@ -80,19 +108,47 @@ if [ -z "${1:-}" ]; then
   usage_short
 fi
 
-if [ ! -f "$1" ]; then
+if [ ! -e "$1" ]; then
   echo "$(basename "$0"): $1: No such file or directory" >&2
   exit 1
 fi
 
-if [[ $1 == *.zip ]]; then
-  TMPDIR=$(mktemp -d)
-  trap 'rm -rf -- "$TMPDIR"' EXIT
-  unzip -q -j "$1" '*-base-split.apk' -d "$TMPDIR"
-  BASEAPKS=("$TMPDIR"/*-base-split.apk)
-  BASEAPK="${BASEAPKS[0]}"
+if [ -d "$1" ]; then
+  BASEAPK=""
+  for candidate in "$1"/*.apk; do
+    [ -f "$candidate" ] || continue
+    if is_base_apk_name "$candidate"; then
+      BASEAPK="$candidate"
+      break
+    fi
+  done
+  if [ -z "$BASEAPK" ]; then
+    echo "$(basename "$0"): no base APK (base.apk, base-master.apk, or *-base-split.apk) found in $1" >&2
+    exit 1
+  fi
+elif [ ! -f "$1" ]; then
+  echo "$(basename "$0"): $1: Not a regular file or directory" >&2
+  exit 1
+elif [[ "$1" == *.zip || "$1" == *.apks ]]; then
+  base_entry=""
+  while IFS= read -r entry; do
+    [[ -z "$entry" || "$entry" == */ ]] && continue
+    if is_base_apk_name "$entry"; then
+      base_entry="$entry"
+      break
+    fi
+  done < <(unzip -Z1 "$1" 2>/dev/null | tr -d '\r')
+
+  if [ -z "$base_entry" ]; then
+    echo "$(basename "$0"): no base APK (base.apk, base-master.apk, or *-base-split.apk) found in $1" >&2
+    exit 1
+  fi
+
+  TMPDIR_EXTRACT=$(mktemp -d)
+  unzip -q -j "$1" "$base_entry" -d "$TMPDIR_EXTRACT"
+  BASEAPK="$TMPDIR_EXTRACT/$(basename "$base_entry")"
   if [ ! -f "$BASEAPK" ]; then
-    echo "$(basename "$0"): *-base-split.apk not found in zip, aborting" >&2
+    echo "$(basename "$0"): failed to extract $base_entry from $1" >&2
     exit 1
   fi
 else
@@ -106,7 +162,7 @@ else
 fi
 
 # -s to skip source (resources only)
-if ! apktool d "$BASEAPK" -f -o "$OUTPUT_DIR" >/dev/null 2>&1; then
+if ! apktool d -s "$BASEAPK" -f -o "$OUTPUT_DIR" >/dev/null 2>&1; then
   echo "$(basename "$0"): apktool failed to decode $BASEAPK" >&2
   if [ -z "$OUTPUT_DIR_USER" ]; then
     rm -rf "$OUTPUT_DIR"

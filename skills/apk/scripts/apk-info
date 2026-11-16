@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 
+# Tests: skills/apk/tests/test-apk-doctor, skills/apk/tests/test-apk-info
+
 set -euo pipefail
 
 SCRIPT_NAME=$(basename "$0")
@@ -15,25 +17,65 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Helper to extract split-APKs from ZIP or use standalone APK
+is_base_apk_name() {
+  local lower_name
+  lower_name=$(basename "$1" | tr '[:upper:]' '[:lower:]')
+  case "$lower_name" in
+    base.apk | *-base-split.apk | *base-master.apk) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Helper to resolve base APK from a standalone APK, split directory, or ZIP/APKS archive
 prepare_apk() {
   local apk_path="$1"
   if [ -z "$apk_path" ]; then
     echo "$SCRIPT_NAME: APK file path required" >&2
     exit 1
   fi
-  if [ ! -f "$apk_path" ]; then
+  if [ ! -e "$apk_path" ]; then
     echo "$SCRIPT_NAME: $apk_path: No such file or directory" >&2
     exit 1
   fi
 
-  if [[ "$apk_path" == *.zip ]]; then
+  if [ -d "$apk_path" ]; then
+    local candidate
+    for candidate in "$apk_path"/*.apk; do
+      [ -f "$candidate" ] || continue
+      if is_base_apk_name "$candidate"; then
+        BASEAPK="$candidate"
+        return 0
+      fi
+    done
+    echo "$SCRIPT_NAME: no base APK (base.apk, base-master.apk, or *-base-split.apk) found in $apk_path" >&2
+    exit 1
+  fi
+
+  if [ ! -f "$apk_path" ]; then
+    echo "$SCRIPT_NAME: $apk_path: Not a regular file or directory" >&2
+    exit 1
+  fi
+
+  if [[ "$apk_path" == *.zip || "$apk_path" == *.apks ]]; then
+    local entry base_entry=""
+    while IFS= read -r entry; do
+      [[ -z "$entry" || "$entry" == */ ]] && continue
+      if is_base_apk_name "$entry"; then
+        base_entry="$entry"
+        break
+      fi
+    done < <(unzip -Z1 "$apk_path" 2>/dev/null | tr -d '\r')
+
+    if [ -z "$base_entry" ]; then
+      echo "$SCRIPT_NAME: no base APK (base.apk, base-master.apk, or *-base-split.apk) found in $apk_path" >&2
+      exit 1
+    fi
+
     TMPDIR=$(mktemp -d)
-    unzip -q -j "$apk_path" '*-base-split.apk' -d "$TMPDIR"
-    local base_apks=("$TMPDIR"/*-base-split.apk)
-    BASEAPK="${base_apks[0]:-}"
+    unzip -q -j "$apk_path" "$base_entry" -d "$TMPDIR"
+    BASEAPK="$TMPDIR/$(basename "$base_entry")"
     if [ ! -f "$BASEAPK" ]; then
-      echo "$SCRIPT_NAME: *-base-split.apk not found in zip, aborting" >&2
+      echo "$SCRIPT_NAME: failed to extract $base_entry from $apk_path" >&2
       exit 1
     fi
   else
@@ -203,17 +245,18 @@ EOF
 
 get_library_version() {
   local lib="$1"
-  local file=""
+  local all_files file=""
+  all_files=$(unzip -Z1 "$BASEAPK" 2>/dev/null | tr -d '\r' || true)
 
   if [[ "$lib" == "whs" || "$lib" == "androidx.health_health-services-client" ]]; then
-    file=$(apkanalyzer files list "$BASEAPK" | grep -E -m1 '/(META-INF/androidx.health_health-services-client\.version|whs\.properties)$')
+    file=$(grep -E -m1 '^(META-INF/androidx\.health_health-services-client\.version|(.*/)?whs\.properties)$' <<<"$all_files" || true)
   else
-    file=$(apkanalyzer files list "$BASEAPK" | grep -E -m1 "/META-INF/${lib}\.version$")
+    file=$(grep -Fx -m1 "META-INF/${lib}.version" <<<"$all_files" || true)
   fi
 
   if [ -n "$file" ]; then
     local raw_val
-    raw_val=$(apkanalyzer files cat --file "$file" "$BASEAPK" 2>/dev/null | tr -d '\r\n')
+    raw_val=$(unzip -p "$BASEAPK" "$file" 2>/dev/null | tr -d '\r\n' || true)
     if [[ "$file" == *whs.properties ]]; then
       if [[ "$raw_val" == *"="* ]]; then
         echo "$raw_val" | awk -F= '/version/ {print $2}' | tr -d ' '
@@ -228,12 +271,13 @@ get_library_version() {
 
 list_all_libraries_json() {
   require jq
-  local all_files files
-  all_files=$(apkanalyzer files list "$BASEAPK")
-  files=$(grep -E '/META-INF/.*\.version$' <<<"$all_files" || true)
+  local all_files files whs_file
+  all_files=$(unzip -Z1 "$BASEAPK" 2>/dev/null | tr -d '\r' || true)
+  files=$(grep -E '^META-INF/.*\.version$' <<<"$all_files" || true)
+  whs_file=$(grep -E -m1 '(^|/)whs\.properties$' <<<"$all_files" || true)
 
-  if grep -q '/whs.properties$' <<<"$all_files" && ! [[ "$files" == *'androidx.health_health-services-client'* ]]; then
-    files=$(printf "%s\n%s" "$files" "/whs.properties")
+  if [[ -n "$whs_file" && "$files" != *'androidx.health_health-services-client'* ]]; then
+    files="${files:+$files$'\n'}$whs_file"
   fi
 
   if [ -z "$files" ]; then
@@ -244,7 +288,7 @@ list_all_libraries_json() {
   local tsv_data
   # Run the entire loop inside a single command substitution block to preserve newlines
   tsv_data=$(
-    while read -r file; do
+    while IFS= read -r file; do
       [ -z "$file" ] && continue
       local lib_id
       if [[ "$file" == *whs.properties ]]; then
@@ -254,7 +298,7 @@ list_all_libraries_json() {
       fi
 
       local version_val
-      version_val=$(apkanalyzer files cat --file "$file" "$BASEAPK" 2>/dev/null | tr -d '\r\n')
+      version_val=$(unzip -p "$BASEAPK" "$file" 2>/dev/null | tr -d '\r\n' || true)
       if [[ "$file" == *whs.properties && "$version_val" == *"="* ]]; then
         version_val=$(echo "$version_val" | awk -F= '/version/ {print $2}' | tr -d ' ')
       fi
