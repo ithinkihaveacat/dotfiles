@@ -21,9 +21,9 @@ Configure an MCP client to launch:
 ```
 
 Use an absolute path to `bin/andon` or `skills/agent-config/scripts/andon` if
-the client cannot find `andon` on its PATH. The executable uses uv to resolve
-its pinned SDK dependencies. Ordinary CLI commands still work with Python 3.11+
-alone; imports of MCP dependencies are deferred until server mode.
+the client cannot find `andon` on its PATH. Ordinary CLI commands run with
+Python 3.11+ stdlib alone and never invoke `uv`; `andon mcp` delegates to
+`scripts/andon-mcp`, which uses `uv` to resolve its pinned SDK dependencies.
 
 Stdio is the default, so `andon mcp` is equivalent. Stdout carries MCP messages
 only; diagnostics go to stderr. Closing stdin ends the server. SIGINT and
@@ -46,17 +46,17 @@ The format is the one every MCP server in this repository writes, documented in
 
 ## Tools
 
-| Tool      | Arguments                                                                                           | Result                                                                         |
-| --------- | --------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
-| `board`   | None                                                                                                | Initial open-alert page and `stats`, linked to the live MCP App UI.            |
-| `pull`    | Required: `color`, `kind`, `summary`, `details`. Optional: `sources`, `resolution`, `proposed_fix`. | Receipt with alert ID, fingerprint, recurrence count, level and guidance.      |
-| `list`    | Optional: `status`, `color`, `kind`, `level`, `session`, `workspace`, `limit`, `offset`.            | `alerts`, matching `total`, and `next_offset` or null.                         |
-| `show`    | `id`                                                                                                | Complete alert with recurrence count.                                          |
-| `stats`   | None                                                                                                | Counts, recurring defects, store path and active shared default level.         |
-| `prompt`  | `id`                                                                                                | A `prompt` string for investigating and fixing the alert. Does not execute it. |
-| `resolve` | `id`; optional `note`, `all_matching`.                                                              | Affected `ids` and `action`.                                                   |
-| `dismiss` | `id`; optional `note`, `all_matching`.                                                              | Affected `ids` and `action`.                                                   |
-| `reopen`  | `id`; optional `note`, `all_matching`.                                                              | Affected `ids` and `action`.                                                   |
+| Tool      | Arguments                                                                                                    | Result                                                                         |
+| --------- | ------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------ |
+| `board`   | None                                                                                                         | Initial open-alert page and `stats`, linked to the live MCP App UI.            |
+| `pull`    | Required: `color`, `kind`, `summary`, `details`. Optional: `sources`, `resolution`, `proposed_fix`, `level`. | Receipt with alert ID, fingerprint, recurrence count, level and guidance.      |
+| `list`    | Optional: `status`, `color`, `kind`, `level`, `session`, `workspace`, `limit`, `offset`.                     | `alerts`, matching `total`, and `next_offset` or null.                         |
+| `show`    | `id`                                                                                                         | Complete alert with recurrence count.                                          |
+| `stats`   | None                                                                                                         | Counts, recurring defects, store path and active shared default level.         |
+| `prompt`  | `id`                                                                                                         | A `prompt` string for investigating and fixing the alert. Does not execute it. |
+| `resolve` | `id`; optional `note`, `all_matching`.                                                                       | Affected `ids` and `action`.                                                   |
+| `dismiss` | `id`; optional `note`, `all_matching`.                                                                       | Affected `ids` and `action`.                                                   |
+| `reopen`  | `id`; optional `note`, `all_matching`.                                                                       | Affected `ids` and `action`.                                                   |
 
 `id` accepts a full alert ID or a unique suffix of at least four characters.
 `all_matching` defaults to false. When true, resolve/dismiss also close matching
@@ -147,5 +147,7 @@ prove skills/agent-config/tests/test-andon-panel
 The MCP tests start real stdio subprocesses with temporary stores. They cover
 discovery, schema rejection, shared CLI/MCP reads and writes, recurrence counts,
 pagination, triage, UI resource discovery, store errors, missing dependencies,
-EOF and signal shutdown. The panel tests need Node.js 18 or newer and exercise
-the shipped HTML against a simulated MCP host without third-party packages.
+EOF and signal shutdown. The panel tests need a Node.js 18+ build with working
+`node:test` support (falling back to `~/.local/share/node` when the system
+`node` omits `node:test` internals) and exercise the shipped HTML against a
+simulated MCP host without third-party packages.

@@ -140,8 +140,8 @@ forcibly interrupt execution.
 ## Develop
 
 Tested against OpenCode **2.0.32**. The development environment needs Node.js
-26.4+ for the UI peers and native TypeScript tests. OpenCode itself supplies the
-runtime when loading the plugin.
+22.18+ (or 24+) for the UI peers and native TypeScript tests. OpenCode itself
+supplies the runtime when loading the plugin.
 
 From this directory:
 

@@ -67,7 +67,7 @@ skill <command> [arguments]
   `skill add` or `skill remove` rewrites the block.
 - **Session Scope (Per-Session / Ephemeral / Temporary / Scratch)**:
   `skill --scope session add|remove|list|doctor|clean` manages the skills of the
-  calling agent's own conversation, without touching the repository, `.envrc` or
+  calling agent's own conversation, without touching the repository or
   `~/.claude`:
   - **Claude Code** (started through the `claude` fish wrapper): links under
     `$AGENT_SESSION_DIR/.claude/skills`. The wrapper passes that directory to
@@ -88,11 +88,13 @@ skill <command> [arguments]
   machine; in an ephemeral per-project environment, where the user is the
   project, `skill --scope user add --defaults` seeds it (never implicit).
 - **Defaults Scope**: `skill --scope defaults add|remove NAME...` manages the
-  default skills, a directory no agent reads
-  (`${XDG_STATE_HOME:-~/.local/state}/skill/defaults`). `skill add --defaults`
-  links each default into a workspace, session or user scope *through* that
-  directory, so removing a default breaks its links everywhere and the next
-  `skill add --defaults` clears them. A skill added by name links straight at
+  default skills (`${XDG_STATE_HOME:-~/.local/state}/skill/defaults`).
+  `skill add --defaults` links each default into a workspace, session or user
+  scope *through* that directory, so removing a default breaks its links
+  everywhere and the next `skill add --defaults` clears them. When
+  `~/.gemini/config` exists, `install.sh` also registers this defaults directory
+  in `~/.gemini/config/skills.json` so workspace symlink confinement does not
+  drop external default skills. A skill added by name or path links straight at
   its source and survives that. The defaults are set by `etc/skill/defaults.sh`
   in the dotfiles and each overlay, which `install.sh` runs.
 - **Unmanaged Directories**: Works in plain directories without VCS, symlinking
@@ -113,12 +115,14 @@ skill <command> [arguments]
 - **`--scope SCOPE`**: Where to install: `user`, `workspace` *(default)*,
   `session` or `defaults` (see above). Only `add`, `remove`, `list`, `doctor`
   and `clean` take a scope other than `workspace`.
+- **`--offline`**: Never fetch remote skills or metadata over the network (same
+  as `AGENT_OFFLINE=1`).
 
 ### Commands
 
 - **`add SPEC...`**: Link a skill (a catalog entry from `skill catalog`, as
-  `NAME` or `NAMESPACE:NAME`) straight to its source, replacing a default's link
-  of the same name.
+  `NAME` or `NAMESPACE:NAME`, or a local skill directory path) straight to its
+  source, replacing a default's link of the same name.
 - **`add --defaults`**: Link every default through the defaults directory,
   keeping any existing link, and remove broken links to defaults; then fail if
   `doctor` would report an error. A broken link to a skill added by name is kept
@@ -136,10 +140,13 @@ skill <command> [arguments]
 - **`doctor [--json]`**: Check the scope's links (broken links, unmanaged files,
   exclude records) and the catalog (read-only).
 - **`catalog [--json]`**: List all plugin-provided skills and their sources.
-  `--json` emits one object per skill with its description and structural
-  profile — the discovery primitive described in
+  `--json` outputs NDJSON (one JSON object per line) with each skill's
+  description and structural profile — the discovery primitive described in
   [Choosing Skills (Workspace vs. Session)](#choosing-skills-workspace-vs-session).
-- **`resolve NAME`**: Print the source path a skill name would resolve to.
+- **`resolve SPEC`**: Print the source path a skill name or path would resolve
+  to.
+- **`info SPEC`** (alias: **`show`**): Display a skill's resolved path,
+  frontmatter description, total size, and per-directory file breakdown.
 - **`mcp [SCOPE]`**: Serve skills over MCP to agents that cannot read them from
   disk (claude.ai, the mobile apps, cloud sessions). A TOML file
   (`SKILL_MCP_CONFIG`) maps each scope to skill names; nothing under `~/.corp`
@@ -183,10 +190,11 @@ installs what it is told; the agent decides what belongs in the workspace or
 session based on project files, tech stack, and user goals. The tool itself is
 fully deterministic and requires no API keys.
 
-1. **Survey the catalog:** Run `skill catalog --json` to inspect all available
-   skills in a single call (JSON Lines). Each record includes frontmatter
-   (`name`, `description`), origin (`source`, `namespace`, `plugin`), and
-   structural metrics:
+1. **Survey the catalog:** Run `skill --offline catalog --json` (or
+   `skill catalog --json` when refreshing uncached remote frontmatter) to
+   inspect all available skills in a single call. Output is NDJSON (one JSON
+   object per line). Each record includes frontmatter (`name`, `description`),
+   origin (`source`, `namespace`, `plugin`), and structural metrics:
    - `scripts`: Count of executable CLI tools (pre-approved for local agents by
      `permission apply`).
    - `references`: Count of reference guides, schemas, or architectural docs.
@@ -201,15 +209,16 @@ fully deterministic and requires no API keys.
      ```
    - **Per-session (ephemeral / temporary / session-scoped / scratch):** When a
      skill is only needed for the active conversation, add it to the session
-     scope so `.envrc` and repository exclusions remain untouched:
+     scope so repository exclusions remain untouched:
      ```bash
      skill --scope session add <names>
      ```
 
 `skill catalog` represents the local and plugin-registered inventory. If
 external or enterprise discovery systems exist in the environment, query those
-as well before making recommendations. Listing the catalog never downloads a
-repository, so it works unchanged under `AGENT_OFFLINE=1`.
+as well before making recommendations. Listing the catalog never clones a remote
+repository; without `--offline` (or `AGENT_OFFLINE=1`), it fetches missing or
+expired remote `SKILL.md` frontmatter stubs over HTTPS.
 
 ### Environment
 
@@ -550,8 +559,8 @@ session's `Artifact Directory Path`, e.g.
 `<artifactDir>/.agents/skills.json`; read
 `<artifactDir>/scratch/skills/<skill>/SKILL.md` directly to use it in the
 current turn, as the harness injects it into `<skills>` only on subsequent turns
-(the command says so after adding). Either way the repository's `.envrc` and
-`.git/info/exclude` are left untouched.
+(the command says so after adding). Either way the repository's
+`.git/info/exclude` is left untouched.
 
 OpenCode and Codex do not support this CLI's session scope. Reuse skills already
 provided by the harness and use its skill loader for missing ones. For a local

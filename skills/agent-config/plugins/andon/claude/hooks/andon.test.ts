@@ -140,7 +140,7 @@ describe("the rule", () => {
     ).toBe(buildRule(5));
   });
 
-  test("includes the full 1-5 trigger level rubric and omits level from INPUT_SCHEMA", () => {
+  test("includes the full 1-5 trigger level rubric and exposes optional level in INPUT_SCHEMA", () => {
     const rule = buildRule(3);
     expect(rule).toContain("Active trigger level: 3 (standard).");
     expect(rule).toContain("- **Level 1 (red only):**");
@@ -148,7 +148,7 @@ describe("the rule", () => {
     expect(rule).toContain("- **Level 3 (standard):**");
     expect(rule).toContain("- **Level 4 (proactive audit):**");
     expect(rule).toContain("- **Level 5 (maximum coverage):**");
-    expect("level" in INPUT_SCHEMA.properties).toBe(false);
+    expect("level" in INPUT_SCHEMA.properties).toBe(true);
   });
 });
 

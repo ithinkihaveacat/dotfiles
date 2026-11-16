@@ -1,12 +1,44 @@
-#!/usr/bin/env -S node --test --test-reporter=tap
+#!/usr/bin/env bash
+# Tests: skills/agent-config/plugins/andon/chatgpt/board.html
+set -euo pipefail
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+NODE_DATA="${XDG_DATA_HOME:-$HOME/.local/share}/node"
+
+probe_test_node() {
+  [[ -x "$1" ]] && "$1" -e 'require("node:test")' >/dev/null 2>&1
+}
+
+NODE_BIN=""
+if sys_node=$(command -v node 2>/dev/null) && probe_test_node "$sys_node"; then
+  NODE_BIN="$sys_node"
+elif probe_test_node "$NODE_DATA/default/bin/node"; then
+  NODE_BIN="$NODE_DATA/default/bin/node"
+elif [[ -d "$NODE_DATA/versions" ]]; then
+  while IFS= read -r cand; do
+    if probe_test_node "$cand"; then
+      NODE_BIN="$cand"
+      break
+    fi
+  done < <(compgen -G "$NODE_DATA/versions/node-v*/bin/node" | sort -V -r || true)
+fi
+
+if [[ -z "$NODE_BIN" ]]; then
+  echo "1..0 # SKIP Node.js >=18 with working node:test is not installed"
+  exit 0
+fi
+
+TMP_JS=$(mktemp "${TMPDIR:-/tmp}/test-andon-panel.XXXXXX.cjs")
+trap 'rm -f "$TMP_JS"' EXIT
+
+cat >"$TMP_JS" <<'EOF'
 // Mock the MCP host and browser primitives to exercise the shipped HTML directly.
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
-const path = require("node:path");
 const vm = require("node:vm");
 const { test } = require("node:test");
 
-const html = fs.readFileSync(path.join(__dirname, "../plugins/andon/chatgpt/board.html"), "utf8");
+const html = fs.readFileSync(process.env.BOARD_HTML, "utf8");
 const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
 const tick = () => new Promise(setImmediate);
 const sample = (id = "alert-one") => ({
@@ -70,7 +102,7 @@ function browser() {
     getElementById: (id) => elements.get(id),
     createElement: (tag) => new Element(tag),
     createDocumentFragment: () => new Element("fragment"),
-    addEventListener: (name, callback) => documentListeners.set(name, callback),
+    addEventListener(name, callback) { documentListeners.set(name, callback); },
   };
   const parent = { postMessage: (message) => requests.push(message) };
   const window = { parent, addEventListener: (name, callback) => listeners.set(name, callback) };
@@ -300,3 +332,6 @@ test("a stale out-of-filter detail read cannot overwrite a newer selection", asy
   assert.equal(b.elements.get("title").textContent, "New selection");
   assert.equal(b.elements.get("selection-context").hidden, true);
 });
+EOF
+
+BOARD_HTML="$DIR/../plugins/andon/chatgpt/board.html" "$NODE_BIN" --test --test-reporter=tap "$TMP_JS"

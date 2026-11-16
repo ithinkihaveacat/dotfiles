@@ -2216,12 +2216,58 @@ function feature_skills {
       echo "warning: $src/etc/skill/defaults.sh failed" >&2
   done
 
-  # Skills are intentionally NOT installed globally. The defaults are linked
-  # into each wrapped agent's workspace or session at launch
-  # (`skill add --defaults`), and others with `skill add ...`, using
-  # ~/.dotfiles/skills (plus .private and .corp overlays) as the source.
-  # Keeping ~/.agents/skills and ~/.claude/skills empty prevents every project
-  # from seeing every skill.
+  # Keep ~/.agents/skills and ~/.claude/skills empty so workspace and session
+  # scoping control which skills Claude Code, Codex, and OpenCode load. For
+  # ~/.gemini/config harnesses (whose workspace symlink confinement drops links
+  # outside the workspace root), feature_agents registers the defaults
+  # directory in ~/.gemini/config/skills.json.
+}
+
+# Register the default skills directory in ~/.gemini/config/skills.json when
+# ~/.gemini/config exists, preserving any existing entries, inherits, or
+# exclusions while keeping ~/.claude/skills and ~/.agents/skills untouched.
+function register_gemini_default_skills {
+  local config_dir="$HOME/.gemini/config"
+  local skills_json="$config_dir/skills.json"
+  local defaults_dir="${SKILL_DEFAULTS_DIR:-$XDG_STATE_HOME/skill/defaults}"
+  local tmp
+
+  [ -d "$config_dir" ] || return 0
+  if ! exists jq; then
+    echo "warning: jq not found; $skills_json not updated" >&2
+    return 0
+  fi
+
+  xmkdir "$defaults_dir"
+  tmp="$skills_json.tmp.$$"
+  if [ ! -s "$skills_json" ]; then
+    if jq -n --arg p "$defaults_dir" '{entries: [{path: $p}]}' >"$tmp" &&
+      x mv "$tmp" "$skills_json"; then
+      echo "registered default skills in $skills_json" >&2
+    else
+      rm -f "$tmp"
+      echo "warning: failed to write $skills_json" >&2
+    fi
+    return 0
+  fi
+  if ! jq -e 'type == "object"' "$skills_json" >/dev/null 2>&1; then
+    echo "warning: $skills_json is not a JSON object; leaving it in place" >&2
+    return 0
+  fi
+  if jq -e --arg p "$defaults_dir" \
+    'any(.entries[]?; .path == $p or .path == "~/.local/state/skill/defaults")' \
+    "$skills_json" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if jq --arg p "$defaults_dir" \
+    '.entries = ((.entries // []) + [{path: $p}])' "$skills_json" >"$tmp" &&
+    x mv "$tmp" "$skills_json"; then
+    echo "registered default skills in $skills_json" >&2
+  else
+    rm -f "$tmp"
+    echo "warning: failed to update $skills_json" >&2
+  fi
 }
 
 # Register an overlay script as a Claude Code PreToolUse command hook in
@@ -2300,6 +2346,9 @@ function feature_agents {
     xmkdir "$HOME/.gemini/config"
     link_overlay_path "etc/agents/agy/hooks.json" "$HOME/.gemini/config/hooks.json"
     link_overlay_path "etc/agents/agy/hooks" "$HOME/.gemini/config/hooks"
+  fi
+  if [ -d "$HOME/.gemini/config" ]; then
+    register_gemini_default_skills
   fi
 
   if is_opencode_agent; then

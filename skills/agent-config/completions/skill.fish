@@ -103,4 +103,5 @@ complete -c skill -n '__fish_seen_subcommand_from mcp' -l log -r -F -d 'Request 
 complete -c skill -f -s h -l help -d 'Display help message and exit'
 complete -c skill -s C -l directory -x -a '(__fish_complete_directories)' -d 'Run as if started in DIR'
 complete -c skill -f -l scope -x -a 'user workspace session defaults' -d 'Where to install skills'
+complete -c skill -f -l offline -d 'Never fetch remote skills or metadata'
 complete -c skill -f -l plugin-template -d 'Output a template for creating a Workspace plugin'

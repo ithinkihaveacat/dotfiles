@@ -969,44 +969,62 @@ def fetch_skill_md(
 
 def load_skill_md_frontmatter(content: str) -> dict:
     """Parses a simple YAML frontmatter block from a SKILL.md file string."""
-    meta = {}
+    meta: dict[str, str] = {}
     lines = content.strip().splitlines()
-    if not lines or lines[0] != "---":
+    if not lines or lines[0].strip() != "---":
         return meta
 
-    current_key = None
-    multiline_val = []
+    current_key: str | None = None
+    multiline_val: list[str] = []
+    is_block = False
+
+    def flush() -> None:
+        nonlocal current_key, multiline_val, is_block
+        if current_key is not None:
+            meta[current_key] = " ".join(p for p in multiline_val if p).strip()
+        current_key = None
+        multiline_val = []
+        is_block = False
 
     for line in lines[1:]:
-        if line == "---":
+        if line.strip() == "---":
             break
 
         stripped = line.strip()
-        if not line.startswith(" ") and ":" in line:
-            if current_key and multiline_val:
-                meta[current_key] = " ".join(multiline_val).strip().strip("'\"")
-                multiline_val = []
-
-            key, val = line.split(":", 1)
-            current_key = key.strip()
-            val_str = val.strip()
-
-            if val_str in (">", "|", ">-", "|-"):
-                multiline_val = []
+        if not line.startswith((" ", "\t")):
+            if not stripped or stripped.startswith("#"):
+                continue
+            if ":" in line:
+                flush()
+                key, val = line.split(":", 1)
+                key = key.strip()
+                val_str = val.strip()
+                if val_str in (">", "|", ">-", "|-", ">+", "|+"):
+                    current_key = key
+                    multiline_val = []
+                    is_block = True
+                elif not val_str:
+                    meta[key] = ""
+                elif (
+                    len(val_str) >= 2
+                    and val_str[0] == val_str[-1]
+                    and val_str[0] in ("'", '"')
+                ):
+                    meta[key] = val_str[1:-1]
+                else:
+                    current_key = key
+                    multiline_val = [val_str]
+                    is_block = False
             else:
-                meta[current_key] = val_str.strip().strip("'\"")
-                current_key = None
-        elif current_key is not None:
-            if line.startswith(" ") or not line:
-                multiline_val.append(stripped)
-            else:
-                meta[current_key] = " ".join(multiline_val).strip().strip("'\"")
-                current_key = None
-                multiline_val = []
+                flush()
+        elif (
+            current_key is not None
+            and stripped
+            and (is_block or not stripped.startswith("#"))
+        ):
+            multiline_val.append(stripped)
 
-    if current_key and multiline_val:
-        meta[current_key] = " ".join(multiline_val).strip().strip("'\"")
-
+    flush()
     return meta
 
 
@@ -1301,6 +1319,18 @@ def get_workspace() -> Workspace:
 
 def resolve_skill_spec(spec: str) -> tuple[Path, str]:
     """Resolves a skill spec/name to its (absolute_source_path, skill_name)."""
+    if (
+        spec == "~"
+        or spec.startswith(("/", "./", "../", "~/"))
+        or ("/" in spec and ":" not in spec)
+    ):
+        p = Path(spec).expanduser()
+        if (p / "SKILL.md").is_file():
+            resolved = Path(os.path.realpath(p))
+            return resolved, resolved.name
+        if spec == "~" or spec.startswith(("/", "./", "../", "~/")):
+            raise ValueError(f"cannot resolve skill path '{spec}' (no SKILL.md found)")
+
     api = get_api()
 
     # 1. Parse the requested spec for namespace
@@ -1572,12 +1602,21 @@ def cmd_add(specs):
 
     # A session add names a project's skills without working out which ones
     # the workspace already links, so skip those: the harness has them.
+    # Exception: Antigravity/Gemini workspace discovery drops .agents/skills/
+    # symlinks whose resolved target escapes the workspace root, so those must
+    # still be staged into the session directory.
     if ws.scope == "session":
         project_ws = detect_project_workspace()
         try:
             active_dirs = project_ws.get_dest_dirs() if project_ws else []
         except RuntimeError:
             active_dirs = []
+        if isinstance(ws, AgyBrainWorkspace):
+            active_dirs = [
+                d
+                for d in active_dirs
+                if d.name == "skills" and d.parent.name == ".agents"
+            ] or active_dirs
         kept = []
         for src, name in resolved_skills:
             link = next(
@@ -1585,11 +1624,20 @@ def cmd_add(specs):
                 None,
             )
             if link is not None and os.path.realpath(link) == os.path.realpath(src):
-                log(
-                    f"already active {name} (workspace {clean_p(link)})",
-                    file=sys.stderr,
-                )
-                continue
+                confined = True
+                if isinstance(ws, AgyBrainWorkspace) and project_ws is not None:
+                    try:
+                        Path(os.path.realpath(link)).relative_to(
+                            Path(os.path.realpath(project_ws.root))
+                        )
+                    except ValueError:
+                        confined = False
+                if confined:
+                    log(
+                        f"already active {name} (workspace {clean_p(link)})",
+                        file=sys.stderr,
+                    )
+                    continue
             kept.append((src, name))
         resolved_skills = kept
 
@@ -2209,7 +2257,54 @@ def cmd_resolve(name):
 COMPONENT_DIRS = ("scripts", "references", "tests")
 
 
-def collect_skill_stats(skill_dir: Path) -> dict:
+def _walk_dir_stats(directory: Path) -> tuple[int, int]:
+    """Count regular files and bytes recursively via os.scandir."""
+    files_count = 0
+    dir_size = 0
+    stack = [directory]
+    while stack:
+        current = stack.pop()
+        try:
+            with os.scandir(current) as it:
+                for entry in it:
+                    if entry.name.startswith(".") or entry.name == "__pycache__":
+                        continue
+                    try:
+                        if entry.is_dir(follow_symlinks=True):
+                            stack.append(Path(entry.path))
+                        elif entry.is_file(follow_symlinks=True):
+                            dir_size += entry.stat(follow_symlinks=True).st_size
+                            files_count += 1
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    return files_count, dir_size
+
+
+def _skill_dir_signature(skill_dir: Path) -> list[list[object]] | None:
+    """Lightweight top-level mtime/size signature to avoid re-walking unchanged skills."""
+    try:
+        root_mtime = skill_dir.stat().st_mtime_ns
+        sig: list[list[object]] = [[".", root_mtime, 0]]
+        with os.scandir(skill_dir) as it:
+            entries = sorted(
+                (
+                    e
+                    for e in it
+                    if not e.name.startswith(".") and e.name != "__pycache__"
+                ),
+                key=lambda e: e.name,
+            )
+            for entry in entries:
+                st = entry.stat(follow_symlinks=True)
+                sig.append([entry.name, st.st_mtime_ns, st.st_size])
+        return sig
+    except OSError:
+        return None
+
+
+def collect_skill_stats(skill_dir: Path, cache: dict[str, dict] | None = None) -> dict:
     """Measure a skill directory: total files/bytes, broken down per subdirectory.
 
     Returns {"file_count", "size_bytes", "dirs"}, where "dirs" maps each
@@ -2220,6 +2315,22 @@ def collect_skill_stats(skill_dir: Path) -> dict:
     Shared by 'info' (the human breakdown) and 'catalog --json' (the structural
     profile), so both report the same footprint for the same skill.
     """
+    cache_key = str(skill_dir)
+    sig = _skill_dir_signature(skill_dir) if cache is not None else None
+    if cache is not None and sig is not None:
+        cached = cache.get(cache_key)
+        if isinstance(cached, dict) and cached.get("sig") == sig:
+            raw_dirs = cached.get("dirs") or {}
+            return {
+                "file_count": int(cached.get("file_count", 0)),
+                "size_bytes": int(cached.get("size_bytes", 0)),
+                "dirs": {
+                    k: (int(v[0]), int(v[1]))
+                    for k, v in raw_dirs.items()
+                    if isinstance(v, (list, tuple)) and len(v) == 2
+                },
+            }
+
     dir_stats: dict[str, tuple[int, int]] = {}
     root_files = 0
     root_size = 0
@@ -2240,21 +2351,7 @@ def collect_skill_stats(skill_dir: Path) -> dict:
             root_files += 1
             root_size += sz
         elif item.is_dir():
-            files_count = 0
-            dir_size = 0
-            for root, dirs, files in os.walk(item):
-                dirs[:] = [
-                    d for d in dirs if not d.startswith(".") and d != "__pycache__"
-                ]
-                for f in files:
-                    if f.startswith("."):
-                        continue
-                    try:
-                        sz = (Path(root) / f).stat().st_size
-                    except OSError:
-                        continue
-                    files_count += 1
-                    dir_size += sz
+            files_count, dir_size = _walk_dir_stats(item)
             if files_count > 0:
                 dir_stats[item.name] = (files_count, dir_size)
 
@@ -2263,7 +2360,15 @@ def collect_skill_stats(skill_dir: Path) -> dict:
     if root_files > 0:
         dir_stats["(root)"] = (root_files, root_size)
 
-    return {"file_count": total_files, "size_bytes": total_size, "dirs": dir_stats}
+    result = {"file_count": total_files, "size_bytes": total_size, "dirs": dir_stats}
+    if cache is not None and sig is not None:
+        cache[cache_key] = {
+            "sig": sig,
+            "file_count": total_files,
+            "size_bytes": total_size,
+            "dirs": {k: [v[0], v[1]] for k, v in dir_stats.items()},
+        }
+    return result
 
 
 def structure_fields(stats: dict | None) -> dict:
@@ -2395,11 +2500,40 @@ def print_catalog(skills_info: list[dict], term_width: int) -> None:
                 print(f"{indent}{''.ljust(arrow_indent)} -> {disp_src}")
 
 
+def _load_stats_cache() -> dict[str, dict]:
+    cache_file = get_cache_dir() / "stats.json"
+    try:
+        data = json.loads(cache_file.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _save_stats_cache(cache: dict[str, dict]) -> None:
+    cache_file = get_cache_dir() / "stats.json"
+    try:
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=str(cache_file.parent), prefix=".stats.")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(cache, f, separators=(",", ":"))
+            os.replace(tmp, cache_file)
+        except BaseException:
+            with os.scandir(cache_file.parent):
+                pass
+            Path(tmp).unlink(missing_ok=True)
+            raise
+    except OSError:
+        pass
+
+
 def cmd_catalog(as_json=False):
     api = get_api()
     ensure_catalog_index(api.plugin_catalog)
 
     skills_info = []
+    stats_cache = _load_stats_cache() if as_json else None
+    stats_before = json.dumps(stats_cache, sort_keys=True) if as_json else ""
 
     # Scan all registered plugin skills. Structural stats are measured from
     # whatever content is already on disk -- a local source directory, or a
@@ -2426,7 +2560,9 @@ def cmd_catalog(as_json=False):
                     "status": "local" if on_disk else "missing",
                 }
                 obj.update(
-                    structure_fields(collect_skill_stats(src_dir) if on_disk else None)
+                    structure_fields(
+                        collect_skill_stats(src_dir, stats_cache) if on_disk else None
+                    )
                 )
             else:
                 obj = {
@@ -2460,7 +2596,9 @@ def cmd_catalog(as_json=False):
                 }
                 obj.update(
                     structure_fields(
-                        collect_skill_stats(cached_dir) if cached_dir else None
+                        collect_skill_stats(cached_dir, stats_cache)
+                        if cached_dir
+                        else None
                     )
                 )
             else:
@@ -2472,6 +2610,13 @@ def cmd_catalog(as_json=False):
             if entry.get("plugin_file"):
                 obj["plugin"] = entry["plugin_file"]
             skills_info.append(obj)
+
+    if (
+        as_json
+        and stats_cache is not None
+        and json.dumps(stats_cache, sort_keys=True) != stats_before
+    ):
+        _save_stats_cache(stats_cache)
 
     # Deduplicate identical target paths within the same group/type
     deduped_info = []
@@ -3210,8 +3355,8 @@ agent reads for the chosen scope:
 
 Commands:
   add SPEC...     Link a skill straight to its source: a catalog entry from
-                  'skill catalog', as NAME or NAMESPACE:NAME (replaces a
-                  default's link)
+                  'skill catalog' (NAME or NAMESPACE:NAME) or a local skill
+                  directory path (replaces a default's link)
   add -           Read skill names from stdin
   add --defaults  Link every default through the defaults directory, keeping
                   existing links; remove broken links to defaults (broken
@@ -3227,11 +3372,11 @@ Commands:
   bundle [SPEC...] Package skills into an archive or directory without installing
   update SPEC...  Re-fetch a plugin-provided catalog entry; --all for every
                   entry, --catalog to refresh the whole metadata index
-  catalog [--json] List plugin-provided skills and sources; --json adds each
-                  skill's description and structural profile (file counts and
-                  sizes for scripts/, references/ and tests/)
-  resolve NAME    Print the source path 'add NAME' would symlink to
-  show/info NAME  Show details and metadata of a skill
+  catalog [--json] List plugin-provided skills and sources; --json outputs
+                  NDJSON (one JSON object per line) with description and
+                  structural profile (scripts/, references/, tests/ counts)
+  resolve SPEC    Print the source path 'add SPEC' would symlink to
+  show/info SPEC  Show details and metadata of a skill
   mcp [SCOPE]     Serve skills over MCP, to agents that cannot read them from
                   disk; see 'skill mcp --help'
 
@@ -3240,6 +3385,8 @@ Options:
   --scope SCOPE        'user', 'workspace' (default), 'session' or 'defaults';
                        only add, remove, list, doctor and clean take a scope
                        other than 'workspace'
+  --offline            Never fetch remote skills or metadata over the network
+                       (same as AGENT_OFFLINE=1)
   --help, -h           Display this help message and exit
   --plugin-template    Output a template/documentation for creating a Workspace plugin
 
@@ -3355,6 +3502,9 @@ def register(api):
             idx += 1
         elif arg.startswith("--scope="):
             explicit_scope = arg[len("--scope=") :].lower()
+            idx += 1
+        elif arg == "--offline":
+            os.environ["AGENT_OFFLINE"] = "1"
             idx += 1
         else:
             filtered_argv.append(arg)

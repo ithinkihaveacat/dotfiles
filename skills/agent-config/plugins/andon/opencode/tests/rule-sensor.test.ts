@@ -8,13 +8,13 @@ import {
 } from "../../claude/hooks/rule.ts";
 import { createSensor, shellFailed } from "../src/sensor.ts";
 
-test("pull payload stays compatible with the Claude adapter and omits level", () => {
+test("pull payload stays compatible with the Claude adapter and includes optional level", () => {
   assert.deepEqual(INPUT_SCHEMA.required, CLAUDE_INPUT_SCHEMA.required);
   assert.deepEqual(
     Object.keys(INPUT_SCHEMA.properties),
     Object.keys(CLAUDE_INPUT_SCHEMA.properties)
   );
-  assert.equal("level" in INPUT_SCHEMA.properties, false);
+  assert.equal("level" in INPUT_SCHEMA.properties, true);
   assert.deepEqual(
     INPUT_SCHEMA.properties.kind.enum,
     CLAUDE_INPUT_SCHEMA.properties.kind.enum
@@ -33,7 +33,8 @@ test("pull payload stays compatible with the Claude adapter and omits level", ()
     "details",
     "sources",
     "resolution",
-    "proposed_fix"
+    "proposed_fix",
+    "level"
   ] as const) {
     assert.equal(
       INPUT_SCHEMA.properties[key].description,

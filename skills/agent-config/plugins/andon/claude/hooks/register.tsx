@@ -240,12 +240,13 @@ async function pull(
   const fields: Record<string, unknown> = {};
   for (const key of MODEL_FIELDS)
     if (e[key] !== undefined) fields[key] = e[key];
-  const level = await ensureLockedLevel($);
+  const session_level = await ensureLockedLevel($);
   const cwd = await $.session.cwd();
   const root = await $.session.root();
   const payload = {
     ...fields,
-    level,
+    level: isLevel(fields.level) ? fields.level : session_level,
+    session_level,
     harness: "claude-code",
     conversation_id: await $.session.id(),
     agent_id: typeof e.agentId === "string" ? e.agentId : undefined,

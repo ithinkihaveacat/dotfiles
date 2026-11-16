@@ -18,46 +18,23 @@ export const KINDS = [
 export const LEVELS: Record<number, { name: string; when: string }> = {
   1: {
     name: "red only",
-    when:
-      "Pull `red` when blocked or when an explicitly requested capability is " +
-      "unavailable. Never pull `yellow`; work around recoverable issues silently."
+    when: "Pull `red` when blocked or an explicitly requested capability is unavailable; never `yellow`."
   },
   2: {
     name: "conservative",
-    when:
-      "Pull `red` when blocked or when an explicitly requested capability is " +
-      "unavailable. Pull `yellow` only for verified, reproducible defects: a " +
-      "direct contradiction between instructions, or a documented flag, script, " +
-      "or path confirmed missing via `--help` or the filesystem."
+    when: "Level 1, plus `yellow` for verified instruction contradictions or documented flags, scripts, or paths confirmed missing."
   },
   3: {
     name: "standard",
-    when:
-      "Pull `red` when blocked or when an explicitly requested capability is " +
-      "unavailable. Pull `yellow` when a skill or rule contradicts another " +
-      "instruction, names a stale flag, path, or reference, requires an " +
-      "undocumented workaround, causes a skill/harness tool, binary, MCP server, " +
-      "or subagent to fail at runtime (even on the first attempt if you abandon " +
-      "it or switch to an alternative), or causes the same documented step to " +
-      "fail twice."
+    when: "Level 2, plus stale references, undocumented workarounds, skill/harness tool, binary, MCP, or subagent runtime failures (even on the first attempt if abandoned), or a documented step failing twice."
   },
   4: {
     name: "proactive audit",
-    when:
-      "Everything at Level 3, plus pull `yellow` on the first encounter with " +
-      "harness friction: an instruction so vague or underspecified it forced a " +
-      "`--help` probe, an unstated prerequisite, or a misleading tool " +
-      "description or error."
+    when: "Level 3, plus first-encounter friction: vague instructions forcing `--help`, unstated prerequisites, or misleading tool descriptions/errors."
   },
   5: {
     name: "maximum coverage",
-    when:
-      "Do not self-filter for severity or confidence. Treat every skill, rule, " +
-      "and tool interaction as under active QA audit: pull `yellow` in parallel " +
-      "whenever you deviate from, supplement, or double-check any documented " +
-      "instruction, flag, or tool behavior — even if resolved on the first try, " +
-      "and including transient failures whose retry or timeout behavior was " +
-      "undocumented or misleading."
+    when: "Do not self-filter: pull `yellow` in parallel whenever you deviate from, supplement, or double-check any documented instruction, flag, or tool behavior, including undocumented transient retries."
   }
 };
 
@@ -76,62 +53,38 @@ export function buildRule(level: number): string {
   const lines = [
     `# Andon Cord (\`${TOOL}\`)`,
     "",
-    "Your instructions (`SKILL.md`, `AGENTS.md`, `CLAUDE.md`), rules, tool schemas, and " +
-      "helper scripts are shared across agent sessions and can contain defects. Even when " +
-      "you find a clean workaround in this conversation, working around a flaw silently " +
-      "means future agent sessions will hit the same broken instruction or tool and waste " +
-      `tokens and time rediscovering the fix. Pulling the Andon cord with \`${TOOL}\` ` +
-      "records the defect out-of-band so its source can be fixed once, while you continue " +
-      "fulfilling the user's request.",
+    "Instructions (`SKILL.md`, `AGENTS.md`, `CLAUDE.md`), rules, schemas, and helper " +
+      "scripts are shared across sessions; silent workarounds leave future sessions to " +
+      `rediscover the same flaw. Pull the Andon cord (\`${TOOL}\`) whenever a command, ` +
+      "tool, MCP server, or subagent fails or times out, forces an unplanned `--help` or " +
+      "script inspection, or makes you deviate from a documented instruction.",
     "",
-    "Between tool calls — whenever a command, tool, binary, MCP server, or subagent " +
-      "fails, times out, or is unavailable; you run `--help` or inspect a script because " +
-      "a documented step did not work as written; or you deviate from or abandon a " +
-      "`SKILL.md`, `AGENTS.md`, or `CLAUDE.md` instruction — evaluate the issue against " +
-      `the session's trigger level and call \`${TOOL}\`.`,
-    "",
-    `- **Subagent Accountability:** If a delegated subagent lacks \`${TOOL}\` and reports ` +
-      "a tool failure, timeout, or connection/permission block back to you (including " +
-      "asynchronously via `<SYSTEM_MESSAGE>`), pull the cord on that turn.",
+    `- **Subagent Accountability:** If a subagent lacks \`${TOOL}\` and reports a tool ` +
+      "failure, timeout, or connection/permission block (including asynchronously), pull on that turn.",
     "",
     "## How to Pull: Parallel Yellow, Blocking Red",
     "",
-    "- **Yellow (`color: \"yellow\"`) — Workaround and Continue:** A safe workaround or " +
-      `alternative exists that fulfills the user's request. Call \`${TOOL}\` **in the same ` +
-      "parallel tool-call batch** as your workaround or next task step, and **continue " +
-      "the user's task immediately** without mentioning the defect to the user. Do not " +
-      "spend a separate turn on a yellow pull.",
-    "- **Red (`color: \"red\"`) — Blocked or Requested Capability Unavailable:** Call " +
-      `\`${TOOL}\` and **stop work on that path immediately** when either:`,
-    "  1. **An explicitly requested capability is unavailable:** A tool, MCP server, or " +
-      "subagent that the user explicitly asked you to use (e.g., via a slash command, " +
-      "`@` mention, or direct instruction) fails, times out, or cannot connect — **even " +
-      "if fallback inputs (such as local files or screenshots) are available**. Do not " +
-      "silently substitute a fallback for an explicitly requested capability.",
-    "  2. **You cannot proceed safely:** Instructions conflict on an irreversible or " +
-      "externally visible action, requirements are circular, or three attempts at the " +
-      "same step produced no new diagnostic.",
-    "  After pulling `red`, end your turn and tell the user what failed or conflicted, " +
-      "what decision you need, and what you completed so far. (Color is severity " +
-      "metadata; stopping is your responsibility, not enforced by the harness.)",
+    '- **Yellow (`color: "yellow"`):** Safe workaround exists. Call ' +
+      `\`${TOOL}\` **in the same parallel tool-call batch** as your workaround and ` +
+      "continue immediately without mentioning it to the user — **never spend a standalone turn on a yellow pull**.",
+    '- **Red (`color: "red"`):** Stop on that path immediately when (1) an **explicitly ' +
+      "requested capability** (slash command, `@` mention, named tool/MCP/subagent) fails " +
+      "or cannot connect — even if fallback inputs exist — or (2) instructions conflict on " +
+      "an irreversible/external action, requirements are circular, or 3 attempts yield no " +
+      "new diagnostic. End your turn and ask the user for a decision (stopping is your responsibility, not host-enforced).",
     "",
-    "## Workaround Precedence and Report Fields",
+    "## Precedence and Fields",
     "",
-    "- **Precedence:** Explicit user instructions and global safety rules outrank skill " +
-      "guidelines; the stricter of two verification steps wins; live `--help` output " +
-      "beats stale CLI prose (without overriding safety policy).",
-    "- **Fields:** Quote the conflicting directive, flag, path, or error in `details`; " +
-      "list the affected files, rules, tools, or subagents in `sources` (paths as read); " +
-      "put the workaround taken (`yellow`) or decision needed (`red`) in `resolution`; " +
-      "and give the concrete edit that would fix the source in `proposed_fix`.",
+    "- **Precedence:** User instructions and safety rules outrank skills; stricter checks and live `--help` beat stale prose.",
+    "- **Fields:** Set `level` to this defect's 1–5 rubric tier (`<=` active trigger level); " +
+      "quote the failing directive/flag/path/error in `details`; list paths, rules, or tools " +
+      "in `sources`; put workaround (`yellow`) or decision needed (`red`) in `resolution`; " +
+      "give the concrete source edit in `proposed_fix`.",
     "",
     "## Trigger Sensitivity Levels (`1`–`5`)",
     "",
     `Active trigger level: ${levelLabel(level)}.`,
-    "",
-    "The trigger level is fixed for the session (`$ANDON_LEVEL` > " +
-      "`~/.local/state/andon/config.json` via `andon level` or `/andon level` > default " +
-      "**Level 3 (standard)**):",
+    "Session-fixed (`$ANDON_LEVEL` > `config.json` via `andon level` > `3`):",
     "",
     ...([1, 2, 3, 4, 5] as const).map(
       (n) => `- **Level ${levelLabel(n)}:** ${LEVELS[n]!.when}`
@@ -139,14 +92,10 @@ export function buildRule(level: number): string {
     "",
     "## Not a Harness Defect (Do Not Pull)",
     "",
-    "- Ordinary compile, lint, type-check, or test failures in repository code you are " +
-      "editing or reviewing.",
-    "- Normal non-error exit codes (such as `rg`, `grep`, or `diff` returning `1` on no " +
-      "matches) or routine sandbox escalations when network or write access is required " +
-      "(unless a skill falsely claimed sandbox compatibility).",
-    "- Ambiguity in the user's request — ask the user directly.",
-    "- At Levels 1–4, a transient failure that succeeds on immediate retry with " +
-      "identical arguments."
+    "- Ordinary compile, lint, type-check, or test failures in repository code under edit or review.",
+    "- Normal non-error exit codes (`rg`, `grep`, or `diff` returning `1` on no matches) or routine network/write sandbox escalations (unless sandbox support was claimed).",
+    "- Ambiguity in the user's request — ask directly.",
+    "- At Levels 1–4, a transient failure that succeeds on immediate retry with identical arguments."
   ];
 
   return lines.join("\n");
@@ -158,14 +107,10 @@ export function buildRule(level: number): string {
  */
 export function buildDescription(): string {
   return (
-    "Pull the Andon cord to record a defect or friction in your operating harness " +
-    "(skills, rules, tool schemas, helper scripts, MCP servers, or subagents) so it " +
-    "can be fixed for future sessions instead of worked around silently. Call " +
-    "color='yellow' in the same parallel tool-call batch as your workaround and " +
-    "continue the user's task without interrupting them. Call color='red' and stop " +
-    "immediately when blocked or when a capability explicitly requested by the user " +
-    "is unavailable. Evaluate against the session's trigger level under 'Andon Cord' " +
-    "in your instructions."
+    "Record a defect in shared instructions, skills, rules, schemas, scripts, MCP servers, " +
+    "or subagents. Yellow: call in parallel with your workaround and continue silently. " +
+    "Red: stop immediately when blocked or an explicitly requested capability is unavailable. " +
+    "See 'Andon Cord' for the session trigger level."
   );
 }
 
@@ -205,6 +150,13 @@ export const INPUT_SCHEMA = {
     proposed_fix: {
       type: "string",
       description: "The concrete edit that would remove the defect."
+    },
+    level: {
+      type: "integer",
+      minimum: 1,
+      maximum: 5,
+      description:
+        "Intrinsic 1-5 rubric tier of this defect (<= active session trigger level)."
     }
   }
 } as const;
