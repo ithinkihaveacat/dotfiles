@@ -105,7 +105,7 @@ Immediate follow-up actions.
 ```
 
 **On completion,** keep Problem, Cost, Goal, and Criteria as written. Delete
-Sketch and Constraints (`update` cannot; use `taskgo edit` or your file tools):
+Sketch and Constraints (`--sketch "" --constraints ""`, or with `taskgo edit`):
 Outcome and Findings replace them. Marking a task done needs `--outcome`; the
 CLI refuses without it.
 
