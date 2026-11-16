@@ -56,11 +56,11 @@ one key, `changes`:
   `STATUS.md` Summary or Next. `expected_hash` is the hash `get_task` or
   `get_project_status` reports, or null when the section is absent. A null
   `text` removes an optional section. A new section goes where the schema orders
-  it. Supply the section body only: omit its `## Heading` or `**Label:**`, which
-  the tool adds. Text that duplicates a section or adds or removes any other
-  section is refused. The result's `sections` list gives the new hash of each
-  section `replace_section` or a task `create` wrote (`record`, `section`,
-  `hash`; null when removed), ready for the next `replace_section`.
+  it. Supply the section body only: a leading own `## Heading` or `**Label:**`
+  is dropped with a note. Text that duplicates a section or adds or removes any
+  other section is refused. The result's `sections` list gives the current hash
+  of every section of each modified task and `STATUS.md` (`record`, `section`,
+  `hash`; null when absent), ready for the next `replace_section`.
 - **Files:** `write_file` writes project assets: any file in an existing project
   outside `tasks/`, `decisions/`, and `STATUS.md`, and `INBOX.md`. It refuses
   `.git*` paths, `..`, symbolic links, more than 256 KiB, non-UTF-8 content, and

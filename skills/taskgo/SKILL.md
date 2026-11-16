@@ -49,9 +49,12 @@ IDs are `TASK-XXXXX` (five hex digits), in `tasks/TASK-XXXXX-<slug>.md`. Pass
 `in-progress`, `blocked`, `done`, and `cancelled`.
 
 Use only the labels and sections in these templates. Do not add one-off headings
-or bold labels; put that text under the nearest section.
+or bold labels; put that text under the nearest section, using `###` (never
+`##`) for subheadings inside a section.
 
 ### Open Task Template
+
+Front-load external stakeholder or impact context in the opening fields.
 
 ```markdown
 ---
@@ -62,8 +65,6 @@ conversations:
 ---
 
 # Title as imperative verb phrase
-
-*(Tip: Front-load external stakeholder or impact context)*
 
 **Problem:** (optional) Current behavior and why it is a problem.
 **Cost:** (optional) Consequence of leaving the task undone and who absorbs it.
@@ -104,7 +105,7 @@ Immediate follow-up actions.
 ```
 
 **On completion,** keep Problem, Cost, Goal, and Criteria as written. Delete
-Sketch and Constraints (`update` cannot; use `taskgo edit` or your file tools):
+Sketch and Constraints (`--sketch "" --constraints ""`, or with `taskgo edit`):
 Outcome and Findings replace them. Marking a task done needs `--outcome`; the
 CLI refuses without it.
 
@@ -128,7 +129,9 @@ CLI refuses without it.
 - `## Next`: the next few concrete actions, not a backlog.
 
 Sessions are recorded in commit trailers and each task's `conversations`, not in
-the Summary.
+the Summary. The CLI reads known agent session variables automatically; pass
+`--conv <scheme>://<id>` when your harness exports none (and on `update` for any
+extra task staged in the same `checkpoint`).
 
 ## Start and Finish
 
@@ -170,10 +173,12 @@ the Summary.
      --ref compiler@1a2b3c4
    ```
 
-   `checkpoint` syncs the generated block, formats the records, records the
-   session, and refuses while `taskgo doctor` reports problems in the files it
-   commits; other findings in the project are counted, not refused. Subjects are
-   Conventional Commits of at most 50 characters, prefix included.
+   `checkpoint` requires an empty Git index, syncs the generated block, formats
+   the records, records the session, and refuses unlisted project changes unless
+   `--all` or `--path` is passed (including `update --slug` renames). It refuses
+   while `taskgo doctor` reports problems in the files it commits; other
+   findings in the project are counted, not refused. Subjects are Conventional
+   Commits of at most 50 characters, prefix included.
 
 1. Leave the project [handoff-ready](references/workflows.md#handoff-ready).
 

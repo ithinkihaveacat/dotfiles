@@ -46,8 +46,9 @@ changes that span more than one project, so these need a plain `git commit`:
 Work out what the change needs from the invariants in SKILL.md rather than
 waiting for a documented procedure. Then:
 
-1. Run `taskgo doctor`, and `taskgo fix` to repair what it can (IDs, status
-   aliases, `STATUS.md` blocks, formatting).
+1. Run `taskgo doctor`, and `taskgo fix --no-commit` to repair what it can (IDs,
+   status aliases, `STATUS.md` blocks, formatting) without creating an early
+   unattributed commit.
 1. Stage only the affected paths. Use a Conventional Commits subject and a
    `Conversation: <agent>://<id>` trailer.
 1. Tell the user. Ask before committing when practical; otherwise say clearly
@@ -64,11 +65,13 @@ them.
 
 ### Remote Sync
 
-Commands that write fetch the upstream branch first, and fast-forward or rebase
-when the checkout is behind. Commands that commit also push. `--offline` (or
-`AGENT_OFFLINE=1`) skips both. Read-only commands such as `list`, `status`, and
-`doctor` work on a read-only mount; commands that write need a writable tree and
-`.git/`.
+When the checkout and `.git/` are writable, both read and write commands lock
+`.git/taskgo.lock`, fetch the upstream branch (`@{u}`), and fast-forward or
+rebase when behind; commands that commit (`create`, `checkpoint`, `commit`,
+`fix`) also push. `--offline` (or `AGENT_OFFLINE=1`) skips remote fetch and
+push. Read-only commands such as `list`, `status`, and `doctor` work on a
+read-only mount; `update`, `edit`, `apply`, and `sync` need a writable tree, and
+committing commands also need writable `.git/`.
 
 ## Agent Handoff
 
@@ -104,11 +107,11 @@ Read /path/to/compiler/STATUS.md and the task record
 (/path/to/compiler/tasks/TASK-3A91F-manifest-loader.md) before acting, and form your
 own view of the approach.
 
-Skills: coding-standards, local:notes. Reuse skills already provided by your
-harness; load missing ones through its skill loader. The command below is only
-for launchers with CLI session support (Claude wrapper or Antigravity), not
-OpenCode or Codex. Otherwise use `skill resolve <NAME>` and read each local
-skill's SKILL.md.
+Skills: coding-standards, local:notes. Reuse skills already available in your
+environment; load missing ones through your harness's skill loader, or locate
+and read their SKILL.md directly. If the optional `skill` CLI is installed and
+supports session scope in your launcher, you can run the command below (or use
+`skill resolve <NAME>` to locate local skills):
 
   taskgo skills compiler | skill --scope session add -
 ```

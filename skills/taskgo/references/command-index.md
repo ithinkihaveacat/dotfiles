@@ -246,8 +246,10 @@ Examples:
   taskgo update TASK-3A91F --set-wait-for 2026-12-01 --set-wait-for issue/123
 
 List fields: --add-FIELD and --remove-FIELD change one value and keep the rest.
---set-wait-for replaces the whole wait_for list ('' clears it). --conv adds one
-conversation, like --add-conversation.
+--set-wait-for replaces the whole wait_for list ('' clears it). Passing '' to a
+section or date option removes an optional section or date. --slug renames the
+file without committing; commit with 'checkpoint --all' to stage both paths.
+--conv adds one conversation, like --add-conversation.
 ```
 
 <!-- /generated -->

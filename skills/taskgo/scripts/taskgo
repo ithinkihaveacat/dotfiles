@@ -118,11 +118,10 @@ AGENTS_DECL_RE = re.compile(
 AGENTS_BLOCK_BODY = f"""\
 This repository follows taskgo: <{CANONICAL_URL}>.
 
-- Start with `taskgo handoff <project|task>`. Reuse skills already provided by
-  your harness; load missing ones through its skill loader. Use the skill CLI's
-  session scope only with a supported launcher (Claude wrapper or Antigravity,
-  not OpenCode or Codex); otherwise resolve local skills with `skill resolve`
-  and read their `SKILL.md`.
+- Start with `taskgo handoff <project|task>`. Reuse available skills; load
+  missing ones via your harness, or read their `SKILL.md` directly. If the
+  optional `skill` CLI is installed and supports session scope here, run
+  `taskgo skills <project> | skill --scope session add -` (or `skill resolve`).
 - Declare the skills a project needs in the `skills:` list of its `README.md`.
 - Commits and tasks record your session. The CLI reads the session ID from the
   environment. Pass `--conv` only when your harness exports none.
@@ -215,12 +214,14 @@ RESOLVED_STATES = {TaskStatus.DONE.value, TaskStatus.CANCELLED.value}
 
 # The coding agents taskgo knows by name, and the environment variables each
 # exports its session ID in, in priority order: the first one set wins.
-# CONVERSATION_ID names no agent.
-CANONICAL_AGENTS = ("antigravity", "claude", "codex", "opencode")
+# CONVERSATION_ID names no agent. Jetski runs on Antigravity's runtime and
+# sets ANTIGRAVITY_CONVERSATION_ID alongside INVOKER_INFO_NAME=jetski.
+CANONICAL_AGENTS = ("jetski", "antigravity", "claude", "codex", "opencode")
 
 SESSION_VARS: tuple[tuple[str, str | None], ...] = (
     ("CLAUDE_CODE_SESSION_ID", "claude"),
     ("CLAUDE_CODE_REMOTE_SESSION_ID", "claude"),
+    ("JETSKI_CONVERSATION_ID", "jetski"),
     ("ANTIGRAVITY_CONVERSATION_ID", "antigravity"),
     ("ANTIGRAVITY_SESSION", "antigravity"),
     ("CLAUDE_SESSION_ID", "claude"),
@@ -243,11 +244,12 @@ def canonicalize_agent_name(name: str | None) -> str | None:
 
 
 def detect_agent_scheme() -> str:
-    """The agent's scheme, from AI_AGENT or else the first session variable
-    set; 'conversation' when neither names one."""
-    c = canonicalize_agent_name(os.environ.get("AI_AGENT"))
-    if c:
-        return c
+    """The agent's scheme, from AI_AGENT, INVOKER_INFO_NAME, or else the first
+    session variable set; 'conversation' when none names one."""
+    for env_var in ("AI_AGENT", "INVOKER_INFO_NAME"):
+        c = canonicalize_agent_name(os.environ.get(env_var))
+        if c:
+            return c
     for var, scheme in SESSION_VARS:
         if scheme and os.environ.get(var):
             return scheme
@@ -320,7 +322,15 @@ def get_active_session(
             if parsed:
                 scheme, conv_id = parsed
                 if not scheme or scheme == "conversation":
-                    scheme = var_scheme or detect_agent_scheme()
+                    if var_scheme == "antigravity":
+                        invoker = canonicalize_agent_name(
+                            os.environ.get("AI_AGENT")
+                        ) or canonicalize_agent_name(
+                            os.environ.get("INVOKER_INFO_NAME")
+                        )
+                        scheme = "jetski" if invoker == "jetski" else var_scheme
+                    else:
+                        scheme = var_scheme or detect_agent_scheme()
                 return scheme, conv_id
             print(
                 _tagged(
@@ -5259,18 +5269,13 @@ def edit_task_text(
     }
     for spec in TASK_SCHEMA.sections:
         val = section_vals.get(spec.name)
-        if not val:
+        if val is None:
             continue
         similar: list[str] = []
         if spec.form == "run-in":
-            block = "\n" in val or val.strip().startswith("1.")
-            replacement = (
-                f"**{spec.name}:**\n\n{val}" if block else f"**{spec.name}:** {val}"
-            )
             spans = find_runins(body, spec.name)
             tag = f"**{spec.name}:**"
         else:
-            replacement = f"## {spec.name}\n\n{val}"
             spans, similar = find_sections(body, spec.name)
             tag = f"'## {spec.name}'"
         if len(spans) > 1:
@@ -5278,6 +5283,20 @@ def edit_task_text(
                 f"{rel_path}: {tag} appears {len(spans)} times; "
                 "edit the task file directly"
             )
+        if not val.strip():
+            if spans:
+                start, end = spans[0]
+                before, after = body[:start].rstrip(), body[end:].lstrip()
+                parts = [p for p in (before, after) if p]
+                body = ("\n\n".join(parts) + "\n") if parts else ""
+            continue
+        if spec.form == "run-in":
+            block = "\n" in val or val.strip().startswith("1.")
+            replacement = (
+                f"**{spec.name}:**\n\n{val}" if block else f"**{spec.name}:** {val}"
+            )
+        else:
+            replacement = f"## {spec.name}\n\n{val}"
         if not spans:
             if similar:
                 warnings.append(
@@ -7636,16 +7655,17 @@ class HandoffTarget:
 def skills_note(project: str, skills: list[str]) -> str:
     """The handoff note's skills paragraph: what to activate, and how.
 
-    The note travels between harnesses, so describe the supported launchers
-    rather than assuming the writer's environment is the reader's environment.
-    Keep the optional command on its own line, never wrapped.
+    The note travels between harnesses, so keep the optional skill CLI as a
+    conditional example rather than assuming the writer's environment is the
+    reader's environment. Keep the command on its own line, never wrapped.
     """
     prose = textwrap.fill(
-        f"Skills: {', '.join(skills)}. Reuse skills already provided by your "
-        "harness; load missing ones through its skill loader. The command below "
-        "is only for launchers with CLI session support (Claude wrapper or "
-        "Antigravity), not OpenCode or Codex. Otherwise use `skill resolve "
-        "<NAME>` and read each local skill's SKILL.md.",
+        f"Skills: {', '.join(skills)}. Reuse skills already available in your "
+        "environment; load missing ones through your harness's skill loader, or "
+        "locate and read their SKILL.md directly. If the optional `skill` CLI "
+        "is installed and supports session scope in your launcher, you can run "
+        "the command below (or use `skill resolve <NAME>` to locate local "
+        "skills):",
         width=76,
         break_long_words=False,
         break_on_hyphens=False,
@@ -10064,8 +10084,10 @@ than a few words.""",
   taskgo update TASK-3A91F --set-wait-for 2026-12-01 --set-wait-for issue/123
 
 List fields: --add-FIELD and --remove-FIELD change one value and keep the rest.
---set-wait-for replaces the whole wait_for list ('' clears it). --conv adds one
-conversation, like --add-conversation.""",
+--set-wait-for replaces the whole wait_for list ('' clears it). Passing '' to a
+section or date option removes an optional section or date. --slug renames the
+file without committing; commit with 'checkpoint --all' to stage both paths.
+--conv adds one conversation, like --add-conversation.""",
     )
     p_update.add_argument("query", metavar="TASK_ID", help="Task ID or relative path")
     p_update.add_argument("--status", "-s", default=None, help="New task state")
