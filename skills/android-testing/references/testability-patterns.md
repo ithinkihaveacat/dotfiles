@@ -16,13 +16,10 @@ Adding a debug-only `BroadcastReceiver` strictly for `debug` builds allows you
 to bypass complex UI flows and reliably simulate rare states during automated
 testing.
 
-> [!NOTE] **ADB Shell UID (`uid=2000`) Permissions**: Unrooted `adb shell` runs
-> as `uid=2000` (`com.android.shell`), so **non-exported**
-> (`android:exported="false"`) and **`signature` /
-> `signatureOrSystem`-protected** receivers reject `adb shell am broadcast`
-> unless `adbd` runs as root (`adb root` or `adb shell su 0 am broadcast ...`).
-> For unrooted device testing, export the receiver only in the `debug` build
-> variant's `src/debug/AndroidManifest.xml`.
+> [!NOTE] **ADB Shell UID (`uid=2000`)**: Unrooted `adb shell` runs as
+> `uid=2000`, so `android:exported="false"` and `signature`-protected receivers
+> reject `am broadcast` unless elevated (`adb root` or `su 0`). For unrooted
+> devices, export the receiver only in `src/debug/AndroidManifest.xml`.
 
 ### Onboarding & Auth Bypass
 

@@ -24,8 +24,6 @@ Options:
   -o, --output FILE The path to save the hierarchy to.
                     If '-', the hierarchy is written to stdout.
   --compressed      Skip non-important views during dump (faster on busy UIs).
-  --timeout SECONDS Per-attempt timeout in seconds before falling back to
-                    compressed mode or aborting (default: 10).
   -h, --help        Display this help message and exit
 
 Environment:
@@ -84,14 +82,6 @@ while [[ $# -gt 0 ]]; do
       COMPRESSED_ONLY=true
       shift
       ;;
-    --timeout)
-      if [[ -z "${2:-}" || ! "${2}" =~ ^[1-9][0-9]*$ ]]; then
-        echo "$(basename "$0"): --timeout requires a positive integer number of seconds" >&2
-        exit 1
-      fi
-      DUMP_TIMEOUT="$2"
-      shift 2
-      ;;
     -)
       if [ -n "$OUTPUT_FILE" ]; then
         echo "$(basename "$0"): cannot specify both FILE and --output" >&2
@@ -129,37 +119,18 @@ require xmllint
 require sed
 
 # Check if device is available
-if ! DEVICE_ERROR=$(adb get-state 2>&1 >/dev/null); then
-  if [[ "$DEVICE_ERROR" == *"more than one"* ]]; then
-    echo "$(basename "$0"): more than one device connected; use --serial or set ANDROID_SERIAL" >&2
-  elif [[ -n "${ANDROID_SERIAL:-}" ]]; then
-    echo "$(basename "$0"): device '$ANDROID_SERIAL' not available" >&2
-  else
-    echo "$(basename "$0"): no device connected" >&2
-  fi
-  exit 1
-fi
+adb get-state >/dev/null || exit 1
 
 if [ -z "$OUTPUT_FILE" ]; then
   OUTPUT_FILE=$(date -u +'adb-uihierarchy-%Y%m%d%H%M%S.xml')
 fi
 
-run_with_timeout() {
-  local secs="$1"
-  shift
-  if command -v timeout >/dev/null 2>&1; then
-    timeout "$secs" "$@"
-  elif command -v gtimeout >/dev/null 2>&1; then
-    gtimeout "$secs" "$@"
-  else
-    python3 -c 'import subprocess, sys; sys.exit(subprocess.run(sys.argv[2:], timeout=float(sys.argv[1])).returncode)' "$secs" "$@"
-  fi
-}
+TIMEOUT_BIN=$(command -v timeout || command -v gtimeout)
 
 dump_hierarchy() {
   local raw="" rc=0
   if ! $COMPRESSED_ONLY; then
-    raw=$(run_with_timeout "$DUMP_TIMEOUT" adb exec-out uiautomator dump /dev/stdout 2>/dev/null) || rc=$?
+    raw=$("$TIMEOUT_BIN" "$DUMP_TIMEOUT" adb exec-out uiautomator dump /dev/stdout 2>/dev/null) || rc=$?
     raw="${raw//UI hierchary dumped to: \/dev\/stdout/}"
     if [[ "$raw" == *"<hierarchy"* ]]; then
       printf '%s\n' "$raw"
@@ -168,7 +139,7 @@ dump_hierarchy() {
   fi
 
   rc=0
-  raw=$(run_with_timeout "$DUMP_TIMEOUT" adb exec-out uiautomator dump --compressed /dev/stdout 2>/dev/null) || rc=$?
+  raw=$("$TIMEOUT_BIN" "$DUMP_TIMEOUT" adb exec-out uiautomator dump --compressed /dev/stdout 2>/dev/null) || rc=$?
   raw="${raw//UI hierchary dumped to: \/dev\/stdout/}"
   if [[ "$raw" == *"<hierarchy"* ]]; then
     printf '%s\n' "$raw"
@@ -176,7 +147,7 @@ dump_hierarchy() {
   fi
 
   if [[ $rc -eq 124 ]]; then
-    echo "$(basename "$0"): uiautomator dump timed out after ${DUMP_TIMEOUT}s (continuous UI animations may be blocking idle detection)" >&2
+    echo "$(basename "$0"): uiautomator dump timed out after ${DUMP_TIMEOUT}s" >&2
   else
     echo "$(basename "$0"): failed to dump UI hierarchy from device" >&2
   fi

@@ -24,7 +24,6 @@ complete -c apk-smali -n "__fish_seen_subcommand_from disassemble" -s o -l outpu
 complete -c apk-smali -n "__fish_seen_subcommand_from find" -F -a '(__fish_complete_suffix .zip)'
 complete -c apk-smali -n "__fish_seen_subcommand_from find" -l declares -r -d "Class declares METHOD"
 complete -c apk-smali -n "__fish_seen_subcommand_from find" -l calls -r -d "Class invokes [CLASS]->METHOD"
-complete -c apk-smali -n "__fish_seen_subcommand_from find" -l field -r -d "Class declares or accesses field [CLASS->][NAME][:TYPE]"
 complete -c apk-smali -n "__fish_seen_subcommand_from find" -l string -r -d "String literal contains PATTERN"
 complete -c apk-smali -n "__fish_seen_subcommand_from find" -l annotated-with -r -d "Class has a class-level annotation of type CLASS"
 complete -c apk-smali -n "__fish_seen_subcommand_from find" -l extends -r -d "Direct superclass is CLASS"

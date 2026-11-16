@@ -1,10 +1,6 @@
 #!/usr/bin/env bash
 
 # Tests: skills/adb/tests/test-adb-cli
-#
-# Hermetic tests for adb-screenshot --no-wake, adb-uihierarchy & adb-currentfocus
-# uiautomator timeout / --compressed fallback, multi-device error reporting across
-# 6 adb scripts, adb-activities [PACKAGE] filtering, and packagename pull -o.
 
 set -euo pipefail
 
@@ -13,7 +9,6 @@ SCRIPTS="$DIR/../scripts"
 
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
-
 MOCK_BIN="$TMP/mock-bin"
 WORK="$TMP/work"
 mkdir -p "$MOCK_BIN" "$WORK"
@@ -22,189 +17,74 @@ ADB_LOG="$TMP/adb.log"
 cat >"$MOCK_BIN/adb" <<'EOF'
 #!/usr/bin/env bash
 echo "$*" >>"$MOCK_ADB_LOG"
-
-if [[ "${1:-}" == "-s" ]]; then
-  export ANDROID_SERIAL="$2"
-  shift 2
-fi
-
 case "$*" in
-  "get-state")
-    if [[ "${MOCK_DEVICES:-1}" == "2" && -z "${ANDROID_SERIAL:-}" ]]; then
-      echo "error: more than one device/emulator" >&2
-      exit 1
-    fi
-    if [[ "${MOCK_DEVICES:-1}" == "0" ]]; then
-      echo "error: no devices/emulators found" >&2
-      exit 1
-    fi
-    echo "device"
-    exit 0
-    ;;
-  "exec-out wm size")
-    echo "Physical size: 1080x2400"
-    exit 0
-    ;;
-  "exec-out screencap -p 2>/dev/null")
-    printf 'PNGDATA'
-    exit 0
-    ;;
-  "exec-out dumpsys window displays")
-    echo "  mCurrentFocus=Window{1234 u0 com.example.app/.MainActivity}"
-    exit 0
-    ;;
+  "get-state") echo "device" ;;
+  "exec-out wm size") echo "Physical size: 1080x2400" ;;
+  "exec-out screencap -p 2>/dev/null") printf 'PNGDATA' ;;
+  "exec-out dumpsys window displays") echo "  mCurrentFocus=Window{1234 u0 com.example.app/.MainActivity}" ;;
   "exec-out uiautomator dump /dev/stdout")
-    if [[ "${MOCK_HANG_PLAIN_DUMP:-0}" == "1" ]]; then
-      sleep 10
-      exit 1
-    fi
+    [[ "${MOCK_HANG_PLAIN_DUMP:-0}" == "1" ]] && { sleep 10; exit 1; }
     printf '<?xml version="1.0" encoding="UTF-8"?><hierarchy rotation="0"><node index="0" class="androidx.compose.ui.platform.ComposeView" package="com.example.app"/></hierarchy>UI hierchary dumped to: /dev/stdout'
-    exit 0
     ;;
   "exec-out uiautomator dump --compressed /dev/stdout")
-    if [[ "${MOCK_HANG_ALL_DUMP:-0}" == "1" ]]; then
-      sleep 10
-      exit 1
-    fi
     printf '<?xml version="1.0" encoding="UTF-8"?><hierarchy rotation="0"><node index="0" class="androidx.compose.ui.platform.ComposeView" package="com.example.app"/></hierarchy>UI hierchary dumped to: /dev/stdout'
-    exit 0
     ;;
-  "shell pm list packages -3")
-    printf 'package:com.example.app\r\npackage:com.other.app\r\n'
-    exit 0
-    ;;
-  "shell cmd package query-activities"*)
-    if [[ "$*" == *"category.LAUNCHER"* ]]; then
-      cat <<'ACT'
+  "shell cmd package query-activities"*category.LAUNCHER*)
+    cat <<'ACT'
 2 activities found:
   Activity #0:
     ActivityInfo:
       name=com.example.app.MainActivity
       packageName=com.example.app
-      ApplicationInfo:
-        packageName=com.example.app
   Activity #1:
     ActivityInfo:
       name=com.other.app.HomeActivity
       packageName=com.other.app
-      ApplicationInfo:
-        packageName=com.other.app
 ACT
-    fi
-    exit 0
-    ;;
-  "exec-out pm path com.example.app")
-    printf 'package:/data/app/com.example.app/split_config.arm64_v8a.apk\r\npackage:/data/app/com.example.app/base.apk\r\n'
-    exit 0
-    ;;
-  "pull "*)
-    src="$2"
-    dest="$3"
-    printf 'APK_FROM_%s' "$(basename "$src")" >"$dest"
-    exit 0
     ;;
 esac
-exit 0
 EOF
 
 cat >"$MOCK_BIN/magick" <<'EOF'
 #!/usr/bin/env bash
 cat >/dev/null || true
-exit 0
 EOF
-
 chmod +x "$MOCK_BIN/adb" "$MOCK_BIN/magick"
-
-TESTNUM=0
-ok() {
-  TESTNUM=$((TESTNUM + 1))
-  echo "ok $TESTNUM - $1"
-}
-not_ok() {
-  TESTNUM=$((TESTNUM + 1))
-  echo "not ok $TESTNUM - $1"
-  [[ -n "${2:-}" ]] && printf '%s\n' "$2" | sed 's/^/# /'
-}
 
 run_mock() {
   : >"$ADB_LOG"
   PATH="$MOCK_BIN:$PATH" MOCK_ADB_LOG="$ADB_LOG" "$@"
 }
 
-# 1. adb-screenshot wakes by default and skips KEYCODE_WAKEUP with --no-wake
+echo "1..4"
+
 run_mock "$SCRIPTS/adb-screenshot" -o "$WORK/wake.png" 2>/dev/null
 LOG_WAKE=$(<"$ADB_LOG")
 run_mock "$SCRIPTS/adb-screenshot" --no-wake -o "$WORK/ambient/aod.png" 2>/dev/null
 LOG_NOWAKE=$(<"$ADB_LOG")
 if [[ "$LOG_WAKE" == *"KEYCODE_WAKEUP"* && "$LOG_NOWAKE" != *"KEYCODE_WAKEUP"* && -f "$WORK/ambient/aod.png" ]]; then
-  ok "adb-screenshot --no-wake skips KEYCODE_WAKEUP and creates parent directories"
+  echo "ok 1 - adb-screenshot --no-wake skips KEYCODE_WAKEUP and creates parent directories"
 else
-  not_ok "adb-screenshot --no-wake skips KEYCODE_WAKEUP and creates parent directories" "$LOG_WAKE / $LOG_NOWAKE"
+  echo "not ok 1 - adb-screenshot --no-wake skips KEYCODE_WAKEUP and creates parent directories"
 fi
 
-# 2. adb-uihierarchy falls back to --compressed when standard dump times out
-OUT=$(MOCK_HANG_PLAIN_DUMP=1 run_mock "$SCRIPTS/adb-uihierarchy" --timeout 1 - 2>/dev/null)
-LOG_UI=$(<"$ADB_LOG")
-if [[ "$OUT" == *"<hierarchy"* && "$LOG_UI" == *"--compressed"* ]]; then
-  ok "adb-uihierarchy bounds uiautomator dump with timeout and falls back to --compressed"
+OUT=$(ADB_UIHIERARCHY_TIMEOUT=1 MOCK_HANG_PLAIN_DUMP=1 run_mock "$SCRIPTS/adb-uihierarchy" - 2>/dev/null)
+if [[ "$OUT" == *"<hierarchy"* && "$(<"$ADB_LOG")" == *"--compressed"* ]]; then
+  echo "ok 2 - adb-uihierarchy bounds uiautomator dump with timeout and falls back to --compressed"
 else
-  not_ok "adb-uihierarchy bounds uiautomator dump with timeout and falls back to --compressed" "$OUT"
+  echo "not ok 2 - adb-uihierarchy bounds uiautomator dump with timeout and falls back to --compressed"
 fi
 
-# 3. adb-uihierarchy exits 1 with animation hint when both attempts time out
-ERR=$(MOCK_HANG_PLAIN_DUMP=1 MOCK_HANG_ALL_DUMP=1 run_mock "$SCRIPTS/adb-uihierarchy" --timeout 1 - 2>&1 || true)
-if [[ "$ERR" == *"uiautomator dump timed out after 1s"* ]]; then
-  ok "adb-uihierarchy reports clear timeout error during continuous animations"
-else
-  not_ok "adb-uihierarchy reports clear timeout error during continuous animations" "$ERR"
-fi
-
-# 4. adb-currentfocus --toolkit falls back to --compressed when standard dump hangs
 TK=$(ADB_UIHIERARCHY_TIMEOUT=1 MOCK_HANG_PLAIN_DUMP=1 run_mock "$SCRIPTS/adb-currentfocus" --toolkit)
 if [[ "$TK" == "compose" ]]; then
-  ok "adb-currentfocus --toolkit bounds dump timeout and falls back to --compressed"
+  echo "ok 3 - adb-currentfocus --toolkit bounds dump timeout and falls back to --compressed"
 else
-  not_ok "adb-currentfocus --toolkit bounds dump timeout and falls back to --compressed" "$TK"
+  echo "not ok 3 - adb-currentfocus --toolkit bounds dump timeout and falls back to --compressed"
 fi
 
-# 5. All 6 scripts report 'more than one device connected' accurately instead of 'no device connected'
-MULTI_OK=1
-MULTI_FAIL_MSG=""
-for cmd in \
-  "$SCRIPTS/adb-screenshot -o $WORK/x.png" \
-  "$SCRIPTS/adb-uihierarchy -" \
-  "$SCRIPTS/adb-currentfocus" \
-  "$SCRIPTS/adb-demo on" \
-  "$SCRIPTS/adb-battery-stats" \
-  "$SCRIPTS/adb-fontscale get"; do
-  # shellcheck disable=SC2086
-  err=$(MOCK_DEVICES=2 run_mock $cmd 2>&1 || true)
-  if [[ "$err" != *"more than one device connected"* ]]; then
-    MULTI_OK=0
-    MULTI_FAIL_MSG="$cmd -> $err"
-    break
-  fi
-done
-if [[ $MULTI_OK -eq 1 ]]; then
-  ok "all 6 adb scripts report 'more than one device connected' instead of 'no device connected'"
-else
-  not_ok "all 6 adb scripts report 'more than one device connected' instead of 'no device connected'" "$MULTI_FAIL_MSG"
-fi
-
-# 6. adb-activities optional [PACKAGE] filter restricts output to the named package
 ACT_OUT=$(run_mock "$SCRIPTS/adb-activities" com.example.app)
 if [[ "$ACT_OUT" == "L    com.example.app/com.example.app.MainActivity" ]]; then
-  ok "adb-activities [PACKAGE] filters output to the specified package"
+  echo "ok 4 - adb-activities [PACKAGE] filters output to the specified package"
 else
-  not_ok "adb-activities [PACKAGE] filters output to the specified package" "$ACT_OUT"
+  echo "not ok 4 - adb-activities [PACKAGE] filters output to the specified package"
 fi
-
-# 7. packagename pull supports -o / --output PATH, strips \r, and prefers base.apk
-run_mock "$SCRIPTS/packagename" pull -o "$WORK/pulled/custom.apk" com.example.app >/dev/null
-if [[ -f "$WORK/pulled/custom.apk" && "$(<"$WORK/pulled/custom.apk")" == "APK_FROM_base.apk" ]]; then
-  ok "packagename pull supports -o/--output, strips CR, and pulls base.apk"
-else
-  not_ok "packagename pull supports -o/--output, strips CR, and pulls base.apk"
-fi
-
-echo "1..$TESTNUM"

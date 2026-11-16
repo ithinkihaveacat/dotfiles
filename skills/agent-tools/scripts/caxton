@@ -409,24 +409,6 @@ def server_timeout_headers(timeout_sec: float | None) -> dict[str, str] | None:
     return {"X-Server-Timeout": str(max(math.ceil(timeout_sec), SERVER_TIMEOUT_FLOOR))}
 
 
-def retry_budget_exhausted(
-    retry_wait_seconds: float,
-    sleep_sec: float,
-    budget_seconds: float,
-    timeout_retries: int = 0,
-    max_timeout_retries: int | None = None,
-) -> bool:
-    """Whether another retry would exceed the backoff wait or timeout cap.
-
-    Tracks cumulative backoff sleep rather than wall-clock time since the first
-    failure so a large-context turn whose per-attempt read timeout exceeds
-    `budget_seconds` is not aborted after a single retry.
-    """
-    if max_timeout_retries is not None and timeout_retries >= max_timeout_retries:
-        return True
-    return retry_wait_seconds + sleep_sec > budget_seconds
-
-
 def request_timeout(estimate: int, override: int | None = None) -> float | None:
     """Seconds to wait for one API response, or None for no limit.
 
@@ -2878,12 +2860,9 @@ Once your work is complete, you MUST call complete_task(success=True, report="..
                     sleep_sec = backoff_delay(
                         attempt, server_backoff_base, max_backoff, random.random()
                     )
-                    if retry_budget_exhausted(
-                        server_wait_seconds,
-                        sleep_sec,
-                        server_retry_timeout,
-                        timeout_retries,
-                        MAX_TIMEOUT_RETRIES,
+                    if (
+                        timeout_retries >= MAX_TIMEOUT_RETRIES
+                        or server_wait_seconds + sleep_sec > server_retry_timeout
                     ):
                         event["action"] = "failed: retries exhausted"
                         raise RuntimeError(
@@ -2937,9 +2916,7 @@ Once your work is complete, you MUST call complete_task(success=True, report="..
                             f"API error 429 ({msg}). Rate limited; pacing to"
                             f" ~{format_tokens(limiter.limit() or 0)} tokens/min"
                         )
-                    if retry_budget_exhausted(
-                        rate_wait_seconds, sleep_sec, rate_retry_timeout
-                    ):
+                    if rate_wait_seconds + sleep_sec > rate_retry_timeout:
                         event["action"] = "failed: retries exhausted"
                         print(
                             f"[caxton] Error: still rate limited after"
@@ -2956,9 +2933,7 @@ Once your work is complete, you MUST call complete_task(success=True, report="..
                         attempt, server_backoff_base, max_backoff, random.random()
                     )
                     why = f"API error {e.code} ({msg}). Retrying with backoff"
-                    if retry_budget_exhausted(
-                        server_wait_seconds, sleep_sec, server_retry_timeout
-                    ):
+                    if server_wait_seconds + sleep_sec > server_retry_timeout:
                         raise
                     server_wait_seconds += sleep_sec
                 attempt += 1

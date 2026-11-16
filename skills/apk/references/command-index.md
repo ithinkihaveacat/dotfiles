@@ -19,21 +19,19 @@
 ```text
 Usage: apk-decode [OPTIONS] APK_FILE
 
-Decodes an APK file, split-APK archive, or split directory using apktool and
-outputs the directory path.
+Decodes an APK file using apktool and outputs the directory path.
 
 This script uses 'apktool d -s' to decode the APK's resources without
 disassembling DEX bytecode. The path to the output directory is printed to
 standard output.
 
 Arguments:
-  APK_FILE          Path to an APK file, split-APK archive (.zip/.apks), or
-                    directory containing a base APK.
+  APK_FILE          Path to an APK file or split-APK archive (.zip/.apks).
 
 Options:
   -o, --output DIR  The directory to decode the APK into.
                     (defaults to a new temporary directory)
-  -h, --help        Display this help message and exit
+  --help            Display this help message and exit
 
 Examples:
   # Decode an APK into a new temporary directory
@@ -88,26 +86,22 @@ Examples:
 ```text
 Usage: apk-install-and-launch [OPTIONS] APK_FILE
 
-Installs and launches an Android application from an APK, split-APK archive,
-or split directory.
+Installs and launches an Android application from an APK or ZIP archive.
 
-The script handles standalone APK files, ZIP/APKS archives containing split
-APKs, or directories containing split APKs. It automatically determines the
-package name and main launchable activity.
+The script can handle single APK files or ZIP archives containing split APKs.
+It automatically determines the package name and main launchable activity.
 
 Arguments:
-  APK_FILE    Path to the APK file, split-APK archive (.zip/.apks), or split
-              directory to install.
+  APK_FILE    Path to the APK or ZIP file to install.
 
 Options:
-  -s, --serial SERIAL
-              Target device serial; must precede APK_FILE.
   -f          Force uninstall the application before installing.
-  -h, --help  Display this help message and exit
+  --help      Display this help message and exit
 
 Environment:
   ANDROID_SERIAL  Serial number of device to connect to (see 'adb devices -l').
-                  The --serial option takes precedence when both are set.
+                  To target a specific device, use:
+                    env ANDROID_SERIAL=<serial> apk-install-and-launch
 
 Examples:
   # Install and launch a standard APK
@@ -115,9 +109,6 @@ Examples:
 
   # Uninstall the existing version, then install and launch a split APK from a ZIP
   apk-install-and-launch -f my-app.zip
-
-  # Install on a specific connected device
-  apk-install-and-launch -s emulator-5554 ./app-splits/
 
 If this script breaks, it's probably because apkanalyzer doesn't
 work. See if running "apkanalyzer" by itself emits its help page, or
@@ -142,11 +133,11 @@ output directory. It handles both vector drawables (XML) and raster images (PNG)
 and picks the highest density version available.
 
 Arguments:
-  APK_FILE    Path to an APK file, split-APK archive (.zip/.apks), or split directory.
+  APK_FILE    Path to an APK file or a ZIP archive containing a base split APK.
 
 Options:
   -o, --output DIR  The directory to save the icons to. Defaults to the current directory.
-  -h, --help        Display this help message and exit
+  --help            Display this help message and exit
 
 Examples:
   # Extract launcher icons to the current directory
@@ -271,9 +262,6 @@ Predicates:
   --declares METHOD         The class declares METHOD.
   --calls [CLASS]->METHOD   A method of the class invokes METHOD (invoke-*).
                             Omit CLASS to match any receiver type.
-  --field PATTERN           The class declares or accesses a field matching
-                            [CLASS->][NAME][:TYPE] (e.g. cacheSize,
-                            :Lcom/example/Repository;, or Foo->bar:I).
   --string PATTERN          A string literal in the class (const-string or
                             static field initializer) contains PATTERN.
   --annotated-with CLASS    The class carries a class-level annotation of
@@ -284,14 +272,13 @@ Predicates:
   METHOD is NAME, NAME(PARAMS) (any return type), or NAME(PARAMS)RETURN, for
   example onTrimMemory, onTrimMemory(I), or onTrimMemory(I)V. CLASS is a type
   descriptor (Lcom/example/Foo;) or a dotted name (com.example.Foo).
-  --field and --string may be given more than once.
 
 Options:
   --package, --pkg PREFIX   Restrict search to classes under package PREFIX
                             (e.g. com.example.feature) before reading entries.
   --methods                 Print the matching methods (CLASS->METHOD) instead
-                            of classes; requires --declares, --calls, --field,
-                            or --string.
+                            of classes; requires --declares, --calls, or
+                            --string.
   -h, --help                Display this help message and exit.
 
 Exit Status:

@@ -1,33 +1,25 @@
 #!/usr/bin/env bash
 
-# Tests: skills/apk/tests/test-apk-info
-
-set -euo pipefail
-
 usage() {
   cat <<EOF
 Usage: $(basename "$0") [OPTIONS] APK_FILE
 
-Installs and launches an Android application from an APK, split-APK archive,
-or split directory.
+Installs and launches an Android application from an APK or ZIP archive.
 
-The script handles standalone APK files, ZIP/APKS archives containing split
-APKs, or directories containing split APKs. It automatically determines the
-package name and main launchable activity.
+The script can handle single APK files or ZIP archives containing split APKs.
+It automatically determines the package name and main launchable activity.
 
 Arguments:
-  APK_FILE    Path to the APK file, split-APK archive (.zip/.apks), or split
-              directory to install.
+  APK_FILE    Path to the APK or ZIP file to install.
 
 Options:
-  -s, --serial SERIAL
-              Target device serial; must precede APK_FILE.
   -f          Force uninstall the application before installing.
-  -h, --help  Display this help message and exit
+  --help      Display this help message and exit
 
 Environment:
   ANDROID_SERIAL  Serial number of device to connect to (see 'adb devices -l').
-                  The --serial option takes precedence when both are set.
+                  To target a specific device, use:
+                    env ANDROID_SERIAL=<serial> $(basename "$0")
 
 Examples:
   # Install and launch a standard APK
@@ -36,9 +28,6 @@ Examples:
   # Uninstall the existing version, then install and launch a split APK from a ZIP
   $(basename "$0") -f my-app.zip
 
-  # Install on a specific connected device
-  $(basename "$0") -s emulator-5554 ./app-splits/
-
 If this script breaks, it's probably because apkanalyzer doesn't
 work. See if running "apkanalyzer" by itself emits its help page, or
 an error. If an error, you probably want to check that JAVA_HOME is
@@ -46,6 +35,38 @@ set to the right version of java.
 EOF
   exit 0
 }
+
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" ]]; then
+  usage
+fi
+
+shopt -s nullglob
+set -euo pipefail
+
+require() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo >&2 "$(basename "$0"): $1 not found"
+    exit 127
+  }
+}
+
+require adb
+require apkanalyzer
+require xpath
+require unzip
+
+UNINSTALL=false
+while getopts "f" opt; do
+  case $opt in
+    f)
+      UNINSTALL=true
+      ;;
+    \?)
+      exit 1
+      ;;
+  esac
+done
+shift $((OPTIND - 1))
 
 usage_short() {
   cat <<EOF >&2
@@ -61,137 +82,26 @@ EOF
   exit 1
 }
 
-UNINSTALL=false
-
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --help | -h | help)
-      usage
-      ;;
-    -s | --serial)
-      if [[ -z "${2:-}" ]]; then
-        echo "$(basename "$0"): $1 option requires an argument" >&2
-        exit 1
-      fi
-      export ANDROID_SERIAL="$2"
-      shift 2
-      ;;
-    -f)
-      UNINSTALL=true
-      shift
-      ;;
-    --)
-      shift
-      break
-      ;;
-    -*)
-      echo "$(basename "$0"): unknown option: $1" >&2
-      exit 1
-      ;;
-    *)
-      break
-      ;;
-  esac
-done
-
-for arg in "${@:2}"; do
-  case "$arg" in
-    -s | --serial)
-      echo "$(basename "$0"): $arg must precede APK_FILE" >&2
-      exit 1
-      ;;
-  esac
-done
-
 if [ -z "${1:-}" ]; then
   usage_short
 fi
 
-shopt -s nullglob
-
-require() {
-  command -v "$1" >/dev/null 2>&1 || {
-    echo >&2 "$(basename "$0"): $1 not found"
-    exit 127
-  }
-}
-
-require adb
-require apkanalyzer
-require xpath
-require unzip
-
-if [ ! -e "$1" ]; then
+if [ ! -f "$1" ]; then
   echo "$(basename "$0"): $1: No such file or directory" >&2
   exit 1
 fi
 
-if ! DEVICE_ERROR=$(adb get-state 2>&1 >/dev/null); then
-  if [[ "$DEVICE_ERROR" == *"more than one"* ]]; then
-    echo "$(basename "$0"): more than one device connected; use --serial or set ANDROID_SERIAL" >&2
-  elif [[ -n "${ANDROID_SERIAL:-}" ]]; then
-    echo "$(basename "$0"): device '$ANDROID_SERIAL' not available" >&2
-  else
-    echo "$(basename "$0"): no device connected" >&2
-  fi
-  exit 1
-fi
-
-is_base_apk_name() {
-  local lower_name
-  lower_name=$(basename "$1" | tr '[:upper:]' '[:lower:]')
-  case "$lower_name" in
-    base.apk | *-base-split.apk | *base-master.apk) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
-TMPDIR_EXTRACT=""
-cleanup() {
-  if [ -n "${TMPDIR_EXTRACT:-}" ] && [ -d "$TMPDIR_EXTRACT" ]; then
-    rm -rf -- "$TMPDIR_EXTRACT"
-  fi
-}
-trap cleanup EXIT
-
-MULTI_INSTALL=false
-APKS=()
-BASEAPK=""
-
-if [ -d "$1" ]; then
-  MULTI_INSTALL=true
-  APKS=("$1"/*.apk)
-  for candidate in "${APKS[@]}"; do
-    if is_base_apk_name "$candidate"; then
-      BASEAPK="$candidate"
-      break
-    fi
-  done
-  if [ -z "$BASEAPK" ]; then
-    echo "$(basename "$0"): no base APK (base.apk, base-master.apk, or *-base-split.apk) found in $1" >&2
+if [[ "$1" == *.zip || "$1" == *.apks ]]; then
+  TMPDIR=$(mktemp -d)
+  trap 'rm -rf -- "$TMPDIR"' EXIT
+  unzip -q -j "$1" '*.apk' -d "$TMPDIR"
+  BASEAPKS=("$TMPDIR"/base.apk "$TMPDIR"/*base-master.apk "$TMPDIR"/*-base-split.apk)
+  BASEAPK="${BASEAPKS[0]:-}"
+  if [ ! -f "$BASEAPK" ]; then
+    echo "$(basename "$0"): no base APK found in $1, aborting" >&2
     exit 1
   fi
-elif [ ! -f "$1" ]; then
-  echo "$(basename "$0"): $1: Not a regular file or directory" >&2
-  exit 1
-elif [[ "$1" == *.zip || "$1" == *.apks ]]; then
-  MULTI_INSTALL=true
-  TMPDIR_EXTRACT=$(mktemp -d)
-  unzip -q "$1" -d "$TMPDIR_EXTRACT"
-  APKS=("$TMPDIR_EXTRACT"/*.apk)
-  if [ ${#APKS[@]} -eq 0 ] && [ -d "$TMPDIR_EXTRACT/splits" ]; then
-    APKS=("$TMPDIR_EXTRACT"/splits/*.apk)
-  fi
-  for candidate in "${APKS[@]}"; do
-    if is_base_apk_name "$candidate"; then
-      BASEAPK="$candidate"
-      break
-    fi
-  done
-  if [ -z "$BASEAPK" ]; then
-    echo "$(basename "$0"): no base APK (base.apk, base-master.apk, or *-base-split.apk) found in $1" >&2
-    exit 1
-  fi
+  APKS=("$TMPDIR"/*.apk)
 else
   BASEAPK="$1"
 fi
@@ -203,9 +113,9 @@ if [ "$UNINSTALL" = "true" ]; then
   adb uninstall "$PACKAGE" || true
 fi
 
-if [ "$MULTI_INSTALL" = "true" ]; then
+if [[ "$1" == *.zip || "$1" == *.apks ]]; then
   adb install-multiple -g -t -r "${APKS[@]}"
-else
+else # assume regular APK
   adb install -g -t -r "$1"
 fi
 

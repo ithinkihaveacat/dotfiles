@@ -78,7 +78,6 @@ complete -c packagename -f -n '__fish_packagename_using_command tiles' -a '(__fi
 complete -c packagename -f -n '__fish_packagename_using_command profile-status' -a '(__fish_packagename_list_packages)' -d Package
 complete -c packagename -f -n '__fish_packagename_using_command profile-generate' -a '(__fish_packagename_list_packages)' -d Package
 complete -c packagename -f -n '__fish_packagename_using_command pull' -a '(__fish_packagename_list_packages)' -d Package
-complete -c packagename -n '__fish_packagename_using_command pull' -s o -l output -r -F -d 'Output file or directory path'
 complete -c packagename -f -n '__fish_packagename_using_command uninstall' -a '(__fish_packagename_list_packages)' -d Package
 complete -c packagename -f -n '__fish_packagename_using_command clear-cache' -a '(__fish_packagename_list_packages)' -d Package
 complete -c packagename -f -n '__fish_packagename_using_command reset-permissions' -a '(__fish_packagename_list_packages)' -d Package

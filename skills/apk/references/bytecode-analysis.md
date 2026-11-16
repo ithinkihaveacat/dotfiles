@@ -43,17 +43,15 @@ lossless rendering of the DEX file:
    name, and `apk-smali show annotations TREE com.example.MyService` or
    `apk-smali show class TREE com.example.MyService` gives the bytecode.
 1. **Search structurally, not textually.** Prefer `apk-smali find` predicates
-   (`--declares`, `--calls`, `--field`, `--string`, `--extends`, `--implements`,
+   (`--declares`, `--calls`, `--string`, `--extends`, `--implements`,
    `--annotated-with`, plus `--package` to scope large archives) to grepping for
    class or method names. R8 renames bundled library classes (such as Google
-   Play Services `DataClient`/`MessageClient`/`WearableListenerService`,
-   AndroidX `OngoingActivity`, or Jetpack Compose and Tiles classes) alongside
-   app-internal code unless consumer ProGuard rules keep them. Only Android
-   framework APIs (`Landroid/...;`, `Ljava/...;`, `Ldalvik/...;`), components
-   registered in `AndroidManifest.xml`, AIDL interface descriptors, and
-   consumer-kept `Parcelable` classes reliably survive renaming—anchor queries
-   on those kept descriptors, manifest entry points, `--string` URI/action
-   constants, and `--field` types.
+   Play Services `DataClient`/`MessageClient`, AndroidX `OngoingActivity`, or
+   Jetpack Compose/Tiles classes) alongside app-internal code unless consumer
+   ProGuard rules keep them. Only Android framework APIs (`Landroid/...;`,
+   `Ljava/...;`), manifest components, AIDL descriptors, and kept `Parcelable`
+   classes reliably survive renaming—anchor queries on those kept descriptors,
+   manifest entry points, and `--string` URI/action constants.
 1. **Read the code path.**
    `apk-smali show method -n TREE CLASS 'name(desc)' --depth 2` prints a method
    together with the same-class helpers it calls and exact 1-based `.smali` file

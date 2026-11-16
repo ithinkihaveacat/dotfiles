@@ -147,7 +147,7 @@ on userdebug builds); user builds cannot export.
 ### Package Operations
 
 - `scripts/packagename`: Comprehensive package tool (`launch`, `force-stop`,
-  `uninstall`, `clear-cache`, `pull -o PATH`, `tiles`, `dumpsys` for manifest
+  `uninstall`, `clear-cache`, `pull`, `tiles`, `dumpsys` for manifest
   components, `services` for running services, `logcat`, `jobscheduler`).
 - `scripts/adb-packages`: List installed packages.
 

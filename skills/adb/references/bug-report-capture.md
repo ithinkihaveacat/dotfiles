@@ -39,14 +39,12 @@ scripts/adb-log "END_REPRO"
 kill $LOGCAT_PID
 ```
 
-> [!IMPORTANT] **Non-Interactive Subshells & Agent Harnesses**: In command
-> runners where each shell invocation executes in an ephemeral process group
-> that is reaped on exit, `adb logcat > continuous_log.txt &` terminates as soon
-> as that command returns. Instead, either start `adb logcat` using the
-> harness's dedicated daemon/background task mode, bound the capture inside the
-> same shell call (`timeout 30s adb -s "$SERIAL" logcat -v time > log.txt`), or
-> enlarge the on-device ring buffer (`adb logcat -G 16M && adb logcat -c`) and
-> dump once after reproduction (`adb logcat -d -v time > log.txt`).
+> [!IMPORTANT] **Ephemeral Subshells**: Where each command runs in a subshell
+> that reaps background children on exit, `adb logcat ... &` dies immediately.
+> Use a background task mode, bound capture in one call
+> (`timeout 30s adb logcat -v time > log.txt`), or enlarge the ring buffer
+> (`adb logcat -G 16M && adb logcat -c`) and dump after
+> (`adb logcat -d > log.txt`).
 
 ## Execution Workflow
 

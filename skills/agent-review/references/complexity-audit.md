@@ -215,20 +215,14 @@ and left alone, including candidates dropped in Pass 2 or Pass 4.
   unless explicitly asked. Run every candidate fix, build, test, and review pass
   in isolated copies so nothing interferes with the original or with other
   passes.
-- Guard against ambient-root CLIs before running project binaries or scripts:
-  many local CLIs resolve their target workspace from an environment variable or
-  default path (such as `$HOME` or a live checkout) rather than `pwd`. Export
-  explicit root/config overrides (e.g., `TASKGO_ROOT`, `XDG_CONFIG_HOME`,
-  `XDG_STATE_HOME`) or pass `--root <isolated-copy>` in your wrapper environment
-  before invoking the binary—even for `--help` or smoke probes—and verify
-  `git status` and `HEAD` of the original checkout and any ambient live
-  repositories afterward.
-- Avoid application network calls and paid services, and keep tool caches,
-  state, and temporary files inside your scratch directory so tests and trials
-  stay hermetic. If an `--offline` build fails only because standard build
-  plugins or toolchain dependencies have not been cached on the host yet,
-  performing a one-time baseline dependency warm-up into the isolated cache is
-  acceptable so offline builds and tests can run.
+- Guard against ambient-root CLIs that resolve their workspace from environment
+  variables or `$HOME` instead of `pwd`: export explicit root/config overrides
+  (`TASKGO_ROOT`, `XDG_CONFIG_HOME`, `XDG_STATE_HOME`) or pass
+  `--root <isolated-copy>`, and verify `git status`/`HEAD` of the live checkout
+  afterward.
+- Avoid application network calls and paid services; keep tool caches and state
+  in your scratch directory (a one-time build-plugin warm-up into the isolated
+  cache is fine if `--offline` fails on cold hosts).
 - Do not run project tools against live data or credentials, and do not stop
   processes by broad pattern.
 - If tests fail on the untouched project, record it and carry on.

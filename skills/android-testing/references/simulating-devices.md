@@ -62,10 +62,9 @@ pipelines locally against a synthetic `Configuration` and display profile:
 | Doze mode, App Standby buckets, battery levels, and radio failover         |         No          |         **Yes**         |
 | Cross-device Wearable Data Layer sync (`DataClient`, `MessageClient`)      |  Yes (`--pair`)\*   |    **Yes (Paired)**     |
 
-*\*Host-JVM runners that support paired app launch (e.g.,
+*\*Host-JVM runners supporting `--pair` (e.g.,
 `compose-preview launch <phone.apk> --pair <watch.apk> --headless --control stdio`)
-can bridge `DataClient` / `MessageClient` flows in-process when `/dev/kvm` is
-unavailable for QEMU emulators.*
+bridge `DataClient`/`MessageClient` in-process when `/dev/kvm` is unavailable.*
 
 ______________________________________________________________________
 
@@ -95,19 +94,14 @@ The system image variant determines whether `adb root` is available:
 
 ### Headless Launch & Boot Readiness
 
-On Linux hosts, verify hardware virtualization acceleration (`[ -e /dev/kvm ]`)
-before starting an x86_64 QEMU emulator—unnested virtual machines without
-`/dev/kvm` cannot boot x86_64 AVDs and should use host-JVM simulation (such as
-`compose-preview`) or a remote device instead.
-
-When starting an emulator from the command line or CI without a display window,
-pass
+When starting an emulator from the command line or CI without a display window
+(requiring `/dev/kvm` on Linux for x86_64 QEMU AVDs; use `compose-preview` or a
+remote device when `/dev/kvm` is absent), pass
 `-no-window -no-audio -no-boot-anim -gpu swiftshader_indirect -no-snapshot-save`
 and wait for both `sys.boot_completed=1` and the Package Manager service before
 issuing setup commands:
 
 ```bash
-# On Linux, check KVM availability before launching local x86_64 QEMU AVDs
 [ "$(uname -s)" != "Linux" ] || [ -e /dev/kvm ] || { echo "/dev/kvm unavailable" >&2; exit 1; }
 
 emulator @<avd_name> -no-window -no-audio -no-boot-anim \

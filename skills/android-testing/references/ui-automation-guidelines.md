@@ -53,10 +53,9 @@ State validation is designed to be observable, chronological, and verifiable.
 - **Dynamic Element Interaction (No Blind Taps)**:
   - Never send blind coordinate taps (e.g., `adb shell input tap 250 800`) if
     the layout is dynamic.
-  - Dump the active view hierarchy (`adb-uihierarchy` if available, or
+  - Dump the active view hierarchy (`adb-uihierarchy`, or
     `timeout 10s adb exec-out uiautomator dump --compressed /dev/stdout` so
-    continuous workout timers or map animations do not block `waitForIdle()`
-    indefinitely) to parse the layout.
+    animations do not block `waitForIdle()`) to parse the layout.
   - Dynamically calculate and coordinate taps based on the bounding boxes of
     semantic elements (IDs, text labels, content descriptions) to ensure tests
     do not flake across different screen densities, aspect ratios, or form
@@ -103,17 +102,10 @@ dismissed:
   ```bash
   adb shell wm dismiss-keyguard
   ```
-- **Clear Android 16/17+ `alternate_bouncer` Overlay**: On Android 16/17+ phones
-  (API 36/37), `wm dismiss-keyguard` can leave
-  `com.android.systemui:id/alternate_bouncer` covering the foreground app. If
-  `dumpsys window` or the UI hierarchy still shows `alternate_bouncer` or
-  `StatusBarKeyguardViewManager`, send `KEYCODE_MENU` or an upward swipe to
-  dismiss it:
-  ```bash
-  adb shell input keyevent KEYCODE_MENU
-  # Or swipe up on the lock screen:
-  adb shell input swipe 540 2000 540 500 300
-  ```
+- **Clear Android 16/17+ `alternate_bouncer` Overlay**: If `wm dismiss-keyguard`
+  leaves `com.android.systemui:id/alternate_bouncer` covering the foreground
+  app, dismiss it with `adb shell input keyevent KEYCODE_MENU` or
+  `adb shell input swipe 540 2000 540 500 300`.
 
 ### Clean System UI (Demo Mode)
 

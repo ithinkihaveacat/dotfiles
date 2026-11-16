@@ -874,41 +874,14 @@ Base64 budget, default: 300), `-n, --dry-run` (preview changes).
 
 **Exit codes:** 0 success, 1 error.
 
-### socrates
+### socrates & benchmarker
 
-Generate evaluation question sets from reference text into a SQLite database,
-collect answers across models, shell scripts, or interactive responders, score
-responses with an evaluator model, and render Markdown comparison reports.
-
-```bash
-DB_PATH=$(cat context.md | scripts/socrates generate)
-scripts/socrates answer "$DB_PATH" --mode model:gemini-flash-latest
-scripts/socrates score "$DB_PATH"
-scripts/socrates report "$DB_PATH"
-```
-
-**Commands:** `generate`, `answer`, `score`, `status`, `delete`, `questions`,
-`report`
-
-**Exit codes:** 0 success, 1 error
-
-### benchmarker
-
-Generic parallel matrix runner and benchmark harness for AI CLI tools and
-agents. Executes a Cartesian product of `--dim` parameters and `--tasks`
-fixtures across isolated ephemeral Git worktrees, recording structured
-`AGENT_TELEMETRY_JSON`, logs, and diffs into `.benchmarks/`.
-
-```bash
-scripts/benchmarker --dim model=gemini-4-carbon,gemini-flash-latest \
-  --tasks benchmarks/tasks/ --cmd "scripts/oracle --model {model} {prompt}"
-```
-
-**Options:** `-c, --cmd TEMPLATE`, `-d, --dim NAME=VALS`, `-t, --tasks DIR`,
-`-o, --output-dir DIR`, `-n, --trials N`, `-j, --workers N`,
-`--timeout SECONDS`, `--dry-run`, `--telemetry-template`
-
-**Exit codes:** 0 success, 1 error
+- `scripts/socrates`: Generate evaluation question sets into a SQLite database,
+  collect answers (`model:`, `shell:`, `interactive:`), score responses, and
+  render Markdown reports (`scripts/socrates --help`).
+- `scripts/benchmarker`: Parallel matrix runner executing `--dim` × `--tasks`
+  combinations across isolated Git worktrees into `.benchmarks/`
+  (`scripts/benchmarker --help`).
 
 ## Image Encoding Notes
 
