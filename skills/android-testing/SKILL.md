@@ -125,7 +125,10 @@ adb shell cmd IWearGestureService gesture DoublePinch
   bridging (`adb-wear-pair`).
 - **[Network & Power States](references/network-and-power.md)** — Bluetooth
   companion proxy bandwidth limits, 60-second Wi-Fi handoff delays, direct WPA2
-  credential injection, dual bugreports, Doze mode, and battery simulation.
+  credential injection, ~5-second Wear OS background socket teardown
+  (`dumpsys netpolicy`, `InetDiagMessage`), standalone watch FCM verification
+  (`GcmService` watch-wide `HiPri`, `gtalk_*` events, Find Hub positive
+  control), dual bugreports, Doze mode, and battery simulation.
 - **[UI, Display & Physical Inputs](references/ui-and-inputs.md)** — Dynamic
   color themes (API 36+), font scale, display density (DPI), rotary crown and
   wrist keyevents, and Wear OS 7+ One-Handed Gestures (`IWearGestureService`).
@@ -134,10 +137,12 @@ adb shell cmd IWearGestureService gesture DoublePinch
   Services (`whs.*`) synthetic exercise and biometric data.
 - **[Permissions, Application State & OS Behavior](references/permissions-and-os-behavior.md)**
   — Wear OS 5 vs. 6 granular health permissions, Foreground Service types, Watch
-  Face Push permission limits, `FLAG_STOPPED` de-isolation, locale switching,
-  and state persistence across reinstalls (`BackupManager` install-time restore,
-  Play Services `BlockStore`, `WearableService` cross-node `DataItem` cache,
-  `pm disable-user`, and `-i com.android.vending` installer attribution).
+  Face Push permission limits, `FLAG_STOPPED` de-isolation, Cached App Freezer
+  `adb shell run-as` unfreeze observer effect (`am_unfreeze`), locale switching,
+  state persistence across reinstalls (`BackupManager`, `BlockStore`,
+  `WearableService` Data Layer cache), cold-stopped companion `MessageClient` QA
+  (`BadTokenException` & BAL), and `BridgingManager` / `setDismissalId`
+  notification bridging lifecycle.
 - **[Watch Faces & Complications](references/watch-faces-and-complications.md)**
   — Forcing complication updates via `DEBUG_SYSUI` (`adb-complication-update`)
   and simulating ambient mode (`cmd wearable_sensing set-ambient-mode`).

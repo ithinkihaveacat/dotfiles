@@ -1,0 +1,202 @@
+#!/usr/bin/env bash
+#
+# Tests for skills/android-testing/evals/oracles/answer-wear-diagnostic.
+
+set -u
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+ROOT_DIR="$SCRIPT_DIR/.."
+ORACLE="$ROOT_DIR/evals/oracles/answer-wear-diagnostic"
+MANIFEST="$ROOT_DIR/evals/shared-benchmark.json"
+
+TEST_TMP=$(mktemp -d "${TMPDIR:-/tmp}/android-testing-eval-oracles.XXXXXXXX")
+trap 'rm -rf -- "$TEST_TMP"' EXIT
+
+TOTAL_TESTS=22
+TEST_NUM=0
+echo "1..$TOTAL_TESTS"
+
+ok() {
+  TEST_NUM=$((TEST_NUM + 1))
+  echo "ok $TEST_NUM - $1"
+}
+
+not_ok() {
+  TEST_NUM=$((TEST_NUM + 1))
+  echo "not ok $TEST_NUM - $1"
+  shift
+  local line
+  for line in "$@"; do
+    echo "# $line"
+  done
+}
+
+assert_status() {
+  local description="$1" status="$2" expected="$3"
+  if [[ "$status" -eq "$expected" ]]; then
+    ok "$description"
+  else
+    not_ok "$description" "Expected exit $expected, got $status" "STDERR: $STDERR"
+  fi
+}
+
+assert_contains() {
+  local description="$1" haystack="$2" needle="$3"
+  if [[ "$haystack" == *"$needle"* ]]; then
+    ok "$description"
+  else
+    not_ok "$description" "Expected to contain: $needle" "Got: $haystack"
+  fi
+}
+
+run_oracle() {
+  local err_file
+  err_file=$(mktemp "${TMPDIR:-/tmp}/android-testing-oracle-err.XXXXXXXX")
+  STDOUT=$("$ORACLE" "$@" 2>"$err_file")
+  STATUS=$?
+  STDERR=$(cat "$err_file")
+  rm -f -- "$err_file"
+}
+
+# --- Usage & error surface -------------------------------------------------
+
+run_oracle --help
+assert_status "--help exits 0" "$STATUS" 0
+assert_contains "help lists arguments" "$STDOUT" "ANSWER        Path to the file"
+
+run_oracle -h
+assert_status "-h is a help alias" "$STATUS" 0
+
+run_oracle
+assert_status "missing arguments exits 1" "$STATUS" 1
+assert_contains "missing arguments points at --help" "$STDERR" "--help"
+
+run_oracle --bogus
+assert_status "unknown flag exits 1" "$STATUS" 1
+
+printf 'placeholder\n' >"$TEST_TMP/dummy.md"
+
+run_oracle "$TEST_TMP/nonexistent.md" socket-cutoff
+assert_status "missing answer file exits 2" "$STATUS" 2
+assert_contains "missing answer file names path" "$STDERR" "no answer file at"
+
+run_oracle "$TEST_TMP/dummy.md" unknown-rule
+assert_status "unknown rule exits 2" "$STATUS" 2
+
+# --- Manifest validity -----------------------------------------------------
+
+if jq -e '.version == 1 and .skill_name == "android-testing" and (.cases | length) == 11' "$MANIFEST" >/dev/null 2>&1; then
+  ok "shared-benchmark.json parses and has 11 cases"
+else
+  not_ok "shared-benchmark.json parses and has 11 cases" "Invalid manifest at $MANIFEST"
+fi
+
+# --- Rule 1: socket-cutoff -------------------------------------------------
+
+cat >"$TEST_TMP/socket-good.md" <<'EOF'
+Yes, Wear OS destroys the background app's live TCP sockets roughly 5 seconds after
+leaving the screen, even while charging with stay_on_while_plugged_in enabled. Check
+`adb shell dumpsys netpolicy` (APP_BACKGROUND|DATA_SAVER) and logcat tag
+`InetDiagMessage` ("Destroyed live tcp sockets"). Do not run a persistent Foreground
+Service just to keep an idle socket alive; use high-priority FCM push messages instead.
+EOF
+run_oracle "$TEST_TMP/socket-good.md" socket-cutoff
+assert_status "socket-cutoff accepts accurate 5s netpolicy + InetDiagMessage + FCM answer" "$STATUS" 0
+
+cat >"$TEST_TMP/socket-bad-10s-fgs.md" <<'EOF'
+Yes, Wear OS cuts off the socket after roughly 10 seconds via CachedAppOptimizer
+freeze_timeout. Check dumpsys netpolicy. To fix it, you must implement a Foreground
+Service (dataSync or remoteMessaging) to hold the TCP socket open.
+EOF
+run_oracle "$TEST_TMP/socket-bad-10s-fgs.md" socket-cutoff
+assert_status "socket-cutoff rejects 10s CachedAppOptimizer + Foreground Service anti-pattern" "$STATUS" 1
+
+# --- Rule 2: unfreeze-observer ---------------------------------------------
+
+cat >"$TEST_TMP/unfreeze-good.md" <<'EOF'
+Running `adb shell run-as com.example.chat` spawns a process in the app's UID that
+transiently unfreezes (thaws) the cgroup-frozen app for roughly 5 seconds before it
+re-freezes, invalidating the wake-up test. Watch for `am_unfreeze` in the events buffer.
+EOF
+run_oracle "$TEST_TMP/unfreeze-good.md" unfreeze-observer
+assert_status "unfreeze-observer accepts transient thaw + am_unfreeze" "$STATUS" 0
+
+cat >"$TEST_TMP/unfreeze-bad-kill.md" <<'EOF'
+The script inadvertently causes the OS to kill the backgrounded com.example.chat app
+process because eBPF CPU accounting sees cpu usage while frozen under ActivityManager,
+even though CachedAppOptimizer handles unfreezing elsewhere.
+EOF
+run_oracle "$TEST_TMP/unfreeze-bad-kill.md" unfreeze-observer
+assert_status "unfreeze-observer rejects eBPF process-kill hallucination and missing am_unfreeze" "$STATUS" 1
+
+# --- Rule 3: fcm-diagnostics -----------------------------------------------
+
+cat >"$TEST_TMP/fcm-good.md" <<'EOF'
+Check `gtalk_connection` and `gtalk_heartbeat_reset` in `adb logcat -b events`, and run
+`adb shell dumpsys activity service com.google.android.gms/.gcm.GcmService`. Note that
+the hourly `HiPri` counter is watch-wide across all packages on the watch (not per-UID).
+Trigger "Play sound" / Ring from Google Find Hub (Find My Device) as a positive control.
+EOF
+run_oracle "$TEST_TMP/fcm-good.md" fcm-diagnostics
+assert_status "fcm-diagnostics accepts gtalk_* + watch-wide GcmService HiPri + Find Hub" "$STATUS" 0
+
+cat >"$TEST_TMP/fcm-bad-per-uid.md" <<'EOF'
+Run `adb shell dumpsys activity service com.google.android.gms/.gcm.GcmService`, scroll
+to the `App stats:` section and locate the target app's UID to see its FCM bucket metrics,
+and ring the watch from Google Find My Device.
+EOF
+run_oracle "$TEST_TMP/fcm-bad-per-uid.md" fcm-diagnostics
+assert_status "fcm-diagnostics rejects missing gtalk_* and fabricated per-UID App stats" "$STATUS" 1
+
+# --- Rule 4: bridging-lifecycle --------------------------------------------
+
+cat >"$TEST_TMP/bridging-good.md" <<'EOF'
+Do not put static NO_BRIDGING in AndroidManifest.xml. Once signed in and push works,
+disable bridging via `BridgingManager.fromContext(context).setConfig(BridgingConfig.Builder(context, false).build())`,
+re-enable bridging (`true`) on sign-out, and set matching
+`NotificationCompat.WearableExtender().setDismissalId(chatId)` on both phone and watch notifications.
+EOF
+run_oracle "$TEST_TMP/bridging-good.md" bridging-lifecycle
+assert_status "bridging-lifecycle accepts BridgingManager + BridgingConfig + logout + setDismissalId" "$STATUS" 0
+
+cat >"$TEST_TMP/bridging-bad-no-dismissal.md" <<'EOF'
+Use BridgingManager and BridgingConfig.Builder(context, false).build() when logged in,
+and restore true when signed out so pre-login alerts work.
+EOF
+run_oracle "$TEST_TMP/bridging-bad-no-dismissal.md" bridging-lifecycle
+assert_status "bridging-lifecycle rejects answer missing setDismissalId" "$STATUS" 1
+
+cat >"$TEST_TMP/bridging-bad-hallucinated.md" <<'EOF'
+Call BridgingManager.setBridgingMode(BRIDGING_MODE_UNBRIDGED) on sign-in, restore on
+sign-out, and pair with setDismissalId and BridgingConfig.
+EOF
+run_oracle "$TEST_TMP/bridging-bad-hallucinated.md" bridging-lifecycle
+assert_status "bridging-lifecycle rejects hallucinated setBridgingMode API" "$STATUS" 1
+
+# --- Rule 5: companion-cold-start ------------------------------------------
+
+cat >"$TEST_TMP/companion-good.md" <<'EOF'
+Simulate a cold-stopped, locked phone via `adb shell am force-stop com.example.app` and
+`input keyevent KEYCODE_SLEEP`. A background-started WearableListenerService will crash
+with `WindowManager$BadTokenException` ("Unable to add window") if it calls Dialog.show(),
+or hit silent Background Activity Launch (BAL) blocking unless using a notification with
+setFullScreenIntent().
+EOF
+run_oracle "$TEST_TMP/companion-good.md" companion-cold-start
+assert_status "companion-cold-start accepts am force-stop + locked + BadTokenException + BAL" "$STATUS" 0
+
+cat >"$TEST_TMP/companion-bad-missing-badtoken.md" <<'EOF'
+Run `adb shell am force-stop com.example.app` and lock the screen. Starting an Activity
+from WearableListenerService will be blocked by Android 14 Background Activity Launch
+(BAL) unless you post a notification with setFullScreenIntent(), or throw NullPointerException.
+EOF
+run_oracle "$TEST_TMP/companion-bad-missing-badtoken.md" companion-cold-start
+assert_status "companion-cold-start rejects answer missing Dialog.show BadTokenException" "$STATUS" 1
+
+# --- Executable permission check -------------------------------------------
+
+if [[ -x "$ORACLE" ]]; then
+  ok "answer-wear-diagnostic is executable"
+else
+  not_ok "answer-wear-diagnostic is executable" "$ORACLE lacks +x"
+fi
