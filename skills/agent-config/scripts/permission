@@ -1454,18 +1454,58 @@ def compute_skill_rules(name: str, skill_dir: Path) -> tuple[list[str], list[str
     return allow, guard
 
 
+def list_active_skill_entries(strict: bool = True) -> list[dict]:
+    """Return merged skill entries across user and workspace scopes."""
+    by_name: dict[str, dict] = {}
+
+    user_res = subprocess.run(
+        [SKILL_BIN, "--scope", "user", "list", "--json"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if user_res.returncode == 0:
+        try:
+            for entry in json.loads(user_res.stdout or "[]"):
+                if entry.get("name"):
+                    by_name[entry["name"]] = entry
+        except json.JSONDecodeError as e:
+            if strict:
+                die(f"could not parse 'skill --scope user list --json' output: {e}")
+    elif strict:
+        print(user_res.stderr, file=sys.stderr, end="")
+        die("'skill --scope user list' failed")
+
+    cwd_is_bare_home = (
+        Path.cwd().resolve() == Path.home().resolve()
+        and not (Path.home() / ".git").exists()
+    )
+    if not cwd_is_bare_home:
+        ws_res = subprocess.run(
+            [SKILL_BIN, "list", "--json"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if ws_res.returncode != 0:
+            if strict:
+                print(ws_res.stderr, file=sys.stderr, end="")
+                die("'skill list' failed")
+        else:
+            try:
+                for entry in json.loads(ws_res.stdout or "[]"):
+                    if entry.get("name"):
+                        by_name[entry["name"]] = entry
+            except json.JSONDecodeError as e:
+                if strict:
+                    die(f"could not parse 'skill list --json' output: {e}")
+
+    return [by_name[k] for k in sorted(by_name)]
+
+
 def compute_workspace_rules() -> tuple[list[str], list[str]]:
     """Aggregates (allow, guard) patterns over all installed skills."""
-    res = subprocess.run(
-        [SKILL_BIN, "list", "--json"], capture_output=True, text=True, check=False
-    )
-    if res.returncode != 0:
-        print(res.stderr, file=sys.stderr, end="")
-        die("'skill list' failed")
-    try:
-        entries = json.loads(res.stdout or "[]")
-    except json.JSONDecodeError as e:
-        die(f"could not parse 'skill list --json' output: {e}")
+    entries = list_active_skill_entries(strict=True)
 
     allow: list[str] = []
     guard: list[str] = []
@@ -1475,7 +1515,7 @@ def compute_workspace_rules() -> tuple[list[str], list[str]]:
         if not path:
             print(
                 f"permission: warning: skipping {name}: not linked "
-                "(run 'skill add --defaults' to clear broken links)",
+                "(run 'skill prune' to clear broken links)",
                 file=sys.stderr,
             )
             continue
@@ -1500,15 +1540,7 @@ def parse_paths_file(skill_dir: Path) -> list[str]:
 
 def compute_workspace_paths() -> list[str]:
     """Aggregates declared paths over all installed skills."""
-    res = subprocess.run(
-        [SKILL_BIN, "list", "--json"], capture_output=True, text=True, check=False
-    )
-    if res.returncode != 0:
-        return []
-    try:
-        entries = json.loads(res.stdout or "[]")
-    except json.JSONDecodeError:
-        return []
+    entries = list_active_skill_entries(strict=False)
     paths: list[str] = []
     for entry in entries:
         p = entry.get("path")
@@ -1528,7 +1560,7 @@ def cmd_apply(agent: str | None):
     if not allow and not guard and not declared_paths:
         print(
             "apply: no installed skills declare any commands or paths "
-            "(run 'skill add --defaults' to install skills first)",
+            "(install skills with 'skill --scope user add' or 'skill add' first)",
             file=sys.stderr,
         )
         return

@@ -50,27 +50,27 @@ applied.
 What each agent receives, and where it comes from. "Manual" means the setting is
 configured by hand, as described in the script's header.
 
-| Concern                 | Source                                                       | Claude Code                     | Codex                               | Antigravity                         | OpenCode                            |
-| ----------------------- | ------------------------------------------------------------ | ------------------------------- | ----------------------------------- | ----------------------------------- | ----------------------------------- |
-| Global instructions     | `AGENTS.md`, linked by `install.sh`                          | `~/.claude/CLAUDE.md`           | `~/.codex/AGENTS.md`                | `~/.gemini/GEMINI.md`               | `~/.config/opencode/AGENTS.md`      |
-| Launch wrapper          | `fish/functions/<agent>.fish`                                | Session directory and preflight | Sandbox defaults and preflight      | Preflight                           | Preflight                           |
-| Preflight               | `fish/functions/_agent_preflight.fish`                       | Session-scope default skills    | Workspace default skills, git hooks | Workspace default skills, git hooks | Workspace default skills, git hooks |
-| Commit-hook safety net  | `hooks/ensure-commit-hooks`                                  | `~/.claude/settings.json`       | None                                | `agy/hooks/PreToolUse`              | `plugins/ensure-commit-hooks.ts`    |
-| Status line             | `<agent>/statusline.sh`                                      | Manual                          | None                                | Manual                              | None                                |
-| Skills                  | `skill` ([agent-config](../../skills/agent-config/SKILL.md)) | Workspace, session, user        | Workspace, user                     | Workspace, session, user            | Workspace                           |
-| Command permissions     | `permission` (agent-config)                                  | Yes                             | Yes                                 | Yes                                 | No                                  |
-| MCP servers             | `mcp` (agent-config)                                         | Yes                             | Yes                                 | No                                  | Yes                                 |
-| Andon plugin            | [`plugins/andon/`](../../skills/agent-config/plugins/andon/) | `claude/`                       | `chatgpt/`                          | No                                  | `opencode/`                         |
-| Directory pre-approvals | `permission path add`, run by `install.sh`                   | Yes                             | Yes                                 | Yes                                 | No                                  |
+| Concern                 | Source                                                       | Claude Code                     | Codex                          | Antigravity               | OpenCode                         |
+| ----------------------- | ------------------------------------------------------------ | ------------------------------- | ------------------------------ | ------------------------- | -------------------------------- |
+| Global instructions     | `AGENTS.md`, linked by `install.sh`                          | `~/.claude/CLAUDE.md`           | `~/.codex/AGENTS.md`           | `~/.gemini/GEMINI.md`     | `~/.config/opencode/AGENTS.md`   |
+| Launch wrapper          | `fish/functions/<agent>.fish`                                | Session directory and preflight | Sandbox defaults and preflight | Preflight                 | Preflight                        |
+| Preflight               | `fish/functions/_agent_preflight.fish`                       | Skill prune and git hooks       | Skill prune and git hooks      | Skill prune and git hooks | Skill prune and git hooks        |
+| Commit-hook safety net  | `hooks/ensure-commit-hooks`                                  | `~/.claude/settings.json`       | None                           | `agy/hooks/PreToolUse`    | `plugins/ensure-commit-hooks.ts` |
+| Status line             | `<agent>/statusline.sh`                                      | Manual                          | None                           | Manual                    | None                             |
+| Skills                  | `skill` ([agent-config](../../skills/agent-config/SKILL.md)) | Workspace, session, user        | Workspace, user                | Workspace, session, user  | Workspace, user                  |
+| Command permissions     | `permission` (agent-config)                                  | Yes                             | Yes                            | Yes                       | No                               |
+| MCP servers             | `mcp` (agent-config)                                         | Yes                             | Yes                            | No                        | Yes                              |
+| Andon plugin            | [`plugins/andon/`](../../skills/agent-config/plugins/andon/) | `claude/`                       | `chatgpt/`                     | No                        | `opencode/`                      |
+| Directory pre-approvals | `permission path add`, run by `install.sh`                   | Yes                             | Yes                            | Yes                       | No                               |
 
-Codex reads skills from the shared `.agents/skills` directory and has no session
-scope (see
+Codex reads skills from `.agents/skills` in workspaces and `~/.agents/skills` in
+user scope, and has no session scope (see
 [the agent-config model](../../skills/agent-config/references/model.md#launchers-and-per-session-skills)).
-OpenCode reads the same shared directory (and `.claude/skills`) directly, so
-workspace links work there, but `skill` has no OpenCode backend: there is no
-session scope and no user scope. The Codex Andon plugin lives in `chatgpt/`
-because it also serves the ChatGPT desktop app. `install.sh` links the OpenCode
-Andon adapter from `skills/agent-config/plugins/andon/opencode` into
+OpenCode reads the same shared `.agents/skills` and `~/.agents/skills`
+directories (plus `.claude/skills`), so workspace and user-scope links work
+there, with no session scope. The Codex Andon plugin lives in `chatgpt/` because
+it also serves the ChatGPT desktop app. `install.sh` links the OpenCode Andon
+adapter from `skills/agent-config/plugins/andon/opencode` into
 `~/.config/opencode/plugins/andon`; that plugin's README covers manual installs.
 
 ## Adding an agent
@@ -78,8 +78,8 @@ Andon adapter from `skills/agent-config/plugins/andon/opencode` into
 1. **Instructions:** in `feature_agents` in `install.sh`, link `AGENTS.md` to
    the agent's global instructions path, gated on the agent's binary.
 1. **Launcher:** add `fish/functions/<agent>.fish`, calling `_agent_preflight`
-   if the agent runs in a repository and should get default skills and git hooks
-   at launch.
+   if the agent runs in a repository and should verify skill health and git
+   hooks at launch.
 1. **Adapters:** put files only this agent reads under `etc/agents/<agent>/`,
    and link or register them in `feature_agents`. Add a row to the
    [Overlay-aware paths](../../README.md#overlay-aware-paths) table for each.

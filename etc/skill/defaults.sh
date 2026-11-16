@@ -1,14 +1,14 @@
 #!/bin/sh
-# Default skills, linked into each wrapped agent's workspace or session at
-# launch ('skill add --defaults'). install.sh runs this file, then the
-# overlays' own etc/skill/defaults.sh.
+# Default skills, linked into the user scope (~/.claude/skills, ~/.agents/skills,
+# ~/.gemini/config/skills) so every agent sees them without per-workspace seeding.
+# install.sh runs this file, then the overlays' own etc/skill/defaults.sh.
 #
-# To stop shipping a default, change its 'add' to a 'remove' (rather than
-# deleting the name), so machines that already have it drop it; its links then
-# break everywhere and the next 'skill add --defaults' clears them.
+# To stop shipping a default, change its 'add' to 'skill --scope user remove
+# --quiet <name>' (rather than deleting the name), so machines that already
+# have it drop it on their next install.sh run.
 set -e
 
-skill --scope defaults add --quiet \
+skill --scope user add --quiet \
   agent-tools \
   coding-standards \
   workspace-tools \

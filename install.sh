@@ -2207,49 +2207,65 @@ function feature_skills {
 
   heading "skill defaults"
 
-  # Each repo's etc/skill/defaults.sh adds and removes default skills with
-  # `skill --scope defaults`, so overlay skill names stay out of this repo. They
-  # run here rather than at agent launch, which only links the defaults.
+  # Ensure global skill config roots exist before etc/skill/defaults.sh runs
+  # 'skill --scope user add', including in cloud containers before agent CLIs
+  # have been launched.
+  if exists claude; then
+    xmkdir "$HOME/.claude"
+  fi
+  if is_codex_agent; then
+    xmkdir "$HOME/.codex"
+  fi
+  if is_opencode_agent; then
+    xmkdir "$XDG_CONFIG_HOME/opencode"
+  fi
+  if exists agy || exists jetski || [ -d "$HOME/.gemini" ]; then
+    xmkdir "$HOME/.gemini/config"
+  fi
+  if [ ! -d "$HOME/.claude" ] && [ ! -d "$HOME/.codex" ] &&
+    [ ! -d "$XDG_CONFIG_HOME/opencode" ] && [ ! -d "$HOME/.opencode" ] &&
+    [ ! -d "$HOME/.gemini/config" ]; then
+    xmkdir "$HOME/.claude" "$HOME/.agents/skills"
+  fi
+
+  # Remove retired ~/.local/state/skill/defaults directory and any legacy
+  # skills.json reference to it.
+  x rm -rf "$XDG_STATE_HOME/skill/defaults"
+  cleanup_legacy_gemini_skills_json
+
+  # Each repo's etc/skill/defaults.sh adds and removes default skills in the
+  # user scope (`skill --scope user`), so overlay skill names stay out of this
+  # repo and agents load defaults globally without per-workspace seeding.
   for src in "${SRCDIRS[@]}"; do
     [ -f "$src/etc/skill/defaults.sh" ] || continue
     x env PATH="$SRCDIR/bin:$PATH" sh "$src/etc/skill/defaults.sh" ||
       echo "warning: $src/etc/skill/defaults.sh failed" >&2
   done
-
-  # Keep ~/.agents/skills and ~/.claude/skills empty so workspace and session
-  # scoping control which skills Claude Code, Codex, and OpenCode load. For
-  # ~/.gemini/config harnesses (whose workspace symlink confinement drops links
-  # outside the workspace root), feature_agents registers the defaults
-  # directory in ~/.gemini/config/skills.json.
 }
 
-# Register the default skills directory in ~/.gemini/config/skills.json when
-# ~/.gemini/config exists, preserving any existing entries, inherits, or
-# exclusions while keeping ~/.claude/skills and ~/.agents/skills untouched.
-function register_gemini_default_skills {
-  local config_dir="$HOME/.gemini/config" skills_json="$HOME/.gemini/config/skills.json"
-  local defaults_dir="${SKILL_DEFAULTS_DIR:-$XDG_STATE_HOME/skill/defaults}" tmp="$HOME/.gemini/config/skills.json.tmp.$$"
-  [ -d "$config_dir" ] || return 0
-  exists jq || {
-    echo "warning: jq not found; $skills_json not updated" >&2
-    return 0
-  }
-  if [ -s "$skills_json" ] && ! jq -e 'type == "object"' "$skills_json" >/dev/null 2>&1; then
-    echo "warning: $skills_json is not a JSON object; leaving it in place" >&2
-    return 0
-  fi
-  xmkdir "$defaults_dir"
-  if [ -s "$skills_json" ] && jq -e --arg p "$defaults_dir" \
+# Remove any legacy ~/.local/state/skill/defaults entry from
+# ~/.gemini/config/skills.json, deleting the file if nothing else remains.
+function cleanup_legacy_gemini_skills_json {
+  local skills_json="$HOME/.gemini/config/skills.json"
+  local defaults_dir="$XDG_STATE_HOME/skill/defaults" tmp="$HOME/.gemini/config/skills.json.tmp.$$"
+  [ -f "$skills_json" ] || return 0
+  exists jq || return 0
+  jq -e 'type == "object"' "$skills_json" >/dev/null 2>&1 || return 0
+  if ! jq -e --arg p "$defaults_dir" \
     'any(.entries[]?; .path == $p or .path == "~/.local/state/skill/defaults")' "$skills_json" >/dev/null 2>&1; then
     return 0
   fi
-  if (if [ -s "$skills_json" ]; then cat "$skills_json"; else echo "{}"; fi) |
-    jq --arg p "$defaults_dir" '.entries = ((.entries // []) + [{path: $p}])' >"$tmp" &&
-    x mv "$tmp" "$skills_json"; then
-    echo "registered default skills in $skills_json" >&2
+  if jq --arg p "$defaults_dir" '
+    .entries = ((.entries // []) | map(select(.path != $p and .path != "~/.local/state/skill/defaults")))
+    | if (.entries | length) == 0 then del(.entries) else . end
+  ' "$skills_json" >"$tmp"; then
+    if [ "$(jq 'keys | length' "$tmp")" -eq 0 ]; then
+      rm -f "$tmp" "$skills_json"
+    else
+      x mv "$tmp" "$skills_json"
+    fi
   else
     rm -f "$tmp"
-    echo "warning: failed to update $skills_json" >&2
   fi
 }
 
@@ -2330,9 +2346,6 @@ function feature_agents {
     link_overlay_path "etc/agents/agy/hooks.json" "$HOME/.gemini/config/hooks.json"
     link_overlay_path "etc/agents/agy/hooks" "$HOME/.gemini/config/hooks"
   fi
-  if [ -d "$HOME/.gemini/config" ]; then
-    register_gemini_default_skills
-  fi
 
   if is_opencode_agent; then
     xmkdir "$XDG_CONFIG_HOME/opencode/plugins"
@@ -2381,6 +2394,10 @@ function feature_agents {
 
     for ws in "${paths_to_approve[@]}"; do
       if [ -d "$ws/.git" ] || [ -d "$ws/.agents/skills" ]; then
+        if [ -x "$SRCDIR/bin/skill" ]; then
+          (cd "$ws" && x "$SRCDIR/bin/skill" prune --quiet) ||
+            echo "warning: failed to prune legacy skill links in $ws" >&2
+        fi
         (cd "$ws" && x "$permission_tool" apply) ||
           echo "warning: failed to apply permissions in $ws" >&2
       fi
