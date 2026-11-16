@@ -225,97 +225,203 @@ adb exec-out screencap -p > preview.png
 ### Method 3: Standalone Developer Renderer (Widget Tray Viewer)
 
 `WidgetTrayActivity` is a vertical widget carousel ("tray") inside the
-standalone renderer package `com.google.android.wearable.protolayout.renderer`.
-While it runs, it registers `WidgetTrayReceiver`, which accepts ADB broadcasts
-to add, update, remove, list, and export widgets. This removes the need for UI
-automation.
+standalone renderer package `com.google.android.wearable.protolayout.renderer`
+(`exported="true"`, no launcher icon, `MAX_WIDGETS = 25`, sequential widget IDs
+starting at `10001`). While its `ViewModel` is alive, it dynamically registers
+`WidgetTrayReceiver` (`RECEIVER_EXPORTED`, no sender permission), which accepts
+ordered ADB broadcasts to add, update, remove, list, and export widgets without
+UI automation.
 
-- **Renderer flavors**: The tray ships only in the emulator (`.emu`),
-  experimental (`.exp`), and developer (`.dev`) flavors (check the `versionName`
-  suffix). Release and `.dogfood` renderers do not have it. Probe for it with:
-  ```bash
-  adb shell cmd package resolve-activity --brief \
-    -n com.google.android.wearable.protolayout.renderer/com.google.android.clockwork.prototiles.renderer.experimental.WidgetTrayActivity
-  # Prints the component name if present, or "No activity found"
-  ```
-- **Tray broadcasts**: Launch `WidgetTrayActivity` and send ordered broadcasts
-  scoped with `-p` to the renderer package. Results are compact JSON in the
-  ordered-broadcast `data`: `result=-1` for success, `result=0` for errors. A
-  broadcast sent right after `am start` can return `result=0` with no data
-  because the receiver is not registered yet, so retry for a few seconds:
-  ```bash
-  R=com.google.android.wearable.protolayout.renderer
-  A=com.google.android.clockwork.prototiles.action
-  adb shell am start -W -n $R/com.google.android.clockwork.prototiles.renderer.experimental.WidgetTrayActivity
+#### Renderer Flavor & Public Emulator Version Guards
 
-  # Add a widget to the tray (container_type: LARGE or SMALL)
-  adb shell am broadcast -p $R -a $A.ADD_WIDGET \
-    --es component "<PACKAGE>/<SERVICE_CLASS>" --es container_type LARGE
+The tray ships only in the emulator (`.emu`), experimental (`.exp`), and
+developer (`.dev`) renderer flavors (omitted from release and `.dogfood`
+builds). Furthermore, **the `.emu` renderer bundled in the public Wear OS 7.1
+Beta RC1 emulator (`1.6.5.41.*`) predates several newer tray broadcasts and
+container geometry updates**. Always check both activity availability and
+`versionName` before relying on newer broadcasts:
 
-  # List active widgets in the tray
-  adb shell am broadcast -p $R -a $A.GET_WIDGETS
+```bash
+R=com.google.android.wearable.protolayout.renderer
+adb shell cmd package resolve-activity --brief \
+  -n $R/com.google.android.clockwork.prototiles.renderer.experimental.WidgetTrayActivity
+adb shell dumpsys package $R | grep -E 'versionName|versionCode'
+adb shell getprop ro.build.type
+```
 
-  # Request fresh content from a widget's provider (by ID or component)
-  adb shell am broadcast -p $R -a $A.UPDATE_WIDGET --ei widget_id 10001
+| Renderer Build / Flavor                               | `WidgetTrayActivity` UI                      | `ADD_WIDGET` / `UPDATE_WIDGET` / `REMOVE_WIDGET` | `UPLOAD_DOC_WIDGET`                    | `GET_WIDGETS` / `DUMP_RC_DOC` / `--ei tile_id`         | `TOGGLE_CONTENT_OUTLINE`               | Rounded-Rect Container Geometry (`SMALL` / `LARGE` height, radius, padding)             | Logcat `Log.d` / `Log.i`                |
+| :---------------------------------------------------- | :------------------------------------------- | :----------------------------------------------- | :------------------------------------- | :----------------------------------------------------- | :------------------------------------- | :-------------------------------------------------------------------------------------- | :-------------------------------------- |
+| **Release / `.dogfood`**                              | No                                           | No                                               | No                                     | No                                                     | No                                     | N/A                                                                                     | Stripped in release; kept in `.dogfood` |
+| **Public Wear OS 7.1 Beta RC1 `.emu` (`1.6.5.41.*`)** | **Yes** (`MAX_WIDGETS = 25`)                 | **Yes**                                          | **No** (returns `result=0`, no `data`) | **No** (returns `result=0`, no `data`)                 | **No** (returns `result=0`, no `data`) | `88dp` / `112dp` (`<225dp` screen) or `128dp` (`>=225dp`), `26dp` radius, `8dp` padding | **Stripped** (`Log.w`/`Log.e` only)     |
+| **Newer `.emu` (`1.6.6.13`–`1.6.6.*`)**               | **Yes**                                      | **Yes**                                          | **Yes** (`1.6.6+`)                     | **Yes** (`>= 1.6.6.13`; `.rc` file pull requires root) | **No**                                 | `88dp` / `112dp` or `128dp`, `26dp` radius, `8dp` padding                               | **Stripped** (`Log.w`/`Log.e` only)     |
+| **Newer `.emu` (`1.6.7.0`–`1.6.7.4`)**                | **Yes**                                      | **Yes**                                          | **Yes**                                | **Yes** (`.rc` file pull requires root)                | **Yes** (`>= 1.6.7.0`)                 | `88dp` / `112dp` or `128dp`, `26dp` radius, `8dp` padding                               | **Stripped** (`Log.w`/`Log.e` only)     |
+| **Newer `.emu` (`>= 1.6.7.5`)**                       | **Yes**                                      | **Yes**                                          | **Yes**                                | **Yes** (`.rc` file pull requires root)                | **Yes**                                | **`64dp` / `124dp` (all screens), `32dp` radius, `10dp` padding**                       | **Stripped** (`Log.w`/`Log.e` only)     |
+| **`.exp` / `.dev` (`>= 1.6.7.5`)**                    | **Yes** (plus `BenchmarkWidgetTrayActivity`) | **Yes**                                          | **Yes**                                | **Yes** (`.rc` file pull requires root)                | **Yes**                                | `64dp` / `124dp`, `32dp` radius, `10dp` padding (matches version above)                 | **Kept**                                |
 
-  # Remove a widget by ID or component
-  adb shell am broadcast -p $R -a $A.REMOVE_WIDGET --ei widget_id 10001
+- **Distinguishing an older `.emu` build from an unstarted tray**: Because
+  `adb shell am broadcast` sends an ordered broadcast, `WidgetTrayReceiver`
+  replies with `result=-1` (or `result=0` on handled errors) and
+  `data="{\"status\":...}"`. If `am broadcast` returns
+  `Broadcast completed: result=0` with **no `data=` field**, Android dropped the
+  broadcast either because `WidgetTrayActivity` has not finished registering
+  `WidgetTrayReceiver` yet, or because the installed `.emu` build predates that
+  action. To distinguish the two, wake the display
+  (`input keyevent KEYCODE_WAKEUP`), start `WidgetTrayActivity -W`, and verify
+  that a baseline action (`UPDATE_WIDGET` or `ADD_WIDGET`) returns
+  `data="{\"status\":...}"`. If baseline actions return `data` while
+  `GET_WIDGETS`, `DUMP_RC_DOC`, `UPLOAD_DOC_WIDGET`, or `TOGGLE_CONTENT_OUTLINE`
+  return `result=0` without `data`, the installed renderer predates those
+  actions.
 
-  # Export a rendered widget's Remote Compose document (.rc) to device storage
-  adb shell am broadcast -p $R -a $A.DUMP_RC_DOC --ei widget_id 10001
+#### `WidgetTrayActivity` Interactive UI & Container Shapes
 
-  # Render a raw .rc document without installing its app (base64 payload)
-  adb shell am broadcast -p $R -a $A.UPLOAD_DOC_WIDGET \
-    --es doc_b64 "$(base64 -w0 widget.rc)" --es container_type LARGE
-  ```
-  Pass widget IDs as integers (`--ei widget_id`). Component names with a `/`
-  must match exactly. Short names such as `WeatherWidgetService` are matched
-  case-insensitively against installed widget providers.
+When launched on screen, `WidgetTrayActivity` provides three interactive views
+that work across all `.emu`, `.exp`, and `.dev` versions (including `1.6.5.41.*`
+on the public emulator):
+
+1. **Tray Screen**: Displays active widgets in a vertical `ScalingLazyColumn`
+   alongside bottom action buttons for **Add widget**, **Clear all**, **Refresh
+   all** (`updateAllWidgets`), and **Change shape** (opening the Configuration
+   screen). Swiping left on any widget card (`SwipeToReveal`) exposes a
+   **Remove** button and, when the provider declares `configIntentAction` in its
+   XML metadata, an **Edit** button (which launches `configIntentAction` with
+   category `com.google.android.clockwork.tiles.category.PROVIDER_CONFIG` and
+   extras `com.google.android.clockwork.EXTRA_PROVIDER_CONFIG_TILE_ID` and
+   `com.google.android.clockwork.EXTRA_CONFIG_PROVIDER_COMPONENT`).
+1. **Available Providers Screen**: Lists all installed
+   `androidx.glance.wear.action.BIND_WIDGET_PROVIDER` services and their
+   declared `SMALL` / `LARGE` container variants for manual tap-to-add.
+1. **Configuration Screen**: Switches the active container shape specification
+   for the entire tray between **Rounded Rectangle** and **Pill**, and (on
+   renderer `1.6.7.0+`) toggles the **Content Outline** overlay (`1px` magenta
+   border around the inner content box `containerSizeDp - 2 * paddingDp`).
+   Switching shapes triggers an immediate `updateWidgetContainerSpec` pass so
+   every active widget re-queries its provider at the new dimensions:
+   - **Rounded Rectangle**: Width `89.6%` of screen width (`5.2%` side margins).
+     On `1.6.5.41.*`–`1.6.7.4`, heights are `88dp` (`SMALL`) and `112dp`
+     (`<225dp` screen) or `128dp` (`>=225dp` screen) with `26dp` corner radius
+     and `8dp` padding. On `1.6.7.5+`, heights are `64dp` (`SMALL`) and `124dp`
+     (`LARGE`, all screen sizes) with `32dp` corner radius and `10dp` padding.
+   - **Pill**: `SMALL` is `80%` screen width x `32%` screen height; `LARGE` is
+     `89.6%` screen width x `70%` screen height; corner radius is `height / 2`
+     (full capsule) and padding is `0.3 * cornerRadius`.
+
+#### Tray Broadcasts & Workspace Helpers
+
+Launch `WidgetTrayActivity` after waking the display, then send ordered
+broadcasts scoped with `-p` to the renderer package:
+
+```bash
+R=com.google.android.wearable.protolayout.renderer
+A=com.google.android.clockwork.prototiles.action
+adb shell input keyevent KEYCODE_WAKEUP
+adb shell am start -W -n $R/com.google.android.clockwork.prototiles.renderer.experimental.WidgetTrayActivity
+
+# Supported on all tray builds (including public emulator 1.6.5.41.979639625.emu):
+# 1. Add a widget to the tray (container_type: LARGE or SMALL)
+adb shell am broadcast -p $R -a $A.ADD_WIDGET \
+  --es component "<PACKAGE>/<SERVICE_CLASS>" --es container_type LARGE
+
+# 2. Request fresh content from a widget's provider (by ID or component)
+#    (Also accepts legacy action: -a androidx.wear.tiles.action.REQUEST_TILE_UPDATE)
+adb shell am broadcast -p $R -a $A.UPDATE_WIDGET --ei widget_id 10001
+
+# 3. Remove a widget by ID or component
+adb shell am broadcast -p $R -a $A.REMOVE_WIDGET --ei widget_id 10001
+
+# Guarded behind newer renderer builds (check versionName or broadcast data reply):
+# 4. Render a raw .rc document without installing its app (requires >= 1.6.6)
+adb shell am broadcast -p $R -a $A.UPLOAD_DOC_WIDGET \
+  --es doc_b64 "$(base64 -w0 widget.rc)" --es container_type LARGE
+
+# 5. List active widgets in the tray (requires >= 1.6.6.13)
+adb shell am broadcast -p $R -a $A.GET_WIDGETS
+
+# 6. Export a rendered widget's Remote Compose document (.rc) (requires >= 1.6.6.13)
+adb shell am broadcast -p $R -a $A.DUMP_RC_DOC --ei widget_id 10001
+
+# 7. Toggle the 1px magenta content-area outline box (requires >= 1.6.7.0)
+adb shell am broadcast -p $R -a $A.TOGGLE_CONTENT_OUTLINE
+```
+
 - **Workspace tray helpers (optional)**: If high-level ADB tile helpers are
-  available in your workspace (such as `adb-tile-add`, `adb-tiles`,
-  `adb-tile-remove`, and `adb-tile-dump`), they wrap these broadcasts—launching
-  the tray if needed, retrying until the receiver registers, and waiting until
-  the widget is rendered:
+  available in your workspace (`adb-tile-add`, `adb-tiles`, `adb-tile-remove`,
+  and `adb-tile-dump`; run each with `--help` for full flag details), they wrap
+  these broadcasts—waking the screen, launching the tray if needed, retrying
+  until the receiver registers, and waiting until the widget renders:
   ```bash
+  # Works on all tray builds (including 1.6.5.41.* .emu):
   adb-tile-add --vertical --type LARGE <PACKAGE>/<SERVICE_CLASS>
-  # => Added/activated widget ID: 10001
-  adb-tiles --vertical                        # list: WIDGET_ID TYPE COMPONENT
-  adb-tile-remove --vertical 10001            # by widget ID
-  adb-tile-remove --vertical <PACKAGE>/<SERVICE_CLASS>   # all instances
-  adb-tile-remove --vertical --all            # empty the tray
-  adb-tile-dump -o widget.rc 10001 > widget.meta.json    # export .rc
+  adb-tile-remove --vertical 10001
+  adb-tile-remove --vertical <PACKAGE>/<SERVICE_CLASS>
+
+  # Requires renderer >= 1.6.6.13 (GET_WIDGETS / DUMP_RC_DOC):
+  adb-tiles --vertical
+  adb-tile-remove --vertical --all
+  adb-tile-dump -o widget.rc 10001 > widget.meta.json   # also requires root
   ```
-- **List tray widgets (`GET_WIDGETS`)**: `GET_WIDGETS` (or
-  `adb-tiles --vertical`) returns every widget currently in the tray. Use it to
-  inspect or reset the tray before a capture instead of guessing which widgets
-  are left over from earlier sessions. Older tray builds do not support
-  `GET_WIDGETS` or `DUMP_RC_DOC` and return `result=0` with no data.
-- **Export a rendered widget as `.rc` (`DUMP_RC_DOC`)**: `DUMP_RC_DOC` (or
-  `adb-tile-dump`) writes the Remote Compose document that the tray is currently
-  rendering to a file on device storage and returns the rendering context as
-  JSON in the broadcast `data`: screen size and density, container and content
-  box sizes in dp and px, corner radius, font scale, time zone, and the dynamic
-  Material 3 theme colors (`theme`, a map of `WearM3.*` to `#AARRGGBB`). Use it
-  to replay a widget exactly as the device rendered it, or to diff documents
-  between app versions.
-  - A component that matches several tray widgets returns
-    `status="MULTIPLE_WIDGETS"` with the list of matching widget IDs. Pick one
-    and pass `--ei widget_id`.
-  - Documents added with `UPLOAD_DOC_WIDGET` show up in `GET_WIDGETS` as
-    `.../com.google.android.clockwork.prototiles.renderer.experimental.UploadedDocWidget`
-    and can be exported by ID. An exported `.rc` file re-uploads and exports
-    back byte-identical, so a document captured on one device can be replayed on
-    another.
-  - `No active widget found for widgetId N` means the ID is not in the tray.
-    `Tile N is not a Remote Compose tile.` also appears while the provider has
-    not delivered content yet.
-  - **Exporting requires root.** The renderer is a privileged app, so the dumped
-    file cannot be read with `run-as`. Pull the file reported in the JSON `file`
-    field using `adb root` (on emulator images that allow it) or `su` on
-    userdebug devices, and verify the byte count against `doc_size_bytes`. User
-    builds cannot export.
-- **Logs**: `adb logcat -s WidgetTrayReceiver`. Emulator (`.emu`) builds strip
-  info and debug logs, so read results from the broadcast `data` instead.
+- **Extra resolution and behavioral nuances**:
+  - **Widget IDs must be integers (`--ei`)**: `parseWidgetId` ignores string
+    extras (`--es`). It checks
+    `com.google.android.clockwork.prototiles.extra.WIDGET_ID`,
+    `androidx.glance.wear.EXTRA_WIDGET_ID`, and `widget_id` (plus `tile_id` on
+    `>= 1.6.6.13`). Always pass `--ei widget_id <int>` for compatibility across
+    all versions.
+  - **Component matching**: Strings containing `/` require an **exact match**
+    against an installed `BIND_WIDGET_PROVIDER` service (`PackageManager`
+    lookup). Short names without `/` (such as `WeatherWidgetService` or a
+    provider label) match case-insensitively on package name, class name, short
+    class name, `.ClassName` suffix, or provider label.
+  - **Unvalidated `container_type` override**: `ADD_WIDGET` accepts `--es`
+    (`LARGE` or `SMALL`) or `--ei` (`1` or `2`) under `container_type`
+    (defaulting to the provider's first XML-declared container or `LARGE`) and
+    does **not** check whether the provider's XML metadata declares support for
+    that size—useful for testing how a single-size widget behaves in the other
+    slot size.
+  - **`UPDATE_WIDGET` does not check active tray membership**: Sending
+    `UPDATE_WIDGET` returns `result=-1` (`"status":"OK"`) as long as
+    `--ei widget_id` is provided or `--es component` resolves to an installed
+    provider, even if that widget is not currently in the tray.
+  - **`UPLOAD_DOC_WIDGET` (`>= 1.6.6`) & cross-configuration reflow**: Uploaded
+    documents are registered under the synthetic sentinel component
+    `com.google.android.wearable.protolayout.renderer/com.google.android.clockwork.prototiles.renderer.experimental.UploadedDocWidget`,
+    which is not in `PackageManager`—always address uploaded widgets by
+    `--ei widget_id` (never by component name) when updating, removing, or
+    dumping them. Because the tray caches the raw `.rc` bytes in memory, you can
+    upload a document once and toggle Rounded Rectangle vs. Pill shapes or run
+    `adb shell wm size` / `adb shell wm density` to inspect how the same `.rc`
+    payload reflows across form factors without the app installed.
+- **Exporting `.rc` documents and rendering metadata (`DUMP_RC_DOC`,
+  `>= 1.6.6.13`)**:
+  - `DUMP_RC_DOC` (or `adb-tile-dump`) writes `<cacheDir>/<widgetId>_rc_doc.rc`
+    and returns the rendering context as compact JSON in the broadcast `data`
+    (using snake_case keys `doc_size_bytes` and `pull_command`): screen
+    dimensions and density, outer container and inner content box sizes in dp
+    and px, corner radius, font scale, time zone, and the resolved dynamic
+    Material 3 color tokens (`theme`, mapping `WearM3.*` to `#AARRGGBB`).
+  - **Works on off-screen tray items**: Because `DUMP_RC_DOC` reads cached
+    `TileRendererImpl.tileContent` (or `injectedDoc` for uploaded widgets), it
+    succeeds as soon as the provider delivers content—even if the widget is
+    scrolled off-screen in the tray and has not been inflated yet.
+  - **Multiple matches by component**: If `--es component` matches more than one
+    active tray widget, `DUMP_RC_DOC` returns `result=-1` with
+    `"status":"MULTIPLE_WIDGETS"` and the matching `widgets` array; re-run with
+    `--ei widget_id`.
+  - **Root required for `.rc` binary pull (`run-as` fails)**: Although the JSON
+    reply includes a nominal `"pull_command": "adb exec-out run-as ..."`, the
+    standalone renderer is installed as a privileged system app (`priv-app`), so
+    `run-as` always fails with `Permission denied`. Pulling the binary `.rc`
+    file requires root (`adb root` on `userdebug` emulators or `su 0 cat` on
+    `userdebug` devices), verifying the byte count against `doc_size_bytes`. On
+    `user` builds (where root is unavailable, if running `>= 1.6.6.13`), you can
+    still read the full JSON rendering context and `WearM3.*` theme palette from
+    the `am broadcast` stdout reply even though the `.rc` cache file cannot be
+    pulled.
+- **Logs**: `adb logcat -s WidgetTrayReceiver:D ProtoTilesTileRendererImpl:D`.
+  Because `.emu` builds apply ProGuard rules that strip `Log.v`, `Log.d`, and
+  `Log.i` (preserving only `Log.w` and `Log.e`), always read command results
+  from the `am broadcast` `data` reply rather than scraping `WidgetTrayReceiver`
+  logcat lines.
 - **Widget centering**: A single widget at the top of the tray sits above the
   circular center and its top corners can clip against the bezel. Before
   capturing, either swipe down slightly
@@ -336,6 +442,13 @@ ______________________________________________________________________
   `versionCode < 100051969` (e.g., Stock API 36) encounter IPC deadlocks
   resulting in `Tile was null`. Always target API 37+ or ensure the renderer is
   updated.
+- **Public `user`-Signed Emulator Images**: Public Wear OS 7.1 Beta emulator
+  images distributed via the Android SDK Manager are `user` builds
+  (`ro.build.type=user`, `ro.debuggable=0`). On these images, `adb root` is
+  disabled and the preinstalled renderer APK under `/product/priv-app/` is
+  signed with the platform release key, so sideloading a development-signed
+  (`.emu`, `.exp`, or `.dev`) renderer APK fails with
+  `INSTALL_FAILED_UPDATE_INCOMPATIBLE`.
 
 ### Samsung Galaxy Watch (One UI Watch) Rules
 
@@ -458,11 +571,20 @@ ______________________________________________________________________
     `fetchActiveWidgets(widget::class)`.
   - **Why It Matters for Emulators and Testbeds**: On development testbeds or
     emulators where widgets/tiles are injected via ADB debug broadcast commands
-    (`com.google.android.wearable.app.DEBUG_SURFACE add-tile`), the platform
-    active-tile registry may not list the debug surface under the app package,
-    causing `fetchActiveWidgets()` to return an empty list and drop updates.
-    `triggerUpdateAll(context)` handles both standard active instances and
-    debug-injected surfaces during development and testing.
+    (`com.google.android.wearable.app.DEBUG_SURFACE add-tile` or
+    `WidgetTrayReceiver`), the platform active-tile registry may not list the
+    debug surface under the app package, causing `fetchActiveWidgets()` to
+    return an empty list and drop updates. `triggerUpdateAll(context)` handles
+    both standard active instances and debug-injected surfaces during
+    development and testing.
+  - **`android:debuggable="true"` Requirement on `user` Builds**: Under the
+    hood, `androidx.glance.wear` emits the fallback
+    `androidx.wear.tiles.action.REQUEST_TILE_UPDATE` broadcast (which both SysUI
+    and `WidgetTrayReceiver` listen for) **only** when the OS image is a debug
+    build (`userdebug`/`eng`) **or** the widget provider APK itself is built as
+    debuggable (`android:debuggable="true"`). When testing provider-initiated
+    updates inside `WidgetTrayActivity` on a `user`-signed emulator or physical
+    watch, always install a `debug` build variant of the widget app.
 - **Official Tile Preview Checklist**:
   - **Dimensions**: Use exactly **400x400px** for the Tile carousel preview
     (`AndroidManifest.xml`).
