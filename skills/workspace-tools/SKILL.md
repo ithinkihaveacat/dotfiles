@@ -182,11 +182,10 @@ runtime versions where those blocks look for them:
   `$NODE_VERSIONS/node-v<version>`
   (`~/.local/share/node/versions/node-v<version>`). Takes seconds. It exits
   non-zero when that exact version is already installed, so check
-  `node-install --installed` (which prints `vX.Y.Z` tags) or
-  `node-install --installed --paths` (which prints full
-  `$NODE_VERSIONS/node-vX.Y.Z` directory paths) first.
-  `node-install --default 24` instead succeeds either way and makes that version
-  the per-user default (`~/.local/share/node/default`, with binaries at
+  `node-install --installed` (which prints `vX.Y.Z` tags installed under
+  `$NODE_VERSIONS/node-vX.Y.Z`) first. `node-install --default 24` instead
+  succeeds either way and makes that version the per-user default
+  (`~/.local/share/node/default`, with binaries at
   `~/.local/share/node/default/bin` on `PATH` in fish and bash when it exists);
   `install.sh` uses it only on Linux machines whose distribution Node.js is too
   old, and removes it once that changes. `node-install --default` alone prints

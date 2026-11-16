@@ -3,7 +3,7 @@
 # Installs a specific version of Node.js to a given prefix directory.
 # Based on https://github.com/wilmoore/nodejs-install
 
-# Tests: skills/workspace-tools/tests/test-node-install
+# Tests: skills/workspace-tools/tests/test-node-install (--default)
 
 set -o errexit
 set -o errtrace
@@ -20,8 +20,7 @@ usage() {
   cat <<EOF
 Usage: $(basename "$0") [OPTIONS] VERSION [PREFIX]
        $(basename "$0") --list
-       $(basename "$0") --installed [--paths] [PREFIX]
-       $(basename "$0") --paths [PREFIX]
+       $(basename "$0") --installed
        $(basename "$0") --default [VERSION]
 
 Downloads and installs a specific version of Node.js.
@@ -37,21 +36,13 @@ Arguments:
 
 Options:
   -l, --list       List all available remote Node.js versions
-  -i, --installed  List installed Node.js version tags (vX.Y.Z, installed under
-                   PREFIX/node-vX.Y.Z; combine with --paths for full paths)
-  --paths          Print full PREFIX/node-vX.Y.Z directory paths for installed
-                   versions
+  -i, --installed  List installed Node.js version tags (vX.Y.Z under PREFIX/node-vX.Y.Z)
   --default [VERSION]
                    Install VERSION if it is missing (succeeding if it is
                    already installed) and make it the per-user default,
                    \$XDG_DATA_HOME/node/default; print its path. Without
                    VERSION, print the current default's path
   --help, -h       Display this help message and exit
-
-Environment:
-  AGENT_OFFLINE    Never use the network; fail on uncached downloads or --list
-  XDG_DATA_HOME    Base directory for versions and default link
-                   (default: ~/.local/share)
 
 Examples:
   # Install latest Node.js 22.x
@@ -60,17 +51,16 @@ Examples:
   # List available versions
   $(basename "$0") --list
 
-  # List installed versions (tags or full paths)
+  # List installed versions
   $(basename "$0") --installed
-  $(basename "$0") --installed --paths
 
   # Make the latest Node.js 24.x the default outside direnv workspaces
   $(basename "$0") --default 24
 
 The default is for machines whose package manager has no recent enough
-Node.js: put \$XDG_DATA_HOME/node/default/bin (~/.local/share/node/default/bin)
-on PATH to use it. Global npm packages are unaffected by switching it,
-provided npm's prefix (~/.npmrc) is outside the version directories.
+Node.js: put \$XDG_DATA_HOME/node/default/bin on PATH to use it. Global npm
+packages are unaffected by switching it, provided npm's prefix (~/.npmrc) is
+outside the version directories.
 EOF
   exit 0
 }
@@ -80,13 +70,6 @@ require() {
     echo >&2 "$(basename "$0"): $1 not found"
     exit 127
   }
-}
-
-is_offline() {
-  case "$(printf '%s' "${AGENT_OFFLINE:-}" | tr '[:upper:]' '[:lower:]')" in
-    1 | true | yes | on) return 0 ;;
-    *) return 1 ;;
-  esac
 }
 
 # Infer operating system identifier for Node.js downloads.
@@ -122,8 +105,8 @@ get_platform() {
 
 # List all downloadable Node.js versions.
 list_versions() {
-  if is_offline; then
-    echo "$(basename "$0"): refusing to fetch https://nodejs.org/dist/ (offline mode); unset AGENT_OFFLINE to allow it" >&2
+  if [[ "${AGENT_OFFLINE:-0}" =~ ^(1|true|yes|on)$ ]]; then
+    echo "$(basename "$0"): refusing to fetch https://nodejs.org/dist/ (offline mode)" >&2
     return 1
   fi
   require curl
@@ -134,28 +117,15 @@ list_versions() {
 
 # List locally installed versions.
 list_installed() {
-  local dir="${1:-$DEFAULT_PREFIX}" show_paths="${2:-0}"
+  local dir="${1:-$DEFAULT_PREFIX}"
   if [[ ! -d "$dir" ]]; then
     echo "$(basename "$0"): no versions found in $dir" >&2
     return
   fi
 
-  local tags tag
-  tags=$(
-    find "$dir" -maxdepth 1 -name "node-v*" -type d |
-      sed 's|.*/node-||' |
-      sort -V
-  )
-  if [[ -z "$tags" ]]; then
-    return
-  fi
-  if [[ "$show_paths" -eq 1 ]]; then
-    while IFS= read -r tag; do
-      [[ -n "$tag" ]] && printf '%s/node-%s\n' "${dir%/}" "$tag"
-    done <<<"$tags"
-  else
-    printf '%s\n' "$tags"
-  fi
+  find "$dir" -maxdepth 1 -name "node-v*" -type d |
+    sed 's|.*/node-||' |
+    sort -V
 }
 
 # Resolve a partial version to the highest matching full version.
@@ -189,14 +159,19 @@ resolve_version() {
   printf '%s\n' "$versions" | { grep -E "$pattern" || true; } | tail -1 | tr -d 'v'
 }
 
+# Handle --help first so it works even without dependencies installed.
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+  usage
+fi
+
 # Download and extract Node.js $1 into $2. It is extracted beside $2 and
 # renamed into place, so an interrupted run never leaves a partial $2 for a
 # later run to mistake for an installed version. Progress goes to stderr; only
 # the caller prints to stdout.
 install_version() {
   local version=$1 target=$2 url tmp
-  if is_offline; then
-    echo "$(basename "$0"): refusing to download Node.js v$version (offline mode); unset AGENT_OFFLINE to allow it" >&2
+  if [[ "${AGENT_OFFLINE:-0}" =~ ^(1|true|yes|on)$ ]]; then
+    echo "$(basename "$0"): refusing to download Node.js v$version (offline mode)" >&2
     exit 1
   fi
   require curl
@@ -230,73 +205,23 @@ resolve_or_exit() {
   fi
 }
 
-for ARG in "$@"; do
-  case "$ARG" in
-    --help | -h) usage ;;
-  esac
-done
-
-if [[ $# -lt 1 ]]; then
-  usage
-fi
-
-MODE=""
-SHOW_PATHS=0
-POSITIONALS=()
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    -l | --list)
-      MODE="list"
-      shift
-      ;;
-    -i | --installed)
-      MODE="installed"
-      shift
-      ;;
-    --paths)
-      SHOW_PATHS=1
-      [[ -z "$MODE" ]] && MODE="installed"
-      shift
-      ;;
-    --default)
-      MODE="default"
-      shift
-      ;;
-    -*)
-      echo "$(basename "$0"): unknown option: $1" >&2
-      exit 1
-      ;;
-    *)
-      POSITIONALS+=("$1")
-      shift
-      ;;
-  esac
-done
-
-case "$MODE" in
-  list)
-    if [[ ${#POSITIONALS[@]} -gt 0 ]]; then
-      echo "$(basename "$0"): --list takes no positional arguments" >&2
-      exit 1
-    fi
+# Handle --list, --installed and --default before checking argument count
+case "${1:-}" in
+  -l | --list)
     list_versions
     exit 0
     ;;
-  installed)
-    if [[ ${#POSITIONALS[@]} -gt 1 ]]; then
-      echo "$(basename "$0"): --installed takes at most one argument (PREFIX)" >&2
-      exit 1
-    fi
-    PREFIX="${POSITIONALS[0]:-$DEFAULT_PREFIX}"
-    list_installed "$PREFIX" "$SHOW_PATHS"
+  -i | --installed)
+    PREFIX="${2:-$DEFAULT_PREFIX}"
+    list_installed "$PREFIX"
     exit 0
     ;;
-  default)
-    if [[ ${#POSITIONALS[@]} -gt 1 ]]; then
+  --default)
+    if [[ $# -gt 2 ]]; then
       echo "$(basename "$0"): --default takes at most one argument (VERSION)" >&2
       exit 1
     fi
-    if [[ ${#POSITIONALS[@]} -eq 0 ]]; then
+    if [[ $# -eq 1 ]]; then
       if [[ ! -L "$DEFAULT_LINK" ]]; then
         echo "$(basename "$0"): no default Node.js version ($DEFAULT_LINK does not exist)" >&2
         exit 1
@@ -312,7 +237,7 @@ case "$MODE" in
       echo "$(basename "$0"): refusing to replace $DEFAULT_LINK: not a symbolic link" >&2
       exit 1
     fi
-    VERSION_INPUT=$(echo "${POSITIONALS[0]}" | tr -d 'vV')
+    VERSION_INPUT=$(echo "$2" | tr -d 'vV')
     PREFIX="$DEFAULT_PREFIX"
     resolve_or_exit
     TARGET="$PREFIX/node-v$VERSION"
@@ -329,15 +254,20 @@ case "$MODE" in
     echo "$TARGET"
     exit 0
     ;;
+  -*)
+    echo "$(basename "$0"): unknown option: $1" >&2
+    exit 1
+    ;;
 esac
 
-if [[ ${#POSITIONALS[@]} -lt 1 ]]; then
+# Show help if no arguments provided
+if [[ $# -lt 1 ]]; then
   usage
 fi
 
 # Parse positional arguments
-VERSION_INPUT=$(echo "${POSITIONALS[0]}" | tr -d 'vV')
-PREFIX="${POSITIONALS[1]:-$DEFAULT_PREFIX}"
+VERSION_INPUT=$(echo "$1" | tr -d 'vV')
+PREFIX="${2:-$DEFAULT_PREFIX}"
 
 # Resolve partial version to full version (e.g., "24" -> "24.1.0")
 resolve_or_exit

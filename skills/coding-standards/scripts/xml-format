@@ -28,9 +28,9 @@ Examples:
 
   $(basename "$0") config.xml
 
-# Format all XML files in a directory recursively
+# Format multiple files
 
-  $(basename "$0") res/
+  $(basename "$0") *.xml
 
 # Format from stdin to stdout
 
@@ -39,41 +39,28 @@ Examples:
 # Format a file and see the result
 
   $(basename "$0") < data.xml
-
-# Check formatting without writing
-
-  $(basename "$0") --check config.xml
 EOF
   exit 0
 }
 
 CHECK=0
 PATHS=()
-END_OPTIONS=0
-for ARG in "$@"; do
-  if [[ "$END_OPTIONS" -eq 0 ]]; then
-    case "$ARG" in
-      --help | -h) usage ;;
-      --) END_OPTIONS=1 ;;
-    esac
-  fi
-done
-
-END_OPTIONS=0
-for ARG in "$@"; do
-  if [[ "$END_OPTIONS" -eq 1 ]]; then
-    PATHS+=("$ARG")
-    continue
-  fi
-  case "$ARG" in
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --help | -h) usage ;;
     --check) CHECK=1 ;;
-    --) END_OPTIONS=1 ;;
+    --)
+      shift
+      PATHS+=("$@")
+      break
+      ;;
     -*)
-      echo "$(basename "$0"): unknown option: $ARG" >&2
+      echo "$(basename "$0"): unknown option: $1" >&2
       exit 1
       ;;
-    *) PATHS+=("$ARG") ;;
+    *) PATHS+=("$1") ;;
   esac
+  shift
 done
 
 if [[ ${#PATHS[@]} -eq 0 && -t 0 ]]; then
@@ -90,65 +77,46 @@ require() {
 require xmllint
 require cmp
 
-if [[ ${#PATHS[@]} -gt 0 ]]; then
-  for P in "${PATHS[@]}"; do
-    if [[ ! -f "$P" && ! -d "$P" ]]; then
-      echo "$(basename "$0"): $P: No such file or directory" >&2
-      exit 1
-    fi
-  done
-fi
+FILES=()
+for P in "${PATHS[@]}"; do
+  if [[ -d "$P" ]]; then
+    while IFS= read -r FOUND; do
+      [[ -n "$FOUND" ]] && FILES+=("$FOUND")
+    done < <(find "$P" \( -name .git -o -name node_modules -o -name .venv -o -name .direnv \) -prune -o -type f -name '*.xml' -print | sort)
+  elif [[ -f "$P" ]]; then
+    FILES+=("$P")
+  else
+    echo "$(basename "$0"): $P: No such file or directory" >&2
+    exit 1
+  fi
+done
 
 if [[ ${#PATHS[@]} -eq 0 && "$CHECK" -eq 0 ]]; then
   xmllint --format -
   exit $?
 fi
 
-TMPDIR_XML=$(mktemp -d) || exit 1
-TMPFILE="$TMPDIR_XML/formatted"
-trap 'rm -f -- "$TMPFILE" "$TMPDIR_XML/stdin"; rmdir "$TMPDIR_XML"' EXIT
+TMPFILE=$(mktemp)
+trap 'rm -f -- "$TMPFILE"' EXIT
 
-FILES=()
 if [[ ${#PATHS[@]} -eq 0 ]]; then
-  cat >"$TMPDIR_XML/stdin" || exit 1
-  FILES=("$TMPDIR_XML/stdin")
-else
-  for P in "${PATHS[@]}"; do
-    if [[ -d "$P" ]]; then
-      while IFS= read -r FOUND; do
-        [[ -n "$FOUND" ]] && FILES+=("$FOUND")
-      done < <(
-        find "$P" \
-          \( -name .git -o -name node_modules -o -name .venv -o -name .direnv -o -name __pycache__ \) -prune \
-          -o -type f -name '*.xml' -print | sort
-      )
-    else
-      FILES+=("$P")
-    fi
-  done
-fi
-
-if [[ ${#FILES[@]} -eq 0 ]]; then
-  exit 0
+  IN=$(cat)
+  OUT=$(printf '%s\n' "$IN" | xmllint --format -) || exit 1
+  [[ "$IN" == "$OUT" ]]
+  exit $?
 fi
 
 FAILED=0
 for FILE in "${FILES[@]}"; do
-  SAFE="$FILE"
-  if [[ "$SAFE" == -* ]]; then
-    SAFE="./$SAFE"
-  fi
-  if xmllint --format "$SAFE" >"$TMPFILE"; then
+  if xmllint --format "$FILE" >"$TMPFILE"; then
     if [[ "$CHECK" -eq 1 ]]; then
-      if ! cmp -s "$SAFE" "$TMPFILE"; then
+      if ! cmp -s "$FILE" "$TMPFILE"; then
         echo "$(basename "$0"): $FILE: needs formatting" >&2
         FAILED=1
       fi
-    elif cat "$TMPFILE" >"$SAFE"; then
-      echo "$(basename "$0"): $FILE: formatted" >&2
     else
-      echo "$(basename "$0"): $FILE: could not write formatted XML" >&2
-      FAILED=1
+      cat "$TMPFILE" >"$FILE"
+      echo "$(basename "$0"): $FILE: formatted" >&2
     fi
   else
     echo "$(basename "$0"): $FILE: failed to format" >&2

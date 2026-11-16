@@ -415,7 +415,7 @@ copy_target() {
 
 is_managed_multiplexer() {
   local n=0 line
-  [ -f "$1" ] && [ ! -L "$1" ] || return 1
+  [ -f "$1" ] || return 1
   while [ "$n" -lt "$MARKER_SCAN_LINES" ] && IFS= read -r line; do
     n=$((n + 1))
     if [[ "$line" =~ $MULTIPLEXER_MARKER_RE ]]; then
@@ -434,51 +434,28 @@ is_managed_subhook() {
   return 1
 }
 
-# Repositories cloned before init.templatedir was retired carry a copy of the
-# old global post-checkout template at .git/hooks/post-checkout. Every version
-# of that template opened with this comment line.
-RETIRED_TEMPLATE_MARKER="# Installed via init.templatedir in ~/.gitconfig."
-# Pre-multiplexer standalone profile hooks installed before 'hook' existed
-# opened with '# git-hooks-<profile>: <hook>' or '# git-hook-<profile>: <hook>'.
-RETIRED_PROFILE_MARKER_RE='^# git-hooks?-(agent|markdown|node):([[:space:]]|$)'
+# Repositories cloned before init.templatedir or the multiplexer existed may
+# carry the old post-checkout template or standalone '# git-hook(s)-<profile>:'
+# scripts in .git/hooks/ or .d/00-legacy.
+RETIRED_HOOK_RE='^# (Installed via init\.templatedir in ~/\.gitconfig\.|git-hooks?-(agent|markdown|node):([[:space:]]|$))'
 
-is_retired_template_hook() {
+is_retired_hook() {
   local n=0 line
   [ -f "$1" ] && [ ! -L "$1" ] || return 1
   while [ "$n" -lt "$MARKER_SCAN_LINES" ] && IFS= read -r line; do
     n=$((n + 1))
-    case "$line" in
-      "$RETIRED_TEMPLATE_MARKER"*)
-        return 0
-        ;;
-    esac
+    [[ "$line" =~ $RETIRED_HOOK_RE ]] && return 0
   done <"$1"
   return 1
 }
 
-is_retired_profile_hook() {
-  local n=0 line
-  [ -f "$1" ] && [ ! -L "$1" ] || return 1
-  while [ "$n" -lt "$MARKER_SCAN_LINES" ] && IFS= read -r line; do
-    n=$((n + 1))
-    if [[ "$line" =~ $RETIRED_PROFILE_MARKER_RE ]]; then
-      return 0
-    fi
-  done <"$1"
-  return 1
-}
-
-require_writable_hooks_dir() {
-  if [ -L "$HOOKS_DIR" ] && [ ! -e "$HOOKS_DIR" ]; then
-    die "hooks directory is a broken symbolic link: $HOOKS_DIR"
-  fi
-  local check_dir="$HOOKS_DIR"
-  if [ ! -e "$check_dir" ]; then
-    check_dir=$(dirname "$check_dir")
-  fi
-  if [ ! -w "$check_dir" ]; then
-    die "hooks directory is not writable: $HOOKS_DIR"
-  fi
+purge_retired_hooks() {
+  local f
+  for f in "$HOOKS_DIR"/* "$HOOKS_DIR"/*.d/"$LEGACY_KEY"; do
+    is_retired_hook "$f" || continue
+    rm -f "$f"
+    info "removed retired hook at $f"
+  done
 }
 
 abs_path() {
@@ -494,47 +471,23 @@ abs_path() {
 count_entries() {
   local n=0 f
   for f in "$1"/*; do
-    [ -e "$f" ] || [ -L "$f" ] || continue
+    [ -e "$f" ] || continue
     n=$((n + 1))
   done
   printf '%s' "$n"
 }
 
 install_multiplexer() {
-  local dst="$1" subdir="$1.d" link_target
-  require_writable_hooks_dir
+  local dst="$1" subdir="$1.d"
   mkdir -p "$(dirname "$dst")"
 
-  if [ -e "$subdir/$LEGACY_KEY" ] && is_retired_profile_hook "$subdir/$LEGACY_KEY"; then
-    rm -f "$subdir/$LEGACY_KEY"
-    info "removed retired pre-multiplexer hook at $subdir/$LEGACY_KEY"
-  fi
-
-  if [ -L "$dst" ]; then
+  if [ -f "$dst" ] && ! is_managed_multiplexer "$dst"; then
     mkdir -p "$subdir"
-    if [ -e "$subdir/$LEGACY_KEY" ] || [ -L "$subdir/$LEGACY_KEY" ]; then
+    if [ -e "$subdir/$LEGACY_KEY" ]; then
       die "refusing to overwrite $subdir/$LEGACY_KEY with the unmanaged hook at $dst"
     fi
-    link_target=$(readlink "$dst")
     info "moving existing unmanaged hook to $subdir/$LEGACY_KEY"
-    if [[ "$link_target" == /* ]]; then
-      mv "$dst" "$subdir/$LEGACY_KEY"
-    else
-      ln -s "../$link_target" "$subdir/$LEGACY_KEY"
-      rm -f "$dst"
-    fi
-  elif [ -f "$dst" ] && ! is_managed_multiplexer "$dst"; then
-    if is_retired_profile_hook "$dst"; then
-      rm -f "$dst"
-      info "replaced retired pre-multiplexer hook at $dst"
-    else
-      mkdir -p "$subdir"
-      if [ -e "$subdir/$LEGACY_KEY" ] || [ -L "$subdir/$LEGACY_KEY" ]; then
-        die "refusing to overwrite $subdir/$LEGACY_KEY with the unmanaged hook at $dst"
-      fi
-      info "moving existing unmanaged hook to $subdir/$LEGACY_KEY"
-      mv "$dst" "$subdir/$LEGACY_KEY"
-    fi
+    mv "$dst" "$subdir/$LEGACY_KEY"
   fi
 
   multiplexer_content >"$dst"
@@ -558,11 +511,25 @@ install_subhook() { # install_subhook HOOK_NAME KEY SOURCE [COPY]
   info "installed $key to $subdir/$key"
 }
 
-teardown_multiplexer_if_empty() { # teardown_multiplexer_if_empty HOOK_NAME
-  local name="$1"
+remove_subhook() { # remove_subhook HOOK_NAME KEY
+  local name="$1" key="$2"
   local dst="$HOOKS_DIR/$name" subdir="$HOOKS_DIR/$name.d"
-  local remaining legacy_link
+  local remaining
 
+  [ -e "$subdir/$key" ] || return 0
+  # Ownership of the sub-hook is checked on its own content, independent of
+  # the multiplexer's state, so a sub-hook we installed still gets removed
+  # even if the multiplexer above it was since deleted or replaced by hand;
+  # otherwise cleanup never converges. Tearing the multiplexer itself down
+  # stays gated on it being ours below.
+  is_managed_subhook "$subdir/$key" || return 0
+
+  rm -f "$subdir/$key"
+  info "removed $subdir/$key"
+
+  # Tear the multiplexer down only once nothing of ours is left under it, and
+  # only if it is ours to tear down. A 00-legacy hook displaced on install is
+  # put back exactly where it was found.
   [ -d "$subdir" ] || return 0
   remaining=$(count_entries "$subdir")
   if [ "$remaining" -eq 0 ]; then
@@ -571,78 +538,11 @@ teardown_multiplexer_if_empty() { # teardown_multiplexer_if_empty HOOK_NAME
       rm -f "$dst"
       info "removed the now-empty multiplexer at $dst"
     fi
-  elif [ "$remaining" -eq 1 ] && { [ -e "$subdir/$LEGACY_KEY" ] || [ -L "$subdir/$LEGACY_KEY" ]; } && is_managed_multiplexer "$dst"; then
-    if is_retired_profile_hook "$subdir/$LEGACY_KEY"; then
-      rm -f "$subdir/$LEGACY_KEY"
-      rmdir "$subdir"
-      rm -f "$dst"
-      info "removed retired pre-multiplexer hook and empty multiplexer at $dst"
-    elif [ -L "$subdir/$LEGACY_KEY" ]; then
-      legacy_link=$(readlink "$subdir/$LEGACY_KEY")
-      rm -f "$dst"
-      if [[ "$legacy_link" == ../* ]]; then
-        ln -s "${legacy_link#../}" "$dst"
-        rm -f "$subdir/$LEGACY_KEY"
-      else
-        mv "$subdir/$LEGACY_KEY" "$dst"
-      fi
-      rmdir "$subdir"
-      info "restored the pre-existing hook at $dst"
-    else
-      mv "$subdir/$LEGACY_KEY" "$dst"
-      rmdir "$subdir"
-      info "restored the pre-existing hook at $dst"
-    fi
+  elif [ "$remaining" -eq 1 ] && [ -e "$subdir/$LEGACY_KEY" ] && is_managed_multiplexer "$dst"; then
+    mv "$subdir/$LEGACY_KEY" "$dst"
+    rmdir "$subdir"
+    info "restored the pre-existing hook at $dst"
   fi
-}
-
-remove_subhook() { # remove_subhook HOOK_NAME KEY
-  local name="$1" key="$2"
-  local subdir="$HOOKS_DIR/$name.d"
-
-  [ -e "$subdir/$key" ] || [ -L "$subdir/$key" ] || return 0
-  # Ownership of the sub-hook is checked on its own content, independent of
-  # the multiplexer's state, so a sub-hook we installed still gets removed
-  # even if the multiplexer above it was since deleted or replaced by hand;
-  # otherwise cleanup never converges. Tearing the multiplexer itself down
-  # stays gated on it being ours below.
-  is_managed_subhook "$subdir/$key" || return 0
-
-  require_writable_hooks_dir
-  rm -f "$subdir/$key"
-  info "removed $subdir/$key"
-
-  # Tear the multiplexer down only once nothing of ours is left under it, and
-  # only if it is ours to tear down. A 00-legacy hook displaced on install is
-  # put back exactly where it was found.
-  teardown_multiplexer_if_empty "$name"
-}
-
-purge_retired_hooks() {
-  local f sub name
-  if is_retired_template_hook "$HOOKS_DIR/post-checkout"; then
-    require_writable_hooks_dir
-    rm -f "$HOOKS_DIR/post-checkout"
-    info "removed retired template hook at $HOOKS_DIR/post-checkout"
-  fi
-  for sub in "$HOOKS_DIR"/*.d/"$LEGACY_KEY"; do
-    [ -f "$sub" ] || continue
-    if is_retired_profile_hook "$sub"; then
-      require_writable_hooks_dir
-      rm -f "$sub"
-      info "removed retired pre-multiplexer hook at $sub"
-      name=$(basename "$(dirname "$sub")" .d)
-      teardown_multiplexer_if_empty "$name"
-    fi
-  done
-  for f in "$HOOKS_DIR"/*; do
-    [ -f "$f" ] && [ ! -L "$f" ] || continue
-    if is_retired_profile_hook "$f"; then
-      require_writable_hooks_dir
-      rm -f "$f"
-      info "removed retired pre-multiplexer hook at $f"
-    fi
-  done
 }
 
 # One of: ok, missing_multiplexer, unmanaged_multiplexer, drifted_multiplexer,
@@ -869,6 +769,8 @@ cmd_apply() {
     is_profile "$profile" || die "unknown profile in AGENT_REQUIRED_HOOKS: $profile"
   done
 
+  purge_retired_hooks
+
   for profile in $PROFILES; do
     found=no
     for want in $wanted; do
@@ -880,8 +782,6 @@ cmd_apply() {
       remove_profile "$profile"
     fi
   done
-
-  purge_retired_hooks
 
   if [ -z "$wanted" ]; then
     info "AGENT_REQUIRED_HOOKS is empty; no hooks to install"
@@ -1014,30 +914,12 @@ cmd_doctor() {
     esac
   done < <(external_subhooks)
 
-  if is_retired_template_hook "$HOOKS_DIR/post-checkout"; then
-    report WARN "post-checkout: retired init.templatedir hook is still installed"
+  local rf
+  for rf in "$HOOKS_DIR"/* "$HOOKS_DIR"/*.d/"$LEGACY_KEY"; do
+    is_retired_hook "$rf" || continue
+    report WARN "${rf#"$HOOKS_DIR/"}: retired init.templatedir hook or pre-multiplexer hook is still installed"
     printf '        run '\''%s apply'\'' to remove it\n' "$SCRIPT_NAME"
     rc=1
-  fi
-
-  local rsub rfile rname
-  for rsub in "$HOOKS_DIR"/*.d/"$LEGACY_KEY"; do
-    [ -f "$rsub" ] || continue
-    if is_retired_profile_hook "$rsub"; then
-      rname=$(basename "$(dirname "$rsub")" .d)
-      report WARN "$rname: retired pre-multiplexer hook at $rname.d/$LEGACY_KEY blocks current profile behavior"
-      printf '        run '\''%s apply'\'' to remove it\n' "$SCRIPT_NAME"
-      rc=1
-    fi
-  done
-  for rfile in "$HOOKS_DIR"/*; do
-    [ -f "$rfile" ] && [ ! -L "$rfile" ] || continue
-    if is_retired_profile_hook "$rfile"; then
-      rname=$(basename "$rfile")
-      report WARN "$rname: retired pre-multiplexer hook is still installed"
-      printf '        run '\''%s apply'\'' to replace or remove it\n' "$SCRIPT_NAME"
-      rc=1
-    fi
   done
 
   return "$rc"
@@ -1052,19 +934,18 @@ cmd_clean() {
       echo "$SCRIPT_NAME clean: re-run with --force to confirm" >&2
       exit 1
     fi
-    require_writable_hooks_dir
     rm -rf "$HOOKS_DIR"
     info "removed $HOOKS_DIR"
     return 0
   fi
+
+  purge_retired_hooks
 
   for profile in $PROFILES; do
     if profile_installed "$profile"; then
       remove_profile "$profile"
     fi
   done
-
-  purge_retired_hooks
 }
 
 # ---------------------------------------------------------------------------

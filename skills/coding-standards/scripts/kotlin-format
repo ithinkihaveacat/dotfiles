@@ -27,7 +27,6 @@ Options:
 
 Environment:
   AGENT_OFFLINE  Use only a cached ktfmt jar; never download over the network
-  XDG_DATA_HOME  Base directory for cached ktfmt jar (default: ~/.local/share)
 
 Examples:
 
@@ -35,15 +34,15 @@ Examples:
 
   $(basename "$0") Main.kt
 
-# Format all Kotlin files in a directory recursively
+# Format multiple files or directories
 
   $(basename "$0") src/
 
-# Check formatting without writing
-
-  $(basename "$0") --check src/
-
 # Format from stdin to stdout
+
+  cat Main.kt | $(basename "$0")
+
+# Format a file and see the result
 
   $(basename "$0") < src/Example.kt
 EOF
@@ -52,31 +51,22 @@ EOF
 
 CHECK=0
 PATHS=()
-END_OPTIONS=0
-for ARG in "$@"; do
-  if [[ "$END_OPTIONS" -eq 0 ]]; then
-    case "$ARG" in
-      --help | -h) usage ;;
-      --) END_OPTIONS=1 ;;
-    esac
-  fi
-done
-
-END_OPTIONS=0
-for ARG in "$@"; do
-  if [[ "$END_OPTIONS" -eq 1 ]]; then
-    PATHS+=("$ARG")
-    continue
-  fi
-  case "$ARG" in
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --help | -h) usage ;;
     --check) CHECK=1 ;;
-    --) END_OPTIONS=1 ;;
+    --)
+      shift
+      PATHS+=("$@")
+      break
+      ;;
     -*)
-      echo "$(basename "$0"): unknown option: $ARG" >&2
+      echo "$(basename "$0"): unknown option: $1" >&2
       exit 1
       ;;
-    *) PATHS+=("$ARG") ;;
+    *) PATHS+=("$1") ;;
   esac
+  shift
 done
 
 if [[ ${#PATHS[@]} -eq 0 && -t 0 ]]; then
@@ -90,21 +80,19 @@ require() {
   }
 }
 
-is_offline() {
-  case "$(printf '%s' "${AGENT_OFFLINE:-}" | tr '[:upper:]' '[:lower:]')" in
-    1 | true | yes | on) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
-if [[ ${#PATHS[@]} -gt 0 ]]; then
-  for P in "${PATHS[@]}"; do
-    if [[ ! -f "$P" && ! -d "$P" ]]; then
-      echo "$(basename "$0"): $P: No such file or directory" >&2
-      exit 1
-    fi
-  done
-fi
+FILES=()
+for P in "${PATHS[@]}"; do
+  if [[ -d "$P" ]]; then
+    while IFS= read -r FOUND; do
+      [[ -n "$FOUND" ]] && FILES+=("$FOUND")
+    done < <(find "$P" \( -name .git -o -name node_modules -o -name .venv -o -name .direnv -o -name .gradle \) -prune -o -type f \( -name '*.kt' -o -name '*.kts' \) -print | sort)
+  elif [[ -f "$P" ]]; then
+    FILES+=("$P")
+  else
+    echo "$(basename "$0"): $P: No such file or directory" >&2
+    exit 1
+  fi
+done
 
 require java
 
@@ -112,8 +100,7 @@ KTFMT_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/ktfmt"
 
 # Find existing jar or download latest
 get_jar() {
-  local jar
-  jar=""
+  local jar=""
   if [[ -d "$KTFMT_DIR" ]]; then
     jar=$(find "$KTFMT_DIR" -maxdepth 1 -name 'ktfmt-*-with-dependencies.jar' 2>/dev/null | sort -V | tail -n 1)
   fi
@@ -123,8 +110,8 @@ get_jar() {
     return 0
   fi
 
-  if is_offline; then
-    echo "$(basename "$0"): ktfmt jar not cached in $KTFMT_DIR (offline mode); run with AGENT_OFFLINE=0 to download it" >&2
+  if [[ "${AGENT_OFFLINE:-0}" =~ ^(1|true|yes|on)$ ]]; then
+    echo "$(basename "$0"): ktfmt jar not cached in $KTFMT_DIR (offline mode)" >&2
     return 1
   fi
 
@@ -135,29 +122,19 @@ get_jar() {
   echo "Downloading ktfmt..." >&2
   mkdir -p "$KTFMT_DIR"
 
-  local releases url
-  if ! releases=$(curl -fsSL https://api.github.com/repos/facebook/ktfmt/releases); then
-    echo "$(basename "$0"): failed to fetch https://api.github.com/repos/facebook/ktfmt/releases" >&2
-    return 1
-  fi
-  url=$(printf '%s\n' "$releases" |
+  local url
+  url=$(curl -fsSL https://api.github.com/repos/facebook/ktfmt/releases |
     jq -r '.[0].assets[] | select(.browser_download_url | endswith("with-dependencies.jar")) | .browser_download_url' |
     head -n 1)
 
   if [[ -z "$url" ]]; then
-    echo "$(basename "$0"): failed to find ktfmt download URL" >&2
+    echo "$(basename "$0"): failed to find download URL" >&2
     return 1
   fi
 
-  local filename tmp_jar
+  local filename
   filename=$(basename "$url")
-  tmp_jar="$KTFMT_DIR/.$filename.tmp.$$"
-  if ! curl -fsSL "$url" -o "$tmp_jar"; then
-    rm -f -- "$tmp_jar"
-    echo "$(basename "$0"): failed to download $url" >&2
-    return 1
-  fi
-  mv "$tmp_jar" "$KTFMT_DIR/$filename"
+  curl -fsSL "$url" -o "$KTFMT_DIR/$filename"
   echo "Downloaded $filename" >&2
   echo "$KTFMT_DIR/$filename"
 }
@@ -173,51 +150,16 @@ if [[ ${#PATHS[@]} -eq 0 ]]; then
   exit $?
 fi
 
-FILES=()
-for P in "${PATHS[@]}"; do
-  if [[ -d "$P" ]]; then
-    while IFS= read -r FOUND; do
-      [[ -n "$FOUND" ]] && FILES+=("$FOUND")
-    done < <(
-      find "$P" \
-        \( -name .git -o -name node_modules -o -name .venv -o -name .direnv -o -name __pycache__ -o -name .gradle \) -prune \
-        -o -type f \( -name '*.kt' -o -name '*.kts' \) -print | sort
-    )
-  else
-    FILES+=("$P")
-  fi
-done
-
-if [[ ${#FILES[@]} -eq 0 ]]; then
-  exit 0
-fi
-
-SAFE_FILES=()
-for FILE in "${FILES[@]}"; do
-  if [[ "$FILE" == -* ]]; then
-    SAFE_FILES+=("./$FILE")
-  else
-    SAFE_FILES+=("$FILE")
-  fi
-done
+[[ ${#FILES[@]} -eq 0 ]] && exit 0
 
 if [[ "$CHECK" -eq 1 ]]; then
-  FAILED=0
-  DRIFT=$(java -jar "$jar" --kotlinlang-style --dry-run --set-exit-if-changed "${SAFE_FILES[@]}") || FAILED=1
-  if [[ -n "$DRIFT" ]]; then
-    while IFS= read -r DFILE; do
-      [[ -n "$DFILE" ]] || continue
-      echo "$(basename "$0"): ${DFILE#./}: needs formatting" >&2
-    done <<<"$DRIFT"
-  fi
-  exit "$FAILED"
+  java -jar "$jar" --kotlinlang-style --dry-run --set-exit-if-changed "${FILES[@]}" >&2
+  exit $?
 fi
 
 FAILED=0
-for i in "${!FILES[@]}"; do
-  FILE="${FILES[$i]}"
-  SAFE="${SAFE_FILES[$i]}"
-  if java -jar "$jar" --kotlinlang-style "$SAFE"; then
+for FILE in "${FILES[@]}"; do
+  if java -jar "$jar" --kotlinlang-style "$FILE"; then
     echo "$(basename "$0"): $FILE: formatted"
   else
     echo "$(basename "$0"): $FILE: failed to format" >&2

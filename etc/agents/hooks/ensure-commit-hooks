@@ -4,8 +4,7 @@
 #
 # Lazily runs 'hook -C <repo> apply --quiet' right before an agent executes a
 # shell tool call containing 'git commit', ensuring the 10-agent commit-msg
-# hook is installed in user-owned repositories cloned or entered mid-session
-# without injecting personal commit-message rules into third-party clones.
+# hook is installed even in repositories cloned or entered mid-session.
 #
 # Reads the tool call JSON on stdin and accepts both the Antigravity/Jetski and
 # Claude Code payload shapes. It never writes output and always exits 0, so it
@@ -36,26 +35,17 @@ esac
 command -v jq >/dev/null 2>&1 || exit 0
 command -v git >/dev/null 2>&1 || exit 0
 
-resolve_script_root() {
-  local target="${BASH_SOURCE[0]}" tdir
-  while [ -L "$target" ]; do
-    tdir=$(cd -P "$(dirname "$target")" 2>/dev/null && pwd) || return 1
-    target=$(readlink "$target")
-    [[ "$target" != /* ]] && target="$tdir/$target"
-  done
-  tdir=$(cd -P "$(dirname "$target")" 2>/dev/null && pwd) || return 1
-  cd -P "$tdir/../../.." 2>/dev/null && pwd
-}
-
-DOTFILES_ROOT=$(resolve_script_root 2>/dev/null || true)
-
 HOOK_BIN=""
 if command -v hook >/dev/null 2>&1; then
   HOOK_BIN="hook"
-elif [ -n "$DOTFILES_ROOT" ] && [ -x "$DOTFILES_ROOT/skills/workspace-tools/scripts/hook" ]; then
-  HOOK_BIN="$DOTFILES_ROOT/skills/workspace-tools/scripts/hook"
 else
-  exit 0
+  script_dir=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd) || exit 0
+  candidate="$script_dir/../../../skills/workspace-tools/scripts/hook"
+  if [ -x "$candidate" ]; then
+    HOOK_BIN="$candidate"
+  else
+    exit 0
+  fi
 fi
 
 eval "$(
@@ -86,126 +76,19 @@ eval "$(
 HOME_REAL=$(cd "$HOME" 2>/dev/null && pwd -P) || HOME_REAL="$HOME"
 BASE_CWD="${TOOL_CWD:-}"
 
-remote_owner_slug() {
-  local url="$1" rest=""
-  case "$url" in
-    "" | /* | ./* | ../* | file://*) return 0 ;;
-    *://*)
-      rest="${url#*://}"
-      case "$rest" in
-        */*) rest="${rest#*/}" ;;
-        *) return 0 ;;
-      esac
-      ;;
-    *:*)
-      rest="${url#*:}"
-      rest="${rest#/}"
-      ;;
-    *) return 0 ;;
-  esac
-  rest="${rest%/}"
-  case "$rest" in
-    */*) printf '%s\n' "${rest%%/*}" ;;
-  esac
-}
-
-DOTFILES_OWNER=""
-if [ -n "$DOTFILES_ROOT" ]; then
-  df_origin=$(git -C "$DOTFILES_ROOT" config --get remote.origin.url 2>/dev/null || true)
-  DOTFILES_OWNER=$(remote_owner_slug "$df_origin")
-fi
-
-has_header_marker() {
-  local file="$1" re="$2" n=0 line
-  [ -f "$file" ] && [ ! -L "$file" ] || return 1
-  while [ "$n" -lt 5 ] && IFS= read -r line; do
-    n=$((n + 1))
-    if [[ "$line" =~ $re ]]; then
-      return 0
-    fi
-  done <"$file"
-  return 1
-}
-
-is_personal_overlay_root() {
-  case "$1" in
-    "$HOME_REAL/.dotfiles" | "$HOME_REAL/.private" | "$HOME_REAL/.corp" | "$HOME_REAL/.ssh" | "$HOME_REAL/.projects")
-      return 0
-      ;;
-  esac
-  return 1
-}
-
 is_owned_repo() {
-  local top="$1" hooks_dir="$2" opt common_dir common_parent
-  local remotes upstream_url canon_url has_upstream=0 first_remote canon_owner
-  local cfg_email cfg_name email_local root_id root_ae root_an
-
+  local top="$1" hooks_dir="$2" opt url me owner
   opt=$(git -C "$top" config --local --bool hooks.agent 2>/dev/null || true)
-  case "$opt" in
-    true) return 0 ;;
-    false) return 1 ;;
-  esac
-
-  is_personal_overlay_root "$top" && return 0
-
-  common_dir=$(git -C "$top" rev-parse --git-common-dir 2>/dev/null || true)
-  if [ -n "$common_dir" ]; then
-    case "$common_dir" in
-      /*) ;;
-      *) common_dir="$top/$common_dir" ;;
-    esac
-    common_parent=$(cd -P "$common_dir/.." 2>/dev/null && pwd) || common_parent=""
-    [ -n "$common_parent" ] && is_personal_overlay_root "$common_parent" && return 0
-  fi
-
-  has_header_marker "$hooks_dir/commit-msg" '^# (git-)?hooks?-multiplexer([: ]|$)' && return 0
-
-  remotes=$(git -C "$top" remote 2>/dev/null || true)
-  [ -n "$remotes" ] || return 0
-
-  upstream_url=$(git -C "$top" config --get remote.upstream.url 2>/dev/null || true)
-  if [ -n "$upstream_url" ]; then
-    canon_url="$upstream_url"
-    has_upstream=1
-  else
-    canon_url=$(git -C "$top" config --get remote.origin.url 2>/dev/null || true)
-    if [ -z "$canon_url" ]; then
-      first_remote="${remotes%%$'\n'*}"
-      canon_url=$(git -C "$top" config --get "remote.$first_remote.url" 2>/dev/null || true)
-    fi
-  fi
-
-  canon_owner=$(remote_owner_slug "$canon_url")
-  [ -n "$DOTFILES_OWNER" ] && [ "$canon_owner" = "$DOTFILES_OWNER" ] && return 0
-
-  cfg_email=$(git -C "$top" config --get user.email 2>/dev/null || true)
-  cfg_name=$(git -C "$top" config --get user.name 2>/dev/null || true)
-  email_local="${cfg_email%%@*}"
-  if [ -n "$email_local" ] && [ "${#email_local}" -ge 3 ]; then
-    [ "$canon_owner" = "$email_local" ] && return 0
-    case "$canon_url" in
-      *"/$email_local/"* | *":$email_local/"* | *"/$email_local-"* | *":personal/$email_local"*)
-        return 0
-        ;;
-    esac
-  fi
-
-  if [ "$has_upstream" -eq 0 ]; then
-    root_id=$(git -C "$top" rev-list --max-parents=0 HEAD -n 1 2>/dev/null || true)
-    if [ -n "$root_id" ]; then
-      root_ae=$(git -C "$top" log -n 1 --format='%ae' "$root_id" 2>/dev/null || true)
-      root_an=$(git -C "$top" log -n 1 --format='%an' "$root_id" 2>/dev/null || true)
-      if [ -n "$cfg_email" ] && [ "$root_ae" = "$cfg_email" ]; then
-        return 0
-      fi
-      if [ -n "$cfg_name" ] && [ "$root_an" = "$cfg_name" ]; then
-        return 0
-      fi
-    fi
-  fi
-
-  return 1
+  [ "$opt" = false ] && return 1
+  [ "$opt" = true ] || [ -d "$hooks_dir/commit-msg.d" ] && return 0
+  [[ "$top" == "$HOME_REAL/.dotfiles" || "$top" == "$HOME_REAL/.private" || "$top" == "$HOME_REAL/.corp" || "$top" == "$HOME_REAL/.projects" ]] && return 0
+  [ -n "$(git -C "$top" config --get remote.upstream.url 2>/dev/null)" ] && return 1
+  url=$(git -C "$top" config --get remote.origin.url 2>/dev/null || true)
+  [ -z "$url" ] && return 0
+  me=$(git -C "$top" config --get user.email 2>/dev/null || true)
+  me="${me%%@*}"
+  owner=$(git -C "$HOME_REAL/.dotfiles" config --get remote.origin.url 2>/dev/null | sed -nE 's#.*[:/]([^/:]+)/[^/]+$#\1#p')
+  [[ (${#me} -ge 3 && ("$url" == *"/$me/"* || "$url" == *":$me/"*)) || (-n "$owner" && ("$url" == *"/$owner/"* || "$url" == *":$owner/"*)) ]]
 }
 
 ensure_repo_hooks() {
@@ -236,20 +119,14 @@ ensure_repo_hooks() {
   esac
 
   # Skip repositories where .git/hooks or commit-msg is a symlink (such as
-  # multi-repository checkouts pointing into shared hook directories).
+  # Android/GoB 'repo' checkouts pointing into shared .repo/repo/hooks).
   [ ! -L "$hooks_dir" ] || return 0
   [ ! -L "$hooks_dir/commit-msg" ] || return 0
-
-  # Only auto-install personal commit-message hooks in user-owned or opted-in
-  # repositories, leaving third-party clones untouched.
   is_owned_repo "$top" "$hooks_dir" || return 0
 
-  # Fast path: if the default profile ('agent') is in effect, 10-agent is
-  # already installed, and no retired pre-multiplexer 00-legacy copy needs
-  # cleanup, skip invoking 'hook'.
-  if [ "${AGENT_REQUIRED_HOOKS-agent}" = "agent" ] &&
-    [ -x "$hooks_dir/commit-msg.d/10-agent" ] &&
-    ! has_header_marker "$hooks_dir/commit-msg.d/00-legacy" '^# git-hooks?-(agent|markdown|node):([[:space:]]|$)'; then
+  # Fast path: if the default profile ('agent') is in effect and 10-agent is
+  # already installed, skip invoking 'hook'.
+  if [ "${AGENT_REQUIRED_HOOKS-agent}" = "agent" ] && [ -x "$hooks_dir/commit-msg.d/10-agent" ]; then
     return 0
   fi
 
