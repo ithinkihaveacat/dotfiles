@@ -98,9 +98,9 @@ global open/red counts. On non-terminal surfaces, the server command provides a
 text list instead of the board.
 
 Levels have the same meanings as the Claude plugin: 1 is red-only, 2 is
-conservative, 3 standard, 4 proactive audit, and 5 maximum coverage. A red alert
-instructs the agent to stop on the blocked path and ask you; it does not
-forcibly interrupt execution.
+conservative, 3 standard, 4 proactive, and 5 max-coverage. A red alert instructs
+the agent to stop on the blocked path and ask you; it does not forcibly
+interrupt execution.
 
 ## Behavior and boundaries
 

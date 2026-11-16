@@ -125,17 +125,17 @@ const START = {
 
 describe("the rule", () => {
   test("keeps the rule text static across levels except for the active level line", () => {
-    expect(buildRule(3)).toContain("## Not a Harness Defect (Do Not Pull)");
-    expect(buildRule(3)).toContain("At Levels 1–4, a transient failure");
-    expect(buildRule(5)).toContain("At Levels 1–4, a transient failure");
-    expect(buildRule(5)).toContain("Active trigger level: 5 (maximum coverage).");
+    expect(buildRule(3)).toContain("## Out of Scope (Skip Pulling)");
+    expect(buildRule(3)).toContain("Transient failures at Levels 1–4");
+    expect(buildRule(5)).toContain("Transient failures at Levels 1–4");
+    expect(buildRule(5)).toContain("Active trigger level: 5 (max-coverage).");
     expect(buildRule(5)).not.toContain(
-      "Active trigger level: 5 (maximum coverage). Do not self-filter"
+      "Active trigger level: 5 (max-coverage). Active QA audit"
     );
     expect(
       buildRule(3).replace(
         "Active trigger level: 3 (standard).",
-        "Active trigger level: 5 (maximum coverage)."
+        "Active trigger level: 5 (max-coverage)."
       )
     ).toBe(buildRule(5));
   });
@@ -143,11 +143,11 @@ describe("the rule", () => {
   test("includes the full 1-5 trigger level rubric and exposes optional level in INPUT_SCHEMA", () => {
     const rule = buildRule(3);
     expect(rule).toContain("Active trigger level: 3 (standard).");
-    expect(rule).toContain("- **Level 1 (red only):**");
-    expect(rule).toContain("- **Level 2 (conservative):**");
-    expect(rule).toContain("- **Level 3 (standard):**");
-    expect(rule).toContain("- **Level 4 (proactive audit):**");
-    expect(rule).toContain("- **Level 5 (maximum coverage):**");
+    expect(rule).toContain("- **1 (`red-only`):**");
+    expect(rule).toContain("- **2 (`conservative`):**");
+    expect(rule).toContain("- **3 (`standard`):**");
+    expect(rule).toContain("- **4 (`proactive`):**");
+    expect(rule).toContain("- **5 (`max-coverage`):**");
     expect("level" in INPUT_SCHEMA.properties).toBe(true);
   });
 });
@@ -251,7 +251,7 @@ describe("the plugin", () => {
     expect(registered).toHaveLength(1);
     expect(registered[0]?.isDeferred).toBe(false);
     // The rule carries the level, so the description cannot go stale.
-    expect(registered[0]?.description).not.toContain("proactive audit");
+    expect(registered[0]?.description).not.toContain("proactive");
   });
 
   test("adds the rule only to requests that offer the tool", async ($, on) => {
@@ -306,7 +306,7 @@ describe("the plugin", () => {
       tools: [TOOL]
     });
     expect(composed.sections[0]?.text).toContain(
-      "Active trigger level: 4 (proactive audit)."
+      "Active trigger level: 4 (proactive)."
     );
     const setOut = await $.command.run({
       command: "andon",
@@ -314,7 +314,7 @@ describe("the plugin", () => {
       origin: { kind: "composer" },
       presentation: { isFullscreen: false, columns: 80 }
     });
-    expect(setOut.text).toContain("5 (maximum coverage)");
+    expect(setOut.text).toContain("5 (max-coverage)");
     expect(
       runs.some((r) => r.argv.includes("level") && r.argv.includes("5"))
     ).toBe(true);

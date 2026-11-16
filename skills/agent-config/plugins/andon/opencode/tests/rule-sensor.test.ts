@@ -1,20 +1,31 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { buildRule, INPUT_SCHEMA, TOOL } from "../src/rule.ts";
 import {
+  buildRule,
+  DESCRIPTION,
+  INPUT_SCHEMA,
+  LEVEL_NAMES,
+  TOOL
+} from "../src/rule.ts";
+import {
+  buildDescription as CLAUDE_BUILD_DESCRIPTION,
   buildRule as CLAUDE_BUILD_RULE,
   INPUT_SCHEMA as CLAUDE_INPUT_SCHEMA,
+  LEVEL_NAMES as CLAUDE_LEVEL_NAMES,
   TOOL as CLAUDE_TOOL
 } from "../../claude/hooks/rule.ts";
 import { createSensor, shellFailed } from "../src/sensor.ts";
 
 test("pull payload stays compatible with the Claude adapter and includes optional level", () => {
+  assert.equal(DESCRIPTION, CLAUDE_BUILD_DESCRIPTION());
+  assert.deepEqual(LEVEL_NAMES, CLAUDE_LEVEL_NAMES);
   assert.deepEqual(INPUT_SCHEMA.required, CLAUDE_INPUT_SCHEMA.required);
   assert.deepEqual(
     Object.keys(INPUT_SCHEMA.properties),
     Object.keys(CLAUDE_INPUT_SCHEMA.properties)
   );
   assert.equal("level" in INPUT_SCHEMA.properties, true);
+  assert.equal("enum" in INPUT_SCHEMA.properties.level, false);
   assert.deepEqual(
     INPUT_SCHEMA.properties.kind.enum,
     CLAUDE_INPUT_SCHEMA.properties.kind.enum
@@ -24,8 +35,16 @@ test("pull payload stays compatible with the Claude adapter and includes optiona
     CLAUDE_INPUT_SCHEMA.properties.color.enum
   );
   assert.equal(
+    INPUT_SCHEMA.properties.summary.minLength,
+    CLAUDE_INPUT_SCHEMA.properties.summary.minLength
+  );
+  assert.equal(
     INPUT_SCHEMA.properties.summary.maxLength,
     CLAUDE_INPUT_SCHEMA.properties.summary.maxLength
+  );
+  assert.equal(
+    INPUT_SCHEMA.properties.details.minLength,
+    CLAUDE_INPUT_SCHEMA.properties.details.minLength
   );
   for (const key of [
     "color",
@@ -55,23 +74,23 @@ test("OpenCode and Claude render the same rule apart from the tool name", () => 
 test("buildRule includes the full 1-5 rubric and keeps static text across levels", () => {
   const rule3 = buildRule(3);
   assert.match(rule3, /Active trigger level: 3 \(standard\)\./);
-  assert.match(rule3, /## Not a Harness Defect \(Do Not Pull\)/);
-  assert.match(rule3, /At Levels 1–4, a transient failure/);
-  assert.match(rule3, /- \*\*Level 1 \(red only\):\*\*/);
-  assert.match(rule3, /- \*\*Level 2 \(conservative\):\*\*/);
-  assert.match(rule3, /- \*\*Level 3 \(standard\):\*\*/);
-  assert.match(rule3, /- \*\*Level 4 \(proactive audit\):\*\*/);
-  assert.match(rule3, /- \*\*Level 5 \(maximum coverage\):\*\*/);
+  assert.match(rule3, /## Out of Scope \(Skip Pulling\)/);
+  assert.match(rule3, /Transient failures at Levels 1–4/);
+  assert.match(rule3, /- \*\*1 \(`red-only`\):\*\*/);
+  assert.match(rule3, /- \*\*2 \(`conservative`\):\*\*/);
+  assert.match(rule3, /- \*\*3 \(`standard`\):\*\*/);
+  assert.match(rule3, /- \*\*4 \(`proactive`\):\*\*/);
+  assert.match(rule3, /- \*\*5 \(`max-coverage`\):\*\*/);
   const rule5 = buildRule(5);
-  assert.match(rule5, /At Levels 1–4, a transient failure/);
+  assert.match(rule5, /Transient failures at Levels 1–4/);
   assert.doesNotMatch(
     rule5,
-    /Active trigger level: 5 \(maximum coverage\)\. Do not self-filter/
+    /Active trigger level: 5 \(max-coverage\)\. Active QA audit/
   );
   assert.equal(
     rule3.replace(
       "Active trigger level: 3 (standard).",
-      "Active trigger level: 5 (maximum coverage)."
+      "Active trigger level: 5 (max-coverage)."
     ),
     rule5
   );
