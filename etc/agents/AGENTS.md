@@ -14,14 +14,19 @@ workflows, helper scripts, and local conventions.
   inventing an ad-hoc approach.
 - **Load session-specific skills when relevant**: Default skills cover only
   baseline workflows. Whenever work touches—or later shifts to—a repository or
-  technology stack not covered by active skills, delegate a subagent to check
-  `skill catalog --json` (or other skill-search tools). Reuse skills already
-  provided by the harness. Load missing skills through its skill loader, or use
-  `skill --scope session add <NAME>...` only when this launcher supports session
-  scope (Claude wrapper or Antigravity). OpenCode and Codex do not support that
-  CLI scope: resolve local skills with `skill resolve <NAME>` and read the
-  resulting `SKILL.md` instead. Do not install workspace/user skills merely to
-  work around missing session support.
+  technology stack not covered by active skills, delegate a subagent to discover
+  candidates via `skill --offline catalog --json` (which outputs NDJSON: one
+  JSON object per line; inspect a candidate with `skill info <NAME>` /
+  `skill show <NAME>`), or other skill-search tools, and return matching skill
+  names and paths to the parent session rather than running
+  `skill --scope session add` inside its own ephemeral subagent session. Reuse
+  skills already provided by the harness. Load missing skills in the parent
+  session through its skill loader, or use `skill --scope session add <NAME>...`
+  only when this launcher supports session scope (Claude wrapper or
+  Antigravity). OpenCode and Codex do not support that CLI scope: resolve local
+  skills with `skill --offline resolve <NAME>` and read the resulting `SKILL.md`
+  instead. Do not install workspace/user skills merely to work around missing
+  session support.
 - **Skill symlinks and relative paths**: Installed skill directories are
   symlinks, so cross-skill links (`../<sibling>/...`) must be resolved against
   the symlink's `realpath` (or activated via `skill --scope session add`), and
@@ -36,8 +41,9 @@ workflows, helper scripts, and local conventions.
     package/CLI tool is missing, activate `workspace-tools` and install it into
     the workspace rather than user- or system-wide. If a `uv run --script`
     helper fails to resolve cached dependencies in a sandbox, run
-    `~/.dotfiles/install.sh --only uv --force` (with network access) to rebuild
-    the script cache rather than changing the script's shebang.
+    `uv sync --script <script>` or `~/.dotfiles/install.sh --apply --only uv`
+    (with network access, without `--force`) to populate the script cache rather
+    than changing the script's shebang.
   - **Version control & commits**: Format commit messages according to the
     active VCS/standards skill. Ensure the workspace commit hooks are installed
     (`hook apply` or `hook -C <repo> apply`) before committing in a repository.
@@ -61,14 +67,16 @@ triggered.
 ## Path and Link Portability
 
 - **Committed files and distributable artifacts**: When writing or editing
-  committed repository files, documentation, or artifacts intended for
-  distribution, use repository-relative paths for internal links (no `file://`
-  scheme) and canonical web URLs (`https://` or `http://`) for external
-  references—never host-specific `file://` links or absolute local paths that
-  break across machines.
-- **Conversation output**: In regular chat responses, use machine-specific
-  `file://` links when referencing local files, directories, or code symbols so
-  they are clickable in the user's environment.
+  committed repository files, documentation, or externally shared documents, use
+  repository-relative paths for internal links (no `file://` scheme) and
+  canonical web URLs (`https://` or `http://`) for external references—never
+  host-specific `file://` links or absolute local paths that break across
+  machines.
+- **Conversation output and session-local IDE artifacts**: In regular chat
+  responses, use machine-specific `file://` links when referencing local files,
+  directories, or code symbols so they are clickable in the user's environment.
+  Session-local IDE artifact panels may likewise use `file://` links when
+  required by the host's artifact viewer.
 
 ## Throwaway HTML
 
@@ -87,9 +95,10 @@ need their own architecture and exact reproducibility.
 ## Command Safety and Bounded Search
 
 Never run broad `find`, `grep`, or recursive file listings on monorepos
-(`/google`), system roots (`/`, `/usr`, `/var`), or home directories (`~`).
-Prefer indexed tools (`rg`, `fd`, `CodeSearch`) scoped to a project
-subdirectory, and bound every `find` with `-maxdepth N` or a timeout
+(`/google`), system roots (`/`, `/usr`, `/var`), or home directories (`~`). In
+local Git repositories and scratch directories, `rg`, `fd`, and `git grep` are
+authorized and preferred over monorepo-only search wrappers. Scope searches to a
+project subdirectory, and bound every `find` with `-maxdepth N` or a timeout
 (`timeout 30s find ...`):
 
 ```bash
