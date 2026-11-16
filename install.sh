@@ -2227,41 +2227,24 @@ function feature_skills {
 # ~/.gemini/config exists, preserving any existing entries, inherits, or
 # exclusions while keeping ~/.claude/skills and ~/.agents/skills untouched.
 function register_gemini_default_skills {
-  local config_dir="$HOME/.gemini/config"
-  local skills_json="$config_dir/skills.json"
-  local defaults_dir="${SKILL_DEFAULTS_DIR:-$XDG_STATE_HOME/skill/defaults}"
-  local tmp
-
+  local config_dir="$HOME/.gemini/config" skills_json="$HOME/.gemini/config/skills.json"
+  local defaults_dir="${SKILL_DEFAULTS_DIR:-$XDG_STATE_HOME/skill/defaults}" tmp="$HOME/.gemini/config/skills.json.tmp.$$"
   [ -d "$config_dir" ] || return 0
-  if ! exists jq; then
+  exists jq || {
     echo "warning: jq not found; $skills_json not updated" >&2
     return 0
-  fi
-
-  xmkdir "$defaults_dir"
-  tmp="$skills_json.tmp.$$"
-  if [ ! -s "$skills_json" ]; then
-    if jq -n --arg p "$defaults_dir" '{entries: [{path: $p}]}' >"$tmp" &&
-      x mv "$tmp" "$skills_json"; then
-      echo "registered default skills in $skills_json" >&2
-    else
-      rm -f "$tmp"
-      echo "warning: failed to write $skills_json" >&2
-    fi
-    return 0
-  fi
-  if ! jq -e 'type == "object"' "$skills_json" >/dev/null 2>&1; then
+  }
+  if [ -s "$skills_json" ] && ! jq -e 'type == "object"' "$skills_json" >/dev/null 2>&1; then
     echo "warning: $skills_json is not a JSON object; leaving it in place" >&2
     return 0
   fi
-  if jq -e --arg p "$defaults_dir" \
-    'any(.entries[]?; .path == $p or .path == "~/.local/state/skill/defaults")' \
-    "$skills_json" >/dev/null 2>&1; then
+  xmkdir "$defaults_dir"
+  if [ -s "$skills_json" ] && jq -e --arg p "$defaults_dir" \
+    'any(.entries[]?; .path == $p or .path == "~/.local/state/skill/defaults")' "$skills_json" >/dev/null 2>&1; then
     return 0
   fi
-
-  if jq --arg p "$defaults_dir" \
-    '.entries = ((.entries // []) + [{path: $p}])' "$skills_json" >"$tmp" &&
+  if (if [ -s "$skills_json" ]; then cat "$skills_json"; else echo "{}"; fi) |
+    jq --arg p "$defaults_dir" '.entries = ((.entries // []) + [{path: $p}])' >"$tmp" &&
     x mv "$tmp" "$skills_json"; then
     echo "registered default skills in $skills_json" >&2
   else

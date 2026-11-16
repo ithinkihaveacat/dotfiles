@@ -26,13 +26,6 @@ PROG = "andon"
 DEFAULT_LEVEL = 3
 SUMMARY_MAX = 120
 MIN_SUFFIX = 4
-LEVEL_NAMES = {
-    1: "red-only",
-    2: "conservative",
-    3: "standard",
-    4: "proactive",
-    5: "max-coverage",
-}
 
 
 class Color(StrEnum):
@@ -90,18 +83,9 @@ HARNESS_FIELDS = (
     "model_name",
     "mcp_error",
     "session_level",
-    "level_configured",
-    "level_reported",
-    "level_source",
 )
 GENERIC_TOOL_SOURCES = frozenset(
-    {
-        "run_command",
-        "write_file",
-        "edit_file",
-        "read_file",
-        "bash",
-    }
+    {"run_command", "write_file", "edit_file", "read_file", "bash"}
 )
 
 
@@ -132,9 +116,6 @@ class Alert(TypedDict):
     workspace_paths: NotRequired[list[str]]
     model_name: NotRequired[str | None]
     mcp_error: NotRequired[str | None]
-    level_configured: NotRequired[int | None]
-    level_reported: NotRequired[int | None]
-    level_source: NotRequired[str | None]
 
 
 class AndonError(Exception):
@@ -194,12 +175,19 @@ def load_alerts() -> list[Alert]:
         try:
             record = json.loads(line)
             if isinstance(record, dict):
-                level = (
-                    parse_level(record.get("level"))
-                    or parse_level(record.get("level_reported"))
-                    or parse_level(record.get("level_configured"))
+                record["level"] = parse_level(record.get("level")) or DEFAULT_LEVEL
+                raw_sources = record.get("sources")
+                sources = (
+                    [str(s) for s in raw_sources]
+                    if isinstance(raw_sources, list)
+                    else []
                 )
-                record["level"] = level if level is not None else DEFAULT_LEVEL
+                if sources or record.get("summary"):
+                    record["fingerprint"] = fingerprint(
+                        str(record.get("kind") or "other"),
+                        sources,
+                        str(record.get("summary") or ""),
+                    )
                 alerts.append(record)  # type: ignore[arg-type]
         except json.JSONDecodeError:
             print(
@@ -305,30 +293,25 @@ def new_id() -> str:
 
 def normalize_source(source: str) -> str:
     """Spells a source the same way from every workspace and session."""
-    source = source.strip()
-    if source.startswith("<") and source.endswith(">") and len(source) > 2:
-        source = source[1:-1].strip()
-    if match := re.fullmatch(r"RULE\[(.+)\]", source, re.IGNORECASE):
-        source = match.group(1).strip()
+    source = re.sub(
+        r"^<?(?:RULE\[(.+)\]|([^>]+))>?$",
+        lambda m: (m.group(1) or m.group(2)).strip(),
+        source.strip(),
+        flags=re.IGNORECASE,
+    )
     while source.startswith("./"):
         source = source[2:]
     if "/" in source or source.startswith("~"):
         expanded = Path(source).expanduser()
-        try:
-            if (
-                expanded.exists()
-                or expanded.is_symlink()
-                or (expanded.parent != Path(".") and expanded.parent.exists())
-            ):
-                source = os.path.realpath(expanded)
-            elif source.startswith("~"):
-                source = str(expanded)
-        except OSError:
-            pass
-    for prefix in dict.fromkeys((os.path.realpath(Path.home()), str(Path.home()))):
-        if source == prefix or source.startswith(prefix + os.sep):
-            source = "~" + source[len(prefix) :]
-            break
+        if expanded.exists() or (
+            expanded.parent != Path(".") and expanded.parent.exists()
+        ):
+            source = os.path.realpath(expanded)
+        elif source.startswith("~"):
+            source = str(expanded)
+    for home in (os.path.realpath(Path.home()), str(Path.home())):
+        if source == home or source.startswith(home + os.sep):
+            return "~" + source[len(home) :]
     return source
 
 
@@ -346,21 +329,6 @@ def fingerprint(kind: str, sources: list[str], summary: str) -> str:
         norm_summary = (summary or "").strip().lower()
         payload = json.dumps([norm_kind, norm_summary], separators=(",", ":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
-
-
-compute_fingerprint = fingerprint
-
-
-def record_fingerprint(alert: Alert | dict[str, Any]) -> str:
-    raw_sources = alert.get("sources")
-    sources = [str(s) for s in raw_sources] if isinstance(raw_sources, list) else []
-    if sources or alert.get("summary"):
-        return fingerprint(
-            str(alert.get("kind") or "other"),
-            sources,
-            str(alert.get("summary") or ""),
-        )
-    return str(alert.get("fingerprint") or "")
 
 
 def args_hash(fields: dict[str, Any]) -> str:
@@ -447,7 +415,7 @@ def open_counts(alerts: list[Alert]) -> dict[str, int]:
     counts: dict[str, int] = {}
     for alert in alerts:
         if alert["status"] == Status.OPEN:
-            fp = record_fingerprint(alert)
+            fp = alert["fingerprint"]
             counts[fp] = counts.get(fp, 0) + 1
     return counts
 
@@ -483,7 +451,7 @@ def render_prompt(alert: Alert) -> str:
         lines.append(f"- **{label}**: {alert['resolution']}")
     if alert.get("proposed_fix"):
         lines.append(f"- **Proposed fix**: {alert['proposed_fix']}")
-    seen = open_counts(load_alerts()).get(record_fingerprint(alert), 0)
+    seen = open_counts(load_alerts()).get(alert["fingerprint"], 0)
     if seen > 1:
         lines.append(f"- **Recurrences**: {seen} open alerts share this fingerprint")
     lines += [
@@ -608,8 +576,11 @@ Try 'andon pull --help' for more information.
 def pull_alert(fields: dict[str, Any]) -> dict[str, Any]:
     alert = build_alert(fields)
     with locked_alerts() as alerts:
+        seen = {a["id"] for a in alerts}
+        while alert["id"] in seen:
+            alert["id"] = new_id()
         alerts.append(alert)
-        recurrences = open_counts(alerts)[record_fingerprint(alert)]
+        recurrences = open_counts(alerts)[alert["fingerprint"]]
     return {
         "ok": True,
         "id": alert["id"],
@@ -659,14 +630,12 @@ def matches_filters(
     if session and alert.get("conversation_id") != session:
         return False
     if workspace:
-        raw_paths = [str(p) for p in alert.get("workspace_paths") or []]
-        if not raw_paths:
-            return False
-        wanted = os.path.abspath(os.path.expanduser(workspace))
-        abs_paths = [os.path.abspath(os.path.expanduser(p)) for p in raw_paths]
-        if wanted not in abs_paths and not any(
-            workspace in p or workspace in ap
-            for p, ap in zip(raw_paths, abs_paths, strict=False)
+        wanted = Path(workspace).expanduser().resolve()
+        seg = f"/{workspace.strip('/')}/"
+        if not any(
+            (ap := Path(str(p)).expanduser().resolve()).is_relative_to(wanted)
+            or (seg != "//" and seg in f"/{ap.as_posix().strip('/')}/")
+            for p in alert.get("workspace_paths") or []
         ):
             return False
     return True
@@ -676,12 +645,11 @@ def list_alerts(**filters: Any) -> list[dict[str, Any]]:
     alerts = load_alerts()
     counts = open_counts(alerts)
     # The store is in pull order, so newest first is the file reversed.
-    out = []
-    for alert in reversed(alerts):
-        if matches_filters(alert, **filters):
-            fp = record_fingerprint(alert)
-            out.append({**alert, "fingerprint": fp, "recurrences": counts.get(fp, 0)})
-    return out
+    return [
+        {**alert, "recurrences": counts.get(alert["fingerprint"], 0)}
+        for alert in reversed(alerts)
+        if matches_filters(alert, **filters)
+    ]
 
 
 def cmd_list(args: argparse.Namespace) -> int:
@@ -713,9 +681,7 @@ def cmd_list(args: argparse.Namespace) -> int:
 def show_alert(id: str) -> dict[str, Any]:
     alerts = load_alerts()
     alert = find_alert(alerts, id)
-    fp = record_fingerprint(alert)
-    recurrences = open_counts(alerts).get(fp, 0)
-    return {**alert, "fingerprint": fp, "recurrences": recurrences}
+    return {**alert, "recurrences": open_counts(alerts).get(alert["fingerprint"], 0)}
 
 
 def cmd_show(args: argparse.Namespace) -> int:
@@ -742,17 +708,13 @@ def transition_alert(
     }[command]
     with locked_alerts() as alerts:
         alert = find_alert(alerts, ref)
-        target_fp = record_fingerprint(alert)
         group = [alert]
         if all_matching:
             group += [
                 a
                 for a in alerts
                 if a is not alert
-                and (
-                    record_fingerprint(a) == target_fp
-                    or a.get("fingerprint") == alert.get("fingerprint")
-                )
+                and a["fingerprint"] == alert["fingerprint"]
                 and (a["status"] == Status.OPEN) == (target != Status.OPEN)
             ]
         stamp = now()
@@ -793,7 +755,7 @@ def alert_stats() -> dict[str, Any]:
             norm = normalize_source(source)
             sources[norm] = sources.get(norm, 0) + 1
     groups = open_counts(alerts)
-    by_fingerprint = {record_fingerprint(a): a["summary"] for a in opened}
+    by_fingerprint = {a["fingerprint"]: a["summary"] for a in opened}
     level, level_source = effective_level()
     return {
         "total": len(alerts),
@@ -915,13 +877,9 @@ Environment:
 
 
 def positive_int(raw: str) -> int:
-    try:
-        value = int(raw)
-    except ValueError as err:
-        raise argparse.ArgumentTypeError(f"invalid integer value: {raw!r}") from err
-    if value < 1:
-        raise argparse.ArgumentTypeError("must be at least 1")
-    return value
+    if not raw.isdigit() or int(raw) < 1:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return int(raw)
 
 
 class Parser(argparse.ArgumentParser):

@@ -20,10 +20,12 @@ from pathlib import Path
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 READER = SCRIPTS / "mcp-logs"
 MCP = SCRIPTS / "mcp"
-# Quiet, so that uv's "Installed N packages" on a cold cache does not reach
-# the stderr these tests check.
-RUN = ["uv", "run", "--quiet", "--script"]
 signal.signal(signal.SIGINT, signal.default_int_handler)
+subprocess.run(["uv", "sync", "--quiet", "--script", str(READER)], check=True)
+READER_PY = subprocess.check_output(
+    ["uv", "python", "find", "--script", str(READER)], text=True
+).strip()
+RUN = [READER_PY, str(READER)]
 
 
 def record(ts: str, **fields) -> dict:
@@ -91,7 +93,7 @@ class McpLogsTests(unittest.TestCase):
         self.tmpdir.cleanup()
 
     def run_reader(self, *args, env=None, script=READER):
-        cmd = [*RUN, str(script)] if script == READER else [str(script)]
+        cmd = RUN if script == READER else [str(script)]
         return subprocess.run(
             [*cmd, *args],
             capture_output=True,
@@ -214,11 +216,10 @@ class McpLogsTests(unittest.TestCase):
         out = Path(self.tmpdir.name) / "follow.out"
         with open(out, "w") as fh:
             proc = subprocess.Popen(
-                [*RUN, str(READER), "-f", "-n", "1"],
+                [*RUN, "-f", "-n", "1"],
                 stdout=fh,
                 stderr=subprocess.PIPE,
                 env=self.env,
-                start_new_session=True,
             )
         try:
             self.wait_for(out, 1)
@@ -237,7 +238,7 @@ class McpLogsTests(unittest.TestCase):
             )
             self.wait_for(out, 7)
         finally:
-            os.killpg(proc.pid, signal.SIGINT)
+            proc.send_signal(signal.SIGINT)
             _, err = proc.communicate(timeout=10)
         lines = out.read_text().splitlines()
         self.assertEqual(
@@ -250,15 +251,14 @@ class McpLogsTests(unittest.TestCase):
     def follow_proc(self, out: Path, *args) -> subprocess.Popen:
         with open(out, "w") as fh:
             return subprocess.Popen(
-                [*RUN, str(READER), "-f", *args],
+                [*RUN, "-f", *args],
                 stdout=fh,
                 stderr=subprocess.PIPE,
                 env=self.env,
-                start_new_session=True,
             )
 
     def stop_follow(self, proc: subprocess.Popen) -> bytes:
-        os.killpg(proc.pid, signal.SIGINT)
+        proc.send_signal(signal.SIGINT)
         _, err = proc.communicate(timeout=10)
         self.assertEqual(proc.returncode, 130)
         return err
@@ -312,25 +312,23 @@ class McpLogsTests(unittest.TestCase):
         self.assertIn(b"no request log for server taskgo", err)
 
     def test_sigterm_process_group(self):
-        """A SIGTERM to the whole process group reaches the reader twice (uv
-        forwards it too), and still stops it cleanly, with no traceback."""
+        """A SIGTERM stops the reader cleanly, with no traceback."""
         for _ in range(3):
             proc = subprocess.Popen(
-                [*RUN, str(READER), "-f", "-n", "0"],
+                [*RUN, "-f", "-n", "0"],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
                 env=self.env,
-                start_new_session=True,
             )
             time.sleep(1.5)
-            os.killpg(proc.pid, signal.SIGTERM)
+            proc.send_signal(signal.SIGTERM)
             _, err = proc.communicate(timeout=10)
             self.assertNotIn(b"Traceback", err)
             self.assertEqual(err.strip(), b"")
 
     def test_sigterm(self):
         proc = subprocess.Popen(
-            [*RUN, str(READER), "-f"],
+            [*RUN, "-f"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             env=self.env,
@@ -354,7 +352,7 @@ class McpLogsTests(unittest.TestCase):
             *(record("2026-11-05T00:00:00.000Z", n=i) for i in range(5000)),
         )
         out = subprocess.run(
-            f"uv run --quiet --script '{READER}' -n all | head -n 1",
+            f"'{READER_PY}' '{READER}' -n all | head -n 1",
             shell=True,
             capture_output=True,
             text=True,

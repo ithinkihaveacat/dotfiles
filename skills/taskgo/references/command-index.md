@@ -764,7 +764,8 @@ Options:
   --path PATH           Endpoint path (default /mcp)
   --remote REMOTE       Remote to fetch from (default origin)
   --branch BRANCH       Branch to serve (default main)
-  --no-fetch            Serve the local BRANCH without fetching; no writes
+  --no-fetch, --offline
+                        Serve the local BRANCH without fetching; no writes
   --local               Serve the local BRANCH without a remote: writes move
                         it and refresh the checkout
   --fetch-ttl SECS      Seconds a fetched or pushed head serves reads (default

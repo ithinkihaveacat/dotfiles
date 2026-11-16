@@ -796,21 +796,12 @@ def set_explicit_root(value: str | None) -> None:
 
 def _find_cwd_control_root() -> Path | None:
     """If CWD is inside a Git-backed taskgo control repository, return its root."""
-    try:
-        cwd = Path.cwd()
-    except OSError:
-        return None
-    for candidate in (cwd, *cwd.parents):
-        if not (candidate / ".git").exists():
-            continue
-        agents_path = candidate / "AGENTS.md"
-        if agents_path.is_file():
-            try:
-                txt = agents_path.read_text(encoding="utf-8")
-            except OSError:
-                txt = ""
-            if has_taskgo_declaration(txt) or _AGENTS_BLOCK_RE.search(txt):
-                return candidate
+    with contextlib.suppress(OSError):
+        for cand in (Path.cwd(), *Path.cwd().parents):
+            if (cand / ".git").exists() and (cand / "AGENTS.md").is_file():
+                txt = (cand / "AGENTS.md").read_text(encoding="utf-8")
+                if has_taskgo_declaration(txt) or _AGENTS_BLOCK_RE.search(txt):
+                    return cand
     return None
 
 
@@ -8085,20 +8076,11 @@ def cmd_doctor(
             if f.severity in ("WARN", "FAIL"):
                 has_warn_or_fail = True
 
-        snap = FsSnapshot(root)
-        if project:
-            has_plan = snap.is_file(f"{project}/PLAN.md")
-        else:
-            projects = list_projects(snap)
-            has_plan = not projects or any(
-                snap.is_file(f"{p}/PLAN.md") for p in projects
-            )
-        plan_clause = "PLAN is the current direction; " if has_plan else ""
         print(
             _tagged(
-                f"""[INFO]  Agent semantic review
+                """[INFO]  Agent semantic review
         STATUS Summary says where the project stands now, in a few sentences; Next is the next few actions.
-        {plan_clause}README and ADRs link to owners rather than copying facts.
+        PLAN (when present) reflects current direction; README and ADRs link to owners rather than copying facts.
         No tracker material has leaked into public or shared artifacts."""
             )
         )
@@ -9357,11 +9339,11 @@ def cmd_checkpoint(
 
         validated_paths: list[tuple[str, bool]] = []
         for p_arg in paths_list:
-            if p_arg.startswith("/") or "\\" in p_arg or ".." in p_arg.split("/"):
-                die(f"checkpoint: unsafe path: {p_arg}")
             p_clean = posixpath.normpath(p_arg.removeprefix("./")).rstrip("/")
             if (
-                not p_clean
+                p_arg.startswith("/")
+                or "\\" in p_arg
+                or not p_clean
                 or p_clean == "."
                 or p_clean.startswith("/")
                 or ".." in p_clean.split("/")
@@ -10034,42 +10016,25 @@ def _add_task_edit_options(parser: argparse.ArgumentParser, *, removable: bool) 
     add_set_field_options(parser, removable=removable)
 
 
-class _RejectTopLevelCAction(argparse.Action):
+class _RejectFlag(argparse.Action):
     def __call__(
-        self,
-        parser: argparse.ArgumentParser,
-        namespace: argparse.Namespace,
-        values: Any,
-        option_string: str | None = None,
+        self, parser: Any, ns: Any, vals: Any, opt: str | None = None
     ) -> NoReturn:
-        parser.error("use -R / --root DIR instead of -C (e.g. taskgo -R DIR COMMAND)")
-
-
-class _RejectMessageFlagAction(argparse.Action):
-    def __call__(
-        self,
-        parser: argparse.ArgumentParser,
-        namespace: argparse.Namespace,
-        values: Any,
-        option_string: str | None = None,
-    ) -> NoReturn:
-        example = (
-            'taskgo checkpoint TASK_ID "type(scope): subject" [--all]'
-            if parser.prog.endswith("checkpoint")
-            else 'git add <paths> && taskgo commit "type(scope): subject"'
-        )
-        parser.error(
-            f"use positional SUBJECT (and --body TEXT), not {option_string or '-m'}: "
-            f"{example}"
-        )
+        parser.error(self.const.format(opt=opt or "-m"))
 
 
 def _add_commit_options(parser: argparse.ArgumentParser) -> None:
+    example = (
+        'taskgo checkpoint TASK_ID "type(scope): subject" [--all]'
+        if parser.prog.endswith("checkpoint")
+        else 'git add <paths> && taskgo commit "type(scope): subject"'
+    )
     parser.add_argument(
         "-m",
         "--message",
         nargs="?",
-        action=_RejectMessageFlagAction,
+        action=_RejectFlag,
+        const=f"use positional SUBJECT (and --body TEXT), not {{opt}}: {example}",
         help=argparse.SUPPRESS,
     )
     parser.add_argument(
@@ -10112,7 +10077,8 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "-C",
         nargs="?",
-        action=_RejectTopLevelCAction,
+        action=_RejectFlag,
+        const="use -R / --root DIR instead of -C (e.g. taskgo -R DIR COMMAND)",
         help=argparse.SUPPRESS,
     )
     parser.add_argument(
@@ -10504,15 +10470,10 @@ task file's Git commit watermark, emitting nothing when no tasks trigger.""",
     p_mcp_head = p_mcp.add_mutually_exclusive_group()
     p_mcp_head.add_argument(
         "--no-fetch",
+        "--offline",
+        dest="no_fetch",
         action="store_true",
         help="Serve the local BRANCH without fetching; no writes",
-    )
-    p_mcp_head.add_argument(
-        "--offline",
-        dest="sub_offline",
-        action="store_true",
-        default=False,
-        help=argparse.SUPPRESS,
     )
     p_mcp_head.add_argument(
         "--local",
@@ -10741,9 +10702,9 @@ task file's Git commit watermark, emitting nothing when no tasks trigger.""",
         sub_p.add_argument(
             "--offline",
             "--no-fetch",
-            dest="sub_offline",
+            dest="offline",
             action="store_true",
-            default=False,
+            default=argparse.SUPPRESS,
             help=argparse.SUPPRESS,
         )
 
@@ -10818,9 +10779,7 @@ def main(argv: list[str] | None = None) -> None:
     global _ACTIVE_COMMAND
     _ACTIVE_COMMAND = args.command
     set_explicit_root(getattr(args, "root", None))
-    set_offline_flag(
-        bool(getattr(args, "offline", False) or getattr(args, "sub_offline", False))
-    )
+    set_offline_flag(bool(getattr(args, "offline", False)))
 
     if search is not None:
         cmd_search(search[1])

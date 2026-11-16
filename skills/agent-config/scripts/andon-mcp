@@ -2,34 +2,12 @@
 # /// script
 # requires-python = ">=3.11"
 # dependencies = [
-#     "PyJWT==2.15.1",
-#     "annotated-types==0.8.0",
 #     "anyio==4.15.1",
-#     "attrs==26.1.0",
-#     "cffi==2.1.1",
-#     "click==8.5.0",
-#     "cryptography==50.0.2",
-#     "h11==0.16.0",
-#     "httpcore2==2.16.0",
-#     "httpx2==2.16.0",
-#     "idna==3.20",
 #     "jsonschema==4.26.0",
-#     "jsonschema-specifications==2025.9.1",
 #     "mcp==2.3.0",
 #     "mcp-types==2.3.0",
-#     "opentelemetry-api==1.45.1",
-#     "pycparser==3.12",
 #     "pydantic==2.14.1",
 #     "pydantic-core==2.50.1",
-#     "python-multipart==0.0.32",
-#     "referencing==0.37.0",
-#     "rpds-py==2026.9.1",
-#     "sse-starlette==3.6.0",
-#     "starlette==1.10.0",
-#     "truststore==0.10.5",
-#     "typing-extensions==4.16.0",
-#     "typing-inspection==0.4.4",
-#     "uvicorn==0.54.0",
 # ]
 # ///
 # Tests: skills/agent-config/tests/test-andon-mcp
@@ -61,24 +39,15 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 
-def skill_root() -> Path:
-    """The directory holding this skill's SKILL.md, found by sentinel rather
-    than depth so that a symlink or a move within the tree still works.
-    ANDON_SKILL_DIR names it when the script has been copied elsewhere."""
-    if override := os.environ.get("ANDON_SKILL_DIR"):
-        return Path(override).expanduser().resolve()
-    for parent in Path(__file__).resolve().parents:
-        if (parent / "SKILL.md").is_file():
-            return parent
-    sys.exit("andon mcp: cannot find SKILL.md above this script; set ANDON_SKILL_DIR")
-
-
 def load_cli() -> Any:
     """Load the stdlib andon store/CLI module from scripts/andon."""
-    existing = sys.modules.get("andon_cli")
-    if existing is not None:
+    if existing := sys.modules.get("andon_cli"):
         return existing
-    path = skill_root() / "scripts" / "andon"
+    path = (
+        Path(os.environ["ANDON_SKILL_DIR"]).expanduser().resolve() / "scripts" / "andon"
+        if "ANDON_SKILL_DIR" in os.environ
+        else Path(__file__).resolve().with_name("andon")
+    )
     if not path.is_file():
         sys.exit(f"andon mcp: {path} not found; set ANDON_SKILL_DIR")
     loader = SourceFileLoader("andon_cli", str(path))
@@ -107,6 +76,7 @@ from andon_cli import (  # noqa: E402
     pull_alert,
     render_prompt,
     show_alert,
+    skill_root,
     transition_alert,
 )
 
@@ -123,45 +93,49 @@ MCP_INSTRUCTIONS = (
 )
 
 
-@dataclass(frozen=True, slots=True)
 class McpTool:
-    name: str
-    description: str
-    properties: dict[str, Any]
-    required: tuple[str, ...]
-    handler: Callable[..., dict[str, Any]]
-    writes: bool = False
+    def __init__(
+        self,
+        name: str,
+        description: str,
+        properties: dict[str, Any],
+        required: tuple[str, ...],
+        handler: Callable[..., dict[str, Any]],
+        *,
+        writes: bool = False,
+    ) -> None:
+        self.name, self.description, self.handler, self.writes = (
+            name,
+            description,
+            handler,
+            writes,
+        )
+        self.schema = {
+            "type": "object",
+            "properties": properties,
+            "required": list(required),
+            "additionalProperties": False,
+        }
 
     def listing(self) -> dict[str, Any]:
-        listing: dict[str, Any] = {
+        meta: dict[str, Any] = {"ui": {"visibility": ["model", "app"]}}
+        if self.name == "board":
+            meta["ui"]["resourceUri"] = MCP_BOARD_URI
+            meta["openai/ui"] = {
+                "entrypoints": [{"type": "thread"}, {"type": "global"}]
+            }
+        return {
             "name": self.name,
             "description": self.description,
-            "inputSchema": {
-                "type": "object",
-                "properties": self.properties,
-                "required": list(self.required),
-                "additionalProperties": False,
-            },
+            "inputSchema": self.schema,
             "annotations": {
                 "readOnlyHint": not self.writes,
                 "destructiveHint": False,
                 "idempotentHint": not self.writes,
                 "openWorldHint": False,
             },
-            "_meta": {"ui": {"visibility": ["model", "app"]}},
+            "_meta": meta,
         }
-        if self.name == "board":
-            listing["_meta"]["ui"]["resourceUri"] = MCP_BOARD_URI
-            listing["_meta"]["openai/ui"] = {
-                "entrypoints": [{"type": "thread"}, {"type": "global"}],
-            }
-        return listing
-
-
-def mcp_pull(**fields: Any) -> dict[str, Any]:
-    # MCP client identity is not an agent session. Do not invent attribution
-    # or expose harness-owned fields as model arguments.
-    return pull_alert({**fields, "harness": "mcp"})
 
 
 def mcp_list(limit: int = 100, offset: int = 0, **filters: Any) -> dict[str, Any]:
@@ -172,15 +146,6 @@ def mcp_list(limit: int = 100, offset: int = 0, **filters: Any) -> dict[str, Any
         "total": len(alerts),
         "next_offset": end if end < len(alerts) else None,
     }
-
-
-def mcp_prompt(id: str) -> dict[str, Any]:
-    return {"prompt": render_prompt(find_alert(load_alerts(), id))}
-
-
-def mcp_board() -> dict[str, Any]:
-    """Initial board data; subsequent UI reads use the ordinary MCP tools."""
-    return {**mcp_list(), "stats": alert_stats()}
 
 
 def mcp_board_resource(uri: str) -> dict[str, Any]:
@@ -250,9 +215,7 @@ MCP_PULL_PROPERTIES = {
         "description": "Concrete source edit to fix the defect.",
     },
     "level": {
-        "type": "integer",
-        "minimum": 1,
-        "maximum": 5,
+        **MCP_LEVEL,
         "description": "Intrinsic defect tier from the Andon rubric (<= session trigger level).",
     },
 }
@@ -262,7 +225,7 @@ MCP_TOOLS = [
         "Open the shared Andon alert board UI.",
         {},
         (),
-        mcp_board,
+        lambda: {**mcp_list(), "stats": alert_stats()},
     ),
     McpTool(
         "pull",
@@ -273,7 +236,7 @@ MCP_TOOLS = [
         "writes.",
         MCP_PULL_PROPERTIES,
         ("color", "kind", "summary", "details"),
-        mcp_pull,
+        lambda **fields: pull_alert({**fields, "harness": "mcp"}),
         writes=True,
     ),
     McpTool(
@@ -311,15 +274,9 @@ MCP_TOOLS = [
         "Generate a Markdown fix prompt for an alert.",
         {"id": MCP_ID},
         ("id",),
-        mcp_prompt,
+        lambda id: {"prompt": render_prompt(find_alert(load_alerts(), id))},
     ),
 ]
-
-
-def mcp_transition(command: str, **args: Any) -> dict[str, Any]:
-    ref = args.pop("id")
-    return {"ids": transition_alert(command, ref, **args), "action": command}
-
 
 for _verb, _description in (
     ("resolve", "Mark an alert resolved after fixing its source."),
@@ -339,7 +296,13 @@ for _verb, _description in (
                 },
             },
             ("id",),
-            partial(mcp_transition, _verb),
+            partial(
+                lambda cmd, id, **kw: {
+                    "ids": transition_alert(cmd, id, **kw),
+                    "action": cmd,
+                },
+                _verb,
+            ),
             writes=True,
         )
     )
@@ -392,9 +355,6 @@ class McpEvent:
     outcome: str = "ok"
     reason: str | None = None
     size: int | None = None
-
-    def fail(self, outcome: str, reason: str) -> None:
-        self.outcome, self.reason = outcome, reason
 
     def record(self) -> dict[str, Any]:
         stamp = datetime.fromtimestamp(self.at, UTC)
@@ -473,29 +433,20 @@ class McpLog:
 
     def append(self, data: bytes) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        for _ in range(3):
-            with open(self.path, "ab") as fh:
-                fcntl.flock(fh, fcntl.LOCK_EX)
-                st = os.fstat(fh.fileno())
-                try:
-                    current = os.stat(self.path).st_ino == st.st_ino
-                except FileNotFoundError:
-                    current = False
-                if not current:
-                    continue
-                if st.st_size and st.st_size + len(data) > MCP_LOG_ROTATE_BYTES:
-                    for i in range(MCP_LOG_ROTATED - 1, 0, -1):
-                        older = Path(f"{self.path}.{i}")
-                        if older.exists():
-                            os.replace(older, f"{self.path}.{i + 1}")
-                    os.replace(self.path, f"{self.path}.1")
-                    with open(self.path, "ab") as fresh:
-                        fcntl.flock(fresh, fcntl.LOCK_EX)
-                        fresh.write(data)
-                else:
-                    fh.write(data)
-                return
-        raise OSError(f"{self.path} kept being rotated")
+        with open(self.path, "ab") as fh:
+            fcntl.flock(fh, fcntl.LOCK_EX)
+            size = os.fstat(fh.fileno()).st_size
+            if size and size + len(data) > MCP_LOG_ROTATE_BYTES:
+                for i in range(MCP_LOG_ROTATED - 1, 0, -1):
+                    older = Path(f"{self.path}.{i}")
+                    if older.exists():
+                        os.replace(older, f"{self.path}.{i + 1}")
+                os.replace(self.path, f"{self.path}.1")
+                with open(self.path, "ab") as fresh:
+                    fcntl.flock(fresh, fcntl.LOCK_EX)
+                    fresh.write(data)
+            else:
+                fh.write(data)
 
 
 def mcp_logging(log: McpLog) -> Any:
@@ -513,13 +464,16 @@ def mcp_logging(log: McpLog) -> Any:
         try:
             return await call_next(ctx)
         except MCPError as err:
-            event.fail("rpc-error", MCP_RPC_ERRORS.get(err.code, f"error {err.code}"))
+            event.outcome, event.reason = (
+                "rpc-error",
+                MCP_RPC_ERRORS.get(err.code, f"error {err.code}"),
+            )
             raise
         except ValidationError:
-            event.fail("rpc-error", MCP_RPC_ERRORS[-32602])
+            event.outcome, event.reason = "rpc-error", MCP_RPC_ERRORS[-32602]
             raise
         except Exception:
-            event.fail("rpc-error", MCP_RPC_ERRORS[-32603])
+            event.outcome, event.reason = "rpc-error", MCP_RPC_ERRORS[-32603]
             raise
         finally:
             MCP_EVENT.reset(token)
@@ -530,72 +484,48 @@ def mcp_logging(log: McpLog) -> Any:
 
 def mcp_call_tool(name: str, arguments: Any) -> dict[str, Any]:
     """Transport-neutral dispatch. No CLI parsing or stdout capture."""
+    import jsonschema
+
     event = MCP_EVENT.get()
     if event is not None:
         event.tool, event.args = name, mcp_log_args(arguments)
-    result = mcp_dispatch(name, arguments)
-    reason = result.pop("_reason", None)
-    if event is not None:
-        if result["isError"]:
-            event.fail(
-                "tool-error", reason or mcp_log_reason(result["content"][0]["text"])
-            )
-        else:
-            event.size = len(result["content"][0]["text"].encode())
-    return result
 
-
-def mcp_dispatch(name: str, arguments: Any) -> dict[str, Any]:
-    import jsonschema
+    def fail(text: str, reason: str | None = None) -> dict[str, Any]:
+        if event is not None:
+            event.outcome = "tool-error"
+            event.reason = reason or mcp_log_reason(text)
+        return {"isError": True, "content": [{"type": "text", "text": text}]}
 
     tool = MCP_TOOLS_BY_NAME.get(name)
     if tool is None:
-        return {
-            "isError": True,
-            "content": [{"type": "text", "text": f"unknown tool: {name}"}],
-        }
+        return fail(f"unknown tool: {name}")
     try:
-        jsonschema.validate(arguments, tool.listing()["inputSchema"])
+        jsonschema.validate(arguments, tool.schema)
         result = tool.handler(**arguments)
     except jsonschema.ValidationError as err:
         where = "/".join(str(p) for p in err.absolute_path) or "arguments"
-        return {
-            "isError": True,
-            "content": [{"type": "text", "text": err.message}],
-            "_reason": f"invalid {where} ({err.validator})",
-        }
+        return fail(err.message, f"invalid {where} ({err.validator})")
     except AndonError as err:
-        return {"isError": True, "content": [{"type": "text", "text": str(err)}]}
+        return fail(str(err))
     except Exception:
         import traceback
 
         traceback.print_exc(file=sys.stderr)
-        return {
-            "isError": True,
-            "content": [
-                {
-                    "type": "text",
-                    "text": "Internal error; see server stderr. A write may have completed; "
-                    "inspect the store before retrying.",
-                }
-            ],
-        }
+        return fail(
+            "Internal error; see server stderr. A write may have completed; "
+            "inspect the store before retrying."
+        )
+    text = json.dumps(result, ensure_ascii=False)
+    if event is not None:
+        event.size = len(text.encode())
     return {
         "isError": False,
-        "content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False)}],
+        "content": [{"type": "text", "text": text}],
         "structuredContent": result,
     }
 
 
 MCP_REQUEST_LOCK = threading.Lock()
-
-
-def mcp_locked(fn: Any, *args: Any) -> Any:
-    """Runs a request in a worker thread, off the event loop, one at a time in
-    this process. Existing file locks still coordinate with the CLI and other
-    servers."""
-    with MCP_REQUEST_LOCK:
-        return fn(*args)
 
 
 def mcp_sdk_server(log: McpLog) -> Any:
@@ -604,6 +534,10 @@ def mcp_sdk_server(log: McpLog) -> Any:
     import mcp_types
     from mcp.server.lowlevel import Server
 
+    def run_locked(fn: Any, *args: Any) -> Any:
+        with MCP_REQUEST_LOCK:
+            return fn(*args)
+
     async def list_tools(ctx: Any, params: Any) -> Any:
         return mcp_types.ListToolsResult(
             tools=[mcp_types.Tool.model_validate(t.listing()) for t in MCP_TOOLS]
@@ -611,7 +545,7 @@ def mcp_sdk_server(log: McpLog) -> Any:
 
     async def call_tool(ctx: Any, params: Any) -> Any:
         result = await anyio.to_thread.run_sync(
-            mcp_locked,
+            run_locked,
             mcp_call_tool,
             params.name,
             params.arguments if params.arguments is not None else {},
@@ -632,7 +566,7 @@ def mcp_sdk_server(log: McpLog) -> Any:
 
     async def read_resource(ctx: Any, params: Any) -> Any:
         result = await anyio.to_thread.run_sync(
-            mcp_locked, mcp_board_resource, str(params.uri)
+            run_locked, mcp_board_resource, str(params.uri)
         )
         return mcp_types.ReadResourceResult.model_validate(result)
 
