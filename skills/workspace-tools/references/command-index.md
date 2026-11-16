@@ -123,7 +123,7 @@ managed marker comments so multiple configurations can co-exist safely. The
 
 Options:
   --output FILE  Path to the output file (default: .envrc)
-  --help         Display this help message and exit
+  --help, -h     Display this help message and exit
 
 Commands:
   create <type> [args...]  Create a configuration block
@@ -185,7 +185,8 @@ The block below is `../scripts/node-install --help`, kept in sync by
 ```text
 Usage: node-install [OPTIONS] VERSION [PREFIX]
        node-install --list
-       node-install --installed
+       node-install --installed [--paths] [PREFIX]
+       node-install --paths [PREFIX]
        node-install --default [VERSION]
 
 Downloads and installs a specific version of Node.js.
@@ -196,18 +197,26 @@ Arguments:
               - "22.13" installs the latest v22.13.x
               - "22" installs the latest v22.x.x
   PREFIX      Directory where Node.js will be installed (optional).
-              A subdirectory named node-vVERSION will be created.
+              Each version is installed in a PREFIX/node-vVERSION directory.
               Default: $XDG_DATA_HOME/node/versions or ~/.local/share/node/versions
 
 Options:
   -l, --list       List all available remote Node.js versions
-  -i, --installed  List all installed Node.js versions
+  -i, --installed  List installed Node.js version tags (vX.Y.Z, installed under
+                   PREFIX/node-vX.Y.Z; combine with --paths for full paths)
+  --paths          Print full PREFIX/node-vX.Y.Z directory paths for installed
+                   versions
   --default [VERSION]
                    Install VERSION if it is missing (succeeding if it is
                    already installed) and make it the per-user default,
                    $XDG_DATA_HOME/node/default; print its path. Without
                    VERSION, print the current default's path
-  --help           Display this help message and exit
+  --help, -h       Display this help message and exit
+
+Environment:
+  AGENT_OFFLINE    Never use the network; fail on uncached downloads or --list
+  XDG_DATA_HOME    Base directory for versions and default link
+                   (default: ~/.local/share)
 
 Examples:
   # Install latest Node.js 22.x
@@ -216,16 +225,17 @@ Examples:
   # List available versions
   node-install --list
 
-  # List installed versions
+  # List installed versions (tags or full paths)
   node-install --installed
+  node-install --installed --paths
 
   # Make the latest Node.js 24.x the default outside direnv workspaces
   node-install --default 24
 
 The default is for machines whose package manager has no recent enough
-Node.js: put $XDG_DATA_HOME/node/default/bin on PATH to use it. Global npm
-packages are unaffected by switching it, provided npm's prefix (~/.npmrc) is
-outside the version directories.
+Node.js: put $XDG_DATA_HOME/node/default/bin (~/.local/share/node/default/bin)
+on PATH to use it. Global npm packages are unaffected by switching it,
+provided npm's prefix (~/.npmrc) is outside the version directories.
 ```
 
 <!-- /generated -->
