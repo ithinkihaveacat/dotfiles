@@ -18,5 +18,7 @@ partner communication emails.
   directionally (*"Seems like there are a few opportunities here"*, *"we have
   some reference patterns that could make this easier"*) rather than dumping
   every prescriptive code change or exact internal telemetry figure into the
-  email. This keeps the email readable, avoids sharing unvetted internal metrics
-  in writing, and gives the recipient a clear reason to meet.
+  email—unless drafting explicit bug-reproduction or partner verification
+  outreach where self-contained reproduction steps are the goal. This keeps the
+  email readable, avoids sharing unvetted internal metrics in writing, and gives
+  the recipient a clear reason to meet.
