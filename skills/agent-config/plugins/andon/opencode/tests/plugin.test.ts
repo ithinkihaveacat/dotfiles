@@ -12,7 +12,7 @@ test("pull is directly offered, outside Code Mode discovery", async () => {
 test("rule is injected on every primary request only when the tool is offered", async () => {
   const h = await harness();
   assert.match((await h.context()).system[0].text, /Active trigger level: 3/);
-  assert.match((await h.context()).system[0].text, /Andon cord/);
+  assert.match((await h.context()).system[0].text, /Andon Cord/);
   assert.deepEqual((await h.context("other", false)).system, []);
 });
 

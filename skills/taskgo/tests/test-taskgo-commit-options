@@ -8,7 +8,7 @@ set -euo pipefail
 source "$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 taskgo_test_init
 
-echo "1..8"
+echo "1..14"
 
 REPO="$TEST_ROOT/repo"
 init_base_repo "$REPO"
@@ -80,7 +80,6 @@ if LEG_OUT=$(tg --root "$LEGACY_REPO" --offline doctor 2>&1) &&
   (tg --root "$LEGACY_REPO" --offline fix --no-commit) >/dev/null 2>&1 &&
   ! grep -q 'Standing Rules\|Target Environment' "$LEGACY_REPO/AGENTS.md" &&
   [[ "$(head -1 "$LEGACY_REPO/AGENTS.md")" == '# Agent Instructions' ]] &&
-  grep -qx '<!-- taskgo:end -->' "$LEGACY_REPO/AGENTS.md" &&
   [[ "$(tail -1 "$LEGACY_REPO/AGENTS.md")" == '<!-- taskgo:end -->' ]]; then
   echo 'ok 2 - an older canonical AGENTS.md is replaced by the managed block'
 else
@@ -168,4 +167,98 @@ if [[ -z "$missing" && "$TOP" == *$'\nTasks:\n'* && "$TOP" == *$'\nHealth:\n'* &
   echo 'ok 8 - top-level help groups every command under headings'
 else
   echo "not ok 8 - top-level help is missing:$missing"
+fi
+
+# 9: commit and checkpoint reject -m / --message with a positional SUBJECT hint
+if [[ "$(tg --root "$REPO" --offline commit -m "docs: msg" 2>&1 || true)" == *'use positional SUBJECT (and --body TEXT), not -m:'*'taskgo commit "type(scope): subject"'* ]] &&
+  [[ "$(tg --root "$REPO" --offline commit --message="docs: msg" 2>&1 || true)" == *'use positional SUBJECT (and --body TEXT), not --message:'* ]] &&
+  [[ "$(tg --root "$REPO" --offline checkpoint TASK-A1B2C -m "docs: msg" 2>&1 || true)" == *'use positional SUBJECT (and --body TEXT), not -m:'*'taskgo checkpoint TASK_ID "type(scope): subject"'* ]] &&
+  [[ "$(tg checkpoint --help)" == *'pushed to the upstream remote unless --offline'* ]] &&
+  [[ "$(tg commit --help)" == *'pushed to the upstream remote unless --offline'* ]] &&
+  grep -q "no \`-m\`" "$REPO/AGENTS.md"; then
+  echo 'ok 9 - commit and checkpoint reject -m/--message with positional SUBJECT hint and document push'
+else
+  echo 'not ok 9 - commit and checkpoint reject -m/--message with positional SUBJECT hint and document push'
+fi
+
+# 10: checkpoint --path stages directories cleanly, and staging errors emit actionable hints
+mkdir -p "$REPO/example/references/sub"
+printf '# Ref A\n' >"$REPO/example/references/a.md"
+printf '# Ref B\n' >"$REPO/example/references/sub/b.md"
+printf 'dirty sibling\n' >"$REPO/example/sibling.txt"
+UNLISTED_ERR=$(tg --root "$REPO" --offline checkpoint TASK-A1B2C 'docs(example): add refs' \
+  --path example/references/ 2>&1 || true)
+rm -f "$REPO/example/sibling.txt"
+printf '\nstaged line\n' >>"$REPO/example/PLAN.md"
+git -C "$REPO" add example/PLAN.md
+NONEMPTY_IDX_ERR=$(tg --root "$REPO" --offline checkpoint TASK-A1B2C 'docs(example): idx' 2>&1 || true)
+git -C "$REPO" reset -q -- example/PLAN.md
+git -C "$REPO" checkout -q -- example/PLAN.md
+if [[ "$UNLISTED_ERR" == *'unlisted project change: example/sibling.txt'* ]] &&
+  [[ "$UNLISTED_ERR" != *'example/references/a.md'* ]] &&
+  [[ "$UNLISTED_ERR" == *'git add <paths> && taskgo commit "<subject>"'* ]] &&
+  [[ "$NONEMPTY_IDX_ERR" == *'checkpoint: index is not empty'*'taskgo commit "<subject>"'*'git reset'* ]] &&
+  tg --root "$REPO" --offline checkpoint TASK-A1B2C 'docs(example): add refs' \
+    --path example/references/ -C 1234567890abcdef1234 >/dev/null 2>&1 &&
+  [[ -z "$(git -C "$REPO" status --porcelain)" ]] &&
+  git -C "$REPO" ls-files --error-unmatch example/references/a.md example/references/sub/b.md >/dev/null 2>&1; then
+  echo 'ok 10 - checkpoint --path stages directories and emits clear staging hints'
+else
+  echo 'not ok 10 - checkpoint --path stages directories and emits clear staging hints'
+fi
+
+# 11: list-valued run-in fields render on a separate block across create and update,
+# and commit stages working-tree STATUS.md updates
+LIST_OUT=$(tg --root "$REPO" --offline create example 'List run-in fields' \
+  --slug list-runins --problem '- First issue' --criteria $'1. Bullet one\n2. Bullet two' --no-commit)
+LIST_ID="${LIST_OUT%%$'\t'*}"
+LIST_REL="${LIST_OUT#*$'\t'}"
+tg --root "$REPO" --offline update "$LIST_ID" --goal $'- Updated goal one\n- Updated goal two' >/dev/null
+LIST_TEXT="$(cat "$REPO/$LIST_REL")"
+git -C "$REPO" add "$LIST_REL"
+if [[ "$LIST_TEXT" == *$'**Problem:**\n\n- First issue'* ]] &&
+  [[ "$LIST_TEXT" == *$'**Goal:**\n\n- Updated goal one\n- Updated goal two'* ]] &&
+  [[ "$LIST_TEXT" == *$'**Criteria:**\n\n1. Bullet one\n'* ]] &&
+  tg --root "$REPO" --offline commit 'feat(example): add list task' >/dev/null 2>&1 &&
+  [[ -z "$(git -C "$REPO" status --porcelain)" ]]; then
+  echo 'ok 11 - list-valued run-ins render as blocks and commit stages updated STATUS.md'
+else
+  echo 'not ok 11 - list-valued run-ins render as blocks and commit stages updated STATUS.md'
+fi
+
+# 12: doctor markdown_finding suggests 'taskgo fix --no-commit' and includes static PLAN wording
+printf '\n*   untidy   item\n' >>"$REPO/example/PROJECT.md"
+MD_DOC_OUT="$(tg --root "$REPO" --offline doctor example 2>&1 || true)"
+git -C "$REPO" checkout -q -- example/PROJECT.md
+if [[ "$MD_DOC_OUT" == *"example/PROJECT.md: markdown formatting needed (run 'taskgo fix --no-commit')"* ]] &&
+  [[ "$MD_DOC_OUT" == *'PLAN (when present) reflects current direction;'* ]]; then
+  echo 'ok 12 - doctor markdown formatting finding suggests taskgo fix --no-commit'
+else
+  echo 'not ok 12 - doctor markdown formatting finding suggests taskgo fix --no-commit'
+  printf '# %s\n' "$MD_DOC_OUT"
+fi
+
+# 13: CWD inside an isolated control-repo clone auto-detects that clone before ~/.projects
+CLONE_REPO="$TEST_ROOT/isolated-clone"
+git clone -q "$REPO" "$CLONE_REPO"
+NON_CONTROL_GIT="$TEST_ROOT/ordinary-git"
+git init -q "$NON_CONTROL_GIT"
+printf '# Ordinary Repo\n' >"$NON_CONTROL_GIT/AGENTS.md"
+CLONE_RESOLVED="$(cd "$CLONE_REPO" && pwd -P)"
+if [[ "$(cd "$CLONE_REPO/example/tasks" && tg root)" == "$CLONE_RESOLVED" ]] &&
+  [[ "$(cd "$CLONE_REPO/example" && tg --offline doctor example 2>&1)" == *"Root: $CLONE_RESOLVED"*'Source: cwd'* ]] &&
+  [[ "$(cd "$NON_CONTROL_GIT" && tg --help)" == *'Root: ~/.projects'*'Source: default'* ]]; then
+  echo 'ok 13 - CWD inside a cloned control repo resolves to that clone instead of ~/.projects'
+else
+  echo 'not ok 13 - CWD inside a cloned control repo resolves to that clone instead of ~/.projects'
+fi
+
+# 14: top-level -C hints -R/--root, and trailing --offline works across subcommands
+if [[ "$(tg -C "$REPO" list 2>&1 || true)" == *'use -R / --root DIR instead of -C'* ]] &&
+  tg --root "$CLONE_REPO" list example --offline >/dev/null &&
+  tg --root "$CLONE_REPO" doctor example --offline >/dev/null &&
+  tg --root "$CLONE_REPO" search 'First issue' --offline >/dev/null; then
+  echo 'ok 14 - top-level -C hints -R/--root and trailing --offline works across subcommands'
+else
+  echo 'not ok 14 - top-level -C hints -R/--root and trailing --offline works across subcommands'
 fi

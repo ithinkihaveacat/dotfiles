@@ -21,11 +21,12 @@ Usage: apk-decode [OPTIONS] APK_FILE
 
 Decodes an APK file using apktool and outputs the directory path.
 
-This script uses 'apktool d' to decode the APK's resources.
-The path to the output directory is printed to standard output.
+This script uses 'apktool d -s' to decode the APK's resources without
+disassembling DEX bytecode. The path to the output directory is printed to
+standard output.
 
 Arguments:
-  APK_FILE          Path to an APK file.
+  APK_FILE          Path to an APK file or split-APK archive (.zip/.apks).
 
 Options:
   -o, --output DIR  The directory to decode the APK into.
@@ -261,6 +262,8 @@ Predicates:
   --declares METHOD         The class declares METHOD.
   --calls [CLASS]->METHOD   A method of the class invokes METHOD (invoke-*).
                             Omit CLASS to match any receiver type.
+  --string PATTERN          A string literal in the class (const-string or
+                            static field initializer) contains PATTERN.
   --annotated-with CLASS    The class carries a class-level annotation of
                             type CLASS.
   --extends CLASS           The class's direct superclass (.super) is CLASS.
@@ -271,8 +274,11 @@ Predicates:
   descriptor (Lcom/example/Foo;) or a dotted name (com.example.Foo).
 
 Options:
+  --package, --pkg PREFIX   Restrict search to classes under package PREFIX
+                            (e.g. com.example.feature) before reading entries.
   --methods                 Print the matching methods (CLASS->METHOD) instead
-                            of classes; requires --declares or --calls.
+                            of classes; requires --declares, --calls, or
+                            --string.
   -h, --help                Display this help message and exit.
 
 Exit Status:
@@ -286,6 +292,9 @@ Examples:
 
   # Methods that call any onTrimMemory, whatever the receiver
   apk-smali find "$TREE" --calls '->onTrimMemory' --methods
+
+  # Methods referencing a URI path within a specific package
+  apk-smali find "$TREE" --package com.example --string '/sync/status' --methods
 
   # Services that are also annotated with an (obfuscated) annotation type
   apk-smali find app-smali.zip --extends 'Landroid/app/Service;' \
@@ -304,7 +313,7 @@ Usage: apk-smali show WHAT TREE CLASS [ARGUMENTS] [OPTIONS]
 Print part of a class from a smali tree.
 
 Commands:
-  class                Print the whole .smali file of CLASS.
+  class                Print the whole .smali file of one or more classes.
   method               Print the body of a method, optionally with the
                        same-class methods it calls.
   annotations          Print the class-level annotations of CLASS.
@@ -316,11 +325,13 @@ Arguments:
                        (com.example.Foo).
 
 Options:
+  -n, --line-numbers   Prefix printed smali lines with 1-based file line
+                       numbers (for class, method, and annotations).
   -h, --help           Display this help message and exit.
 
 Examples:
   apk-smali show class "$TREE" com.example.MyWidgetService
-  apk-smali show method "$TREE" com.example.MyService 'onTrimMemory(I)V'
+  apk-smali show method -n "$TREE" com.example.MyService 'onTrimMemory(I)V'
   apk-smali show annotations "$TREE" 'Lcom/example/MyWidgetService;'
   apk-smali show hierarchy "$TREE" com.example.MyWidgetService
 
@@ -334,21 +345,23 @@ Run 'apk-smali show WHAT --help' for help on each command.
 <!-- generated: ../scripts/apk-smali show class --help -->
 
 ```text
-Usage: apk-smali show class TREE CLASS
+Usage: apk-smali show class [OPTIONS] TREE CLASS...
 
-Print the whole .smali file of CLASS.
+Print the whole .smali file of each CLASS. When multiple classes are given,
+each block is preceded by a '# DESCRIPTOR' header line.
 
 Arguments:
-  TREE         A directory or ZIP archive of .smali files.
-  CLASS        A type descriptor (Lcom/example/Foo;) or a dotted name
-               (com.example.Foo).
+  TREE                 A directory or ZIP archive of .smali files.
+  CLASS...             One or more type descriptors (Lcom/example/Foo;) or
+                       dotted names (com.example.Foo).
 
 Options:
-  -h, --help   Display this help message and exit.
+  -n, --line-numbers   Prefix each line with its 1-based .smali line number.
+  -h, --help           Display this help message and exit.
 
 Examples:
   apk-smali show class "$TREE" com.example.MyWidgetService
-  apk-smali show class app-smali.zip 'La/b;'
+  apk-smali show class -n app-smali.zip 'La/b;' 'Lcom/example/MyService;'
 ```
 
 <!-- /generated -->
@@ -364,17 +377,18 @@ Print the full .method ... .end method body of METHOD in CLASS. All overloads
 are printed when METHOD omits the parameter list.
 
 Arguments:
-  TREE           A directory or ZIP archive of .smali files.
-  CLASS          A type descriptor (Lcom/example/Foo;) or a dotted name
-                 (com.example.Foo).
-  METHOD         NAME, NAME(PARAMS), or NAME(PARAMS)RETURN, for example
-                 onTrimMemory(I)V.
+  TREE                 A directory or ZIP archive of .smali files.
+  CLASS                A type descriptor (Lcom/example/Foo;) or a dotted name
+                       (com.example.Foo).
+  METHOD               NAME, NAME(PARAMS), or NAME(PARAMS)RETURN, for example
+                       onTrimMemory(I)V.
 
 Options:
-  --depth N      Also print methods of CLASS that the printed methods invoke,
-                 following calls N levels deep; each method is printed once.
-                 (default: 0)
-  -h, --help     Display this help message and exit.
+  --depth N            Also print methods of CLASS that the printed methods
+                       invoke, following calls N levels deep; each method is
+                       printed once. (default: 0)
+  -n, --line-numbers   Prefix each line with its 1-based .smali line number.
+  -h, --help           Display this help message and exit.
 
 Examples:
   # The body of an override
@@ -397,17 +411,18 @@ Print the class-level .annotation blocks of CLASS, including their values
 (for example the class literals an annotation references).
 
 Arguments:
-  TREE           A directory or ZIP archive of .smali files.
-  CLASS          A type descriptor (Lcom/example/Foo;) or a dotted name
-                 (com.example.Foo).
+  TREE                 A directory or ZIP archive of .smali files.
+  CLASS                A type descriptor (Lcom/example/Foo;) or a dotted name
+                       (com.example.Foo).
 
 Options:
-  --all          Include Lkotlin/Metadata; and Ldalvik/annotation/* blocks,
-                 which are hidden by default.
-  --members      Also print field and method annotations; each group is
-                 preceded by a '# CLASS', '# CLASS->FIELD' or
-                 '# CLASS->METHOD' comment line.
-  -h, --help     Display this help message and exit.
+  --all                Include Lkotlin/Metadata; and Ldalvik/annotation/*
+                       blocks, which are hidden by default.
+  --members            Also print field and method annotations; each group is
+                       preceded by a '# CLASS', '# CLASS->FIELD' or
+                       '# CLASS->METHOD' comment line.
+  -n, --line-numbers   Prefix each line with its 1-based .smali line number.
+  -h, --help           Display this help message and exit.
 
 Examples:
   # Runtime annotations on a service declared in AndroidManifest.xml

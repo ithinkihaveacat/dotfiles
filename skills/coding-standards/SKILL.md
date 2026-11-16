@@ -18,25 +18,37 @@ changes across languages and domains in this repository.
 
 ## Formatting Scripts
 
-Helper scripts in `scripts/` encapsulate repository-wide style rules and lint
-checks. References to `scripts/...` are relative to this skill directory. All
-scripts support formatting multiple files in place, or reading from `stdin` and
-writing to `stdout` when no arguments are provided.
+Helper scripts live in `<skill-dir>/scripts/<tool>` (without `.py` or `.sh`
+extensions) and are symlinked onto `PATH` via `~/.dotfiles/bin/<tool>`, so they
+can be invoked directly by name (e.g., `markdown-format`) or via
+`scripts/<tool>` relative to this skill directory. All formatters accept
+`--check`, expand directory arguments recursively, format multiple files in
+place, and read from `stdin` / write to `stdout` when given no paths (except
+`command-index-format`, which uses `--all` instead of `stdin`). In strict
+scratch-only sandboxes where `~/.cache/uv` is read-only, set `UV_CACHE_DIR` to a
+writable scratch directory before running `uv`-backed formatters.
 
-- **`scripts/python-format`**: Format and lint Python files using `ruff`
-  (supports `--check` and recursive directory scanning).
-- **`scripts/shell-format`**: Format and lint shell scripts (POSIX/Bash) using
-  `shfmt` and `shellcheck` (supports `--check` and recursive directory scanning;
-  Fish scripts use `fish_indent`).
-- **`scripts/markdown-format`**: Format Markdown files using `mdformat` with GFM
-  and frontmatter preservation (supports `--check` for drift detection).
-- **`scripts/command-index-format`**: Refresh generated `--help` blocks in
-  `command-index.md` files (marker comments; supports `--check` and `--all`).
-- **`scripts/kotlin-format`**: Format Kotlin files using `ktfmt` with kotlinlang
-  style.
-- **`scripts/json-format`**: Format JSON files using `jq` (`--check` checks
-  formatting without writing).
-- **`scripts/xml-format`**: Format XML files using `xmllint`.
+- **`scripts/python-format`** (`python-format`): Format and lint Python files
+  using `ruff` (supports `--check` and recursive `.py` directory scanning).
+- **`scripts/shell-format`** (`shell-format`): Format and lint POSIX/Bash
+  scripts using `shfmt` and `shellcheck`, and format Fish scripts (`.fish` or
+  `fish` shebang) using `fish_indent` (supports `--check` and recursive
+  directory scanning).
+- **`scripts/markdown-format`** (`markdown-format`): Format Markdown files using
+  `mdformat` with GFM and frontmatter wrapping (supports `--check` and recursive
+  `.md` directory scanning).
+- **`scripts/command-index-format`** (`command-index-format`): Refresh generated
+  `--help` blocks in Markdown files with marker comments (accepts file or
+  directory paths, `--check`, and `--all`).
+- **`scripts/kotlin-format`** (`kotlin-format`): Format Kotlin files using
+  `ktfmt` with kotlinlang style (supports `--check`, recursive `.kt`/`.kts`
+  directory scanning, and `AGENT_OFFLINE=1` when the jar is cached).
+- **`scripts/json-format`** (`json-format`): Format JSON files using `jq`
+  (supports `--check` and recursive `.json` directory scanning).
+- **`scripts/xml-format`** (`xml-format`): Format XML files using `xmllint`
+  (supports `--check` and recursive `.xml` directory scanning; repository-local
+  XML layout rules in `AGENTS.md`, such as multi-line manifest attributes, take
+  precedence where specified).
 
 Always prefer the helper scripts in `scripts/` over raw tool invocations to
 guarantee consistent repository formatting rules.
@@ -45,11 +57,14 @@ guarantee consistent repository formatting rules.
 
 ### Markdown Quality
 
-All Markdown files must be formatted and linted with `scripts/markdown-format`.
-Headings default to clean, unadorned ATX style (`## Heading`) without manual
-bolding, ALL CAPS, or section numbers on topical headings; see
-**[references/markdown.md](references/markdown.md)** for existing-document and
-sequential-step rules.
+All Markdown files must be formatted with `scripts/markdown-format` (enforced in
+CI via `--check`; `.markdownlint-cli2.jsonc` is optional editor configuration).
+Keep repository Markdown strictly Unicode-only for symbols and notation (`→`,
+`≤`, `×`, code spans)—never use `$...$` or `$$...$$` LaTeX math, which plain GFM
+`mdformat` escapes. Headings default to clean, unadorned ATX style
+(`## Heading`) without manual bolding, ALL CAPS, or section numbers on topical
+headings; see **[references/markdown.md](references/markdown.md)** for
+existing-document and sequential-step rules.
 
 ### Python Development
 
@@ -96,7 +111,9 @@ See **[references/servers.md](references/servers.md)**.
 
 ### Git Operations & Commit Messages
 
-Agents must not commit changes automatically unless explicitly authorized.
+Agents must not commit changes automatically unless explicitly authorized (or
+when running guarded `taskgo` tracker commands—`create`, `checkpoint`, `commit`,
+`fix`—in a control repository whose committed `AGENTS.md` declares `taskgo`).
 Commit messages must adhere strictly to Conventional Commits syntax
 (`type(scope): description`), keeping the subject under 50 characters and
 hard-wrapping body prose to 72 characters. See

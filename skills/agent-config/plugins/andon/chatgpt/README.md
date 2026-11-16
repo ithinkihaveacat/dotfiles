@@ -119,10 +119,11 @@ andon level --reset
 ```
 
 The first command saves level 5; the second removes the saved default, falling
-back to 3. `ANDON_LEVEL` overrides either saved choice. MCP report arguments do
-not include `level`; the trusted tool-result hook stamps each attributed report
-with the locked session level. Without a recognized host callback, an MCP report
-retains the shared backend's default level and `mcp` attribution.
+back to 3. `ANDON_LEVEL` overrides either saved choice. MCP report arguments may
+include optional `level` (the defect's 1–5 rubric tier); the trusted tool-result
+hook stamps `session_level` with the locked session level (and sets `level` when
+omitted). Without a recognized host callback, an MCP report retains the shared
+backend's default level and `mcp` attribution.
 
 Session state is stored under `$ANDON_STATE_DIR/codex`, or the default Andon
 store's `codex/` directory. Files use hashed session IDs and mode 0600, with

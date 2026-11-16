@@ -34,8 +34,8 @@ agent reads for the chosen scope:
 
 Commands:
   add SPEC...     Link a skill straight to its source: a catalog entry from
-                  'skill catalog', as NAME or NAMESPACE:NAME (replaces a
-                  default's link)
+                  'skill catalog' (NAME or NAMESPACE:NAME) or a local skill
+                  directory path (replaces a default's link)
   add -           Read skill names from stdin
   add --defaults  Link every default through the defaults directory, keeping
                   existing links; remove broken links to defaults (broken
@@ -51,11 +51,11 @@ Commands:
   bundle [SPEC...] Package skills into an archive or directory without installing
   update SPEC...  Re-fetch a plugin-provided catalog entry; --all for every
                   entry, --catalog to refresh the whole metadata index
-  catalog [--json] List plugin-provided skills and sources; --json adds each
-                  skill's description and structural profile (file counts and
-                  sizes for scripts/, references/ and tests/)
-  resolve NAME    Print the source path 'add NAME' would symlink to
-  show/info NAME  Show details and metadata of a skill
+  catalog [--json] List plugin-provided skills and sources; --json outputs
+                  NDJSON (one JSON object per line) with description and
+                  structural profile (scripts/, references/, tests/ counts)
+  resolve SPEC    Print the source path 'add SPEC' would symlink to
+  show/info SPEC  Show details and metadata of a skill
   mcp [SCOPE]     Serve skills over MCP, to agents that cannot read them from
                   disk; see 'skill mcp --help'
 
@@ -64,6 +64,8 @@ Options:
   --scope SCOPE        'user', 'workspace' (default), 'session' or 'defaults';
                        only add, remove, list, doctor and clean take a scope
                        other than 'workspace'
+  --offline            Never fetch remote skills or metadata over the network
+                       (same as AGENT_OFFLINE=1)
   --help, -h           Display this help message and exit
   --plugin-template    Output a template/documentation for creating a Workspace plugin
 

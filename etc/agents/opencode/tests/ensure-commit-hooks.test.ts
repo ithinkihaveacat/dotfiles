@@ -123,3 +123,16 @@ test("honours the opt-out, leaves non-repositories alone and never throws", asyn
 
   setRequiredHooks(undefined);
 });
+
+test("skips third-party clones and forks unless opted in", async () => {
+  setRequiredHooks("agent");
+  const hook = await shellHook();
+  const repo = repository();
+  execFileSync("git", ["-C", repo, "remote", "add", "origin", "https://github.com/other-org/external.git"]);
+  await hook({ command: "git commit -m test", cwd: repo });
+  assert.equal(existsSync(commitHook(repo)), false);
+  execFileSync("git", ["-C", repo, "config", "hooks.agent", "true"]);
+  await hook({ command: "git commit -m test", cwd: repo });
+  assert.equal(existsSync(commitHook(repo)), true);
+  setRequiredHooks(undefined);
+});

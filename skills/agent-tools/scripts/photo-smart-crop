@@ -135,16 +135,20 @@ img_height=$(echo "$dimensions" | cut -d' ' -f2)
 
 URL="https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent"
 
-# Convert to HEIF and base64 encode for API
+# Convert to HEIF and base64 encode into a temp file so large images never hit
+# kernel ARG_MAX limits when passed to jq.
 # Using 1024x1024 for better detail retention while staying within reasonable token limits
 # base64: macOS uses -b 0, Linux uses -w 0
 # Read the help whole: piping it into grep -q can cut base64 off mid-write,
 # and under pipefail that broken pipe reads as "no -w".
+B64_FILE=$(mktemp)
+REQ_FILE=$(mktemp)
+trap 'rm -f "$B64_FILE" "$REQ_FILE"' EXIT
 base64_help=$(base64 --help 2>&1 || true)
 if [[ "$base64_help" == *"-w"* ]]; then
-  IMAGE_BASE64=$(magick "$INPUT" -auto-orient -alpha off -resize 1024x1024\> heif:- | base64 -w 0)
+  magick "$INPUT" -auto-orient -alpha off -resize 1024x1024\> heif:- | base64 -w 0 >"$B64_FILE"
 else
-  IMAGE_BASE64=$(magick "$INPUT" -auto-orient -alpha off -resize 1024x1024\> heif:- | base64 -b 0)
+  magick "$INPUT" -auto-orient -alpha off -resize 1024x1024\> heif:- | base64 -b 0 >"$B64_FILE"
 fi
 
 # System Instruction: Defines the core task and constraints
@@ -161,10 +165,10 @@ SYSTEM_INSTRUCTION="<role>You are an expert photo editor and compositional analy
 USER_PROMPT="Perform the smart crop analysis on this image."
 
 # Build JSON request body
-REQUEST_BODY=$(jq -n \
+jq -n \
   --arg system_instruction "$SYSTEM_INSTRUCTION" \
   --arg user_prompt "$USER_PROMPT" \
-  --arg image "$IMAGE_BASE64" \
+  --rawfile image "$B64_FILE" \
   '{
     "system_instruction": {
       "parts": [{ "text": $system_instruction }]
@@ -206,7 +210,7 @@ REQUEST_BODY=$(jq -n \
         "required": ["subject_box"]
       }
     }
-  }')
+  }' >"$REQ_FILE"
 
 # Read the status via -w '%{http_code}' rather than trusting curl's exit code:
 # it is "000" only when no HTTP response arrived at all, which is what separates
@@ -214,11 +218,11 @@ REQUEST_BODY=$(jq -n \
 # the exit code also stops a failed curl from killing the script silently under
 # `set -e`, before any of the handling below can run.
 CURL_STATUS=0
-RAW=$(echo "${REQUEST_BODY}" | curl -sS -X POST \
+RAW=$(curl -sS -X POST \
   -H "x-goog-api-key: $GEMINI_API_KEY" \
   -H "Content-Type: application/json" \
   -d @- -w '\n%{http_code}' \
-  "${URL}" 2>/dev/null) || CURL_STATUS=$?
+  "${URL}" <"$REQ_FILE" 2>/dev/null) || CURL_STATUS=$?
 
 HTTP_STATUS="${RAW##*$'\n'}"
 RESPONSE="${RAW%$'\n'*}"

@@ -39,8 +39,7 @@ understatement makes empirical evidence more persuasive:
 Rather than asserting severity with adjectives or priority demands, lay out the
 causal chain from trigger to cost:
 
-`[Trigger]` $\\rightarrow$ `[Mechanism]` $\\rightarrow$ `[Observable Symptom]`
-$\\rightarrow$ `[User / Developer Cost]`
+`[Trigger]` → `[Mechanism]` → `[Observable Symptom]` → `[User / Developer Cost]`
 
 Focus on concrete systemic impacts when explaining the cost:
 
@@ -212,9 +211,8 @@ Before submitting a technical comment, verify that:
   sentence, with unnecessary backstory trimmed.
 - [ ] **Tone:** Phrasing is calm, collegial, and understated, free of alarmist
   or hyperbolic labels (*"blocker"*, *"completely broken"*, *"unacceptable"*).
-- [ ] **Severity:** Impact is shown through a factual causal chain (trigger
-  $\\rightarrow$ mechanism $\\rightarrow$ symptom $\\rightarrow$ cost) rather
-  than adjectives.
+- [ ] **Severity:** Impact is shown through a factual causal chain (trigger →
+  mechanism → symptom → cost) rather than adjectives.
 - [ ] **Framing:** Critiques of incomplete fixes open with clarifying questions
   and offer pragmatic trade-offs rather than ultimatums.
 - [ ] **Pushback:** Replies to *"works for me"* explain why the maintainer's

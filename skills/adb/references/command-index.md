@@ -43,7 +43,7 @@ adb exec-out log -p f -t TAG MESSAGE
 
 **Purpose**: Take a screenshot. Applies circular mask if display is square (Wear
 OS). **Dependencies**: `adb`, `magick` **Usage**:
-`scripts/adb-screenshot [OUTPUT_FILE]` **Raw Command**:
+`scripts/adb-screenshot [--no-wake] [-o FILE] [OUTPUT_FILE]` **Raw Command**:
 
 ```bash
 # Standard
@@ -403,10 +403,11 @@ adb exec-out am broadcast -a com.google.android.wearable.app.DEBUG_SYSUI --es op
 ### `scripts/adb-activities`
 
 **Purpose**: List activities on the device, tagged by category. By default shows
-only user-installed apps. **Dependencies**: `adb` **Usage**:
+only user-installed apps, or activities in `PACKAGE` if specified.
+**Dependencies**: `adb` **Usage**:
 
 ```bash
-scripts/adb-activities [OPTIONS]
+scripts/adb-activities [OPTIONS] [PACKAGE]
 ```
 
 **Options**:
@@ -465,11 +466,12 @@ adb shell pm list packages -3
 
 **Purpose**: Dump the UI hierarchy to an XML file. **Dependencies**: `adb`,
 `xmllint` (optional but recommended for formatting) **Usage**:
-`scripts/adb-uihierarchy [OUTPUT_FILE]` **Raw Command**:
+`scripts/adb-uihierarchy [--compressed] [-o FILE] [OUTPUT_FILE]` **Raw
+Command**:
 
 ```bash
-adb exec-out uiautomator dump /dev/stdout
-# (Piped to xml format)
+timeout 10s adb exec-out uiautomator dump /dev/stdout
+# (Fallback: uiautomator dump --compressed /dev/stdout; piped to xmllint --format -)
 ```
 
 ### `scripts/adb-currentfocus`
@@ -494,8 +496,9 @@ adb exec-out dumpsys window displays | grep mCurrentFocus | grep -oE '{.*?}' | a
 
 **Purpose**: Unified package management tool. **Dependencies**: `adb` **Usage**:
 `scripts/packagename COMMAND PACKAGE` **Commands**: `launch`, `force-stop`,
-`uninstall`, `clear-cache`, `permissions`, `services`, `version`, `pull`. **Raw
-Commands**:
+`uninstall`, `clear-cache`, `dumpsys` (manifest components), `services`
+(active/running), `tiles`, `jobscheduler`, `logcat`, `permissions`, `version`,
+`pull`. **Raw Commands**:
 
 ```bash
 # launch
@@ -507,11 +510,11 @@ adb exec-out am force-stop PACKAGE
 # clear-cache
 adb exec-out pm clear PACKAGE
 
-# services
+# active/running services (use 'dumpsys package PACKAGE' for manifest declarations)
 adb exec-out dumpsys activity service PACKAGE
 
 # uninstall
-    adb uninstall PACKAGE
+adb uninstall PACKAGE
 ```
 
 ### `scripts/adb-packages`
@@ -603,7 +606,7 @@ these specific packages/components are very useful to know:
 - **WearableService (Data Layer):** `WearableService` (e.g.
   `adb exec-out dumpsys activity service WearableService`)
 - **Standalone ProtoLayout Renderer / Widget Tray Activity:**
-  `com.google.android.wearable.protolayout.renderer/.WidgetTrayActivity`
+  `com.google.android.wearable.protolayout.renderer/com.google.android.clockwork.prototiles.renderer.experimental.WidgetTrayActivity`
   (renderer package `com.google.android.wearable.protolayout.renderer`,
   supporting vertical tray widgets and `GET_WIDGETS` queries)
 

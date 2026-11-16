@@ -215,8 +215,14 @@ and left alone, including candidates dropped in Pass 2 or Pass 4.
   unless explicitly asked. Run every candidate fix, build, test, and review pass
   in isolated copies so nothing interferes with the original or with other
   passes.
-- Avoid network calls and paid services. Keep tool caches, state, and temporary
-  files inside your scratch directory so tests and trials stay hermetic.
+- Guard against ambient-root CLIs that resolve their workspace from environment
+  variables or `$HOME` instead of `pwd`: export explicit root/config overrides
+  (`TASKGO_ROOT`, `XDG_CONFIG_HOME`, `XDG_STATE_HOME`) or pass
+  `--root <isolated-copy>`, and verify `git status`/`HEAD` of the live checkout
+  afterward.
+- Avoid application network calls and paid services; keep tool caches and state
+  in your scratch directory (a one-time build-plugin warm-up into the isolated
+  cache is fine if `--offline` fails on cold hosts).
 - Do not run project tools against live data or credentials, and do not stop
   processes by broad pattern.
 - If tests fail on the untouched project, record it and carry on.

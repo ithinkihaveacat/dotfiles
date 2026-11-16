@@ -969,44 +969,35 @@ def fetch_skill_md(
 
 def load_skill_md_frontmatter(content: str) -> dict:
     """Parses a simple YAML frontmatter block from a SKILL.md file string."""
-    meta = {}
+    meta: dict[str, str] = {}
     lines = content.strip().splitlines()
-    if not lines or lines[0] != "---":
+    if not lines or lines[0].strip() != "---":
         return meta
 
-    current_key = None
-    multiline_val = []
-
-    for line in lines[1:]:
-        if line == "---":
-            break
-
+    key: str | None = None
+    parts: list[str] = []
+    for line in [*lines[1:], "---"]:
         stripped = line.strip()
-        if not line.startswith(" ") and ":" in line:
-            if current_key and multiline_val:
-                meta[current_key] = " ".join(multiline_val).strip().strip("'\"")
-                multiline_val = []
-
-            key, val = line.split(":", 1)
-            current_key = key.strip()
-            val_str = val.strip()
-
-            if val_str in (">", "|", ">-", "|-"):
-                multiline_val = []
-            else:
-                meta[current_key] = val_str.strip().strip("'\"")
-                current_key = None
-        elif current_key is not None:
-            if line.startswith(" ") or not line:
-                multiline_val.append(stripped)
-            else:
-                meta[current_key] = " ".join(multiline_val).strip().strip("'\"")
-                current_key = None
-                multiline_val = []
-
-    if current_key and multiline_val:
-        meta[current_key] = " ".join(multiline_val).strip().strip("'\"")
-
+        if stripped == "---":
+            if key is not None:
+                meta[key] = " ".join(parts).strip()
+            break
+        if not line.startswith((" ", "\t")):
+            if not stripped or stripped.startswith("#"):
+                continue
+            if key is not None:
+                meta[key] = " ".join(parts).strip()
+                key, parts = None, []
+            if ":" in line:
+                k, val = line.split(":", 1)
+                key, val = k.strip(), val.strip()
+                parts = (
+                    []
+                    if val in (">", "|", ">-", "|-", ">+", "|+")
+                    else [val.strip("'\"")]
+                )
+        elif key is not None and stripped and not stripped.startswith("#"):
+            parts.append(stripped)
     return meta
 
 
@@ -1301,6 +1292,15 @@ def get_workspace() -> Workspace:
 
 def resolve_skill_spec(spec: str) -> tuple[Path, str]:
     """Resolves a skill spec/name to its (absolute_source_path, skill_name)."""
+    explicit_path = spec == "~" or spec.startswith(("/", "./", "../", "~/"))
+    if explicit_path or ("/" in spec and ":" not in spec):
+        p = Path(spec).expanduser()
+        if (p / "SKILL.md").is_file():
+            resolved = Path(os.path.realpath(p))
+            return resolved, resolved.name
+        if explicit_path:
+            raise ValueError(f"cannot resolve skill path '{spec}' (no SKILL.md found)")
+
     api = get_api()
 
     # 1. Parse the requested spec for namespace
@@ -1572,19 +1572,36 @@ def cmd_add(specs):
 
     # A session add names a project's skills without working out which ones
     # the workspace already links, so skip those: the harness has them.
+    # Exception: Antigravity/Gemini workspace discovery drops .agents/skills/
+    # symlinks whose resolved target escapes the workspace root, so those must
+    # still be staged into the session directory.
     if ws.scope == "session":
         project_ws = detect_project_workspace()
         try:
             active_dirs = project_ws.get_dest_dirs() if project_ws else []
         except RuntimeError:
             active_dirs = []
+        if isinstance(ws, AgyBrainWorkspace):
+            active_dirs = [
+                d
+                for d in active_dirs
+                if d.name == "skills" and d.parent.name == ".agents"
+            ] or active_dirs
         kept = []
         for src, name in resolved_skills:
             link = next(
                 (d / src.name for d in active_dirs if (d / src.name).is_symlink()),
                 None,
             )
-            if link is not None and os.path.realpath(link) == os.path.realpath(src):
+            if (
+                link is not None
+                and os.path.realpath(link) == os.path.realpath(src)
+                and (
+                    not isinstance(ws, AgyBrainWorkspace)
+                    or project_ws is None
+                    or Path(link).resolve().is_relative_to(project_ws.root.resolve())
+                )
+            ):
                 log(
                     f"already active {name} (workspace {clean_p(link)})",
                     file=sys.stderr,
@@ -3210,8 +3227,8 @@ agent reads for the chosen scope:
 
 Commands:
   add SPEC...     Link a skill straight to its source: a catalog entry from
-                  'skill catalog', as NAME or NAMESPACE:NAME (replaces a
-                  default's link)
+                  'skill catalog' (NAME or NAMESPACE:NAME) or a local skill
+                  directory path (replaces a default's link)
   add -           Read skill names from stdin
   add --defaults  Link every default through the defaults directory, keeping
                   existing links; remove broken links to defaults (broken
@@ -3227,11 +3244,11 @@ Commands:
   bundle [SPEC...] Package skills into an archive or directory without installing
   update SPEC...  Re-fetch a plugin-provided catalog entry; --all for every
                   entry, --catalog to refresh the whole metadata index
-  catalog [--json] List plugin-provided skills and sources; --json adds each
-                  skill's description and structural profile (file counts and
-                  sizes for scripts/, references/ and tests/)
-  resolve NAME    Print the source path 'add NAME' would symlink to
-  show/info NAME  Show details and metadata of a skill
+  catalog [--json] List plugin-provided skills and sources; --json outputs
+                  NDJSON (one JSON object per line) with description and
+                  structural profile (scripts/, references/, tests/ counts)
+  resolve SPEC    Print the source path 'add SPEC' would symlink to
+  show/info SPEC  Show details and metadata of a skill
   mcp [SCOPE]     Serve skills over MCP, to agents that cannot read them from
                   disk; see 'skill mcp --help'
 
@@ -3240,6 +3257,8 @@ Options:
   --scope SCOPE        'user', 'workspace' (default), 'session' or 'defaults';
                        only add, remove, list, doctor and clean take a scope
                        other than 'workspace'
+  --offline            Never fetch remote skills or metadata over the network
+                       (same as AGENT_OFFLINE=1)
   --help, -h           Display this help message and exit
   --plugin-template    Output a template/documentation for creating a Workspace plugin
 
@@ -3355,6 +3374,9 @@ def register(api):
             idx += 1
         elif arg.startswith("--scope="):
             explicit_scope = arg[len("--scope=") :].lower()
+            idx += 1
+        elif arg == "--offline":
+            os.environ["AGENT_OFFLINE"] = "1"
             idx += 1
         else:
             filtered_argv.append(arg)

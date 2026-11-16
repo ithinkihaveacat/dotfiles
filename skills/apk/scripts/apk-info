@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 
+# Tests: skills/apk/tests/test-apk-doctor, skills/apk/tests/test-apk-info
+
 set -euo pipefail
 
 SCRIPT_NAME=$(basename "$0")
@@ -27,13 +29,13 @@ prepare_apk() {
     exit 1
   fi
 
-  if [[ "$apk_path" == *.zip ]]; then
+  if [[ "$apk_path" == *.zip || "$apk_path" == *.apks ]]; then
     TMPDIR=$(mktemp -d)
-    unzip -q -j "$apk_path" '*-base-split.apk' -d "$TMPDIR"
-    local base_apks=("$TMPDIR"/*-base-split.apk)
+    unzip -q -j "$apk_path" 'base.apk' '*/base.apk' '*base-master.apk' '*-base-split.apk' -d "$TMPDIR" 2>/dev/null || true
+    local base_apks=("$TMPDIR"/*.apk)
     BASEAPK="${base_apks[0]:-}"
     if [ ! -f "$BASEAPK" ]; then
-      echo "$SCRIPT_NAME: *-base-split.apk not found in zip, aborting" >&2
+      echo "$SCRIPT_NAME: no base APK found in $apk_path, aborting" >&2
       exit 1
     fi
   else
@@ -203,17 +205,18 @@ EOF
 
 get_library_version() {
   local lib="$1"
-  local file=""
+  local all_files file=""
+  all_files=$(unzip -Z1 "$BASEAPK" 2>/dev/null | tr -d '\r' || true)
 
   if [[ "$lib" == "whs" || "$lib" == "androidx.health_health-services-client" ]]; then
-    file=$(apkanalyzer files list "$BASEAPK" | grep -E -m1 '/(META-INF/androidx.health_health-services-client\.version|whs\.properties)$')
+    file=$(grep -E -m1 '^(META-INF/androidx\.health_health-services-client\.version|(.*/)?whs\.properties)$' <<<"$all_files" || true)
   else
-    file=$(apkanalyzer files list "$BASEAPK" | grep -E -m1 "/META-INF/${lib}\.version$")
+    file=$(grep -Fx -m1 "META-INF/${lib}.version" <<<"$all_files" || true)
   fi
 
   if [ -n "$file" ]; then
     local raw_val
-    raw_val=$(apkanalyzer files cat --file "$file" "$BASEAPK" 2>/dev/null | tr -d '\r\n')
+    raw_val=$(unzip -p "$BASEAPK" "$file" 2>/dev/null | tr -d '\r\n' || true)
     if [[ "$file" == *whs.properties ]]; then
       if [[ "$raw_val" == *"="* ]]; then
         echo "$raw_val" | awk -F= '/version/ {print $2}' | tr -d ' '
@@ -228,12 +231,13 @@ get_library_version() {
 
 list_all_libraries_json() {
   require jq
-  local all_files files
-  all_files=$(apkanalyzer files list "$BASEAPK")
-  files=$(grep -E '/META-INF/.*\.version$' <<<"$all_files" || true)
+  local all_files files whs_file
+  all_files=$(unzip -Z1 "$BASEAPK" 2>/dev/null | tr -d '\r' || true)
+  files=$(grep -E '^META-INF/.*\.version$' <<<"$all_files" || true)
+  whs_file=$(grep -E -m1 '(^|/)whs\.properties$' <<<"$all_files" || true)
 
-  if grep -q '/whs.properties$' <<<"$all_files" && ! [[ "$files" == *'androidx.health_health-services-client'* ]]; then
-    files=$(printf "%s\n%s" "$files" "/whs.properties")
+  if [[ -n "$whs_file" && "$files" != *'androidx.health_health-services-client'* ]]; then
+    files="${files:+$files$'\n'}$whs_file"
   fi
 
   if [ -z "$files" ]; then
@@ -244,7 +248,7 @@ list_all_libraries_json() {
   local tsv_data
   # Run the entire loop inside a single command substitution block to preserve newlines
   tsv_data=$(
-    while read -r file; do
+    while IFS= read -r file; do
       [ -z "$file" ] && continue
       local lib_id
       if [[ "$file" == *whs.properties ]]; then
@@ -254,7 +258,7 @@ list_all_libraries_json() {
       fi
 
       local version_val
-      version_val=$(apkanalyzer files cat --file "$file" "$BASEAPK" 2>/dev/null | tr -d '\r\n')
+      version_val=$(unzip -p "$BASEAPK" "$file" 2>/dev/null | tr -d '\r\n' || true)
       if [[ "$file" == *whs.properties && "$version_val" == *"="* ]]; then
         version_val=$(echo "$version_val" | awk -F= '/version/ {print $2}' | tr -d ' ')
       fi

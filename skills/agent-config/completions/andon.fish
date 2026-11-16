@@ -43,7 +43,8 @@ complete -c andon -n "__fish_seen_subcommand_from list" -l color -xa "$colors" -
 complete -c andon -n "__fish_seen_subcommand_from list" -l kind -xa "$kinds" -d 'Kind of defect'
 complete -c andon -n "__fish_seen_subcommand_from list" -l level -xa "1 2 3 4 5" -d 'Trigger level'
 complete -c andon -n "__fish_seen_subcommand_from list" -l workspace -xa "(__fish_complete_directories)" -d 'Only alerts pulled in DIR'
-complete -c andon -n "__fish_seen_subcommand_from list" -l session -x -d 'Only alerts from session ID'
+complete -c andon -n "__fish_seen_subcommand_from list" -l session -l conv -x -d 'Only alerts from session ID'
+complete -c andon -n "__fish_seen_subcommand_from list" -l limit -x -d 'At most N alerts'
 complete -c andon -n "__fish_seen_subcommand_from list stats show level" -l json -d 'Print JSON'
 
 # show, prompt, resolve, dismiss, reopen

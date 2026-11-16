@@ -60,8 +60,11 @@ authorization.
 Live development can happen on any machine. A shared checkout is one stream of
 work: serialize edits there; use worktrees for independent or risky changes. On
 trusted personal or work computers, stage broad agent changes in a worktree
-before deliberately activating them. Local edits to symlinked code are already
-live, regardless of PR status.
+before deliberately activating them. If the user explicitly asks for commits on
+a named local topic or experiment branch without opening a PR, keep the live
+checkout on `main` and create the branch in a temporary linked worktree
+(`git worktree add -b <branch> <dir> main`). Local edits to symlinked code are
+already live, regardless of PR status.
 
 `./install.sh --apply` applies the current checkout without Git updates. Normal
 runs preflight all overlays, show the exact incoming range, and prompt `[y/N/d]`

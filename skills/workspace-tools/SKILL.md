@@ -33,6 +33,11 @@ that `envrc` blocks activate per directory, together with a workspace-local
 place for the project's packages and command-line tools; see
 [Language Environments](#language-environments-node-install-ruby-install-python-install).
 
+All tools in this skill live in `<skill-dir>/scripts/<tool>` and are symlinked
+onto `PATH` via `~/.dotfiles/bin/<tool>`. Invoke them directly by name (`hook`,
+`envrc`, `node-install`, `ruby-install`, `python-install`) or via
+`<skill-dir>/scripts/<tool>` (never `<skill-dir>/bin/<tool>`).
+
 ## Gotchas
 
 - **Agent shells usually do not load direnv.** A command run in the workspace
@@ -55,10 +60,11 @@ ______________________________________________________________________
 
 ## Managing Git Hooks (`hook`)
 
-The `hook` tool (symlinked in `bin/`) manages Git hooks in your repository as
-lightweight trampolines pointing into bundled source scripts under
-`resources/hooks/`, allowing hook updates to propagate instantly to all
-configured workspaces without external repository dependencies.
+The `hook` command (`scripts/hook`, on `PATH` via `~/.dotfiles/bin/hook`)
+manages Git hooks in your repository as lightweight trampolines pointing into
+bundled source scripts under `resources/hooks/`, allowing hook updates to
+propagate instantly to all configured workspaces without external repository
+dependencies.
 
 ```bash
 hook [options] <command> [arguments]
@@ -103,8 +109,8 @@ hook [options] <command> [arguments]
 - **`list`** (alias: **`ls`**): List currently installed hook profiles in this
   repository.
 - **`catalog`**: List all available hook profiles and their descriptions.
-- **`doctor`**: Audit `.git/hooks/` for missing, drifted, or unmanaged hooks
-  (read-only).
+- **`doctor`** (compatibility alias: **`status`**): Audit `.git/hooks/` for
+  missing, drifted, retired, or unmanaged hooks (read-only).
 - **`clean`**: Remove all managed hooks and restore legacy/original hooks.
 - **`add --external HOOK-NAME:KEY SOURCE`**: Install `SOURCE`, a hook script
   kept outside this tree (for example in another repository), as sub-hook `KEY`
@@ -129,9 +135,10 @@ ______________________________________________________________________
 
 ## Managing `.envrc` (`envrc`)
 
-The `envrc` tool (symlinked in `bin/`) is the single write path for `.envrc`
-files: it manages marker-delimited configuration blocks so multiple
-configurations co-exist safely and other tools never edit `.envrc` directly.
+The `envrc` command (`scripts/envrc`, on `PATH` via `~/.dotfiles/bin/envrc`) is
+the single write path for `.envrc` files: it manages marker-delimited
+configuration blocks so multiple configurations co-exist safely and other tools
+never edit `.envrc` directly.
 
 - **`create <type> [args...]`** / **`delete <type>`** / **`show <type>`**:
   Create, delete, or print a typed block (`node`, `ruby`, `uv`, `firebase`,
@@ -167,18 +174,22 @@ workspace:
 | `envrc create ruby 3.4` | `use ruby 3.4` | `layout ruby`: gems in `.direnv/ruby` (`GEM_HOME`), bin on `PATH` |
 | `envrc create uv`       | uv-managed     | `layout uv`: a `.venv` in the workspace, activated                |
 
-The installers (symlinked in `bin/`) put runtime versions where those blocks
-look for them:
+The installers (`scripts/<tool>`, on `PATH` via `~/.dotfiles/bin/<tool>`) put
+runtime versions where those blocks look for them:
 
 - **`node-install VERSION`**: Downloads the official Node.js binary for the
-  latest matching release (`22` → newest `22.x.x`) into `$NODE_VERSIONS`
-  (`~/.local/share/node/versions`). Takes seconds. It exits non-zero when that
-  exact version is already installed, so check `node-install --installed` first.
-  `node-install --default 24` instead succeeds either way and makes that version
-  the per-user default (`~/.local/share/node/default`, on `PATH` in fish and
-  bash when it exists); `install.sh` uses it only on Linux machines whose
-  distribution Node.js is too old, and removes it once that changes.
-  `node-install --default` alone prints the current default.
+  latest matching release (`22` → newest `22.x.x`) into
+  `$NODE_VERSIONS/node-v<version>`
+  (`~/.local/share/node/versions/node-v<version>`). Takes seconds. It exits
+  non-zero when that exact version is already installed, so check
+  `node-install --installed` (which prints `vX.Y.Z` tags installed under
+  `$NODE_VERSIONS/node-vX.Y.Z`) first. `node-install --default 24` instead
+  succeeds either way and makes that version the per-user default
+  (`~/.local/share/node/default`, with binaries at
+  `~/.local/share/node/default/bin` on `PATH` in fish and bash when it exists);
+  `install.sh` uses it only on Linux machines whose distribution Node.js is too
+  old, and removes it once that changes. `node-install --default` alone prints
+  the current default.
 - **`ruby-install VERSION`**: Compiles Ruby from source with `ruby-build` into
   `$RUBY_VERSIONS` (`~/.local/share/ruby/versions`). Takes minutes (over ten on
   a small machine) and is declared unsafe, so it always prompts. Run it in the
@@ -229,10 +240,11 @@ Prefer the version the project already declares. If it declares none and CI pins
 one, match CI and suggest that the user add a version file, rather than adding
 one to the repository unasked.
 
-`envrc create node` and `envrc create ruby` require `NODE_VERSIONS` and
-`RUBY_VERSIONS` to name existing directories (the dotfiles shell configuration
-sets both); `use ruby` is defined in `~/.direnvrc`, and `use node` comes from
-the direnv standard library.
+`envrc create node` and `envrc create ruby` check `NODE_VERSIONS` and
+`RUBY_VERSIONS` (defaulting in both `envrc` and `~/.direnvrc` to
+`${XDG_DATA_HOME:-~/.local/share}/{node,ruby}/versions` when unset in
+non-interactive shells); `use ruby` is defined in `~/.direnvrc`, and `use node`
+comes from the direnv standard library.
 
 ### Installing Project Tools
 

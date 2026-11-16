@@ -55,13 +55,14 @@ selection.
   `scripts/adb-wear-pair` (or `scripts/adb-wear-pair --status` to inspect
   pairing state)
 
-- **Package Information:** `scripts/packagename tiles PACKAGE_NAME`
-  `scripts/packagename services PACKAGE_NAME`
+- **Package Information:** `scripts/packagename tiles PACKAGE_NAME`,
+  `scripts/packagename dumpsys PACKAGE_NAME` (manifest components),
+  `scripts/packagename services PACKAGE_NAME` (active/running services)
 
 - **Device Info:** `scripts/adb-device-properties`
 
-- **Discover Activities:** `scripts/adb-activities` (find launcher, TV, settings
-  activities)
+- **Discover Activities:** `scripts/adb-activities [PACKAGE]` (find launcher,
+  TV, settings activities across user apps or for a specific package)
 
 ## Script Index
 
@@ -83,8 +84,9 @@ the exact invocations, including non-obvious flags.
 
 - `scripts/adb-screenshot`: Take a screenshot. **Always use this instead of raw
   `adb shell screencap`.** Features: auto-detects square Wear OS displays and
-  applies circular mask, wakes device before capture, copies to macOS clipboard,
-  generates timestamped filenames by default.
+  applies circular mask, wakes device before capture by default (pass
+  `--no-wake` to preserve Wear OS Ambient / Always-On Display state), copies to
+  macOS clipboard, generates timestamped filenames by default.
 - `scripts/adb-screenrecord`: Record the screen to a file. Automatically detects
   devices that require raw frame streaming (e.g., Samsung Wear OS watches) and
   uses ffmpeg for capture, while defaulting to scrcpy for standard devices.
@@ -96,7 +98,9 @@ the exact invocations, including non-obvious flags.
   `BIND_WIDGET_PROVIDER` (Glance widgets); `FULLSCREEN` produces a full-screen
   tile.
 - `scripts/adb-tile-switch`: Switch the active tile.
-- `scripts/adb-tile-remove`: Remove a tile.
+- `scripts/adb-tile-remove`: Remove a tile by `COMPONENT_NAME` from the SysUI
+  carousel, or remove tray widgets by ID, component, or `--all` with
+  `--vertical`.
 - `scripts/adb-tiles`: List installed tiles and indicate which are in the
   carousel.
 - `scripts/adb-tile-dump`: Export a tray widget's Remote Compose document
@@ -132,16 +136,19 @@ on userdebug builds); user builds cannot export.
 ### Activity Discovery
 
 - `scripts/adb-activities`: List activities tagged by category (Launcher, Home,
-  TV/Leanback, Settings). Use `--launcher-only`, `--tv-only`, `--settings-only`
-  to filter. Add `--all` to include system apps.
-- `scripts/adb-uihierarchy`: Dump the UI hierarchy to an XML file.
+  TV/Leanback, Settings), optionally filtered to a single `PACKAGE`. Use
+  `--launcher-only`, `--tv-only`, `--settings-only` to filter by category, or
+  `--all` to include system apps.
+- `scripts/adb-uihierarchy`: Dump the UI hierarchy to an XML file with bounded
+  timeout and `--compressed` fallback so animated screens do not hang.
 - `scripts/adb-currentfocus`: Display the focused package, activity, or detected
   UI toolkit (`--toolkit`, `--details`, `--json`).
 
 ### Package Operations
 
-- `scripts/packagename`: Comprehensive package tool (uninstall, launch, stop,
-  clear-cache, logcat, jobscheduler).
+- `scripts/packagename`: Comprehensive package tool (`launch`, `force-stop`,
+  `uninstall`, `clear-cache`, `pull`, `tiles`, `dumpsys` for manifest
+  components, `services` for running services, `logcat`, `jobscheduler`).
 - `scripts/adb-packages`: List installed packages.
 
 ### System & Dumpsys
@@ -164,9 +171,13 @@ on userdebug builds); user builds cannot export.
 
 ## Safety Notes
 
-- **Debug Broadcasts**: Tile management relies on Wear OS debug broadcasts
-  (`com.google.android.wearable.app.DEBUG_SURFACE`) which may not work on
-  production builds without developer options or specific system images.
+- **Debug Broadcasts & Shell UID (`uid=2000`)**: Tile management relies on Wear
+  OS debug broadcasts (`com.google.android.wearable.app.DEBUG_SURFACE`) which
+  may not work on production builds without developer options or specific system
+  images. Standard unrooted `adb shell` runs as `uid=2000`
+  (`com.android.shell`), so non-exported components and
+  `signature`/`signatureOrSystem`-protected receivers reject `am broadcast`
+  unless elevated via `adb root` or `su 0`.
 - **USB Debugging**: Requires `adb` authorization.
 - **Destructive Actions**: Scripts like `adb-tile-remove` (including
   `--vertical --all`, which empties the widget tray) or `packagename uninstall`

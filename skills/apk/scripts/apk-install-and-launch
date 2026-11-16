@@ -36,12 +36,12 @@ EOF
   exit 0
 }
 
-if [[ "$1" == "--help" || "$1" == "-h" || "$1" == "help" ]]; then
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" ]]; then
   usage
 fi
 
 shopt -s nullglob
-set -e
+set -euo pipefail
 
 require() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -82,7 +82,7 @@ EOF
   exit 1
 }
 
-if [ -z "$1" ]; then
+if [ -z "${1:-}" ]; then
   usage_short
 fi
 
@@ -91,14 +91,14 @@ if [ ! -f "$1" ]; then
   exit 1
 fi
 
-if [[ $1 == *.zip ]]; then
+if [[ "$1" == *.zip || "$1" == *.apks ]]; then
   TMPDIR=$(mktemp -d)
   trap 'rm -rf -- "$TMPDIR"' EXIT
-  unzip -q "$1" -d "$TMPDIR"
-  BASEAPKS=("$TMPDIR"/*-base-split.apk)
-  BASEAPK="${BASEAPKS[0]}"
+  unzip -q -j "$1" '*.apk' -d "$TMPDIR"
+  BASEAPKS=("$TMPDIR"/base.apk "$TMPDIR"/*base-master.apk "$TMPDIR"/*-base-split.apk)
+  BASEAPK="${BASEAPKS[0]:-}"
   if [ ! -f "$BASEAPK" ]; then
-    echo "$(basename "$0"): *-base-split.apk not found in zip, aborting" >&2
+    echo "$(basename "$0"): no base APK found in $1, aborting" >&2
     exit 1
   fi
   APKS=("$TMPDIR"/*.apk)
@@ -107,16 +107,20 @@ else
 fi
 
 PACKAGE=$(apkanalyzer manifest application-id "$BASEAPK")
-ACTIVITY=$(apkanalyzer manifest print "$BASEAPK" | xpath -n -q -e "string(//activity[intent-filter/action[@android:name='android.intent.action.MAIN'] and intent-filter/category[@android:name='android.intent.category.LAUNCHER']]/@android:name)")
+ACTIVITY=$(apkanalyzer manifest print "$BASEAPK" | xpath -n -q -e "string(//activity[intent-filter/action[@android:name='android.intent.action.MAIN'] and intent-filter/category[@android:name='android.intent.category.LAUNCHER']]/@android:name)" || true)
 
 if [ "$UNINSTALL" = "true" ]; then
   adb uninstall "$PACKAGE" || true
 fi
 
-if [[ $1 == *.zip ]]; then
+if [[ "$1" == *.zip || "$1" == *.apks ]]; then
   adb install-multiple -g -t -r "${APKS[@]}"
 else # assume regular APK
   adb install -g -t -r "$1"
 fi
 
-adb exec-out am start -n "$PACKAGE/$ACTIVITY" -a android.intent.action.MAIN -c android.intent.category.LAUNCHER
+if [ -n "$ACTIVITY" ]; then
+  adb exec-out am start -n "$PACKAGE/$ACTIVITY" -a android.intent.action.MAIN -c android.intent.category.LAUNCHER
+else
+  echo "$(basename "$0"): installed $PACKAGE (no launcher activity declared)" >&2
+fi

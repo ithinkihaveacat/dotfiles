@@ -98,9 +98,9 @@ global open/red counts. On non-terminal surfaces, the server command provides a
 text list instead of the board.
 
 Levels have the same meanings as the Claude plugin: 1 is red-only, 2 is
-conservative, 3 standard, 4 proactive audit, and 5 maximum coverage. A red alert
-instructs the agent to stop on the blocked path and ask you; it does not
-forcibly interrupt execution.
+conservative, 3 standard, 4 proactive, and 5 max-coverage. A red alert instructs
+the agent to stop on the blocked path and ask you; it does not forcibly
+interrupt execution.
 
 ## Behavior and boundaries
 
@@ -140,8 +140,8 @@ forcibly interrupt execution.
 ## Develop
 
 Tested against OpenCode **2.0.32**. The development environment needs Node.js
-26.4+ for the UI peers and native TypeScript tests. OpenCode itself supplies the
-runtime when loading the plugin.
+22.18+ (or 24+) for the UI peers and native TypeScript tests. OpenCode itself
+supplies the runtime when loading the plugin.
 
 From this directory:
 

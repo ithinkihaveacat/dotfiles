@@ -121,7 +121,7 @@ export async function setup(
     let saved: string;
     try {
       const session = await ctx.session.get({ sessionID: context.sessionID });
-      const level = await sessionLevel(context.sessionID);
+      const session_level = await sessionLevel(context.sessionID);
       const model =
         models.get(context.sessionID) ??
         (session.model
@@ -131,7 +131,8 @@ export async function setup(
         ["pull", "--json", "-"],
         {
           ...fields,
-          level,
+          level: isLevel(fields.level) ? fields.level : session_level,
+          session_level,
           harness: "opencode",
           conversation_id: context.sessionID,
           agent_id: session.parentID ? context.sessionID : undefined,

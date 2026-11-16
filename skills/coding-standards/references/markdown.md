@@ -2,22 +2,37 @@
 
 ## Formatting and Linting
 
-All Markdown files, whether new or updated, _must_ be linted and formatted. Use
-the `scripts/markdown-format` script to apply both tools automatically. You can
-also pass the `--check` option to verify formatting without modifying files
-(e.g. for lint checks).
+All Markdown files, whether new or updated, _must_ be formatted with
+`scripts/markdown-format` (`mdformat` with GFM and `ruamel.yaml` frontmatter
+wrapping). Pass `--check` to verify formatting without modifying files, as CI
+does. (`.markdownlint-cli2.jsonc` provides optional editor lint configuration
+and is not run by `markdown-format` or CI.)
 
-To format a file in place:
+To format a file or directory recursively in place:
 
 ```bash
-scripts/markdown-format README.md
+scripts/markdown-format README.md docs/
 ```
 
 To format from stdin to stdout:
 
 ```bash
-cat README.md | scripts/markdown-format > formatted.md
+scripts/markdown-format < README.md > formatted.md
 ```
+
+## Symbols and Mathematical Notation (Unicode Only)
+
+Keep repository Markdown strictly Unicode-only for arrows, operators, relations,
+Greek letters, and inline notation:
+
+- Use plain Unicode symbols (`→`, `←`, `≤`, `≥`, `≠`, `×`, `±`, `Δ`) and inline
+  code spans (`` `O(n log n)` ``, `` `x_i` ``) rather than LaTeX/KaTeX `$...$`
+  or `$$...$$` math blocks.
+- `scripts/markdown-format` runs plain GFM `mdformat` without a dollar-math
+  extension, so backslashes, underscores, braces, and percent signs inside
+  `$...$` are treated as ordinary Markdown prose and escaped or reflowed.
+- If a multi-line equation cannot be expressed clearly with Unicode and code
+  spans, place it inside a fenced code block (```` ```text ````).
 
 ## Heading Style
 

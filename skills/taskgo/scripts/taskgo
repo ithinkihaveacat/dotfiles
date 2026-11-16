@@ -24,6 +24,7 @@ import json
 import os
 import posixpath
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -122,15 +123,17 @@ This repository follows taskgo: <{CANONICAL_URL}>.
   missing ones via your harness, or read their `SKILL.md` directly. If the
   optional `skill` CLI is installed and supports session scope here, run
   `taskgo skills <project> | skill --scope session add -` (or `skill resolve`).
-- Declare the skills a project needs in the `skills:` list of its `README.md`.
-- Commits and tasks record your session. The CLI reads the session ID from the
-  environment. Pass `--conv` only when your harness exports none.
+- Declare project skills in `README.md` (`skills:`).
+- Commit with a positional ≤50-char subject (no `-m`):
+  `taskgo checkpoint <task> "type(scope): …" --all` or
+  `git add … && taskgo commit "type(scope): …"`. Pass `--conv` only when your
+  harness exports no session ID.
 - Rewrite a `STATUS.md` Summary as the project's current state, in a few
   sentences. Never append a log of finished work.
 - Keep tracker data private: never copy it into other repositories. Use
   relative links between tracker files.
-- Put local policy for this repository below this block. `taskgo fix` rewrites
-  only the text between the markers.
+- Put local policy below this block; `taskgo fix` rewrites only between the
+  markers.
 """
 AGENTS_TITLE = "# Agent Instructions"
 # Whitespace-collapsed, formatted SHA-256 prefixes of the whole-file AGENTS.md
@@ -791,6 +794,17 @@ def set_explicit_root(value: str | None) -> None:
         _EXPLICIT_ROOT = Path(value).expanduser()
 
 
+def _find_cwd_control_root() -> Path | None:
+    """If CWD is inside a Git-backed taskgo control repository, return its root."""
+    with contextlib.suppress(OSError):
+        for cand in (Path.cwd(), *Path.cwd().parents):
+            if (cand / ".git").exists() and (cand / "AGENTS.md").is_file():
+                txt = (cand / "AGENTS.md").read_text(encoding="utf-8")
+                if has_taskgo_declaration(txt) or _AGENTS_BLOCK_RE.search(txt):
+                    return cand
+    return None
+
+
 def resolve_root_candidate() -> tuple[Path, str]:
     """Returns the configured root path and its source for error messages."""
     if _EXPLICIT_ROOT is not None:
@@ -798,7 +812,13 @@ def resolve_root_candidate() -> tuple[Path, str]:
     env_root = os.environ.get("TASKGO_ROOT")
     if env_root:
         return Path(env_root).expanduser(), "TASKGO_ROOT"
-    return Path(DEFAULT_ROOT).expanduser(), "default"
+    default_root = Path(DEFAULT_ROOT).expanduser()
+    cwd_root = _find_cwd_control_root()
+    if cwd_root is not None and os.path.realpath(cwd_root) != os.path.realpath(
+        default_root
+    ):
+        return cwd_root, "cwd"
+    return default_root, "default"
 
 
 def display_path(path: Path) -> str:
@@ -4080,7 +4100,7 @@ def markdown_finding(
     return Finding(
         category="markdown",
         severity="INFO",
-        message=f"{rel}: markdown formatting needed",
+        message=f"{rel}: markdown formatting needed (run 'taskgo fix --no-commit')",
         path=rel,
         remediation=remediate,
     )
@@ -4820,6 +4840,17 @@ def cmd_root() -> None:
     print(get_repo_root())
 
 
+_LIST_ITEM_START_RE = re.compile(r"^([-*+]|\d+[.)])\s")
+
+
+def _format_runin(label: str, value: str) -> str:
+    """Formats a bold run-in section, placing multiline or list content on a new block."""
+    body_val = value.strip("\r\n")
+    if "\n" in body_val.strip() or _LIST_ITEM_START_RE.match(body_val.lstrip()):
+        return f"**{label}:**\n\n{body_val.lstrip()}"
+    return f"**{label}:** {body_val.strip()}"
+
+
 def render_task_file(
     task_id: str,
     title: str,
@@ -4842,22 +4873,16 @@ def render_task_file(
 ) -> str:
     """Render and format a task Markdown document."""
     body_blocks = []
-    if problem:
-        body_blocks.append(f"**Problem:** {problem}")
-    if cost:
-        body_blocks.append(f"**Cost:** {cost}")
-    if goal:
-        body_blocks.append(f"**Goal:** {goal}")
-    if criteria:
-        body_blocks.append(f"**Criteria:** {criteria}")
-    if sketch:
-        body_blocks.append(
-            f"**Sketch:**\n\n{sketch}"
-            if ("\n" in sketch or sketch.strip().startswith("1."))
-            else f"**Sketch:** {sketch}"
-        )
-    if constraints:
-        body_blocks.append(f"**Constraints:** {constraints}")
+    for label, val in (
+        ("Problem", problem),
+        ("Cost", cost),
+        ("Goal", goal),
+        ("Criteria", criteria),
+        ("Sketch", sketch),
+        ("Constraints", constraints),
+    ):
+        if val:
+            body_blocks.append(_format_runin(label, val))
 
     if status == "done":
         if outcome:
@@ -5291,10 +5316,7 @@ def edit_task_text(
                 body = ("\n\n".join(parts) + "\n") if parts else ""
             continue
         if spec.form == "run-in":
-            block = "\n" in val or val.strip().startswith("1.")
-            replacement = (
-                f"**{spec.name}:**\n\n{val}" if block else f"**{spec.name}:** {val}"
-            )
+            replacement = _format_runin(spec.name, val)
         else:
             replacement = f"## {spec.name}\n\n{val}"
         if not spans:
@@ -6147,9 +6169,7 @@ def apply_replace_section(cs: ChangeSet, change: dict[str, Any]) -> None:
                 "label, which was dropped; send the section body only"
             )
         if spec.form == "run-in":
-            block = "\n" in text or text.startswith("1.")
-            label = f"**{name}:**"
-            replacement = f"{label}\n\n{text}" if block else f"{label} {text}".strip()
+            replacement = _format_runin(name, text).strip()
         else:
             replacement = f"## {name}\n\n{text}".strip()
     if spans:
@@ -7206,7 +7226,8 @@ def skill_catalog() -> set[tuple[str, str]] | None:
             ["skill", "catalog", "--json"],
             capture_output=True,
             text=True,
-            timeout=60,
+            env={**os.environ, "AGENT_OFFLINE": "1"},
+            timeout=15,
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
@@ -7670,7 +7691,8 @@ def skills_note(project: str, skills: list[str]) -> str:
         break_long_words=False,
         break_on_hyphens=False,
     )
-    return f"{prose}\n\n  taskgo skills {project} | skill --scope session add -"
+    offline_opt = " --offline" if _is_offline() else ""
+    return f"{prose}\n\n  taskgo{offline_opt} skills {project} | skill --scope session add -"
 
 
 def find_task_row(snap: TreeSnapshot, task_id: str) -> TaskRow:
@@ -8058,7 +8080,7 @@ def cmd_doctor(
             _tagged(
                 """[INFO]  Agent semantic review
         STATUS Summary says where the project stands now, in a few sentences; Next is the next few actions.
-        PLAN is the current direction; README and ADRs link to owners rather than copying facts.
+        PLAN (when present) reflects current direction; README and ADRs link to owners rather than copying facts.
         No tracker material has leaked into public or shared artifacts."""
             )
         )
@@ -9295,7 +9317,11 @@ def cmd_checkpoint(
         # Index must be empty before pre-sync (--autostash would unstage staged changes)
         diff_cached = run_git(["diff", "--cached", "--quiet"], check=False)
         if diff_cached.returncode != 0:
-            die("checkpoint: index is not empty")
+            die(
+                "checkpoint: index is not empty "
+                "(to commit already-staged files, run 'taskgo commit \"<subject>\"'; "
+                "or 'git reset' before 'taskgo checkpoint')"
+            )
 
         pre_sync_repo(root)
 
@@ -9311,20 +9337,31 @@ def cmd_checkpoint(
         require_project(snap, project_name)
         status_rel = f"{project_name}/STATUS.md"
 
-        requested = [rel_path, status_rel]
+        validated_paths: list[tuple[str, bool]] = []
         for p_arg in paths_list:
-            p_clean = p_arg.removeprefix("./")
-            if p_clean.startswith("/") or ".." in p_clean.split("/"):
+            p_clean = posixpath.normpath(p_arg.removeprefix("./")).rstrip("/")
+            if (
+                p_arg.startswith("/")
+                or "\\" in p_arg
+                or not p_clean
+                or p_clean == "."
+                or p_clean.startswith("/")
+                or ".." in p_clean.split("/")
+            ):
                 die(f"checkpoint: unsafe path: {p_arg}")
-            if not p_clean.startswith(f"{project_name}/"):
+            if p_clean != project_name and not p_clean.startswith(f"{project_name}/"):
                 die(f"checkpoint: path is outside project {project_name}: {p_arg}")
-            is_existing_file = (root / p_clean).is_file()
-            is_git_deleted = bool(
-                run_git(["status", "--porcelain", "--", p_clean]).stdout.strip()
+            full_p = root / p_clean
+            is_dir = full_p.is_dir() and not full_p.is_symlink()
+            is_existing_file = full_p.is_file() or full_p.is_symlink()
+            porcelain = (
+                ""
+                if (is_dir or is_existing_file)
+                else run_git(["status", "--porcelain", "--", p_clean]).stdout.strip()
             )
-            if not is_existing_file and not is_git_deleted:
+            if not is_dir and not is_existing_file and not porcelain:
                 die(f"checkpoint: path not found: {p_arg}")
-            requested.append(p_clean)
+            validated_paths.append((p_clean, is_dir or not is_existing_file))
 
         # Synchronize status for project
         sync_status(snap, project_name)
@@ -9353,6 +9390,19 @@ def cmd_checkpoint(
         ]
         all_changed = sorted(set(diff_proj + untracked_proj))
 
+        requested = [rel_path, status_rel]
+        for p_clean, expand_prefix in validated_paths:
+            if expand_prefix:
+                matched = [
+                    c
+                    for c in all_changed
+                    if c == p_clean or c.startswith(f"{p_clean}/")
+                ]
+                requested.extend(matched)
+            else:
+                requested.append(p_clean)
+        requested = list(dict.fromkeys(requested))
+
         if all_files:
             requested = sorted(set(requested + [c for c in all_changed if c]))
 
@@ -9367,9 +9417,11 @@ def cmd_checkpoint(
         # Check for unlisted project changes
         unlisted = [c for c in all_changed if c and c not in requested]
         if unlisted:
-            suggested = " ".join(f"--path {p}" for p in unlisted)
+            suggested = " ".join(f"--path {shlex.quote(p)}" for p in unlisted)
             print(
-                f"[HINT] To include unlisted project file(s), add --all or: {suggested}",
+                f"[HINT] To include unlisted project file(s), add --all or: {suggested}\n"
+                "[HINT] To commit only specific files while leaving other project files "
+                'dirty, stage them and run: git add <paths> && taskgo commit "<subject>"',
                 file=sys.stderr,
             )
             die(f"checkpoint: unlisted project change: {unlisted[0]}")
@@ -9506,7 +9558,17 @@ def cmd_commit(
         if projects:
             project_name = next(iter(projects))
             require_project(snap, project_name)
-            commit_gate(root, project_name, staged_files, "commit")
+            status_rel = f"{project_name}/STATUS.md"
+            status_porcelain = run_git(
+                ["status", "--porcelain", "--", status_rel],
+                check=False,
+            ).stdout.strip()
+            gate_files = list(
+                dict.fromkeys(
+                    [*staged_files, *([status_rel] if status_porcelain else [])]
+                )
+            )
+            commit_gate(root, project_name, gate_files, "commit")
             if session:
                 scheme, c_id = session
                 for sf in staged_files:
@@ -9528,20 +9590,18 @@ def cmd_commit(
                                     ),
                                     file=sys.stderr,
                                 )
-            status_porcelain = run_git(
-                ["status", "--porcelain", "--", f"{project_name}/STATUS.md"],
-                check=False,
-            ).stdout.strip()
             if status_porcelain:
                 print(
                     _tagged(
-                        f"[INFO]  Staging working-tree updates in {project_name}/STATUS.md",
+                        f"[INFO]  Staging working-tree updates in {status_rel}",
                         sys.stderr,
                     ),
                     file=sys.stderr,
                 )
-            if sync_status(snap, project_name):
-                run_git(["add", f"{project_name}/STATUS.md"])
+                format_records(root, [status_rel])
+            synced = sync_status(snap, project_name)
+            if status_porcelain or synced:
+                run_git(["add", "--", status_rel])
 
         project_for_scope = next(iter(projects)) if projects else None
         subject = subject_or_die(subject, project_for_scope, "commit")
@@ -9770,9 +9830,9 @@ Server:
   mcp [OPTIONS]                    Serve the tracker to MCP clients
 
 Options:
-  -R, --root DIR  Operate on the control repository at DIR instead of the
-                  default (~/.projects); overrides TASKGO_ROOT. Must appear
-                  before COMMAND.
+  -R, --root DIR  Operate on the control repository at DIR (overrides
+                  TASKGO_ROOT, a CWD control repo, and ~/.projects). Must
+                  appear before COMMAND.
   --offline       Skip remote Git fetch and push (same as AGENT_OFFLINE=1)
   --help, -h      Display this help message and exit
 
@@ -9956,7 +10016,27 @@ def _add_task_edit_options(parser: argparse.ArgumentParser, *, removable: bool) 
     add_set_field_options(parser, removable=removable)
 
 
+class _RejectFlag(argparse.Action):
+    def __call__(
+        self, parser: Any, ns: Any, vals: Any, opt: str | None = None
+    ) -> NoReturn:
+        parser.error(self.const.format(opt=opt or "-m"))
+
+
 def _add_commit_options(parser: argparse.ArgumentParser) -> None:
+    example = (
+        'taskgo checkpoint TASK_ID "type(scope): subject" [--all]'
+        if parser.prog.endswith("checkpoint")
+        else 'git add <paths> && taskgo commit "type(scope): subject"'
+    )
+    parser.add_argument(
+        "-m",
+        "--message",
+        nargs="?",
+        action=_RejectFlag,
+        const=f"use positional SUBJECT (and --body TEXT), not {{opt}}: {example}",
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument(
         "--body",
         "-b",
@@ -9990,9 +10070,16 @@ def create_parser() -> argparse.ArgumentParser:
         metavar="DIR",
         default=None,
         help=(
-            "Control repository to operate on (default: ~/.projects, "
-            "overridden by TASKGO_ROOT); must appear before COMMAND"
+            "Control repository to operate on (overrides TASKGO_ROOT, a CWD "
+            "control repo, and ~/.projects); must appear before COMMAND"
         ),
+    )
+    parser.add_argument(
+        "-C",
+        nargs="?",
+        action=_RejectFlag,
+        const="use -R / --root DIR instead of -C (e.g. taskgo -R DIR COMMAND)",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--offline",
@@ -10383,6 +10470,8 @@ task file's Git commit watermark, emitting nothing when no tasks trigger.""",
     p_mcp_head = p_mcp.add_mutually_exclusive_group()
     p_mcp_head.add_argument(
         "--no-fetch",
+        "--offline",
+        dest="no_fetch",
         action="store_true",
         help="Serve the local BRANCH without fetching; no writes",
     )
@@ -10541,8 +10630,10 @@ task file's Git commit watermark, emitting nothing when no tasks trigger.""",
             " subject without a known 'type(scope): ' prefix is rewritten as"
             " 'chore(<project>): <subject>', and refused if that is too long."
             " Tracker records about to be committed are formatted first."
-            " Staged paths must belong to TASK_ID's project; changes spanning projects (such as moving a"
-            " task) need a plain 'git commit'; see references/workflows.md."
+            " Staged paths must belong to TASK_ID's project; changes spanning"
+            " projects (such as moving a task) need a plain 'git commit'; see"
+            " references/workflows.md. Commits are pushed to the upstream"
+            " remote unless --offline is set."
         ),
         epilog="""Examples:
   taskgo checkpoint TASK-3A91F "chore(proj): start diagnosis" --all
@@ -10572,7 +10663,7 @@ task file's Git commit watermark, emitting nothing when no tasks trigger.""",
         dest="paths",
         action="append",
         default=[],
-        help="Explicit project files to stage",
+        help="Explicit project file or directory to stage (repeatable)",
     )
     _add_commit_options(p_checkpoint)
 
@@ -10586,7 +10677,8 @@ task file's Git commit watermark, emitting nothing when no tasks trigger.""",
             " 'git commit'; see references/workflows.md. The subject rules are"
             " checkpoint's: at most 50 characters, refused rather than"
             " truncated. Staged tracker records are formatted and re-staged"
-            " (not ones that also have unstaged changes)."
+            " (not ones that also have unstaged changes). Commits are pushed"
+            " to the upstream remote unless --offline is set."
         ),
         epilog="""Examples:
   git add proj/PLAN.md && taskgo commit "docs(proj): revise plan"
@@ -10604,15 +10696,15 @@ task file's Git commit watermark, emitting nothing when no tasks trigger.""",
 
     seen_parsers: set[int] = set()
     for sub_name, sub_p in subparsers.choices.items():
-        if sub_name in ("mcp", "search") or id(sub_p) in seen_parsers:
+        if sub_name == "mcp" or id(sub_p) in seen_parsers:
             continue
         seen_parsers.add(id(sub_p))
         sub_p.add_argument(
             "--offline",
             "--no-fetch",
-            dest="sub_offline",
+            dest="offline",
             action="store_true",
-            default=False,
+            default=argparse.SUPPRESS,
             help=argparse.SUPPRESS,
         )
 
@@ -10687,9 +10779,7 @@ def main(argv: list[str] | None = None) -> None:
     global _ACTIVE_COMMAND
     _ACTIVE_COMMAND = args.command
     set_explicit_root(getattr(args, "root", None))
-    set_offline_flag(
-        bool(getattr(args, "offline", False) or getattr(args, "sub_offline", False))
-    )
+    set_offline_flag(bool(getattr(args, "offline", False)))
 
     if search is not None:
         cmd_search(search[1])

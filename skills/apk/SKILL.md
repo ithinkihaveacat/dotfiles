@@ -24,9 +24,9 @@ APK files and split-APK ZIP archives offline.
 ## Using Helper Scripts vs. Raw CLI Tools
 
 Use the scripts in `scripts/` as the primary interface for APK inspection. They
-automate handling split-APK ZIP archives (extracting base splits to temporary
-directories), normalize output across `aapt`, `aapt2`, and `apkanalyzer`, and
-format XML manifests for clean readability.
+automate handling split-APK archives (`.zip`/`.apks` containing `base.apk`,
+`base-master.apk`, or `*-base-split.apk`), normalize output across `aapt`,
+`aapt2`, and `apkanalyzer`, and format XML manifests for clean readability.
 
 When raw tools like `apkanalyzer` or `aapt2` are needed for specialized flags,
 refer to the helper scripts as reference implementations for handling archive
@@ -43,8 +43,12 @@ See `references/command-index.md` for detailed usage.
 
 ### Extraction & Decoding
 
-- `scripts/apk-decode`: Decompile the entire APK using apktool to inspect
-  resources.
+- `scripts/apk-decode`: Decode APK resources and `AndroidManifest.xml` using
+  `apktool d -s` (skipping DEX disassembly for fast resource extraction). When
+  `apktool` is not installed (`apk-info doctor` reports `[WARN]  apktool`), fall
+  back to `jadx --no-src -d <dir> <apk>`,
+  `aapt2 dump xmltree <apk> --file AndroidManifest.xml`, or
+  `scripts/apk-info file <apk> <path>`.
 - `scripts/apk-launcher-icon-extract`: Decompile and extract the launcher and
   round launcher icons as files.
 - `scripts/apk-unzip`: Unzip ZIP archives, split APK bundles, or app bundles.
@@ -54,14 +58,15 @@ See `references/command-index.md` for detailed usage.
 ### Bytecode Analysis
 
 - `scripts/apk-smali`: Disassemble all DEX files of an APK, split-APK archive,
-  or App Bundle into one smali tree (`disassemble`), then query it: classes that
-  declare, call, extend, implement, or are annotated with something (`find`),
-  and a class, method body with its same-class callees, class annotations, or
-  superclass chain (`show class`, `show method`, `show annotations`,
-  `show hierarchy`). `find` and `show` also read a pre-disassembled smali
-  archive (any ZIP or directory of baksmali output) in place. See
-  `references/bytecode-analysis.md` for when to use smali versus jadx and how to
-  report findings.
+  or App Bundle into one smali tree (`disassemble`), then query it: classes or
+  methods that declare, call, contain string literals, extend, implement, or are
+  annotated with something (`find`, with `--package`/`--pkg` to scope package
+  subtrees), and one or more classes, a method body with its same-class callees,
+  class annotations, or superclass chain (`show class`, `show method`,
+  `show annotations`, `show hierarchy`, with `-n`/`--line-numbers`). `find` and
+  `show` also read a pre-disassembled smali archive (any ZIP or directory of
+  baksmali output) in place. See `references/bytecode-analysis.md` for when to
+  use smali versus jadx and how to report findings.
 
 ### Device Interaction
 
