@@ -94,6 +94,70 @@ use the raw Android `svc` power and network services:
 port `5601`, see
 **[Simulating Devices Without Hardware](simulating-devices.md#paired-phone--wear-os-emulator-bridging)**.)*
 
+### Background Socket Termination (~5s) & Process Freezing (~60s) on Wear OS
+
+Unlike mobile Android—where background network access often persists until Doze
+or App Standby kicks in, and where charging lifts many background
+restrictions—Wear OS enforces aggressive background data-saver rules immediately
+after an activity leaves the screen:
+
+- **~5-Second Socket Teardown (Even Charging & Screen-On)**: Roughly **5
+  seconds** after an activity stops (`I/wm_stop_activity` → `procState=LAST`),
+  `NetworkPolicyManagerService` applies the `<uid>-background-default` firewall
+  rule (`blocked=APP_BACKGROUND|DATA_SAVER`) and immediately destroys the UID's
+  live TCP sockets
+  (`D/InetDiagMessage: Destroyed live tcp sockets for uids={<uid>}`, surfacing
+  in socket/native code as `ECONNABORTED` / errno `103`). This happens **even
+  when the watch is sitting on its charger and `stay_on_while_plugged_in` keeps
+  the watch face awake**.
+- **~60-Second Process Freeze**: Roughly **60 seconds** after leaving the
+  screen, the Cached App Freezer freezes the background process (`I/am_freeze`
+  in `adb logcat -b events`).
+- **Architecture Rule**: Do **not** hold a persistent Foreground Service open
+  solely to keep an idle messaging or sync socket alive in the background (which
+  severely drains watch battery). Rely on high-priority Firebase Cloud Messaging
+  (FCM) data messages to wake the app when new data arrives.
+- **Proving OS Socket Teardown via ADB**: Inspect `dumpsys netpolicy` (both the
+  firewall transition history and the per-UID `blocked_state` snapshot)
+  alongside `adb logcat -b all`:
+  ```bash
+  adb shell dumpsys netpolicy | grep -E "background-default|blocked_state"
+  adb logcat -b all -d | grep -E "wm_stop_activity|InetDiagMessage|am_freeze"
+  ```
+
+### Verifying Standalone Watch FCM Delivery (Without Backend Access)
+
+When testing a standalone Wear OS app over Wi-Fi (paired phone in Airplane Mode
+with Bluetooth disabled) and expected background pushes never wake the watch
+app, isolate watch FCM transport health from server-side push issues using
+public on-device tools:
+
+1. **Check the Live Push Socket in the `events` Buffer**: Confirm Google Play
+   Services holds an active push connection (`gtalk_connection` and
+   `gtalk_heartbeat_reset` without a trailing `gtalk_conn_close`):
+   ```bash
+   adb logcat -b events -d | grep -E "gtalk_connection|gtalk_heartbeat_reset|gtalk_conn_close"
+   ```
+1. **Inspect `GcmService` Delivery Counters**: Query Play Services' push service
+   dump:
+   ```bash
+   adb shell dumpsys activity service com.google.android.gms/.gcm.GcmService
+   ```
+   > [!IMPORTANT] **Watch-Wide `HiPri` Scope:** On Wear OS, the hourly `HiPri`
+   > column in `GcmService` aggregates incoming high-priority FCM messages
+   > **device-wide across all packages on the watch**—it does not break quotas
+   > or counts down per app UID. Corroborate whether your specific package woke
+   > by checking `I/am_unfreeze` in `adb logcat -b events` (and avoid polling
+   > the app via `adb shell run-as` during the wait, which triggers false
+   > `am_unfreeze` events; see
+   > **[Permissions, Application State & OS Behavior](permissions-and-os-behavior.md#cached-app-freezer--the-adb-unfreeze-observer-effect)**).
+1. **Trigger a Zero-Install Positive Control Push**: Without backend credentials
+   or extra test apps, trigger **Play sound / Ring** on the watch from **Google
+   Find Hub (Find My Device)** while the paired phone remains in Airplane Mode.
+   Verify `I/GCM: Message from ...` and the incoming ring notification arrive on
+   the standalone watch over Wi-Fi, confirming end-to-end high-priority FCM
+   delivery works on the device.
+
 ______________________________________________________________________
 
 ## Power & Doze Mode

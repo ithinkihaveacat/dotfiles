@@ -1,0 +1,370 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
+"""Grade-time oracle for Wear OS diagnostic cases in skill-eval-harness."""
+
+# Tests: ../../tests/test-android-testing-eval-oracles
+
+from __future__ import annotations
+
+import os
+import pathlib
+import re
+import sys
+from dataclasses import dataclass
+from enum import StrEnum
+
+PROG = pathlib.Path(sys.argv[0]).name
+
+
+class Rule(StrEnum):
+    SOCKET_CUTOFF = "socket-cutoff"
+    UNFREEZE_OBSERVER = "unfreeze-observer"
+    FCM_DIAGNOSTICS = "fcm-diagnostics"
+    BRIDGING_LIFECYCLE = "bridging-lifecycle"
+    COMPANION_COLD_START = "companion-cold-start"
+
+
+@dataclass(slots=True, frozen=True)
+class Verdict:
+    passed: bool
+    summary: str
+
+
+HELP_TEXT = f"""\
+Usage: {PROG} [OPTIONS] ANSWER RULE
+
+Evaluate an agent answer against a Wear OS diagnostic ground-truth rule.
+
+Arguments:
+  ANSWER        Path to the file holding the agent's answer
+  RULE          Diagnostic rule to check:
+                  socket-cutoff
+                  unfreeze-observer
+                  fcm-diagnostics
+                  bridging-lifecycle
+                  companion-cold-start
+
+Options:
+  -h, --help    Display this help message and exit
+
+Examples:
+  {PROG} run/output.md socket-cutoff
+  {PROG} run/output.md unfreeze-observer
+  {PROG} run/output.md fcm-diagnostics
+"""
+
+SHORT_USAGE = f"""\
+{PROG}: missing required arguments ANSWER and RULE
+
+Examples:
+  {PROG} run/output.md socket-cutoff
+  {PROG} run/output.md unfreeze-observer
+
+Try '{PROG} --help' for more information.
+"""
+
+
+def check_socket_cutoff(norm: str) -> Verdict:
+    negated = bool(
+        re.search(
+            r"(\bcolleague\s+is\s+(right|correct)\b|"
+            r"wear\s*os\s+(does\s+not|doesn't|will\s+not|won't|would\s+not|wouldn't)\s+"
+            r"(cut|kill|destroy|close|block|drop|terminate|sever))",
+            norm,
+            re.IGNORECASE,
+        )
+    )
+    affirmed = bool(
+        re.search(
+            r"(^\s*[*_#\s]*yes\b|"
+            r"wear\s*os\s+(itself\s+)?(still\s+|indeed\s+|does\s+|will\s+|actively\s+|"
+            r"immediately\s+|automatically\s+|roughly\s+)?(cuts?\s+off|kills?|destroys?|"
+            r"closes?|blocks?|drops?|terminates?|severs?|restricts?)|"
+            r"\bdestroys?\s+(the\s+)?(uid'?s\s+|app'?s\s+|background\s+|live\s+)*tcp\s+sockets?\b)",
+            norm,
+            re.IGNORECASE,
+        )
+    )
+    mentioned_5s = bool(
+        re.search(
+            r"\b(5(\.0\d*)?|five)\s*(s|sec|secs|second|seconds)\b|"
+            r"\b[34]\s*([-\u2013]|to)\s*5\s*(s|sec|secs|second|seconds)\b",
+            norm,
+            re.IGNORECASE,
+        )
+    )
+    mentioned_netpolicy = bool(
+        re.search(
+            r"\b(dumpsys\s+netpolicy|NetworkPolicyManagerService|"
+            r"APP_BACKGROUND|DATA_SAVER|background-default)\b",
+            norm,
+            re.IGNORECASE,
+        )
+    )
+    mentioned_inetdiag = bool(
+        re.search(
+            r"\b(InetDiagMessage|Destroyed\s+live\s+tcp\s+sockets)\b",
+            norm,
+            re.IGNORECASE,
+        )
+    )
+    mentioned_fcm = bool(
+        re.search(r"\b(FCM|Firebase\s+Cloud\s+Messaging)\b", norm, re.IGNORECASE)
+    )
+    prescribed_fgs = bool(
+        re.search(
+            r"\b(you\s+must|should|need\s+to|fix\s+it[^.]{0,40})\s+"
+            r"(implement|use|run|start|keep)\s+(a\s+)?(persistent\s+)?foreground\s+service\b",
+            norm,
+            re.IGNORECASE,
+        )
+    )
+    passed = (
+        not negated
+        and affirmed
+        and mentioned_5s
+        and mentioned_netpolicy
+        and mentioned_inetdiag
+        and mentioned_fcm
+        and not prescribed_fgs
+    )
+    return Verdict(
+        passed=passed,
+        summary=(
+            f"affirmed={affirmed and not negated}, 5s={mentioned_5s}, "
+            f"netpolicy={mentioned_netpolicy}, inetdiag={mentioned_inetdiag}, "
+            f"fcm={mentioned_fcm}, prescribed_fgs={prescribed_fgs}"
+        ),
+    )
+
+
+def check_unfreeze_observer(norm: str) -> Verdict:
+    negated_unfreeze = bool(
+        re.search(
+            r"\b(does\s+not|doesn't|will\s+not|won't|never)\s+(transiently\s+)?(unfreez\w*|thaw\w*)\b",
+            norm,
+            re.IGNORECASE,
+        )
+    )
+    mentioned_unfreeze = (
+        bool(re.search(r"\b(unfreez\w*|thaw\w*)\b", norm, re.IGNORECASE))
+        and not negated_unfreeze
+    )
+    mentioned_am_unfreeze = bool(re.search(r"\bam_unfreeze\b", norm))
+    hallucinated_kill = bool(
+        re.search(
+            r"(causes?\s+the\s+os\s+to\s+kill|"
+            r"immediate\s+termination\s+of\s+the\s+app|"
+            r"cpu\s+usage\s+while\s+frozen|"
+            r"kills?\s+the\s+(frozen|backgrounded)\s+(com\.[\w.]+\s+)?(app|process))",
+            norm,
+            re.IGNORECASE,
+        )
+    )
+    passed = mentioned_unfreeze and mentioned_am_unfreeze and not hallucinated_kill
+    return Verdict(
+        passed=passed,
+        summary=(
+            f"unfreeze={mentioned_unfreeze}, am_unfreeze={mentioned_am_unfreeze}, "
+            f"hallucinated_kill={hallucinated_kill}"
+        ),
+    )
+
+
+def check_fcm_diagnostics(norm: str) -> Verdict:
+    mentioned_gcm = bool(
+        re.search(
+            r"\bdumpsys\s+activity\s+services?\s+\S*GcmService\b|\bGcmService\b",
+            norm,
+            re.IGNORECASE,
+        )
+    )
+    mentioned_gtalk = bool(re.search(r"\bgtalk_(connection|heartbeat_reset)\b", norm))
+    mentioned_device_wide = bool(
+        re.search(
+            r"\b(device[- ]wide|watch[- ]wide|across\s+all\s+(watch\s+)?(apps|packages)|"
+            r"all\s+(apps|packages)\s+on\s+the\s+(watch|device)|not\s+(broken\s+down\s+)?per[- ](app\s+)?uid)\b",
+            norm,
+            re.IGNORECASE,
+        )
+    )
+    hallucinated_per_uid_quota = bool(
+        re.search(
+            r"(locate\s+the\s+target\s+app'?s\s+uid[^.]{0,120}(fcm|bucket|hp)|"
+            r"scroll\s+to\s+the\s+[`'\"]?App\s+stats:[`'\"]?\s+section|"
+            r"breaks?\s+(down\s+)?(quotas?|counts?)\s+per[- ](app\s+)?uid)",
+            norm,
+            re.IGNORECASE,
+        )
+        and not re.search(
+            r"\b(does\s+not|doesn't|not|no|never)\s+[^.]{0,50}per[- ](app\s+)?uid\b",
+            norm,
+            re.IGNORECASE,
+        )
+    )
+    mentioned_find_hub = bool(
+        re.search(
+            r"\b(Find\s+My\s+(Device|Watch)|Find\s+Hub|android\.com/find)\b",
+            norm,
+            re.IGNORECASE,
+        )
+    )
+    passed = (
+        mentioned_gcm
+        and mentioned_gtalk
+        and mentioned_device_wide
+        and not hallucinated_per_uid_quota
+        and mentioned_find_hub
+    )
+    return Verdict(
+        passed=passed,
+        summary=(
+            f"gcm={mentioned_gcm}, gtalk={mentioned_gtalk}, "
+            f"device_wide={mentioned_device_wide}, "
+            f"hallucinated_per_uid={hallucinated_per_uid_quota}, "
+            f"find_hub={mentioned_find_hub}"
+        ),
+    )
+
+
+def check_bridging_lifecycle(norm: str) -> Verdict:
+    has_manager = bool(re.search(r"\bBridgingManager\b", norm))
+    has_config = bool(re.search(r"\bBridgingConfig\b", norm))
+    hallucinated_api = bool(
+        re.search(
+            r"\b(setBridgingMode|BRIDGING_MODE_UNBRIDGED|setBridgeOption|BRIDGE_MODE_BRIDGING_DISABLED)\b",
+            norm,
+        )
+        and not re.search(
+            r"\b(do\s+not|don't|never|non-existent)\b", norm, re.IGNORECASE
+        )
+    )
+    has_logout_reenable = bool(
+        re.search(
+            r"\b(log[- ]*out|sign[- ]*out|logged[- ]*out|signed[- ]*out)\b.{0,180}\b(re-?enable|enable|true|restore)\b|"
+            r"\b(re-?enable|enable|true|restore)\b.{0,180}\b(log[- ]*out|sign[- ]*out|logged[- ]*out|signed[- ]*out)\b",
+            norm,
+            re.IGNORECASE,
+        )
+    )
+    has_dismissal_id = bool(re.search(r"\bsetDismissalId\b", norm))
+    passed = (
+        has_manager
+        and has_config
+        and not hallucinated_api
+        and has_logout_reenable
+        and has_dismissal_id
+    )
+    return Verdict(
+        passed=passed,
+        summary=(
+            f"BridgingManager={has_manager}, BridgingConfig={has_config}, "
+            f"hallucinated_api={hallucinated_api}, logout_reenable={has_logout_reenable}, "
+            f"setDismissalId={has_dismissal_id}"
+        ),
+    )
+
+
+def check_companion_cold_start(norm: str) -> Verdict:
+    has_force_stop = bool(re.search(r"\bam\s+force-stop\b", norm))
+    has_locked = bool(
+        re.search(r"\b(lock(ed)?|KEYCODE_SLEEP|screen[- ]off)\b", norm, re.IGNORECASE)
+    )
+    has_bad_token = bool(
+        re.search(r"\b(BadTokenException|Unable\s+to\s+add\s+window)\b", norm)
+    )
+    has_bal = bool(
+        re.search(
+            r"\b(Background\s+Activity\s+(Launch|Start)|BAL|setFullScreenIntent)\b",
+            norm,
+            re.IGNORECASE,
+        )
+    )
+    passed = has_force_stop and has_locked and has_bad_token and has_bal
+    return Verdict(
+        passed=passed,
+        summary=(
+            f"force_stop={has_force_stop}, locked={has_locked}, "
+            f"bad_token={has_bad_token}, bal={has_bal}"
+        ),
+    )
+
+
+CHECKERS = {
+    Rule.SOCKET_CUTOFF: check_socket_cutoff,
+    Rule.UNFREEZE_OBSERVER: check_unfreeze_observer,
+    Rule.FCM_DIAGNOSTICS: check_fcm_diagnostics,
+    Rule.BRIDGING_LIFECYCLE: check_bridging_lifecycle,
+    Rule.COMPANION_COLD_START: check_companion_cold_start,
+}
+
+
+def run(argv: list[str]) -> int:
+    for arg in argv:
+        if arg in ("-h", "--help"):
+            sys.stdout.write(HELP_TEXT)
+            return 0
+
+    for arg in argv:
+        if arg.startswith("-") and arg != "-":
+            sys.stderr.write(
+                f"{PROG}: unrecognized option '{arg}'\nTry '{PROG} --help' for more information.\n"
+            )
+            return 1
+
+    if len(argv) != 2:
+        sys.stderr.write(SHORT_USAGE)
+        return 1
+
+    answer_arg, rule_arg = argv
+    try:
+        rule = Rule(rule_arg)
+    except ValueError:
+        valid = ", ".join(r.value for r in Rule)
+        sys.stderr.write(
+            f"{PROG}: unknown rule '{rule_arg}' (expected one of: {valid})\n"
+        )
+        return 2
+
+    path = pathlib.Path(answer_arg)
+    if not path.is_file():
+        sys.stderr.write(f"{PROG}: no answer file at {path}\n")
+        return 2
+
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        sys.stderr.write(f"{PROG}: failed to read {path}: {exc}\n")
+        return 2
+
+    norm = re.sub(r"\s+", " ", text)
+    verdict = CHECKERS[rule](norm)
+    if not verdict.passed:
+        sys.stderr.write(f"{PROG}: {rule.value} failed ({verdict.summary})\n")
+        return 1
+
+    sys.stdout.write(f"{rule.value}: ok ({verdict.summary})\n")
+    return 0
+
+
+def main() -> None:
+    sys.exit(run(sys.argv[1:]))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        try:
+            sys.stderr.write("\n")
+            sys.stderr.flush()
+        except Exception:
+            pass
+        sys.exit(130)
+    except BrokenPipeError:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        sys.exit(141)
