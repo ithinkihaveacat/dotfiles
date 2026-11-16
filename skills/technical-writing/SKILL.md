@@ -74,9 +74,10 @@ relevant reference guide:
   and Sketch fields without hardening into premature plans.
 - **[Getting Started Guides](references/getting-started-guides.md)** — Building
   action-oriented onboarding golden paths from zero to first result.
-- **[Capability Skills](references/capability-skills.md)** — Authoring modular,
-  decoupled, and self-contained `SKILL.md` files and reference documents for
-  skills that teach a class of task.
+- **[Capability Skills](references/capability-skills.md)** — Deciding what earns
+  a place in a skill, and authoring modular, decoupled, and self-contained
+  `SKILL.md` files and reference documents for skills that teach a class of
+  task.
 - **[Knowledge Skills](references/knowledge-skills.md)** — Structuring and
   maintaining skills that record current facts about particular systems,
   accounts, people, and places.

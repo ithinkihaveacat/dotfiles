@@ -21,6 +21,31 @@ operating in specific domains or codebases.
   decision rules, underlying rationale, and task-appropriate degrees of freedom
   over heavy-handed imperatives.
 
+## What Belongs in a Capability Skill
+
+A capability skill competes with what frontier models (and their near-equivalent
+distilled variants) already know from pretraining, public docs, and `--help`.
+Target only that tier, and keep only what a frontier model cannot readily
+discover or routinely gets wrong:
+
+| Belongs here                                                                       | Omit                                              |
+| ---------------------------------------------------------------------------------- | ------------------------------------------------- |
+| Undocumented flags, log tags, service dumps, or wire formats                       | Standard language, library, or CLI usage          |
+| False-assumption traps where neighboring-platform intuition misleads               | Options or schemas visible in `--help`            |
+| Setups where happy-path checks mask a broken underlying path                       | Generic best practices and textbook hygiene       |
+| Probes or defaults that alter state under test or drop evidence                    | Error messages that already explain their fix     |
+| Canonical doc snippets that break common states (cold start, logged out, minified) | Workarounds only needed by weaker or older models |
+| Recipes that save heavy trial-and-error or stop a model from guessing              | Step-by-step walkthroughs of routine workflows    |
+
+**Test your intuition.** It is easy to overestimate how novel a lesson is right
+after debugging it. When in doubt — especially when distilling an audit,
+postmortem, or bug fix — check that an unprimed frontier model (without the
+skill, and without leading keywords in the prompt) actually hits the gap or
+spends real effort rediscovering the answer. How you check is up to you: a quick
+prompt on a realistic symptom or small fixture is usually enough, scaling up to
+paired with/without-skill evals when tuning a larger skill. If the baseline
+already handles it cleanly, leave it out.
+
 ## Core Principles & Decoupling Rule
 
 To ensure skills remain modular, portable, and maintainable across diverse
@@ -300,6 +325,8 @@ When a skill bundles executable utilities or helper tools in `scripts/`:
 
 Before publishing or committing a reusable skill, verify that:
 
+- [ ] Additions clear the frontier-model bar (verified without the skill when in
+  doubt) rather than restating pretraining or `--help` knowledge.
 - [ ] No hard mandates or cross-references to sibling skills in your personal
   collection exist (referencing shared public or organization-wide skills is
   acceptable).
