@@ -6,11 +6,6 @@
 #     "httpx",
 #     "httpx2",
 # ]
-# [tool.uv.sources]
-# google-genai = { index = "pypi" }
-# [[tool.uv.index]]
-# name = "pypi"
-# url = "https://pypi.org/simple"
 # ///
 """Caxton: Autonomous path-scoped long-form text transformation and audit engine.
 
@@ -35,6 +30,7 @@ import difflib
 import fnmatch
 import inspect
 import json
+import math
 import mimetypes
 import os
 import random
@@ -397,6 +393,38 @@ class RateLimiter:
 # is given a floor plus time in proportion to its input before it is abandoned.
 REQUEST_TIMEOUT_FLOOR = 180.0
 REQUEST_SECONDS_PER_1K_TOKENS = 1.0
+# google-genai copies HttpOptions.timeout into the X-Server-Timeout header
+# unless the caller sets it, and the server enforces X-Server-Timeout as a
+# wall-clock deadline on the whole turn rather than a transport stall timeout.
+# Give the server a generous deadline while keeping the tighter client timeout
+# to detect stalled connections.
+SERVER_TIMEOUT_FLOOR = 1800
+MAX_TIMEOUT_RETRIES = 3
+
+
+def server_timeout_headers(timeout_sec: float | None) -> dict[str, str] | None:
+    """X-Server-Timeout header decoupling server deadline from client timeout."""
+    if not timeout_sec:
+        return None
+    return {"X-Server-Timeout": str(max(math.ceil(timeout_sec), SERVER_TIMEOUT_FLOOR))}
+
+
+def retry_budget_exhausted(
+    retry_wait_seconds: float,
+    sleep_sec: float,
+    budget_seconds: float,
+    timeout_retries: int = 0,
+    max_timeout_retries: int | None = None,
+) -> bool:
+    """Whether another retry would exceed the backoff wait or timeout cap.
+
+    Tracks cumulative backoff sleep rather than wall-clock time since the first
+    failure so a large-context turn whose per-attempt read timeout exceeds
+    `budget_seconds` is not aborted after a single retry.
+    """
+    if max_timeout_retries is not None and timeout_retries >= max_timeout_retries:
+        return True
+    return retry_wait_seconds + sleep_sec > budget_seconds
 
 
 def request_timeout(estimate: int, override: int | None = None) -> float | None:
@@ -2774,14 +2802,18 @@ Once your work is complete, you MUST call complete_task(success=True, report="..
             )
 
         attempt = 0
-        # The retry budget runs from the first failure, so a request that
-        # stalled for minutes does not spend it before the first retry.
-        retry_start = None
+        # Track cumulative backoff sleep rather than wall-clock time since the
+        # first failure so long per-attempt read timeouts on large prompts do
+        # not exhaust the retry budget during active request flight.
+        server_wait_seconds = 0.0
+        rate_wait_seconds = 0.0
+        timeout_retries = 0
         timeout_sec = request_timeout(estimate, args.request_timeout)
         request_config = config.model_copy(
             update={
                 "http_options": types.HttpOptions(
-                    timeout=int(timeout_sec * 1000) if timeout_sec else None
+                    timeout=int(timeout_sec * 1000) if timeout_sec else None,
+                    headers=server_timeout_headers(timeout_sec),
                 )
             }
         )
@@ -2835,9 +2867,6 @@ Once your work is complete, you MUST call complete_task(success=True, report="..
                     or e.code not in (429, 500, 502, 503, 504)
                 ):
                     raise
-                if retry_start is None:
-                    retry_start = time.monotonic()
-                elapsed = time.monotonic() - retry_start
                 if timed_out:
                     # A stalled request shares the 5xx retry budget.
                     event = {
@@ -2849,7 +2878,13 @@ Once your work is complete, you MUST call complete_task(success=True, report="..
                     sleep_sec = backoff_delay(
                         attempt, server_backoff_base, max_backoff, random.random()
                     )
-                    if elapsed + sleep_sec > server_retry_timeout:
+                    if retry_budget_exhausted(
+                        server_wait_seconds,
+                        sleep_sec,
+                        server_retry_timeout,
+                        timeout_retries,
+                        MAX_TIMEOUT_RETRIES,
+                    ):
                         event["action"] = "failed: retries exhausted"
                         raise RuntimeError(
                             f"API request timed out after {timeout_sec:.0f}s"
@@ -2859,6 +2894,8 @@ Once your work is complete, you MUST call complete_task(success=True, report="..
                         ) from e
                     event["action"] = f"retried after {sleep_sec:.1f}s"
                     attempt += 1
+                    timeout_retries += 1
+                    server_wait_seconds += sleep_sec
                     wait(
                         sleep_sec,
                         f"Warning: API request timed out after {timeout_sec:.0f}s"
@@ -2900,24 +2937,30 @@ Once your work is complete, you MUST call complete_task(success=True, report="..
                             f"API error 429 ({msg}). Rate limited; pacing to"
                             f" ~{format_tokens(limiter.limit() or 0)} tokens/min"
                         )
-                    if elapsed + sleep_sec > rate_retry_timeout:
+                    if retry_budget_exhausted(
+                        rate_wait_seconds, sleep_sec, rate_retry_timeout
+                    ):
                         event["action"] = "failed: retries exhausted"
                         print(
                             f"[caxton] Error: still rate limited after"
-                            f" {elapsed:.0f}s of retries; quota"
+                            f" {rate_wait_seconds:.0f}s of retries; quota"
                             f" {', '.join(ids) or 'not named'}. This may be a"
                             " plan or daily quota rather than a per-minute limit.",
                             file=sys.stderr,
                         )
                         raise
+                    rate_wait_seconds += sleep_sec
                     event["action"] = f"retried after {sleep_sec:.1f}s"
                 else:
                     sleep_sec = backoff_delay(
                         attempt, server_backoff_base, max_backoff, random.random()
                     )
                     why = f"API error {e.code} ({msg}). Retrying with backoff"
-                    if elapsed + sleep_sec > server_retry_timeout:
+                    if retry_budget_exhausted(
+                        server_wait_seconds, sleep_sec, server_retry_timeout
+                    ):
                         raise
+                    server_wait_seconds += sleep_sec
                 attempt += 1
                 wait(sleep_sec, f"Warning: {why}")
 

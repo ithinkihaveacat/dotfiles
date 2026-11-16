@@ -56,7 +56,7 @@ TOOLS=(
   "bin/uihierarchy-compare|$WORK/ui.xml|$WORK/ui.xml"
 )
 
-echo "1..$((${#TOOLS[@]} * 3))"
+echo "1..$((${#TOOLS[@]} * 3 + 2))"
 
 make_curl_shim() {
   cat >"$WORK/shim/curl" <<EOF
@@ -127,3 +127,48 @@ for entry in "${TOOLS[@]}"; do
     sed 's/^/# /' "$LOG"
   fi
 done
+
+# Large base64 payloads (>128 KB single-argument MAX_ARG_STRLEN on Linux) must
+# stream via jq --rawfile rather than failing with E2BIG (exit 126).
+cat >"$WORK/shim/magick" <<'SHIM'
+#!/bin/sh
+has_crop=0
+last=""
+for a in "$@"; do
+  last="$a"
+  case "$a" in
+    info:) printf '800 600\n'; exit 0 ;;
+    -crop) has_crop=1 ;;
+  esac
+done
+if [ "$has_crop" -eq 1 ]; then
+  printf 'cropped' >"$last"
+  exit 0
+fi
+dd if=/dev/zero bs=1024 count=160 2>/dev/null
+SHIM
+chmod +x "$WORK/shim/magick"
+
+TEST_NUM=$((TEST_NUM + 1))
+make_curl_shim 'printf "{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Alt text\"}]}}]}\n200"'
+if run_tool "$ROOT/skills/agent-tools/scripts/screenshot-describe" "$WORK/img.png" &&
+  grep -q "^Alt text$" "$LOG"; then
+  echo "ok $TEST_NUM - screenshot-describe handles >128KB base64 payloads without ARG_MAX failure"
+else
+  echo "not ok $TEST_NUM - screenshot-describe failed on >128KB base64 payload"
+  sed 's/^/# /' "$LOG"
+fi
+
+TEST_NUM=$((TEST_NUM + 1))
+cat >"$WORK/crop-resp.json" <<'JSON'
+{"candidates":[{"content":{"parts":[{"text":"{\"subject_box\":{\"ymin\":100,\"xmin\":100,\"ymax\":900,\"xmax\":900}}"}]}}]}
+200
+JSON
+make_curl_shim "cat '$WORK/crop-resp.json'"
+if run_tool "$ROOT/skills/agent-tools/scripts/photo-smart-crop" "$WORK/img.png" "$WORK/crop-out.jpg" &&
+  [ -f "$WORK/crop-out.jpg" ]; then
+  echo "ok $TEST_NUM - photo-smart-crop handles >128KB base64 payloads without ARG_MAX failure"
+else
+  echo "not ok $TEST_NUM - photo-smart-crop failed on >128KB base64 payload"
+  sed 's/^/# /' "$LOG"
+fi

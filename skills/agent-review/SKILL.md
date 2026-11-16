@@ -95,6 +95,16 @@ agy has no documented forced skill-invocation syntax, so its fallback names the
 `agent-review` skill explicitly; verify skill loading in verbose logs when
 activation matters.
 
+**Subagent fallback when external CLIs are unavailable:** When none of the
+external CLI binaries (`codex`, `claude`, `agy`) are installed or permitted by
+host policy (for example, `review-with-agent` exits `127`, including when a
+non-OpenAI `codex` binary is on `PATH`), spawn a fresh, isolated read-only
+subagent through your agent harness and instruct it to perform the synthesized
+review itself following
+[references/review-rubric.md](references/review-rubric.md) (or the four-pass
+audit in [references/complexity-audit.md](references/complexity-audit.md))
+without modifying source files.
+
 The launcher routes code reviews only. To delegate an unattended complexity
 audit, pass an external scratch directory so all copies, builds, candidate
 fixes, and review passes stay outside the target project:

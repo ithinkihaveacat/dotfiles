@@ -4,10 +4,12 @@ description: >-
   Command-line AI tools and context gatherers for image analysis, screenshot diffing,
   smart cropping, token counting, technical essays (emerson), boolean condition evaluation,
   Android UI automation (popper), receipt extraction (pacioli), GitHub data formatting
-  (gh-markdown), deep reasoning research (Oracle), and whole-tree text refactoring
-  (Caxton). Use when analyzing images, comparing screenshots, evaluating conditions,
+  (gh-markdown), deep reasoning research (Oracle), whole-tree text refactoring
+  (Caxton), question-set evaluation (socrates), and parallel CLI benchmarking
+  (benchmarker). Use when analyzing images, comparing screenshots, evaluating conditions,
   extracting receipts, gathering domain context, automating Android apps, refactoring
-  multi-file repositories with Caxton, or performing deep research with Oracle.
+  multi-file repositories with Caxton, benchmarking AI CLIs, or performing deep research
+  with Oracle.
 compatibility: >-
   Requires curl, jq, and uv. Image tools also need base64 and magick (ImageMagick).
   Needs a Gemini API key (GEMINI_API_KEY) and network access to generativelanguage.googleapis.com.
@@ -36,7 +38,7 @@ you can adapt for custom calls.
 
 **Environment:** AI commands require a Gemini API key (reads from
 `GEMINI_API_KEY`). Scripts will report clear errors if no key is found.
-`gh-markdown` optionally accepts a `--token` for GitHub API access.
+`gh-markdown` requires `GITHUB_TOKEN` in the environment for GitHub API access.
 
 **Model selection:** Every Gemini-backed script accepts `--model MODEL` and
 honors the `GEMINI_MODEL` environment variable (`--model` wins; each script's
@@ -94,11 +96,11 @@ The `agent-tools` skill provides three distinct deep reasoning engines,
 separated by their epistemology (closed-world vs. grounded open-world), agency
 (consultation vs. disk mutation), and execution topology:
 
-| Engine        | Epistemic Model                                                     | Execution Paradigm                                        | Mutation Surface              | Primary Role                                                                                       |
-| :------------ | :------------------------------------------------------------------ | :-------------------------------------------------------- | :---------------------------- | :------------------------------------------------------------------------------------------------- |
-| **`emerson`** | **Strict Closed-World** (zero search, trusts `stdin` as sole truth) | Single-turn Unix filter (`stdin` $\\rightarrow$ `stdout`) | None                          | Distilling pre-gathered text into authoritative, footnoted ~3000-word essays without hallucination |
-| **`oracle`**  | **Grounded Open-World** (Google Search/Maps + Python execution)     | Single-turn streaming consultation                        | None (read-only advice)       | Strategic research, architectural tradeoffs, and multimodal context synthesis (\<1 MB)             |
-| **`caxton`**  | **Hybrid Grounded Action** (Search/Code + Repository tools)         | Multi-turn autonomous agent loop                          | Full disk mutation (`--edit`) | Multi-file text transformation, doc-code synchronization, and whole-tree harmonization             |
+| Engine        | Epistemic Model                                                     | Execution Paradigm                           | Mutation Surface              | Primary Role                                                                                       |
+| :------------ | :------------------------------------------------------------------ | :------------------------------------------- | :---------------------------- | :------------------------------------------------------------------------------------------------- |
+| **`emerson`** | **Strict Closed-World** (zero search, trusts `stdin` as sole truth) | Single-turn Unix filter (`stdin` → `stdout`) | None                          | Distilling pre-gathered text into authoritative, footnoted ~3000-word essays without hallucination |
+| **`oracle`**  | **Grounded Open-World** (Google Search/Maps + Python execution)     | Single-turn streaming consultation           | None (read-only advice)       | Strategic research, architectural tradeoffs, and multimodal context synthesis (\<1 MB)             |
+| **`caxton`**  | **Hybrid Grounded Action** (Search/Code + Repository tools)         | Multi-turn autonomous agent loop             | Full disk mutation (`--edit`) | Multi-file text transformation, doc-code synchronization, and whole-tree harmonization             |
 
 ### Decision Guide
 
@@ -110,7 +112,8 @@ separated by their epistemology (closed-world vs. grounded open-world), agency
    summary or spec without any risk of external hallucination.
 
 1. **Asking complex, strategic, or internet-grounded questions? Use `oracle`.**
-   `oracle` is a grounded, open-world synthesizer. It accepts arbitrary
+   `oracle` is a grounded, open-world synthesizer by default (pass `--no-search`
+   for closed-world analysis over local files). It accepts arbitrary
    files/directories (up to 1 MB upfront), performs Google Searches, and
    executes Python code to provide a definitive, one-shot strategic answer. Use
    it for deep architectural research, bug triage, or exploring unfamiliar
@@ -214,12 +217,12 @@ scripts/oracle [OPTIONS] "PROMPT" [FILE_OR_DIR ...]
 **Arguments:**
 
 - `PROMPT`: The specific question or task for the Oracle.
-- `FILE_OR_DIR`: Optional files or directories to include as context.
-  Directories are recursively walked (ignoring hidden files, credential
-  patterns, and standard ignore lists like `node_modules`; symlinks inside
-  directories are skipped). Symlinks and paths traversing symlinks passed as
-  direct arguments are rejected for safety; resolve paths (e.g. via `realpath`)
-  before passing.
+- `FILE_OR_DIR`: Optional files or directories to include as context, or `-` to
+  read context from `stdin`. Directories are recursively walked (ignoring hidden
+  files, credential patterns, and standard ignore lists like `node_modules`;
+  symlinks inside directories are skipped). Symlinks and paths traversing
+  symlinks passed as direct arguments are rejected for safety; resolve paths
+  (e.g. via `realpath`) before passing.
 
 **Options:**
 
@@ -244,9 +247,11 @@ scripts/oracle [OPTIONS] "PROMPT" [FILE_OR_DIR ...]
   `high`; env `ORACLE_THINKING`). On large contexts (~100k+ tokens), `high` can
   take 8–15 minutes while `medium` typically finishes in 3–4 minutes with
   comparable depth.
-- `--request-timeout SECONDS`: Abandon and retry an API request with no response
-  after `SECONDS`; `0` waits indefinitely (env `ORACLE_REQUEST_TIMEOUT`). The
-  default is 180 s plus 1 s per 1k input tokens.
+- `--request-timeout SECONDS`: Client read timeout per API stream chunk; abandon
+  and retry an API request that stalls for `SECONDS` (`0` waits indefinitely;
+  env `ORACLE_REQUEST_TIMEOUT`). Defaults to 180 s plus 1 s per 1k input tokens,
+  while `X-Server-Timeout` is set to at least 1800 s so active multi-minute
+  thinking streams are not cut short by the server.
 - `--max-output-tokens N`: Ceiling on thinking plus answer tokens (default:
   131072; env `ORACLE_MAX_OUTPUT_TOKENS`). See "Output limit" below.
 - `--serialize` / `--no-serialize`: Save request payload and answer to files in
@@ -264,11 +269,13 @@ the exit status is 1; raise `--max-output-tokens` or lower `--thinking`.
 Telemetry records `max_output_tokens`, `finish_reason`, `continuation_tokens`,
 and `truncated`.
 
-**Environment:** `GEMINI_API_KEY` (Required), `ORACLE_THINKING` (Optional),
-`ORACLE_REQUEST_TIMEOUT` (Optional), `ORACLE_MAX_OUTPUT_TOKENS` (Optional),
+**Environment:** `GEMINI_API_KEY` (Required), `GEMINI_MODEL` (Optional),
+`ORACLE_THINKING` (Optional), `ORACLE_REQUEST_TIMEOUT` (Optional),
+`ORACLE_MAX_OUTPUT_TOKENS` (Optional), `AGENT_TELEMETRY_JSON` (Optional),
 `ORACLE_STATE_DIR` (Optional)
 
-**Exit codes:** 0 success, 1 error (including an incomplete or empty answer)
+**Exit codes:** 0 success, 1 error (including an incomplete or empty answer),
+130 interrupted
 
 **Examples:**
 
@@ -289,9 +296,9 @@ contradictions, standardizing style, and synchronizing documentation against
 codebases. Combines Oracle's broad upfront bulk context inlining (up to 1 MB)
 with Popper's autonomous tool-calling loop. It inlines the selected files into
 the initial prompt and provides the model with exact byte-for-byte
-`search_and_replace`, `write_file`, `delete_file`, `read_file`, and `list_files`
-tools to execute changes across multiple documents before finalizing via
-`complete_task`.
+`search_and_replace`, `write_file`, `delete_file`, `read_file`, `list_files`,
+and `grep_search` tools to execute changes across multiple documents before
+finalizing via `complete_task`.
 
 Unlike iterative coding tools that operate in tight compile/test loops, Caxton
 is tailored for narrative text, specifications, and documentation corpuses where
@@ -333,7 +340,7 @@ initial prompt — is controlled by `--inline`/`--no-inline`.
 - `--thinking LEVEL`: Thinking level: `high`, `low`, `none` (default: `high`).
 - `--search` / `--no-search`: Google Search grounding for live external context
   (default: on).
-- `--code` / `--no-code`: Python code execution in cloud sandbox (default: on).
+- `--code` / `--no-code`: Python code execution in cloud sandbox (default: off).
 - `--serialize` / `--no-serialize`: Save request payload and final response to
   the state directory (`~/.local/state/caxton/`) (default: on).
 - `--max-steps N`: Maximum agent tool steps before stopping (default: 100).
@@ -367,8 +374,13 @@ initial prompt — is controlled by `--inline`/`--no-inline`.
 `PROMPT` is the only positional argument and must come before the path options,
 which each consume every following path.
 
-**Environment:** `GEMINI_API_KEY` (Required), `CAXTON_STATE_DIR` (Optional),
-`AGENT_OFFLINE` (Optional)
+**Environment:** `GEMINI_API_KEY` (Required), `GEMINI_MODEL` (Optional),
+`AGENT_OFFLINE` (Optional), `CAXTON_TPM` (Optional), `CAXTON_MAX_INPUT_TOKENS`
+(Optional), `CAXTON_REQUEST_TIMEOUT` (Optional), `CAXTON_MAX_OUTPUT_TOKENS`
+(Optional), `AGENT_TELEMETRY_JSON` / `CAXTON_TELEMETRY_FILE` (Optional),
+`CAXTON_STATE_DIR` (Optional). Live runs require network access to
+`generativelanguage.googleapis.com` and write access to `~/.local/state/caxton/`
+(unless `--no-serialize` is set).
 
 **Exit codes:** 0 success, 1 error, 2 timeout, 127 git missing, 130 interrupted,
 141 stdout closed early
@@ -536,7 +548,7 @@ scripts/context show gemini-api | scripts/emerson "How do tools work?"
 Generate concise alt-text for an image. Optimized for UI captures.
 
 ```bash
-scripts/screenshot-describe IMAGE [PROMPT]
+scripts/screenshot-describe [OPTIONS] [IMAGE] [PROMPT]
 ```
 
 **Exit codes:** 0 success, 1 error, 127 missing dependency
@@ -604,8 +616,9 @@ with `--model` for harder questions.
 
 Deterministic image prep (EXIF rotate, alpha flatten, resize to `--max-size`
 (default 768, 384 for `@people`), WebP encode) is content-addressed-cached at
-`~/.cache/agent-tools/photo-query/` so repeated queries against the same images
-skip the resize entirely. Use `--no-cache` to bypass.
+`~/.cache/photo-query/` (override via `PHOTO_QUERY_CACHE_DIR`) so repeated
+queries against the same images skip the resize entirely. Use `--no-cache` to
+bypass.
 
 ```bash
 # Boolean check (exit code idiom)
@@ -787,13 +800,17 @@ scripts/popper "GOAL"
 
 **Options:** `--launch PACKAGE` (launch a package before starting),
 `--stay-in-app` (restrict the run to a single application package),
-`--dump-layout` (print the current simplified UI layout as JSON and exit),
-`--agent-screenshots` / `--no-agent-screenshots` (enable/disable sending
-screenshots to API), `--local-screenshots` / `--no-local-screenshots`
-(enable/disable saving screenshots locally), `--screenshot-dir DIR` (override
-directory to save screenshots)
+`--timeout SECONDS` (execution timeout, default: 180),
+`--output-format {text,stream-json}` (output format), `--dump-layout` (print the
+current simplified UI layout as JSON and exit), `--agent-screenshots` /
+`--no-agent-screenshots` (enable/disable sending screenshots to API),
+`--local-screenshots` / `--no-local-screenshots` (enable/disable saving debug
+screenshots locally), `--local-screenshot-dir DIR` (override directory for debug
+screenshots), `--output-dir DIR` (override directory for explicit agent
+screenshots), `--model MODEL` (override Gemini model)
 
-**Environment:** `ANDROID_SERIAL` (optional, target specific device)
+**Environment:** `GEMINI_API_KEY` (required), `ANDROID_SERIAL` (optional, target
+specific device), `GEMINI_MODEL` (optional), `AGENT_OFFLINE` (optional)
 
 **Exit codes:** 0 success (task completed), 1 error (task failed), 2 timeout
 
@@ -857,6 +874,42 @@ Base64 budget, default: 300), `-n, --dry-run` (preview changes).
 
 **Exit codes:** 0 success, 1 error.
 
+### socrates
+
+Generate evaluation question sets from reference text into a SQLite database,
+collect answers across models, shell scripts, or interactive responders, score
+responses with an evaluator model, and render Markdown comparison reports.
+
+```bash
+DB_PATH=$(cat context.md | scripts/socrates generate)
+scripts/socrates answer "$DB_PATH" --mode model:gemini-flash-latest
+scripts/socrates score "$DB_PATH"
+scripts/socrates report "$DB_PATH"
+```
+
+**Commands:** `generate`, `answer`, `score`, `status`, `delete`, `questions`,
+`report`
+
+**Exit codes:** 0 success, 1 error
+
+### benchmarker
+
+Generic parallel matrix runner and benchmark harness for AI CLI tools and
+agents. Executes a Cartesian product of `--dim` parameters and `--tasks`
+fixtures across isolated ephemeral Git worktrees, recording structured
+`AGENT_TELEMETRY_JSON`, logs, and diffs into `.benchmarks/`.
+
+```bash
+scripts/benchmarker --dim model=gemini-4-carbon,gemini-flash-latest \
+  --tasks benchmarks/tasks/ --cmd "scripts/oracle --model {model} {prompt}"
+```
+
+**Options:** `-c, --cmd TEMPLATE`, `-d, --dim NAME=VALS`, `-t, --tasks DIR`,
+`-o, --output-dir DIR`, `-n, --trials N`, `-j, --workers N`,
+`--timeout SECONDS`, `--dry-run`, `--telemetry-template`
+
+**Exit codes:** 0 success, 1 error
+
 ## Image Encoding Notes
 
 - Screenshot tools encode to lossless WebP; `photo-query` uses lossy WebP and
@@ -875,7 +928,13 @@ Base64 budget, default: 300), `-n, --dry-run` (preview changes).
 - Requires a Gemini API key (reads from `GEMINI_API_KEY`)
 - API calls may incur usage costs
 - Large images increase request size and latency
-- Scripts do not store or log input data
+- Several tools persist local state or caches by default: `oracle` saves
+  payloads and answers under `~/.local/state/oracle/` (`--no-serialize`
+  disables), `caxton` saves payloads and responses under
+  `~/.local/state/caxton/` (`--no-serialize` disables), `popper` saves debug
+  screenshots locally (`--no-local-screenshots` disables), `context` caches
+  fetched repositories under `~/.local/share/context/`, and `photo-query` caches
+  resized WebP derivatives under `~/.cache/photo-query/` (`--no-cache` disables)
 
 ## Reference Material
 
