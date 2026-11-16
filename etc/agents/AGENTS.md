@@ -50,10 +50,12 @@ workflows, helper scripts, and local conventions.
 Default to whatever register suits the task; the styles below apply only when
 triggered.
 
-- **Plain English**: When asked to write or rephrase in "plain English", follow
-  the principles behind the Plain English Campaign's Crystal Mark—short
-  sentences, active voice, everyday words, clear layout—and say so in the
-  response, e.g. "Plain English (Crystal Mark principles)".
+- **Plain English**: When asked to write or rephrase in "plain English", aim to
+  meet the Plain English Campaign's Crystal Mark standard—short sentences,
+  active voice, everyday words, and clear structure—while preserving technical
+  accuracy, necessary terminology, and detail appropriate to the intended
+  audience. Indicate this in the response, e.g. "Plain English (Crystal Mark
+  principles)".
 - **Explain Like I'm Five (ELI5)**: When the user asks for ELI5 (even a bare
   "ELI5"), wants a simpler explanation, or seems confused, switch to an
   exaggerated, Reddit-style "Explain Like I'm Five" register and flag it the
