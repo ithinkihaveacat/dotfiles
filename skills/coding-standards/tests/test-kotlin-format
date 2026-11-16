@@ -1,0 +1,210 @@
+#!/usr/bin/env bash
+
+# Tests: skills/coding-standards/tests/test-kotlin-format
+
+set -euo pipefail
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BIN="$DIR/../scripts/kotlin-format"
+
+ROOT=$(mktemp -d)
+trap 'rm -rf -- "$ROOT"' EXIT
+
+STUB_BIN="$ROOT/stub-bin"
+FAKE_DATA="$ROOT/xdg-data"
+EMPTY_DATA="$ROOT/empty-data"
+mkdir -p "$STUB_BIN" "$FAKE_DATA/ktfmt" "$EMPTY_DATA"
+: >"$FAKE_DATA/ktfmt/ktfmt-0.0-with-dependencies.jar"
+
+# Minimal PATH without curl/jq to prove cached runs do not require them, plus a
+# stub 'java' that formats simple Kotlin fixtures deterministically offline.
+for tool in bash basename cat cmp dirname find head mkdir mv printf rm sort tail tr uname; do
+  if p=$(command -v "$tool" 2>/dev/null); then
+    ln -sf "$p" "$STUB_BIN/$tool"
+  fi
+done
+
+cat >"$STUB_BIN/java" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+dry_run=0
+files=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -jar) shift 2 ;;
+    --kotlinlang-style | --set-exit-if-changed) shift ;;
+    --dry-run) dry_run=1; shift ;;
+    -) files+=("-"); shift ;;
+    -*) echo "ktfmt-stub: unexpected option: $1" >&2; exit 2 ;;
+    *) files+=("$1"); shift ;;
+  esac
+done
+
+canonical='fun main() {
+    println(1)
+}'
+rc=0
+for f in "${files[@]}"; do
+  if [[ "$f" == "-" ]]; then
+    in_text=$(cat)
+    if [[ "$in_text" == *"broken("* ]]; then
+      echo "<stdin>:1:1: error: Syntax error" >&2
+      exit 1
+    fi
+    if [[ "$dry_run" -eq 1 ]]; then
+      if [[ "$in_text" != "$canonical" ]]; then
+        echo "<stdin>"
+        rc=1
+      fi
+    else
+      printf '%s\n' "$canonical"
+    fi
+  else
+    in_text=$(cat "$f")
+    if [[ "$in_text" == *"broken("* ]]; then
+      echo "$f:1:1: error: Syntax error" >&2
+      rc=1
+      continue
+    fi
+    if [[ "$dry_run" -eq 1 ]]; then
+      if [[ "$in_text" != "$canonical" ]]; then
+        echo "$f"
+        rc=1
+      fi
+    else
+      printf '%s\n' "$canonical" >"$f"
+    fi
+  fi
+done
+exit "$rc"
+EOF
+chmod +x "$STUB_BIN/java"
+
+run_stub() {
+  env PATH="$STUB_BIN" XDG_DATA_HOME="$FAKE_DATA" "$BIN" "$@"
+}
+
+echo "1..11"
+
+FILE="$ROOT/Main.kt"
+DIRTY='fun main(){println(1)}'
+printf '%s\n' "$DIRTY" >"$FILE"
+BEFORE=$(cat "$FILE")
+
+# 1: --help takes precedence without writing
+if OUT=$(run_stub --bogus "$FILE" --help) &&
+  [[ "$OUT" == *"--check"* ]] &&
+  [[ "$(cat "$FILE")" == "$BEFORE" ]]; then
+  echo "ok 1 - Help takes precedence without writing"
+else
+  echo "not ok 1 - Help takes precedence without writing"
+fi
+
+# 2 & 3: Unknown options before/after file fail before mutating
+for ARGS in before after; do
+  if [[ "$ARGS" == before ]]; then
+    CMD=(--bogus "$FILE")
+    N=2
+  else
+    CMD=("$FILE" --bogus)
+    N=3
+  fi
+  if ! run_stub "${CMD[@]}" >/dev/null 2>&1 &&
+    [[ "$(cat "$FILE")" == "$BEFORE" ]]; then
+    echo "ok $N - Unknown option $ARGS file fails before writing"
+  else
+    echo "not ok $N - Unknown option $ARGS file fails before writing"
+  fi
+done
+
+# 4: Missing file fails before writing other files
+if ! run_stub "$FILE" "$ROOT/Missing.kt" >/dev/null 2>&1 &&
+  [[ "$(cat "$FILE")" == "$BEFORE" ]]; then
+  echo "ok 4 - Missing file fails before writing other files"
+else
+  echo "not ok 4 - Missing file fails before writing other files"
+fi
+
+# 5: AGENT_OFFLINE=1 fails cleanly on uncached jar without needing curl/jq
+if ERR=$(env PATH="$STUB_BIN" XDG_DATA_HOME="$EMPTY_DATA" AGENT_OFFLINE=1 "$BIN" "$FILE" 2>&1); then
+  echo "not ok 5 - AGENT_OFFLINE=1 fails when jar is missing"
+elif [[ "$ERR" == *"offline mode"* ]] && [[ "$(cat "$FILE")" == "$BEFORE" ]]; then
+  echo "ok 5 - AGENT_OFFLINE=1 fails cleanly when jar is missing"
+else
+  echo "not ok 5 - AGENT_OFFLINE=1 unexpected output: $ERR"
+fi
+
+# 6: --check reports drift on stderr without writing or emitting stdout
+OUT_FILE="$ROOT/check.out"
+ERR_FILE="$ROOT/check.err"
+if ! run_stub --check "$FILE" >"$OUT_FILE" 2>"$ERR_FILE" &&
+  [[ ! -s "$OUT_FILE" ]] &&
+  [[ "$(cat "$ERR_FILE")" == *"needs formatting"* ]] &&
+  [[ "$(cat "$FILE")" == "$BEFORE" ]]; then
+  echo "ok 6 - Check reports drift on stderr without writing or stdout noise"
+else
+  echo "not ok 6 - Check reports drift on stderr without writing or stdout noise"
+fi
+
+# 7: Default formats in place without curl/jq on PATH, and passes --check
+if run_stub "$FILE" >/dev/null 2>&1 &&
+  run_stub --check "$FILE" >/dev/null 2>&1; then
+  echo "ok 7 - Cached jar formats in place without curl/jq and passes --check"
+else
+  echo "not ok 7 - Cached jar formats in place without curl/jq and passes --check"
+fi
+
+# 8: Stdin formatting and --check on stdin
+STDIN_OUT=$(printf '%s\n' "$DIRTY" | run_stub)
+if [[ "$STDIN_OUT" == "$(cat "$FILE")" ]] &&
+  run_stub --check <"$FILE" &&
+  ! (printf '%s\n' "$DIRTY" | run_stub --check >"$OUT_FILE" 2>/dev/null) &&
+  [[ ! -s "$OUT_FILE" ]]; then
+  echo "ok 8 - Stdin formatting and --check work cleanly"
+else
+  echo "not ok 8 - Stdin formatting and --check work cleanly"
+fi
+
+# 9: Recursive directory expansion formats .kt and .kts while skipping node_modules and .git
+SUB="$ROOT/tree"
+mkdir -p "$SUB/src" "$SUB/node_modules/pkg" "$SUB/.git/hooks"
+printf '%s\n' "$DIRTY" >"$SUB/src/App.kt"
+printf '%s\n' "$DIRTY" >"$SUB/src/build.gradle.kts"
+printf 'broken(\n' >"$SUB/node_modules/pkg/Ignored.kt"
+printf 'broken(\n' >"$SUB/.git/hooks/Ignored.kt"
+if ! run_stub --check "$SUB" >/dev/null 2>&1 &&
+  run_stub "$SUB" >/dev/null 2>&1 &&
+  run_stub --check "$SUB" >/dev/null 2>&1 &&
+  [[ "$(cat "$SUB/node_modules/pkg/Ignored.kt")" == "broken(" ]]; then
+  echo "ok 9 - Recursive directory formatting handles .kt/.kts and skips ignored dirs"
+else
+  echo "not ok 9 - Recursive directory formatting handles .kt/.kts and skips ignored dirs"
+fi
+
+# 10: End-of-options (--) handles hyphenated filenames
+HYPHEN_DIR="$ROOT/hyphen"
+mkdir -p "$HYPHEN_DIR"
+printf '%s\n' "$DIRTY" >"$HYPHEN_DIR/-Main.kt"
+if (cd "$HYPHEN_DIR" && run_stub -- -Main.kt >/dev/null 2>&1) &&
+  (cd "$HYPHEN_DIR" && run_stub --check -- -Main.kt >/dev/null 2>&1); then
+  echo "ok 10 - End-of-options accepts hyphenated filenames"
+else
+  echo "not ok 10 - End-of-options accepts hyphenated filenames"
+fi
+
+# 11: Real java + cached ktfmt integration smoke test when available locally
+REAL_KTFMT_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/ktfmt"
+REAL_JAR=$(find "$REAL_KTFMT_DIR" -maxdepth 1 -name 'ktfmt-*-with-dependencies.jar' 2>/dev/null | head -n 1 || true)
+if ! command -v java >/dev/null 2>&1 || [[ -z "$REAL_JAR" ]]; then
+  echo "ok 11 - Real ktfmt integration # SKIP java or cached ktfmt jar not present"
+else
+  REAL_KT="$ROOT/Real.kt"
+  printf 'fun greet():String{return "ok"}\n' >"$REAL_KT"
+  if ! AGENT_OFFLINE=1 "$BIN" --check "$REAL_KT" >/dev/null 2>&1 &&
+    AGENT_OFFLINE=1 "$BIN" "$REAL_KT" >/dev/null 2>&1 &&
+    AGENT_OFFLINE=1 "$BIN" --check "$REAL_KT" >/dev/null 2>&1; then
+    echo "ok 11 - Real cached ktfmt formats and passes --check offline"
+  else
+    echo "not ok 11 - Real cached ktfmt formats and passes --check offline"
+  fi
+fi

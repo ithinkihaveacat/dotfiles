@@ -1,24 +1,33 @@
 #!/usr/bin/env bash
 
+# Tests: skills/coding-standards/tests/test-kotlin-format
+
 set -euo pipefail
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [FILE...]
+Usage: $(basename "$0") [OPTIONS] [PATH...]
 
 Format Kotlin files using ktfmt with kotlinlang style.
 
-When FILEs are provided, each file is formatted in place. When no FILE is
+When PATHs are provided, each file is formatted in place. If a directory is
+provided, recursively formats all .kt and .kts files in it. When no PATH is
 provided, reads from standard input and writes to standard output.
 
 The ktfmt jar is automatically downloaded from GitHub on first use and
 cached in \$XDG_DATA_HOME/ktfmt (or ~/.local/share/ktfmt).
 
 Arguments:
-  FILE...     Paths to Kotlin files to format (optional)
+  PATH...     Paths to Kotlin files or directories to format (optional)
 
 Options:
-  --help      Display this help message and exit
+  --check     Check formatting without changing files or emitting Kotlin
+  --help, -h  Display this help message and exit
+  --          Treat remaining arguments as file names
+
+Environment:
+  AGENT_OFFLINE  Use only a cached ktfmt jar; never download over the network
+  XDG_DATA_HOME  Base directory for cached ktfmt jar (default: ~/.local/share)
 
 Examples:
 
@@ -26,26 +35,51 @@ Examples:
 
   $(basename "$0") Main.kt
 
-# Format multiple files
+# Format all Kotlin files in a directory recursively
 
-  $(basename "$0") src/*.kt
+  $(basename "$0") src/
+
+# Check formatting without writing
+
+  $(basename "$0") --check src/
 
 # Format from stdin to stdout
-
-  cat Main.kt | $(basename "$0")
-
-# Format a file and see the result
 
   $(basename "$0") < src/Example.kt
 EOF
   exit 0
 }
 
-if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-  usage
-fi
+CHECK=0
+PATHS=()
+END_OPTIONS=0
+for ARG in "$@"; do
+  if [[ "$END_OPTIONS" -eq 0 ]]; then
+    case "$ARG" in
+      --help | -h) usage ;;
+      --) END_OPTIONS=1 ;;
+    esac
+  fi
+done
 
-if [[ $# -eq 0 && -t 0 ]]; then
+END_OPTIONS=0
+for ARG in "$@"; do
+  if [[ "$END_OPTIONS" -eq 1 ]]; then
+    PATHS+=("$ARG")
+    continue
+  fi
+  case "$ARG" in
+    --check) CHECK=1 ;;
+    --) END_OPTIONS=1 ;;
+    -*)
+      echo "$(basename "$0"): unknown option: $ARG" >&2
+      exit 1
+      ;;
+    *) PATHS+=("$ARG") ;;
+  esac
+done
+
+if [[ ${#PATHS[@]} -eq 0 && -t 0 ]]; then
   usage
 fi
 
@@ -56,66 +90,138 @@ require() {
   }
 }
 
+is_offline() {
+  case "$(printf '%s' "${AGENT_OFFLINE:-}" | tr '[:upper:]' '[:lower:]')" in
+    1 | true | yes | on) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+if [[ ${#PATHS[@]} -gt 0 ]]; then
+  for P in "${PATHS[@]}"; do
+    if [[ ! -f "$P" && ! -d "$P" ]]; then
+      echo "$(basename "$0"): $P: No such file or directory" >&2
+      exit 1
+    fi
+  done
+fi
+
 require java
-require curl
-require jq
 
 KTFMT_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/ktfmt"
 
 # Find existing jar or download latest
 get_jar() {
   local jar
-  jar=$(find "$KTFMT_DIR" -maxdepth 1 -name 'ktfmt-*-with-dependencies.jar' 2>/dev/null | head -n 1)
+  jar=""
+  if [[ -d "$KTFMT_DIR" ]]; then
+    jar=$(find "$KTFMT_DIR" -maxdepth 1 -name 'ktfmt-*-with-dependencies.jar' 2>/dev/null | sort -V | tail -n 1)
+  fi
 
   if [[ -n "$jar" ]]; then
     echo "$jar"
     return 0
   fi
 
+  if is_offline; then
+    echo "$(basename "$0"): ktfmt jar not cached in $KTFMT_DIR (offline mode); run with AGENT_OFFLINE=0 to download it" >&2
+    return 1
+  fi
+
+  require curl
+  require jq
+
   # Download latest release
   echo "Downloading ktfmt..." >&2
   mkdir -p "$KTFMT_DIR"
 
-  local url
-  url=$(curl -fsSL https://api.github.com/repos/facebook/ktfmt/releases |
-    jq -r '.[0].assets[] | select(.browser_download_url | endswith("with-dependencies.jar")) | .browser_download_url')
+  local releases url
+  if ! releases=$(curl -fsSL https://api.github.com/repos/facebook/ktfmt/releases); then
+    echo "$(basename "$0"): failed to fetch https://api.github.com/repos/facebook/ktfmt/releases" >&2
+    return 1
+  fi
+  url=$(printf '%s\n' "$releases" |
+    jq -r '.[0].assets[] | select(.browser_download_url | endswith("with-dependencies.jar")) | .browser_download_url' |
+    head -n 1)
 
   if [[ -z "$url" ]]; then
-    echo "$(basename "$0"): failed to find download URL" >&2
+    echo "$(basename "$0"): failed to find ktfmt download URL" >&2
     return 1
   fi
 
-  local filename
+  local filename tmp_jar
   filename=$(basename "$url")
-  curl -fsSL "$url" -o "$KTFMT_DIR/$filename"
+  tmp_jar="$KTFMT_DIR/.$filename.tmp.$$"
+  if ! curl -fsSL "$url" -o "$tmp_jar"; then
+    rm -f -- "$tmp_jar"
+    echo "$(basename "$0"): failed to download $url" >&2
+    return 1
+  fi
+  mv "$tmp_jar" "$KTFMT_DIR/$filename"
   echo "Downloaded $filename" >&2
   echo "$KTFMT_DIR/$filename"
 }
 
 jar=$(get_jar)
 
-if [[ $# -eq 0 ]]; then
-
-  # Read from stdin, write to stdout
-
-  java -jar "$jar" --kotlinlang-style -
-else
-
-  # Format files in place
-
-  FAILED=0
-  for FILE in "$@"; do
-    if [[ ! -f "$FILE" ]]; then
-      echo "$(basename "$0"): $FILE: No such file or directory" >&2
-      FAILED=1
-      continue
-    fi
-    if java -jar "$jar" --kotlinlang-style "$FILE"; then
-      echo "$(basename "$0"): $FILE: formatted"
-    else
-      echo "$(basename "$0"): $FILE: failed to format" >&2
-      FAILED=1
-    fi
-  done
-  exit $FAILED
+if [[ ${#PATHS[@]} -eq 0 ]]; then
+  if [[ "$CHECK" -eq 1 ]]; then
+    java -jar "$jar" --kotlinlang-style --dry-run --set-exit-if-changed - >/dev/null
+  else
+    java -jar "$jar" --kotlinlang-style -
+  fi
+  exit $?
 fi
+
+FILES=()
+for P in "${PATHS[@]}"; do
+  if [[ -d "$P" ]]; then
+    while IFS= read -r FOUND; do
+      [[ -n "$FOUND" ]] && FILES+=("$FOUND")
+    done < <(
+      find "$P" \
+        \( -name .git -o -name node_modules -o -name .venv -o -name .direnv -o -name __pycache__ -o -name .gradle \) -prune \
+        -o -type f \( -name '*.kt' -o -name '*.kts' \) -print | sort
+    )
+  else
+    FILES+=("$P")
+  fi
+done
+
+if [[ ${#FILES[@]} -eq 0 ]]; then
+  exit 0
+fi
+
+SAFE_FILES=()
+for FILE in "${FILES[@]}"; do
+  if [[ "$FILE" == -* ]]; then
+    SAFE_FILES+=("./$FILE")
+  else
+    SAFE_FILES+=("$FILE")
+  fi
+done
+
+if [[ "$CHECK" -eq 1 ]]; then
+  FAILED=0
+  DRIFT=$(java -jar "$jar" --kotlinlang-style --dry-run --set-exit-if-changed "${SAFE_FILES[@]}") || FAILED=1
+  if [[ -n "$DRIFT" ]]; then
+    while IFS= read -r DFILE; do
+      [[ -n "$DFILE" ]] || continue
+      echo "$(basename "$0"): ${DFILE#./}: needs formatting" >&2
+    done <<<"$DRIFT"
+  fi
+  exit "$FAILED"
+fi
+
+FAILED=0
+for i in "${!FILES[@]}"; do
+  FILE="${FILES[$i]}"
+  SAFE="${SAFE_FILES[$i]}"
+  if java -jar "$jar" --kotlinlang-style "$SAFE"; then
+    echo "$(basename "$0"): $FILE: formatted"
+  else
+    echo "$(basename "$0"): $FILE: failed to format" >&2
+    FAILED=1
+  fi
+done
+exit "$FAILED"
