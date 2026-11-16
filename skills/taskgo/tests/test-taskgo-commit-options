@@ -8,7 +8,7 @@ set -euo pipefail
 source "$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 taskgo_test_init
 
-echo "1..8"
+echo "1..15"
 
 REPO="$TEST_ROOT/repo"
 init_base_repo "$REPO"
@@ -168,4 +168,168 @@ if [[ -z "$missing" && "$TOP" == *$'\nTasks:\n'* && "$TOP" == *$'\nHealth:\n'* &
   echo 'ok 8 - top-level help groups every command under headings'
 else
   echo "not ok 8 - top-level help is missing:$missing"
+fi
+
+# 9: commit and checkpoint reject -m / --message with a positional SUBJECT hint,
+# preserve -C (--conv) on subcommands, and document upstream push in --help
+CM_M_RC=0
+CM_M_ERR=$(tg --root "$REPO" --offline commit -m "docs(example): msg" 2>&1) || CM_M_RC=$?
+CM_MSG_RC=0
+CM_MSG_ERR=$(tg --root "$REPO" --offline commit --message="docs(example): msg" 2>&1) || CM_MSG_RC=$?
+CP_M_RC=0
+CP_M_ERR=$(tg --root "$REPO" --offline checkpoint TASK-A1B2C -m "docs(example): msg" 2>&1) || CP_M_RC=$?
+CP_HELP="$(tg checkpoint --help)"
+CM_HELP="$(tg commit --help)"
+if [[ "$CM_M_RC" -eq 2 ]] &&
+  [[ "$CM_M_ERR" == *'use positional SUBJECT (and --body TEXT), not -m:'*'taskgo commit "type(scope): subject"'* ]] &&
+  [[ "$CM_MSG_RC" -eq 2 ]] &&
+  [[ "$CM_MSG_ERR" == *'use positional SUBJECT (and --body TEXT), not --message:'* ]] &&
+  [[ "$CP_M_RC" -eq 2 ]] &&
+  [[ "$CP_M_ERR" == *'use positional SUBJECT (and --body TEXT), not -m:'*'taskgo checkpoint TASK_ID "type(scope): subject"'* ]] &&
+  [[ "$CP_HELP" == *'pushed to the upstream remote unless --offline'* ]] &&
+  [[ "$CM_HELP" == *'pushed to the upstream remote unless --offline'* ]] &&
+  grep -q "no \`-m\`" "$REPO/AGENTS.md"; then
+  echo 'ok 9 - commit and checkpoint reject -m/--message with positional SUBJECT hint and document push'
+else
+  echo 'not ok 9 - commit and checkpoint reject -m/--message with positional SUBJECT hint and document push'
+  printf '# cm=%s (%s) cp=%s (%s)\n' "$CM_M_RC" "$CM_M_ERR" "$CP_M_RC" "$CP_M_ERR"
+fi
+
+# 10: checkpoint --path stages directories cleanly, and staging errors emit actionable hints
+mkdir -p "$REPO/example/references/sub"
+printf '# Ref A\n' >"$REPO/example/references/a.md"
+printf '# Ref B\n' >"$REPO/example/references/sub/b.md"
+printf 'dirty sibling\n' >"$REPO/example/sibling.txt"
+UNLISTED_ERR=$(tg --root "$REPO" --offline checkpoint TASK-A1B2C 'docs(example): add refs' \
+  --path example/references/ 2>&1 || true)
+rm -f "$REPO/example/sibling.txt"
+git -C "$REPO" add example/PLAN.md 2>/dev/null || true
+printf '\nstaged line\n' >>"$REPO/example/PLAN.md"
+git -C "$REPO" add example/PLAN.md
+NONEMPTY_IDX_ERR=$(tg --root "$REPO" --offline checkpoint TASK-A1B2C 'docs(example): idx' 2>&1 || true)
+git -C "$REPO" reset -q -- example/PLAN.md
+git -C "$REPO" checkout -q -- example/PLAN.md
+if [[ "$UNLISTED_ERR" == *'unlisted project change: example/sibling.txt'* ]] &&
+  [[ "$UNLISTED_ERR" != *'example/references/a.md'* ]] &&
+  [[ "$UNLISTED_ERR" == *'git add <paths> && taskgo commit "<subject>"'* ]] &&
+  [[ "$NONEMPTY_IDX_ERR" == *'checkpoint: index is not empty'*'taskgo commit "<subject>"'*'git reset'* ]] &&
+  tg --root "$REPO" --offline checkpoint TASK-A1B2C 'docs(example): add refs' \
+    --path example/references/ -C 1234567890abcdef1234 >/dev/null 2>&1 &&
+  [[ -z "$(git -C "$REPO" status --porcelain)" ]] &&
+  git -C "$REPO" ls-files --error-unmatch example/references/a.md example/references/sub/b.md >/dev/null 2>&1; then
+  echo 'ok 10 - checkpoint --path stages directories and emits clear staging hints'
+else
+  echo 'not ok 10 - checkpoint --path stages directories and emits clear staging hints'
+  printf '# unlisted=%s\n# idx=%s\n' "$UNLISTED_ERR" "$NONEMPTY_IDX_ERR"
+fi
+
+# 11: list-valued run-in fields render on a separate block across create, update, and apply;
+# commit stages working-tree STATUS.md updates from update and gates dirty STATUS.md prose
+LIST_OUT=$(tg --root "$REPO" --offline create example 'List run-in fields' \
+  --slug list-runins \
+  --problem '- First issue' \
+  --cost '* High toil' \
+  --goal '+ Reliable output' \
+  --criteria $'1. Bullet one\n2. Bullet two' \
+  --sketch '1) Prototype parser' \
+  --constraints '- Keep compatibility' \
+  --no-commit)
+LIST_ID="${LIST_OUT%%$'\t'*}"
+LIST_REL="${LIST_OUT#*$'\t'}"
+LIST_FILE="$REPO/$LIST_REL"
+tg --root "$REPO" --offline update "$LIST_ID" --goal $'- Updated goal one\n- Updated goal two' >/dev/null
+printf '%s\n' '{"changes": [' \
+  '{"op": "replace_section", "record": "'"$LIST_ID"'", "section": "Constraints",' \
+  ' "text": "* Updated constraint", "expected_hash": "'"$(
+    "$TASKGO_PY" -c '
+import importlib.machinery, importlib.util, sys
+loader = importlib.machinery.SourceFileLoader("tg_t", sys.argv[1])
+tg = importlib.util.module_from_spec(importlib.util.spec_from_loader("tg_t", loader))
+loader.exec_module(tg)
+txt = open(sys.argv[2]).read()
+print(next(s["hash"] for s in tg.record_sections(txt, tg.TASK_SCHEMA) if s["name"] == "Constraints"))
+' "$BIN" "$LIST_FILE"
+  )"'"}' \
+  ']}' >"$TEST_ROOT/list-apply.json"
+tg --root "$REPO" --offline apply "$TEST_ROOT/list-apply.json" >/dev/null
+LIST_TEXT="$(cat "$LIST_FILE")"
+# Stage only the new task file while STATUS.md has unstaged working-tree updates from create/update:
+git -C "$REPO" add "$LIST_REL"
+if [[ "$LIST_TEXT" == *$'**Problem:**\n\n- First issue'* ]] &&
+  [[ "$LIST_TEXT" == *$'**Cost:**\n\n- High toil'* ]] &&
+  [[ "$LIST_TEXT" == *$'**Goal:**\n\n- Updated goal one\n- Updated goal two'* ]] &&
+  [[ "$LIST_TEXT" == *$'**Criteria:**\n\n1. Bullet one\n1. Bullet two'* || "$LIST_TEXT" == *$'**Criteria:**\n\n1. Bullet one\n2. Bullet two'* ]] &&
+  [[ "$LIST_TEXT" == *$'**Sketch:**\n\n1. Prototype parser'* || "$LIST_TEXT" == *$'**Sketch:**\n\n1) Prototype parser'* ]] &&
+  [[ "$LIST_TEXT" == *$'**Constraints:**\n\n- Updated constraint'* ]] &&
+  tg --root "$REPO" --offline commit 'feat(example): add list task' >/dev/null 2>&1 &&
+  [[ -z "$(git -C "$REPO" status --porcelain)" ]]; then
+  echo 'ok 11 - list-valued run-ins render as blocks and commit stages updated STATUS.md'
+else
+  echo 'not ok 11 - list-valued run-ins render as blocks and commit stages updated STATUS.md'
+  printf '# text=%s\n# status=%s\n' "$LIST_TEXT" "$(git -C "$REPO" status --porcelain)"
+fi
+
+# 12: markdown_finding includes '(run '\''taskgo fix --no-commit'\'')'
+printf '\n*   untidy   item\n' >>"$REPO/example/PROJECT.md"
+MD_DOC_OUT="$(tg --root "$REPO" --offline doctor example 2>&1 || true)"
+git -C "$REPO" checkout -q -- example/PROJECT.md
+if [[ "$MD_DOC_OUT" == *"example/PROJECT.md: markdown formatting needed (run 'taskgo fix --no-commit')"* ]]; then
+  echo 'ok 12 - doctor markdown formatting finding suggests taskgo fix --no-commit'
+else
+  echo 'not ok 12 - doctor markdown formatting finding suggests taskgo fix --no-commit'
+  printf '# %s\n' "$MD_DOC_OUT"
+fi
+
+# 13: doctor includes PLAN clause only when PLAN.md exists
+mkdir -p "$REPO/noplan"
+printf '# No Plan Project\n' >"$REPO/noplan/README.md"
+tg --root "$REPO" --offline sync noplan >/dev/null
+DOC_WITH_PLAN="$(tg --root "$REPO" --offline doctor example 2>&1)"
+DOC_NO_PLAN="$(tg --root "$REPO" --offline doctor noplan 2>&1)"
+rm -rf "$REPO/noplan"
+if [[ "$DOC_WITH_PLAN" == *'PLAN is the current direction;'* ]] &&
+  [[ "$DOC_NO_PLAN" != *'PLAN is the current direction;'* ]] &&
+  [[ "$DOC_NO_PLAN" == *'README and ADRs link to owners rather than copying facts.'* ]]; then
+  echo 'ok 13 - doctor omits PLAN semantic prompt when project has no PLAN.md'
+else
+  echo 'not ok 13 - doctor omits PLAN semantic prompt when project has no PLAN.md'
+  printf '# with=%s\n# without=%s\n' "$DOC_WITH_PLAN" "$DOC_NO_PLAN"
+fi
+
+# 14: CWD inside an isolated control-repo clone auto-detects that clone before ~/.projects
+CLONE_REPO="$TEST_ROOT/isolated-clone"
+git clone -q "$REPO" "$CLONE_REPO"
+NON_CONTROL_GIT="$TEST_ROOT/ordinary-git"
+mkdir -p "$NON_CONTROL_GIT"
+git -C "$NON_CONTROL_GIT" init -q
+printf '# Ordinary Repo\n\nGeneral development rules.\n' >"$NON_CONTROL_GIT/AGENTS.md"
+CLONE_RESOLVED="$(cd "$CLONE_REPO" && pwd -P)"
+CWD_ROOT_OUT="$(cd "$CLONE_REPO/example/tasks" && tg root)"
+CWD_DOC_OUT="$(cd "$CLONE_REPO/example" && tg --offline doctor example 2>&1)"
+ORD_HELP_OUT="$(cd "$NON_CONTROL_GIT" && tg --help)"
+if [[ "$CWD_ROOT_OUT" == "$CLONE_RESOLVED" ]] &&
+  [[ "$CWD_DOC_OUT" == *"Root: $CLONE_RESOLVED"* ]] &&
+  [[ "$CWD_DOC_OUT" == *"Source: cwd"* ]] &&
+  [[ "$ORD_HELP_OUT" == *"Root: ~/.projects"* ]] &&
+  [[ "$ORD_HELP_OUT" == *"Source: default"* ]]; then
+  echo 'ok 14 - CWD inside a cloned control repo resolves to that clone instead of ~/.projects'
+else
+  echo 'not ok 14 - CWD inside a cloned control repo resolves to that clone instead of ~/.projects'
+  printf '# root=%s\n# doc=%s\n# ord=%s\n' "$CWD_ROOT_OUT" "$CWD_DOC_OUT" "$ORD_HELP_OUT"
+fi
+
+# 15: top-level -C hints -R/--root, and trailing --offline works across subcommands
+TOP_C_RC=0
+TOP_C_ERR=$(tg -C "$REPO" list 2>&1) || TOP_C_RC=$?
+if [[ "$TOP_C_RC" -eq 2 ]] &&
+  [[ "$TOP_C_ERR" == *'use -R / --root DIR instead of -C'* ]] &&
+  tg --root "$CLONE_REPO" list example --offline >/dev/null &&
+  tg --root "$CLONE_REPO" status example --offline >/dev/null &&
+  tg --root "$CLONE_REPO" doctor example --offline >/dev/null &&
+  tg --root "$CLONE_REPO" skills example --offline >/dev/null &&
+  tg --root "$CLONE_REPO" search 'First issue' --offline >/dev/null; then
+  echo 'ok 15 - top-level -C hints -R/--root and trailing --offline works across subcommands'
+else
+  echo 'not ok 15 - top-level -C hints -R/--root and trailing --offline works across subcommands'
+  printf '# rc=%s err=%s\n' "$TOP_C_RC" "$TOP_C_ERR"
 fi

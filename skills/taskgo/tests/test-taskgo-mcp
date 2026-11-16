@@ -428,6 +428,7 @@ git -C "$SKILLS_REPO" commit -qm 'init skills fixture'
 cat >"$SKILLS_REPO/bin/skill" <<'FAKE_SKILL'
 #!/usr/bin/env bash
 [ "$1" = catalog ] && [ "$2" = --json ] || exit 2
+[ "${AGENT_OFFLINE:-}" = 1 ] || exit 3
 printf '%s\n' '{"name": "coding-standards", "status": "local"}' \
   '{"name": "local:notes", "status": "local"}'
 FAKE_SKILL
@@ -438,18 +439,24 @@ printf '#!/usr/bin/env bash\nexit 1\n' >"$SKILLS_REPO/nobin/skill"
 chmod +x "$SKILLS_REPO/nobin/skill"
 
 # Test 191: skills prints the list; handoff carries it, with the command on
-# a line of its own
-SKILLS_OUT="$(tg --root "$SKILLS_REPO" skills proj)"
-SKILLS_JSON="$(tg --root "$SKILLS_REPO" skills proj --json)"
-SKILLS_NONE="$(tg --root "$SKILLS_REPO" skills bare)"
-SKILLS_NOTE="$(tg --root "$SKILLS_REPO" handoff proj 2>/dev/null)"
-SKILLS_BARE_NOTE="$(tg --root "$SKILLS_REPO" handoff bare 2>/dev/null)"
-SKILLS_PAYLOAD="$(tg --root "$SKILLS_REPO" handoff proj --json 2>/dev/null)"
+# a line of its own (propagating --offline when handoff runs offline)
+SKILLS_OUT="$(AGENT_OFFLINE=0 tg --root "$SKILLS_REPO" skills proj)"
+SKILLS_JSON="$(AGENT_OFFLINE=0 tg --root "$SKILLS_REPO" skills proj --json)"
+SKILLS_NONE="$(AGENT_OFFLINE=0 tg --root "$SKILLS_REPO" skills bare)"
+SKILLS_NOTE="$(AGENT_OFFLINE=0 tg --root "$SKILLS_REPO" handoff proj 2>/dev/null)"
+SKILLS_NOTE_OFFLINE_PRE="$(AGENT_OFFLINE=0 tg --root "$SKILLS_REPO" --offline handoff proj 2>/dev/null)"
+SKILLS_NOTE_OFFLINE_POST="$(AGENT_OFFLINE=0 tg --root "$SKILLS_REPO" handoff proj --offline 2>/dev/null)"
+SKILLS_NOTE_OFFLINE_ENV="$(AGENT_OFFLINE=1 tg --root "$SKILLS_REPO" handoff proj 2>/dev/null)"
+SKILLS_BARE_NOTE="$(AGENT_OFFLINE=0 tg --root "$SKILLS_REPO" handoff bare 2>/dev/null)"
+SKILLS_PAYLOAD="$(AGENT_OFFLINE=0 tg --root "$SKILLS_REPO" handoff proj --json 2>/dev/null)"
 if [[ "$SKILLS_OUT" == $'coding-standards\nlocal:notes\ncoding-standard' ]] &&
   [[ "$SKILLS_JSON" == '["coding-standards", "local:notes", "coding-standard"]' ]] &&
   [[ -z "$SKILLS_NONE" ]] &&
   [[ "$SKILLS_NOTE" == *$'\n\nSkills: coding-standards, local:notes, coding-standard. '* ]] &&
   [[ "$SKILLS_NOTE" == *$'\n\n  taskgo skills proj | skill --scope session add -' ]] &&
+  [[ "$SKILLS_NOTE_OFFLINE_PRE" == *$'\n\n  taskgo --offline skills proj | skill --scope session add -' ]] &&
+  [[ "$SKILLS_NOTE_OFFLINE_POST" == *$'\n\n  taskgo --offline skills proj | skill --scope session add -' ]] &&
+  [[ "$SKILLS_NOTE_OFFLINE_ENV" == *$'\n\n  taskgo --offline skills proj | skill --scope session add -' ]] &&
   [[ "$SKILLS_NOTE" == *"supports session scope in your launcher"* ]] &&
   [[ "$SKILLS_NOTE" == *'skill resolve <NAME>'* ]] &&
   [[ "$SKILLS_BARE_NOTE" != *"Skills:"* ]] &&
@@ -462,21 +469,21 @@ assert "\n\n  taskgo skills proj | skill --scope session add -\n\n" in got["note
 assert "supports session scope in your launcher" in got["note"], got["note"]
 assert "skill resolve <NAME>" in got["note"], got["note"]
 ' "$SKILLS_PAYLOAD"; then
-  echo 'ok 9 - skills prints a project'"'"'s skills; handoff carries them and the command to activate them'
+  echo 'ok 9 - skills prints a project'"'"'s skills; handoff carries them and propagates --offline'
 else
-  echo 'not ok 9 - skills prints a project'"'"'s skills; handoff carries them and the command to activate them'
+  echo 'not ok 9 - skills prints a project'"'"'s skills; handoff carries them and propagates --offline'
   printf '# %s\n' "$SKILLS_OUT" "$SKILLS_JSON" "$SKILLS_NOTE"
 fi
 
-# Test 192: doctor checks the names against the skill CLI's catalog, and says
-# when it cannot
+# Test 192: doctor checks the names against the skill CLI's catalog (forcing
+# AGENT_OFFLINE=1), and says when it cannot
 set +e
-SKILLS_DOCTOR="$(PATH="$SKILLS_REPO/bin:$PATH" tg --root "$SKILLS_REPO" doctor proj 2>&1)"
+SKILLS_DOCTOR="$(AGENT_OFFLINE=0 PATH="$SKILLS_REPO/bin:$PATH" tg --root "$SKILLS_REPO" doctor proj 2>&1)"
 SKILLS_DOCTOR_RC=0
-PATH="$SKILLS_REPO/bin:$PATH" tg --root "$SKILLS_REPO" doctor proj >/dev/null 2>&1 || SKILLS_DOCTOR_RC=$?
+AGENT_OFFLINE=0 PATH="$SKILLS_REPO/bin:$PATH" tg --root "$SKILLS_REPO" doctor proj >/dev/null 2>&1 || SKILLS_DOCTOR_RC=$?
 SKILLS_DOCTOR_BARE_RC=0
-PATH="$SKILLS_REPO/bin:$PATH" tg --root "$SKILLS_REPO" doctor bare >/dev/null 2>&1 || SKILLS_DOCTOR_BARE_RC=$?
-SKILLS_DOCTOR_NOCLI="$(PATH="$SKILLS_REPO/nobin:$PATH" tg --root "$SKILLS_REPO" doctor proj 2>&1)"
+AGENT_OFFLINE=0 PATH="$SKILLS_REPO/bin:$PATH" tg --root "$SKILLS_REPO" doctor bare >/dev/null 2>&1 || SKILLS_DOCTOR_BARE_RC=$?
+SKILLS_DOCTOR_NOCLI="$(AGENT_OFFLINE=0 PATH="$SKILLS_REPO/nobin:$PATH" tg --root "$SKILLS_REPO" doctor proj 2>&1)"
 set -e
 if [[ "$SKILLS_DOCTOR" == *"[WARN]  proj/README.md: unknown skill 'coding-standard' (did you mean 'coding-standards'?)"* ]] &&
   [[ "$SKILLS_DOCTOR" != *"unknown skill 'coding-standards'"* ]] &&
@@ -636,6 +643,10 @@ try:
     assert captured[-1]["no_fetch"] is True, captured[-1]
     mcp_mod._cli.set_offline_flag(False)
     mcp_mod.main(["--no-fetch", "mcp", "--stdio"])
+    assert captured[-1]["no_fetch"] is True, captured[-1]
+    mcp_mod._cli.set_offline_flag(False)
+    mcp_mod.main(["mcp", "--stdio", "--offline"])
+    assert mcp_mod._cli._is_offline() is True
     assert captured[-1]["no_fetch"] is True, captured[-1]
 finally:
     mcp_mod.cmd_mcp = saved_cmd_mcp

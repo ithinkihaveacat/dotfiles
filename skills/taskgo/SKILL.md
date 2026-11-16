@@ -19,8 +19,11 @@ taskgo keeps a private **control repository** of projects and tasks in Markdown.
 Run `taskgo <command>` if it is on `$PATH`, or
 `<skill-dir>/scripts/taskgo <command>`, where `<skill-dir>` holds this
 `SKILL.md`. The root is `-R DIR` (before the command), else `$TASKGO_ROOT`, else
-`~/.projects`; `taskgo root` prints it. When the control repository is not your
-workspace and your harness has the taskgo MCP tools, you may use those instead.
+a control repository containing `$PWD`, else `~/.projects`; `taskgo root` prints
+it. Pass `--offline` (before or on the command) or set `AGENT_OFFLINE=1` to skip
+remote Git fetch and push when the remote is unreachable or unauthenticated.
+When the control repository is not your workspace and your harness has the
+taskgo MCP tools, you may use those instead.
 
 ## Core Rules
 
@@ -164,7 +167,8 @@ extra task staged in the same `checkpoint`).
    `PLAN.md` only if the direction changed.
 
 1. Rewrite the Summary and Next of `<project>/STATUS.md` with `taskgo edit` or
-   your file tools.
+   your file tools (`update`, `sync`, and `edit` wrap tracker Markdown at 80
+   columns, so re-read a file before exact-text edits).
 
 1. Commit the task change and the `STATUS.md` prose together, in one commit:
 
@@ -184,18 +188,19 @@ extra task staged in the same `checkpoint`).
 
 ## Common Commands
 
-| Command                                        | Use                                                  |
-| ---------------------------------------------- | ---------------------------------------------------- |
-| `taskgo handoff PROJECT\|TASK_ID`              | Onboarding note: files to read, skills to activate   |
-| `taskgo status [PROJECT\|TASK_ID]`             | Current state of a task or project                   |
-| `taskgo list [PROJECT] --state ready`          | Tasks ready to start                                 |
-| `taskgo create PROJECT TITLE --goal …`         | New task (commits)                                   |
-| `taskgo update TASK --findings … --next …`     | Change state (`--status`) or sections in place       |
-| `taskgo update TASK --status done --outcome …` | Close a task                                         |
-| `taskgo edit PATH --old … --new …`             | Exact-text edit; validates and formats records       |
-| `taskgo sync [PROJECT]`                        | Refresh generated `STATUS.md` blocks                 |
-| `taskgo doctor [PROJECT]`                      | Read-only checks; non-zero on problems               |
-| `taskgo checkpoint TASK SUBJECT`               | Guarded commit for one task (`commit`: staged files) |
+| Command                                        | Use                                                         |
+| ---------------------------------------------- | ----------------------------------------------------------- |
+| `taskgo handoff PROJECT\|TASK_ID`              | Onboarding note: files to read, skills to activate          |
+| `taskgo status [PROJECT\|TASK_ID]`             | Current state of a task or project                          |
+| `taskgo list [PROJECT] --state ready`          | Tasks ready to start                                        |
+| `taskgo create PROJECT TITLE --goal …`         | New task (commits)                                          |
+| `taskgo update TASK --findings … --next …`     | Change state (`--status`) or sections in place              |
+| `taskgo update TASK --status done --outcome …` | Close a task                                                |
+| `taskgo edit PATH --old … --new …`             | Exact-text edit; validates and formats records              |
+| `taskgo sync [PROJECT]`                        | Refresh generated `STATUS.md` blocks                        |
+| `taskgo doctor [PROJECT]`                      | Read-only checks; non-zero on problems                      |
+| `taskgo checkpoint TASK SUBJECT [--all]`       | Guarded commit for one task (positional `SUBJECT`, no `-m`) |
+| `taskgo commit SUBJECT`                        | Commit staged files in one project (positional `SUBJECT`)   |
 
 Everything else, including every option, is in
 [the command index](references/command-index.md) and `taskgo <command> --help`.

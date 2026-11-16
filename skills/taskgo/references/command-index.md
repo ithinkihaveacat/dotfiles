@@ -72,9 +72,9 @@ Server:
   mcp [OPTIONS]                    Serve the tracker to MCP clients
 
 Options:
-  -R, --root DIR  Operate on the control repository at DIR instead of the
-                  default (~/.projects); overrides TASKGO_ROOT. Must appear
-                  before COMMAND.
+  -R, --root DIR  Operate on the control repository at DIR (overrides
+                  TASKGO_ROOT, a CWD control repo, and ~/.projects). Must
+                  appear before COMMAND.
   --offline       Skip remote Git fetch and push (same as AGENT_OFFLINE=1)
   --help, -h      Display this help message and exit
 
@@ -631,7 +631,7 @@ Usage: taskgo checkpoint [-h] [--all] [--path PATHS] [--body BODY]
                          [--ref REFS] [--conv ID]
                          TASK_ID SUBJECT
 
-Commit an authorized tracker checkpoint for TASK_ID. The subject must fit in 50 characters: a longer one is refused, with its length and the prefix's share, before anything is staged. A subject without a known 'type(scope): ' prefix is rewritten as 'chore(<project>): <subject>', and refused if that is too long. Tracker records about to be committed are formatted first. Staged paths must belong to TASK_ID's project; changes spanning projects (such as moving a task) need a plain 'git commit'; see references/workflows.md.
+Commit an authorized tracker checkpoint for TASK_ID. The subject must fit in 50 characters: a longer one is refused, with its length and the prefix's share, before anything is staged. A subject without a known 'type(scope): ' prefix is rewritten as 'chore(<project>): <subject>', and refused if that is too long. Tracker records about to be committed are formatted first. Staged paths must belong to TASK_ID's project; changes spanning projects (such as moving a task) need a plain 'git commit'; see references/workflows.md. Commits are pushed to the upstream remote unless --offline is set.
 
 Arguments:
   TASK_ID               Target task ID
@@ -641,7 +641,8 @@ Arguments:
 Options:
   -h, --help            Display this help message and exit
   --all, -a             Stage all modified/untracked project files
-  --path, -p PATHS      Explicit project files to stage
+  --path, -p PATHS      Explicit project file or directory to stage
+                        (repeatable)
   --body, -b BODY       Plain-text commit body (hard-wrapped to 72 columns)
   --ref, -r REFS        External references (e.g. artifact@sha)
   --conv, -C, --conversation ID
@@ -666,7 +667,7 @@ Examples:
 ```text
 Usage: taskgo commit [-h] [--body BODY] [--ref REFS] [--conv ID] SUBJECT
 
-Commit a logical transition with automatic project status synchronization. Staged changes must touch at most one project; changes spanning projects (such as moving a task) need a plain 'git commit'; see references/workflows.md. The subject rules are checkpoint's: at most 50 characters, refused rather than truncated. Staged tracker records are formatted and re-staged (not ones that also have unstaged changes).
+Commit a logical transition with automatic project status synchronization. Staged changes must touch at most one project; changes spanning projects (such as moving a task) need a plain 'git commit'; see references/workflows.md. The subject rules are checkpoint's: at most 50 characters, refused rather than truncated. Staged tracker records are formatted and re-staged (not ones that also have unstaged changes). Commits are pushed to the upstream remote unless --offline is set.
 
 Arguments:
   SUBJECT               Conventional Commits subject ('type(scope):

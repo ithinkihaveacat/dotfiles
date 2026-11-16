@@ -145,7 +145,7 @@ complete -f -c taskgo -n '__fish_seen_subcommand_from fix' -l no-commit -d 'Appl
 
 # checkpoint options
 complete -f -c taskgo -n '__fish_seen_subcommand_from checkpoint' -s a -l all -d 'Stage all modified/untracked project files'
-complete -c taskgo -n '__fish_seen_subcommand_from checkpoint' -s p -l path -r -d 'Include additional modified project file'
+complete -c taskgo -n '__fish_seen_subcommand_from checkpoint' -s p -l path -r -d 'Include additional modified project file or directory'
 complete -f -c taskgo -n '__fish_seen_subcommand_from checkpoint' -s b -l body -x -d 'Commit body'
 complete -f -c taskgo -n '__fish_seen_subcommand_from checkpoint' -s r -l ref -x -d 'External reference URL/ID'
 complete -f -c taskgo -n '__fish_seen_subcommand_from checkpoint' -s C -l conv -l conversation -x -d 'Session ID (default: from environment)'
