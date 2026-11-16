@@ -27,7 +27,7 @@ For long-running reproductions where the device's log buffer might rotate,
 stream logs continuously to the host:
 
 ```bash
-# 1. Clear buffer and start background capture
+# 1. Clear buffer and start background capture (interactive shell)
 adb logcat -c && adb logcat > continuous_log.txt & LOGCAT_PID=$!
 
 # 2. Execute reproduction steps with markers
@@ -38,6 +38,15 @@ scripts/adb-log "END_REPRO"
 # 3. Stop background capture
 kill $LOGCAT_PID
 ```
+
+> [!IMPORTANT] **Non-Interactive Subshells & Agent Harnesses**: In command
+> runners where each shell invocation executes in an ephemeral process group
+> that is reaped on exit, `adb logcat > continuous_log.txt &` terminates as soon
+> as that command returns. Instead, either start `adb logcat` using the
+> harness's dedicated daemon/background task mode, bound the capture inside the
+> same shell call (`timeout 30s adb -s "$SERIAL" logcat -v time > log.txt`), or
+> enlarge the on-device ring buffer (`adb logcat -G 16M && adb logcat -c`) and
+> dump once after reproduction (`adb logcat -d -v time > log.txt`).
 
 ## Execution Workflow
 

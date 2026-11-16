@@ -38,6 +38,7 @@ the full decision boundary and GMSCore architecture):
   setup wizard, and tutorial overlays on a fresh watch or emulator (`adb root`
   required for `pm disable`):
   ```bash
+  adb root
   adb shell settings put global device_provisioned 1
   adb shell settings put secure user_setup_complete 1
   adb shell pm disable com.google.android.wearable.setupwizard

@@ -18,8 +18,34 @@
 ### `scripts/adb-device-properties`
 
 **Purpose**: Show key device properties (model, manufacturer, release, SDK,
-display resolution and density). **Dependencies**: `adb` **Usage**:
-`scripts/adb-device-properties` **Raw Command**:
+display resolution and density). **Dependencies**: `adb`
+
+<!-- generated: ../scripts/adb-device-properties --help -->
+
+```text
+Usage: adb-device-properties [OPTIONS]
+
+Display device information and properties from an adb-connected Android device.
+
+Shows hardware details, software versions, and display configuration including:
+  - Device manufacturer, model, and serial number
+  - Android version, API level, and security patch date
+  - SoC/chipset information and CPU architecture
+  - Display resolution, density, and calculated dp size
+
+Options:
+  -s, --serial SERIAL
+                  Target device serial; must precede arguments or commands.
+  --help      Display this help message and exit
+
+Environment:
+  ANDROID_SERIAL  Serial number of device to connect to (see 'adb devices -l').
+                  The --serial option takes precedence when both are set.
+```
+
+<!-- /generated -->
+
+**Raw Command**:
 
 ```bash
 adb exec-out getprop ro.product.model
@@ -31,7 +57,33 @@ adb exec-out getprop ro.build.version.sdk
 ### `scripts/adb-log`
 
 **Purpose**: Write a message to the Android system log. **Dependencies**: `adb`
-**Usage**: `scripts/adb-log MESSAGE` **Raw Command**:
+
+<!-- generated: ../scripts/adb-log --help -->
+
+```text
+Usage: adb-log [OPTIONS] MESSAGE
+
+Writes a message to the Android system log on an adb-connected device.
+
+Arguments:
+  MESSAGE     The message string to log.
+
+Options:
+  -s, --serial SERIAL
+                  Target device serial; must precede arguments or commands.
+  --help      Display this help message and exit
+
+Environment:
+  ANDROID_SERIAL  Serial number of device to connect to (see 'adb devices -l').
+                  The --serial option takes precedence when both are set.
+
+Examples:
+  adb-log "Starting test sequence"
+```
+
+<!-- /generated -->
+
+**Raw Command**:
 
 ```bash
 adb exec-out log -p f -t TAG MESSAGE
@@ -41,9 +93,56 @@ adb exec-out log -p f -t TAG MESSAGE
 
 ### `scripts/adb-screenshot`
 
-**Purpose**: Take a screenshot. Applies circular mask if display is square (Wear
-OS). **Dependencies**: `adb`, `magick` **Usage**:
-`scripts/adb-screenshot [OUTPUT_FILE]` **Raw Command**:
+**Purpose**: Take a screenshot (with optional `--no-wake` for ambient/AOD
+captures). Applies circular mask if display is square (Wear OS).
+**Dependencies**: `adb`, `magick`
+
+<!-- generated: ../scripts/adb-screenshot --help -->
+
+```text
+Usage: adb-screenshot [OPTIONS] [FILE]
+
+Takes a screenshot from an adb-connected device.
+
+The screenshot is saved to the specified file, or to a timestamped file in the
+current directory if no file is specified.
+
+For square displays (e.g., Wear OS), a circular mask is applied to the screenshot.
+
+Arguments:
+  FILE              The path to save the screenshot to, or '-' for stdout.
+                    (defaults to 'adb-screenshot-YYYYMMDDHHMMSS.png')
+
+Options:
+  -s, --serial SERIAL
+                  Target device serial; must precede arguments or commands.
+  -o, --output FILE The path to save the screenshot to.
+  --wake            Wake the display before capture (default)
+  --no-wake         Do not send KEYCODE_WAKEUP (preserves Wear OS ambient/AOD state)
+  --preview         Display a preview of the image using chafa
+  --no-preview      Disable preview (default)
+  --copy            Copy the image to the clipboard (macOS only)
+  --no-copy         Do not copy to clipboard (default)
+  -h, --help        Display this help message and exit
+
+Environment:
+  ANDROID_SERIAL  Serial number of device to connect to (see 'adb devices -l').
+                  The --serial option takes precedence when both are set.
+
+Examples:
+  # Save screenshot to a timestamped file in the current directory
+  adb-screenshot
+
+  # Save screenshot to a specific file
+  adb-screenshot /tmp/my-screenshot.png
+
+  # Capture Wear OS Always-On Display (ambient mode) without waking
+  adb-screenshot --no-wake /tmp/ambient.png
+```
+
+<!-- /generated -->
+
+**Raw Command**:
 
 ```bash
 # Standard
@@ -61,10 +160,56 @@ adb exec-out "screencap -p" | magick - \
 
 **Purpose**: Record screen to video file. Automatically detects devices that
 require raw frame streaming (e.g., Samsung Wear OS watches) and uses ffmpeg for
-capture, while defaulting to scrcpy for standard devices. Use `--raw` or
-`--no-raw` to manually override. **Dependencies**: `adb`, `scrcpy` (for standard
-devices), `ffmpeg` (for raw capture) **Usage**:
-`scripts/adb-screenrecord [OPTIONS] [FILE]` **Raw Command**:
+capture, while defaulting to scrcpy for standard devices. **Dependencies**:
+`adb`, `scrcpy` (for standard devices), `ffmpeg` (for raw capture)
+
+<!-- generated: ../scripts/adb-screenrecord --help -->
+
+```text
+Usage: adb-screenrecord [OPTIONS] [FILE]
+
+Records the screen of an adb-connected device. Automatically detects devices
+that require raw frame streaming (e.g. Samsung Wear OS watches) and uses ffmpeg
+for capture, while defaulting to scrcpy for standard devices.
+
+The screen recording is saved to the specified file, or to a timestamped file
+in the current directory if no file is specified. Touches are displayed during
+the recording.
+
+Arguments:
+  FILE                    The path to save the screen recording to.
+                          (defaults to 'adb-screenrecord-YYYYMMDDHHMMSS.mp4')
+
+Options:
+  -s, --serial SERIAL     Target device serial; must precede FILE.
+  -o, --output FILE       The path to save the screen recording to.
+  -t, --duration SECONDS  Max recording duration in seconds.
+  --time-limit SECONDS    Alias for --duration.
+  --raw                   Force raw frame capture using ffmpeg.
+  --no-raw                Disable raw frame capture (force scrcpy).
+  -h, --help              Display this help message and exit
+
+Environment:
+  ANDROID_SERIAL  Serial number of device to connect to (see 'adb devices -l').
+                  The --serial option takes precedence when both are set.
+
+Examples:
+  # Save screen recording to a timestamped file in the current directory
+  adb-screenrecord
+
+  # Save screen recording for 10 seconds
+  adb-screenrecord --duration 10 /tmp/my-screen-recording.mp4
+
+  # Force raw frame capture on any device
+  adb-screenrecord --raw --duration 10 /tmp/my-screen-recording.mp4
+
+  # Record from one of several connected devices
+  adb-screenrecord -s emulator-5554 /tmp/emulator.mp4
+```
+
+<!-- /generated -->
+
+**Raw Command**:
 
 ```bash
 # Standard devices (scrcpy)
@@ -158,7 +303,39 @@ adb shell am broadcast \
 ### `scripts/adb-tile-switch`
 
 **Purpose**: Switch the active tile on the carousel by index. **Dependencies**:
-`adb` **Usage**: `scripts/adb-tile-switch INDEX` **Raw Command**:
+`adb`
+
+<!-- generated: ../scripts/adb-tile-switch --help -->
+
+```text
+Usage: adb-tile-switch [OPTIONS] TILE_INDEX
+
+Activates a tile at the specified index. The tile must already have been added
+to the carousel (e.g., via 'adb-tile-add').
+
+Note: 'adb-tile-add' shows tiles immediately by default, making this command
+primarily useful for switching between already added tiles.
+
+Arguments:
+  TILE_INDEX  The index of the tile to activate.
+
+Options:
+  -s, --serial SERIAL
+                  Target device serial; must precede arguments or commands.
+  --help      Display this help message and exit
+
+Environment:
+  ANDROID_SERIAL  Serial number of device to connect to (see 'adb devices -l').
+                  The --serial option takes precedence when both are set.
+
+Examples:
+  adb-tile-switch 0
+  adb-tile-switch 1
+```
+
+<!-- /generated -->
+
+**Raw Command**:
 
 ```bash
 adb shell am broadcast \
@@ -382,7 +559,40 @@ adb shell am broadcast \
 ### `scripts/adb-watchface-set`
 
 **Purpose**: Set the current watch face on a Wear OS device. **Dependencies**:
-`adb` **Usage**: `scripts/adb-watchface-set COMPONENT_NAME` **Raw Command**:
+`adb`
+
+<!-- generated: ../scripts/adb-watchface-set --help -->
+
+```text
+Usage: adb-watchface-set [OPTIONS] COMPONENT_NAME
+
+Sets the current watch face on a Wear OS device.
+
+This script is a convenient wrapper around 'adb shell am broadcast' to change
+the active watch face. The argument should be the component name of the
+watch face service.
+
+Arguments:
+  COMPONENT_NAME  Component name of the watch face service
+                  (e.g., com.google.android.wearable.app/.watchfaces.GoogleWatchFace)
+
+Options:
+  -s, --serial SERIAL
+                  Target device serial; must precede arguments or commands.
+  --help          Display this help message and exit
+
+Environment:
+  ANDROID_SERIAL  Serial number of device to connect to (see 'adb devices -l').
+                  The --serial option takes precedence when both are set.
+
+Examples:
+  # Set a specific watch face
+  adb-watchface-set com.google.android.wearable.app/.watchfaces.GoogleWatchFace
+```
+
+<!-- /generated -->
+
+**Raw Command**:
 
 ```bash
 adb exec-out am broadcast -a com.google.android.wearable.app.DEBUG_SURFACE --es operation set-watchface --es watchFaceId COMPONENT_NAME
@@ -391,8 +601,38 @@ adb exec-out am broadcast -a com.google.android.wearable.app.DEBUG_SURFACE --es 
 ### `scripts/adb-complication-update`
 
 **Purpose**: Trigger an update for a complication on a Wear OS device.
-**Dependencies**: `adb` **Usage**:
-`scripts/adb-complication-update COMPLICATION_ID` **Raw Command**:
+**Dependencies**: `adb`
+
+<!-- generated: ../scripts/adb-complication-update --help -->
+
+```text
+Usage: adb-complication-update [OPTIONS] COMPLICATION_ID
+
+Triggers an update for a specific complication on a Wear OS device.
+
+This script is a convenient wrapper around 'adb shell am broadcast' to force
+the system to update a complication's data feed via DEBUG_SYSUI.
+
+Arguments:
+  COMPLICATION_ID  Integer ID of the complication to update
+
+Options:
+  -s, --serial SERIAL
+                  Target device serial; must precede arguments or commands.
+  --help          Display this help message and exit
+
+Environment:
+  ANDROID_SERIAL  Serial number of device to connect to (see 'adb devices -l').
+                  The --serial option takes precedence when both are set.
+
+Examples:
+  # Force update complication with ID 1
+  adb-complication-update 1
+```
+
+<!-- /generated -->
+
+**Raw Command**:
 
 ```bash
 adb exec-out am broadcast -a com.google.android.wearable.app.DEBUG_SYSUI --es operation complication_update --ei complication_id COMPLICATION_ID
@@ -403,42 +643,48 @@ adb exec-out am broadcast -a com.google.android.wearable.app.DEBUG_SYSUI --es op
 ### `scripts/adb-activities`
 
 **Purpose**: List activities on the device, tagged by category. By default shows
-only user-installed apps. **Dependencies**: `adb` **Usage**:
+only user-installed apps (or a specific package when `PACKAGE` is passed).
+**Dependencies**: `adb`
 
-```bash
-scripts/adb-activities [OPTIONS]
+<!-- generated: ../scripts/adb-activities --help -->
+
+```text
+Usage: adb-activities [OPTIONS] [PACKAGE]
+
+Lists activities declared on the connected device, tagged by category.
+By default, lists activities from user-installed (third-party) apps, or from
+PACKAGE if specified.
+
+Supported categories:
+  L - Launcher (android.intent.category.LAUNCHER)
+  H - Home/Launcher App (android.intent.category.HOME)
+  T - TV/Leanback (android.intent.category.LEANBACK_LAUNCHER)
+  S - Settings (android.intent.category.PREFERENCE)
+
+Arguments:
+  PACKAGE          Optional package name to filter activities to.
+
+Options:
+  -s, --serial SERIAL
+                  Target device serial; must precede arguments or commands.
+  --launcher-only  List only launcher activities
+  --home-only      List only home/launcher app activities
+  --tv-only        List only TV/Leanback activities
+  --settings-only  List only settings activities
+  --all            List activities from all packages (including system apps)
+  -h, --help       Display this help message and exit
+
+Environment:
+  ANDROID_SERIAL  Serial number of device to connect to (see 'adb devices -l').
+                  The --serial option takes precedence when both are set.
+
+Examples:
+  adb-activities
+  adb-activities --launcher-only
+  adb-activities com.example.app
 ```
 
-**Options**:
-
-- `--launcher-only`: Show only launcher activities
-- `--home-only`: Show only home/launcher app activities
-- `--tv-only`: Show only TV/Leanback activities
-- `--settings-only`: Show only settings/preference activities
-- `--all`: Include system apps (default: user apps only)
-
-**Category Tags** (in default output):
-
-- `L` - Launcher (`android.intent.category.LAUNCHER`)
-- `H` - Home (`android.intent.category.HOME`)
-- `T` - TV/Leanback (`android.intent.category.LEANBACK_LAUNCHER`)
-- `S` - Settings (`android.intent.category.PREFERENCE`)
-
-**Examples**:
-
-```bash
-# List all activities from user apps with category tags
-scripts/adb-activities
-
-# Find launcher activities only
-scripts/adb-activities --launcher-only
-
-# Find TV/Leanback activities (useful for Android TV)
-scripts/adb-activities --tv-only
-
-# Include system apps
-scripts/adb-activities --all
-```
+<!-- /generated -->
 
 **Raw Command**:
 
@@ -463,22 +709,108 @@ adb shell pm list packages -3
 
 ### `scripts/adb-uihierarchy`
 
-**Purpose**: Dump the UI hierarchy to an XML file. **Dependencies**: `adb`,
-`xmllint` (optional but recommended for formatting) **Usage**:
-`scripts/adb-uihierarchy [OUTPUT_FILE]` **Raw Command**:
+**Purpose**: Dump the UI hierarchy to an XML file with timeout protection and
+`--compressed` fallback. **Dependencies**: `adb`, `xmllint`
+
+<!-- generated: ../scripts/adb-uihierarchy --help -->
+
+```text
+Usage: adb-uihierarchy [OPTIONS] [FILE]
+
+Dumps the UI hierarchy from an adb-connected device.
+
+The hierarchy is saved to the specified file, or to a timestamped file in the
+current directory if no file is specified.
+
+Arguments:
+  FILE              The path to save the hierarchy to.
+                    (defaults to 'adb-uihierarchy-YYYYMMDDHHMMSS.xml')
+                    If '-', the hierarchy is written to stdout.
+
+Options:
+  -s, --serial SERIAL
+                  Target device serial; must precede arguments or commands.
+  -o, --output FILE The path to save the hierarchy to.
+                    If '-', the hierarchy is written to stdout.
+  --compressed      Skip non-important views during dump (faster on busy UIs).
+  --timeout SECONDS Per-attempt timeout in seconds before falling back to
+                    compressed mode or aborting (default: 10).
+  -h, --help        Display this help message and exit
+
+Environment:
+  ANDROID_SERIAL  Serial number of device to connect to (see 'adb devices -l').
+                  The --serial option takes precedence when both are set.
+
+Examples:
+  # Save hierarchy to a timestamped file in the current directory
+  adb-uihierarchy
+
+  # Save hierarchy to a specific file
+  adb-uihierarchy /tmp/my-hierarchy.xml
+
+  # Save hierarchy to a specific file using the --output flag
+  adb-uihierarchy --output /tmp/my-hierarchy.xml
+
+  # Save hierarchy to stdout
+  adb-uihierarchy -
+```
+
+<!-- /generated -->
+
+**Raw Command**:
 
 ```bash
-adb exec-out uiautomator dump /dev/stdout
-# (Piped to xml format)
+timeout 10s adb exec-out uiautomator dump /dev/stdout
+# (Fallback: uiautomator dump --compressed /dev/stdout; piped to xmllint --format -)
 ```
 
 ### `scripts/adb-currentfocus`
 
 **Purpose**: Display the package name, activity, or UI toolkit of the
-application that currently has focus. **Dependencies**: `adb`, `uv` **Usage**:
-`scripts/adb-currentfocus [OPTIONS]` **Options**: `-p, --packagename`,
-`-a, --activity`, `-t, --toolkit`, `-d, --details`, `-j, --json`. **Raw
-Commands**:
+application that currently has focus. **Dependencies**: `adb`, `uv`
+
+<!-- generated: ../scripts/adb-currentfocus --help -->
+
+```text
+usage: adb-currentfocus [-s SERIAL] [-h] [-p | -a | -t | -d | -j]
+
+Display the package name, activity, or UI toolkit of the application that currently has focus on an adb-connected device.
+
+options:
+  -s, --serial SERIAL  Target device serial; specify before other arguments.
+                       Overrides ANDROID_SERIAL
+  -h, --help           Display this help message and exit
+  -p, --packagename    Display the package name of the focused application
+                       (default)
+  -a, --activity       Display the package and activity name (e.g.
+                       com.example/.MainActivity)
+  -t, --toolkit        Display the detected UI toolkit (compose, views,
+                       hybrid, flutter, react-native, webview, unknown)
+  -d, --details        Display a detailed breakdown of the focused application
+                       and UI layout
+  -j, --json           Output all information as a JSON object
+
+Environment:
+  ANDROID_SERIAL  Serial number of device to connect to (see 'adb devices -l').
+                  The --serial option takes precedence when both are set.
+
+Examples:
+  # Display the focused package name
+  adb-currentfocus
+
+  # Check if the current screen is using Jetpack Compose, Views, or Hybrid
+  adb-currentfocus --toolkit
+
+  # Display the focused package and activity
+  adb-currentfocus --activity
+
+  # Output detailed inspection as JSON
+  adb-currentfocus --json
+```
+
+<!-- /generated -->
+
+**Raw Commands**:
 
 ```bash
 # Focused package
@@ -492,10 +824,66 @@ adb exec-out dumpsys window displays | grep mCurrentFocus | grep -oE '{.*?}' | a
 
 ### `scripts/packagename`
 
-**Purpose**: Unified package management tool. **Dependencies**: `adb` **Usage**:
-`scripts/packagename COMMAND PACKAGE` **Commands**: `launch`, `force-stop`,
-`uninstall`, `clear-cache`, `permissions`, `services`, `version`, `pull`. **Raw
-Commands**:
+**Purpose**: Unified package management tool. **Dependencies**: `adb`
+
+<!-- generated: ../scripts/packagename --help -->
+
+```text
+Usage: packagename [OPTIONS] <command> [arguments]
+
+Android package management utilities via adb.
+
+Commands:
+  Process/Lifecycle:
+    launch               Launch an application's main activity
+    force-stop           Force stop an application
+    pid                  Get the process ID of a running package
+    logcat               Display logcat filtered by package's PID
+
+  Information:
+    dumpsys              Display dumpsys package information (manifest components)
+    version              Get the version name and code
+    permissions          List declared permissions
+    services             List active/running services of a package
+    services-dumpsys     Display detailed dumpsys for active services
+    jobscheduler         Display jobscheduler information
+    tiles                List tiles and widgets provided by a package (Wear OS)
+
+  Profile/Optimization:
+    profile-status       Display dex optimization status
+    profile-generate     Trigger background dex optimization
+
+  Package Management:
+    pull                 Pull the base APK file from the device (-o, --output PATH)
+    uninstall            Uninstall a package
+    clear-cache          Clear the cache of a package
+    reset-permissions    Reset all permissions
+
+  Navigation:
+    view                 Open a URL within a package (PACKAGE URL)
+    playstore            Open the Play Store page
+    settings             Open the settings page
+
+Options:
+  -s, --serial SERIAL
+                  Target device serial; must precede arguments or commands.
+  --help        Display this help message and exit
+  --list        List available commands (names only)
+
+Environment:
+  ANDROID_SERIAL  Serial number of device to connect to (see 'adb devices -l').
+                  The --serial option takes precedence when both are set.
+
+Examples:
+  packagename launch com.android.systemui
+  packagename version com.google.android.apps.photos
+  packagename view com.android.chrome https://www.google.com
+  packagename profile-status com.example.app
+```
+
+<!-- /generated -->
+
+**Raw Commands**:
 
 ```bash
 # launch
@@ -507,17 +895,40 @@ adb exec-out am force-stop PACKAGE
 # clear-cache
 adb exec-out pm clear PACKAGE
 
-# services
+# active/running services
 adb exec-out dumpsys activity service PACKAGE
 
 # uninstall
-    adb uninstall PACKAGE
+adb uninstall PACKAGE
 ```
 
 ### `scripts/adb-packages`
 
 **Purpose**: List installed packages on the connected device. **Dependencies**:
-`adb` **Usage**: `scripts/adb-packages [OPTIONS]` **Raw Command**:
+`adb`
+
+<!-- generated: ../scripts/adb-packages --help -->
+
+```text
+Usage: adb-packages [OPTIONS]
+
+Lists installed packages on the connected device.
+By default, lists only user-installed (third-party) packages.
+
+Options:
+  -s, --serial SERIAL
+                  Target device serial; must precede arguments or commands.
+  --all       List all packages (including system apps)
+  --help      Display this help message and exit
+
+Environment:
+  ANDROID_SERIAL  Serial number of device to connect to (see 'adb devices -l').
+                  The --serial option takes precedence when both are set.
+```
+
+<!-- /generated -->
+
+**Raw Command**:
 
 ```bash
 adb exec-out pm list packages -3 | cut -b 9- | sort
@@ -603,7 +1014,7 @@ these specific packages/components are very useful to know:
 - **WearableService (Data Layer):** `WearableService` (e.g.
   `adb exec-out dumpsys activity service WearableService`)
 - **Standalone ProtoLayout Renderer / Widget Tray Activity:**
-  `com.google.android.wearable.protolayout.renderer/.WidgetTrayActivity`
+  `com.google.android.wearable.protolayout.renderer/com.google.android.clockwork.prototiles.renderer.experimental.WidgetTrayActivity`
   (renderer package `com.google.android.wearable.protolayout.renderer`,
   supporting vertical tray widgets and `GET_WIDGETS` queries)
 
@@ -612,7 +1023,28 @@ these specific packages/components are very useful to know:
 ### `scripts/adb-battery-stats`
 
 **Purpose**: Display battery-related information and settings. **Dependencies**:
-`adb` **Usage**: `scripts/adb-battery-stats` **Raw Command**:
+`adb`
+
+<!-- generated: ../scripts/adb-battery-stats --help -->
+
+```text
+Usage: adb-battery-stats [OPTIONS]
+
+Displays battery-related information and settings from an adb-connected device.
+
+Options:
+  -s, --serial SERIAL
+                  Target device serial; must precede arguments or commands.
+  --help      Display this help message and exit
+
+Environment:
+  ANDROID_SERIAL  Serial number of device to connect to (see 'adb devices -l').
+                  The --serial option takes precedence when both are set.
+```
+
+<!-- /generated -->
+
+**Raw Command**:
 
 ```bash
 adb exec-out dumpsys battery
@@ -677,7 +1109,49 @@ adb -s WATCH_SERIAL shell cmd activity broadcast \
 
 **Purpose**: Enable or disable demo mode (clean status bar, 100% battery, 16:20
 time, show touches, long screen timeout, DND). **Dependencies**: `adb`
-**Usage**: `scripts/adb-demo on|off` **Raw Command**:
+
+<!-- generated: ../scripts/adb-demo --help -->
+
+```text
+Usage: adb-demo [OPTIONS] COMMAND
+
+Enable or disable demo mode on an adb-connected Android device.
+
+Commands:
+  on          Enter demo mode:
+                - Enables the SystemUI demo mode
+                - Sets the clock to 16:20
+                - Shows 4G and full mobile level
+                - Sets battery to 100% and unplugged
+                - Hides notifications and wifi
+                - Enables the "Show touches" setting
+                - Sets the screen-off timeout to 30 minutes
+                - Blocks heads-up notification popups
+                - Enables Do Not Disturb (Priority Only)
+  off         Exit demo mode:
+                - Disables the SystemUI demo mode
+                - Disables the "Show touches" setting
+                - Restores the screen-off timeout to 1 minute
+                - Restores heads-up notification popups to enabled
+                - Disables Do Not Disturb (Zen Mode: Off)
+
+Options:
+  -s, --serial SERIAL
+                  Target device serial; must precede arguments or commands.
+  --help      Display this help message and exit
+
+Environment:
+  ANDROID_SERIAL  Serial number of device to connect to (see 'adb devices -l').
+                  The --serial option takes precedence when both are set.
+
+Examples:
+  adb-demo on
+  adb-demo off
+```
+
+<!-- /generated -->
+
+**Raw Command**:
 
 ```bash
 # on
@@ -693,8 +1167,42 @@ adb exec-out am broadcast -a com.android.systemui.demo -e command exit
 ### `scripts/adb-fontscale`
 
 **Purpose**: Get or set the system font scale (presets: `default` = 1.0, `large`
-= 1.24, or any numeric value). **Dependencies**: `adb` **Usage**:
-`scripts/adb-fontscale get`, `scripts/adb-fontscale set default|large|NUMBER`
+= 1.24, or any numeric value). **Dependencies**: `adb`
+
+<!-- generated: ../scripts/adb-fontscale --help -->
+
+```text
+Usage: adb-fontscale [OPTIONS] COMMAND [SCALE]
+
+Get or set the system font scale on an adb-connected Android device.
+
+Commands:
+  get         Print the current font scale
+  set SCALE   Set the font scale to a preset or numeric value
+
+Scales:
+  default     Reset to the default scale (1.0)
+  large       Large scale (1.24)
+  NUMBER      Any numeric scale factor (e.g. 0.85, 1.5)
+
+Options:
+  -s, --serial SERIAL
+                  Target device serial; must precede arguments or commands.
+  --help      Display this help message and exit
+
+Environment:
+  ANDROID_SERIAL  Serial number of device to connect to (see 'adb devices -l').
+                  The --serial option takes precedence when both are set.
+
+Examples:
+  adb-fontscale get
+  adb-fontscale set large
+  adb-fontscale set 1.5
+  adb-fontscale set default
+```
+
+<!-- /generated -->
+
 **Raw Command**:
 
 ```bash
@@ -706,7 +1214,52 @@ adb exec-out settings put system font_scale 1.24
 
 **Purpose**: Get or set system theme customization (e.g., 'lemongrass', 'none').
 **Requirements**: Wear OS device, API Level 36+ (Android 16) recommended.
-**Dependencies**: `adb`, `jq` **Usage**: `scripts/adb-theme [get|set THEME]`
+**Dependencies**: `adb`, `jq`
+
+<!-- generated: ../scripts/adb-theme --help -->
+
+```text
+Usage: adb-theme [OPTIONS] COMMAND [THEME]
+
+Get or set the Android system theme customization via ADB.
+
+Requirements:
+  - Wear OS device
+  - API Level 36+ (Android 16) recommended (warns if lower)
+
+Commands:
+  get         Get the current theme configuration (JSON)
+  set THEME   Set the theme to one of the presets
+
+Themes:
+  indigo      Vibrant blue
+  iris        Expressive purple
+  ivy         Spritz dark green
+  jade        Tonal spot green
+  lemongrass  Expressive yellow-green
+  moonstone   Spritz grey-blue
+  peony       Vibrant pink
+  porcelain   Spritz beige
+  watchface   Dynamic colors from home wallpaper
+  none        Static grey (reset)
+
+Options:
+  -s, --serial SERIAL
+                  Target device serial; must precede arguments or commands.
+  --help      Display this help message and exit
+
+Environment:
+  ANDROID_SERIAL  Serial number of device to connect to (see 'adb devices -l').
+                  The --serial option takes precedence when both are set.
+
+Examples:
+  adb-theme get
+  adb-theme set lemongrass
+  adb-theme set none
+```
+
+<!-- /generated -->
+
 **Raw Command**:
 
 ```bash
@@ -720,7 +1273,29 @@ adb exec-out settings put secure theme_customization_overlay_packages '{"android
 ### `scripts/adb-settings-theme`
 
 **Purpose**: Open system theme settings (requires root/debuggable build).
-**Dependencies**: `adb` **Usage**: `scripts/adb-settings-theme` **Raw Command**:
+**Dependencies**: `adb`
+
+<!-- generated: ../scripts/adb-settings-theme --help -->
+
+```text
+Usage: adb-settings-theme [OPTIONS]
+
+Opens the system theme settings on the connected Android device (Wear OS).
+Requires a debuggable build (userdebug/eng) with adb root access.
+
+Options:
+  -s, --serial SERIAL
+                  Target device serial; must precede arguments or commands.
+  --help      Display this help message and exit
+
+Environment:
+  ANDROID_SERIAL  Serial number of device to connect to (see 'adb devices -l').
+                  The --serial option takes precedence when both are set.
+```
+
+<!-- /generated -->
+
+**Raw Command**:
 
 ```bash
 adb exec-out am start -a com.google.android.clockwork.sysui.ACTION_SYSTEM_THEME_SETTINGS

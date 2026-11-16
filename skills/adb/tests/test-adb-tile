@@ -11,7 +11,7 @@ LIST_BIN="$DIR/../scripts/adb-tiles"
 DUMP_BIN="$DIR/../scripts/adb-tile-dump"
 PKG_BIN="$DIR/../scripts/packagename"
 
-echo "1..53"
+echo "1..58"
 
 TMPDIR_TEST=$(mktemp -d)
 OUTPUT="$TMPDIR_TEST/output"
@@ -124,9 +124,10 @@ case "$*" in
       ;;
     *)
       if [[ "${MOCK_RENDER_SILENT:-0}" != "1" ]]; then
-        echo "09-28 18:42:01.100 D/ProtoTilesTileRendererImpl( 7956): Attaching Tile to a container. 4ee5d87 com.example/.MyWidget"
-        echo "09-28 18:42:03.936 D/ProtoTilesTileRendererImpl( 7956): Received tile content. com.example/.MyWidget"
-        echo "09-28 18:42:03.938 D/ProtoTilesTileRendererImpl( 7956): Rendering tile com.example/.MyWidget"
+        render_comp="${MOCK_RENDER_COMPONENT:-com.example/.MyWidget}"
+        echo "09-28 18:42:01.100 D/ProtoTilesTileRendererImpl( 7956): Attaching Tile to a container. 4ee5d87 $render_comp"
+        echo "09-28 18:42:03.936 D/ProtoTilesTileRendererImpl( 7956): Received tile content. $render_comp"
+        echo "09-28 18:42:03.938 D/ProtoTilesTileRendererImpl( 7956): Rendering tile $render_comp"
       fi
       ;;
     esac
@@ -354,6 +355,10 @@ QAPPWIDGET_EOF
     exit 0
     ;;
   *"com.google.android.clockwork.prototiles.action.REMOVE_WIDGET"*)
+    count=$(next_count remove)
+    if ((count < ${MOCK_TRAY_READY_ATTEMPT:-1})); then
+      unanswered REMOVE_WIDGET
+    fi
     echo 'Broadcasting: Intent { act=com.google.android.clockwork.prototiles.action.REMOVE_WIDGET }'
     if [[ "${MOCK_REMOVE_WEIRD:-0}" == "1" ]]; then
       echo 'Broadcast completed: result=0, data="oops"'
@@ -384,7 +389,8 @@ QAPPWIDGET_EOF
     exit 0
     ;;
   *"com.google.android.clockwork.prototiles.action.DUMP_RC_DOC"*)
-    if [[ "${MOCK_TRAY_V2:-1}" != "1" ]]; then
+    count=$(next_count dump)
+    if [[ "${MOCK_TRAY_V2:-1}" != "1" ]] || ((count < ${MOCK_TRAY_READY_ATTEMPT:-1})); then
       unanswered DUMP_RC_DOC
     fi
     echo 'Broadcasting: Intent { act=com.google.android.clockwork.prototiles.action.DUMP_RC_DOC }'
@@ -414,7 +420,11 @@ QAPPWIDGET_EOF
     ;;
   *"com.google.android.wearable.app.DEBUG_SURFACE"*"add-tile"*)
     echo 'Broadcasting: Intent { act=com.google.android.wearable.app.DEBUG_SURFACE }'
-    echo 'Broadcast completed: result=1, data="Index=[0]"'
+    if [[ "${MOCK_ADD_TILE_FAILED:-0}" == "1" ]]; then
+      echo 'Broadcast completed: result=1, data="add-tile failed."'
+    else
+      echo 'Broadcast completed: result=1, data="Index=[0]"'
+    fi
     exit 0
     ;;
   *"com.google.android.wearable.app.DEBUG_SURFACE"*"remove-tile"*)
@@ -1047,5 +1057,58 @@ if (
   echo "ok 53 - a long package list is read whole, with no broken pipe"
 else
   echo "not ok 53 - the installed-package check broke on a long package list"
+  report
+fi
+
+# Test 54: on add-tile failed, invalid component fails instead of blindly switching to INDEX=0
+if ! MOCK_ADD_TILE_FAILED=1 run_mock "$ADD_BIN" com.todoist.debug/.NonExistentTileService >"$OUTPUT" 2>&1 &&
+  [[ "$(<"$OUTPUT")" == *"add-tile failed for 'com.todoist.debug/.NonExistentTileService'"* ]] &&
+  [[ "$(<"$ADB_LOG")" != *"show-tile"* ]]; then
+  echo "ok 54 - adb-tile-add fails clearly on add-tile failed when component is not in carousel"
+else
+  echo "not ok 54 - adb-tile-add blindly accepted invalid component on add-tile failed"
+  report
+fi
+
+# Test 55: on add-tile failed for an already-added tile, resolves real carousel index from wear_service
+if MOCK_ADD_TILE_FAILED=1 MOCK_RENDER_COMPONENT="com.todoist.debug/com.todoist.service.DayProgressWidgetService" \
+  run_mock "$ADD_BIN" com.todoist.debug/com.todoist.service.DayProgressWidgetService >"$OUTPUT" 2>&1 &&
+  [[ "$(<"$OUTPUT")" == *"Added/activated tile ID: 1"* ]] &&
+  [[ "$(<"$ADB_LOG")" == *"--es operation show-tile --ei index 1"* ]]; then
+  echo "ok 55 - adb-tile-add resolves actual carousel index from wear_service when already added"
+else
+  echo "not ok 55 - adb-tile-add failed to resolve real carousel index on add-tile failed"
+  report
+fi
+
+# Test 56: Rendering tile from another component in the same package does not falsely satisfy visibility
+if ! MOCK_RENDER_COMPONENT="com.example/.OtherTile" ADB_TILE_VISIBILITY_TIMEOUT=1 \
+  run_mock "$ADD_BIN" com.example/.MyWidget >"$OUTPUT" 2>&1 &&
+  [[ "$(<"$OUTPUT")" != *"Success"* ]]; then
+  echo "ok 56 - adb-tile-add matches target component (not just package) on Rendering tile"
+else
+  echo "not ok 56 - adb-tile-add matched Rendering tile from a different component in the same package"
+  report
+fi
+
+# Test 57: SysUI mode re-broadcasts show-tile after render settles
+if run_mock "$ADD_BIN" com.example/.MyWidget >"$OUTPUT" 2>&1 &&
+  [[ "$(grep -c 'DEBUG_SYSUI.*--es operation show-tile --ei index 0' "$ADB_LOG")" == "2" ]]; then
+  echo "ok 57 - adb-tile-add SysUI mode re-broadcasts show-tile after render settles"
+else
+  echo "not ok 57 - adb-tile-add SysUI mode did not re-broadcast show-tile after render settles"
+  report
+fi
+
+# Test 58: tray_broadcast wakes sleeping display before starting WidgetTrayActivity in list, remove, and dump
+if MOCK_TRAY_READY_ATTEMPT=2 run_mock "$LIST_BIN" --vertical >"$OUTPUT" 2>&1 &&
+  grep -Fq "input keyevent KEYCODE_WAKEUP" "$ADB_LOG" &&
+  MOCK_TRAY_READY_ATTEMPT=2 run_mock "$REMOVE_BIN" --vertical 10001 >"$OUTPUT" 2>&1 &&
+  grep -Fq "input keyevent KEYCODE_WAKEUP" "$ADB_LOG" &&
+  MOCK_TRAY_READY_ATTEMPT=2 MOCK_ADB_UID=0 run_mock "$DUMP_BIN" -o "$WORK/wake.rc" 10001 >"$STDOUT" 2>"$OUTPUT" &&
+  grep -Fq "input keyevent KEYCODE_WAKEUP" "$ADB_LOG"; then
+  echo "ok 58 - tray_broadcast sends KEYCODE_WAKEUP before opening WidgetTrayActivity in list, remove, and dump"
+else
+  echo "not ok 58 - tray_broadcast missing KEYCODE_WAKEUP in sibling tray scripts"
   report
 fi

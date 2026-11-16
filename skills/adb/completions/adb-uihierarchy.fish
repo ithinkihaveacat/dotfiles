@@ -2,4 +2,6 @@
 
 complete -c adb-uihierarchy -s s -l serial -x -a '(__fish_android_devices)' -d 'Target device serial'
 complete -c adb-uihierarchy -s o -l output -r -F -d 'The path to save the hierarchy to'
+complete -c adb-uihierarchy -l compressed -d 'Skip non-important views during dump'
+complete -c adb-uihierarchy -l timeout -x -d 'Per-attempt timeout in seconds (default: 10)'
 complete -c adb-uihierarchy -s h -l help -d 'Display help message and exit'

@@ -7,16 +7,20 @@ fi
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [OPTIONS]
+Usage: $(basename "$0") [OPTIONS] [PACKAGE]
 
-Lists available activities on the connected device, tagged by category.
-By default, lists only activities from user-installed (third-party) apps.
+Lists activities declared on the connected device, tagged by category.
+By default, lists activities from user-installed (third-party) apps, or from
+PACKAGE if specified.
 
 Supported categories:
   L - Launcher (android.intent.category.LAUNCHER)
   H - Home/Launcher App (android.intent.category.HOME)
   T - TV/Leanback (android.intent.category.LEANBACK_LAUNCHER)
   S - Settings (android.intent.category.PREFERENCE)
+
+Arguments:
+  PACKAGE          Optional package name to filter activities to.
 
 Options:
   -s, --serial SERIAL
@@ -26,11 +30,16 @@ Options:
   --tv-only        List only TV/Leanback activities
   --settings-only  List only settings activities
   --all            List activities from all packages (including system apps)
-  --help           Display this help message and exit
+  -h, --help       Display this help message and exit
 
 Environment:
   ANDROID_SERIAL  Serial number of device to connect to (see 'adb devices -l').
                   The --serial option takes precedence when both are set.
+
+Examples:
+  $(basename "$0")
+  $(basename "$0") --launcher-only
+  $(basename "$0") com.example.app
 EOF
   exit 0
 }
@@ -41,10 +50,15 @@ home_only=0
 tv_only=0
 settings_only=0
 all_apps=0
+target_pkg=""
 
 while [[ "$#" -gt 0 ]]; do
   case $1 in
     -s | --serial)
+      if [[ -n "$target_pkg" ]]; then
+        echo "$(basename "$0"): $1 must precede PACKAGE" >&2
+        exit 1
+      fi
       if [[ -z "${2:-}" ]]; then
         echo "$(basename "$0"): $1 option requires an argument" >&2
         exit 1
@@ -59,9 +73,17 @@ while [[ "$#" -gt 0 ]]; do
     --settings-only) settings_only=1 ;;
     --all) all_apps=1 ;;
     --help | -h) usage ;;
-    *)
+    -*)
       echo "$(basename "$0"): unknown option '$1'" >&2
       exit 1
+      ;;
+    *)
+      if [[ -z "$target_pkg" ]]; then
+        target_pkg="$1"
+      else
+        echo "$(basename "$0"): unexpected argument '$1'" >&2
+        exit 1
+      fi
       ;;
   esac
   shift
@@ -82,8 +104,10 @@ require() {
 
 require adb
 
-if ! adb get-state >/dev/null 2>&1; then
-  if [[ -n "$ANDROID_SERIAL" ]]; then
+if ! DEVICE_ERROR=$(adb get-state 2>&1 >/dev/null); then
+  if [[ "$DEVICE_ERROR" == *"more than one"* ]]; then
+    echo "$(basename "$0"): more than one device connected; use --serial or set ANDROID_SERIAL" >&2
+  elif [[ -n "${ANDROID_SERIAL:-}" ]]; then
     echo "$(basename "$0"): device '$ANDROID_SERIAL' not available" >&2
   else
     echo "$(basename "$0"): no device connected" >&2
@@ -98,13 +122,14 @@ CAT_HOME="android.intent.category.HOME"
 CAT_LEANBACK="android.intent.category.LEANBACK_LAUNCHER"
 CAT_PREFERENCE="android.intent.category.PREFERENCE"
 
-# Fetch user packages if filtering is enabled
+# Fetch user packages if filtering is enabled and no explicit package was given
 declare -A user_pkgs
-if ((! all_apps)); then
+if ((! all_apps)) && [[ -z "$target_pkg" ]]; then
   # Read user packages into associative array
   # 'pm list packages -3' returns "package:com.example"
   while read -r line; do
     pkg=${line#package:}
+    [[ -z "$pkg" ]] && continue
     user_pkgs["$pkg"]=1
   done < <(adb shell pm list packages -3 | tr -d '\r')
 fi
@@ -131,18 +156,19 @@ run_query() {
     tr -d '\r'
 }
 
-# Helper to filter output based on user_pkgs
+# Helper to filter output based on target_pkg or user_pkgs
 filter_and_print() {
   while read -r comp; do
     [[ -z "$comp" ]] && continue
-    if ((all_apps)); then
-      echo "$comp"
-    else
-      # Extract package name: com.example/Activity -> com.example
-      local pkg="${comp%%/*}"
-      if [[ -n "${user_pkgs[$pkg]+_}" ]]; then
+    local pkg="${comp%%/*}"
+    if [[ -n "$target_pkg" ]]; then
+      if [[ "$pkg" == "$target_pkg" ]]; then
         echo "$comp"
       fi
+    elif ((all_apps)); then
+      echo "$comp"
+    elif [[ -n "${user_pkgs[$pkg]+_}" ]]; then
+      echo "$comp"
     fi
   done
 }
@@ -214,15 +240,15 @@ awk '
   echo "$list_t" | awk '{print "T: " $0}'
   echo "$list_s" | awk '{print "S: " $0}'
 ) | sort | uniq | while read -r line; do
-  if ((all_apps)); then
-    echo "$line"
-  else
-    # line is "LHTS com.pkg/Act"
-    # Extract comp (last field)
-    comp=${line##* }
-    pkg=${comp%%/*}
-    if [[ -n "${user_pkgs[$pkg]+_}" ]]; then
+  comp=${line##* }
+  pkg=${comp%%/*}
+  if [[ -n "$target_pkg" ]]; then
+    if [[ "$pkg" == "$target_pkg" ]]; then
       echo "$line"
     fi
+  elif ((all_apps)); then
+    echo "$line"
+  elif [[ -n "${user_pkgs[$pkg]+_}" ]]; then
+    echo "$line"
   fi
 done
