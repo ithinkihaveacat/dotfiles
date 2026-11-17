@@ -172,7 +172,12 @@ def read_copy_source_from_content(content: str) -> str | None:
     if not lines or lines[0].strip() != "---":
         return None
     end = next(
-        (i for i in range(1, len(lines)) if lines[i].strip() in ("---", "...")),
+        (
+            i
+            for i in range(1, len(lines))
+            if not lines[i].startswith((" ", "\t"))
+            and lines[i].strip() in ("---", "...")
+        ),
         None,
     )
     if end is None:
@@ -272,14 +277,14 @@ def inject_copy_source(content: str, source: str) -> str:
             while block_end > meta_idx + 1 and not fm[block_end - 1].strip():
                 block_end -= 1
             kept_block: list[str] = []
-            child_indent = "  "
+            child_indent: str | None = None
             b_i = meta_idx + 1
             while b_i < block_end:
                 bl = fm[b_i]
                 bs = bl.strip()
                 if bs and not bs.startswith("#"):
                     ind = bl[: len(bl) - len(bl.lstrip(" \t"))]
-                    if child_indent == "  ":
+                    if child_indent is None:
                         child_indent = ind
                     if (
                         ind == child_indent
@@ -296,10 +301,11 @@ def inject_copy_source(content: str, source: str) -> str:
                         continue
                 kept_block.append(bl)
                 b_i += 1
+            eff_indent = child_indent if child_indent is not None else "  "
             fm[meta_idx:block_end] = [
                 "metadata:",
                 *kept_block,
-                f"{child_indent}source: {src_json}",
+                f"{eff_indent}source: {src_json}",
             ]
     return eol.join(["---", *fm, fence]) + eol + rest
 
@@ -2327,6 +2333,15 @@ def cmd_update(names):
             refresh_copies(scan_links(ws)[0])
         return
 
+    def entry_source_norms(v: dict) -> set[str]:
+        if "path" in v:
+            p = Path(v["path"]).expanduser()
+            return {os.path.normpath(p), os.path.realpath(p)}
+        if "repo" in v and "ref" in v:
+            rc = remote_cache_dir(v["repo"], v["ref"], v.get("subpath"))
+            return {os.path.normpath(rc), os.path.realpath(rc)}
+        return set()
+
     ws_entries = scan_links(ws)[0] if (ws is not None and ws.uses_copies) else []
     for name in names:
         cat_matches = (
@@ -2362,32 +2377,33 @@ def cmd_update(names):
         # An installed copy named directly by basename refreshes from its own
         # metadata.source even if a remote catalog skill shares that name.
         if copies and ":" not in name and any(e.link_name == name for e in copies):
-            copy_src_norms = {os.path.normpath(e.source) for e in copies if e.source}
+            copy_src_norms = {
+                s
+                for e in copies
+                if e.source
+                for s in (os.path.normpath(e.source), os.path.realpath(e.source))
+            }
             cat_matches = [
                 (k, v)
                 for k, v in api.plugin_catalog.items()
-                if (
-                    "path" in v
-                    and {
-                        os.path.normpath(Path(v["path"]).expanduser()),
-                        os.path.realpath(Path(v["path"]).expanduser()),
-                    }
-                    & copy_src_norms
-                )
-                or (
-                    "repo" in v
-                    and "ref" in v
-                    and os.path.normpath(
-                        remote_cache_dir(v["repo"], v["ref"], v.get("subpath"))
-                    )
-                    in copy_src_norms
-                )
+                if entry_source_norms(v) & copy_src_norms
             ]
         if not cat_matches and not copies:
             print(f"skill update: unknown skill '{name}'", file=sys.stderr)
             continue
         for cname, centry in cat_matches:
             update_catalog_entry(cname, centry, quiet_local=bool(copies))
+        if cat_matches:
+            matched_norms = {
+                s for _, centry in cat_matches for s in entry_source_norms(centry)
+            }
+            copies = [
+                e
+                for e in copies
+                if e.source
+                and {os.path.normpath(e.source), os.path.realpath(e.source)}
+                & matched_norms
+            ]
         refresh_copies(copies)
 
 

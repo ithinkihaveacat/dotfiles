@@ -338,12 +338,13 @@ cases = [
     '---\nname: e\nmetadata: {}\n---\nbody\n',
     '---\nname: f\nmetadata: {source: \"/old\", version: \"3\"}\n---\nbody\n',
     '---\nname: g\nmetadata: {\n  version: \"4\"\n}\n---\nbody\n',
+    '---\nname: h\ndescription: |\n  line1\n  ---\n  ...\n  line2\nmetadata:\n  note: >-\n    multiline continuation\n  source: \"/old\"\n  version: \"5\"\n---\nbody\n',
 ]
 for idx, raw in enumerate(cases):
     out = m.inject_copy_source(raw, src)
     got = m.read_copy_source_from_content(out)
     assert got == src, f'case {idx} got {got!r} from:\n{out}'
-    fm = out.split('---', 2)[1]
+    fm = out.split('\n---\n', 1)[0]
     meta_keys = [
         l for l in fm.splitlines()
         if not l.startswith((' ', '\t')) and l.lstrip().startswith('metadata:')
@@ -417,15 +418,18 @@ def register(api):
 EOF
 ALIAS_WS="${TMPDIR}/alias-ws"
 ADHOC_WS="${TMPDIR}/adhoc-ws"
-mkdir -p "$ALIAS_WS" "$ADHOC_WS"
+REAL_CACHE="${TMPDIR}/real-cache-store"
+SYM_CACHE="${TMPDIR}/sym-cache-link"
+mkdir -p "$ALIAS_WS" "$ADHOC_WS" "$REAL_CACHE"
+ln -s "$REAL_CACHE" "$SYM_CACHE"
 git -C "$ALIAS_WS" init -q
 git -C "$ADHOC_WS" init -q
-_SKILL_TEST_REMOTE="$ALIAS_UPSTREAM" "${SCRIPT}" -C "$ALIAS_WS" add remote:pkg-key-name >/dev/null 2>&1
-_SKILL_TEST_REMOTE="$ALIAS_UPSTREAM" "${SCRIPT}" --scope user add remote:pkg-key-name >/dev/null 2>&1
+SKILL_CACHE_DIR="$SYM_CACHE" _SKILL_TEST_REMOTE="$ALIAS_UPSTREAM" "${SCRIPT}" -C "$ALIAS_WS" add remote:pkg-key-name >/dev/null 2>&1
+SKILL_CACHE_DIR="$SYM_CACHE" _SKILL_TEST_REMOTE="$ALIAS_UPSTREAM" "${SCRIPT}" --scope user add remote:pkg-key-name >/dev/null 2>&1
 printf -- '---\nname: aliased-folder\ndescription: v2\n---\nv2\n' \
   >"${ALIAS_UPSTREAM}/skills/aliased-folder/SKILL.md"
 git -C "$ALIAS_UPSTREAM" commit -q -am "v2"
-_SKILL_TEST_REMOTE="$ALIAS_UPSTREAM" "${SCRIPT}" -C "$ALIAS_WS" update aliased-folder >/dev/null 2>&1
+SKILL_CACHE_DIR="$SYM_CACHE" _SKILL_TEST_REMOTE="$ALIAS_UPSTREAM" "${SCRIPT}" -C "$ALIAS_WS" update aliased-folder >/dev/null 2>&1
 printf -- '---\nname: aliased-folder\ndescription: v3\n---\nv3\n' \
   >"${ALIAS_UPSTREAM}/skills/aliased-folder/SKILL.md"
 git -C "$ALIAS_UPSTREAM" commit -q -am "v3"
@@ -437,7 +441,7 @@ def register(api):
         {"repo": "owner/repo", "ref": "main", "subpath": "skills/aliased-folder"},
     )
 EOF
-_SKILL_TEST_REMOTE="$ALIAS_UPSTREAM" "${SCRIPT}" --scope user update --all >/dev/null 2>&1
+SKILL_CACHE_DIR="$SYM_CACHE" _SKILL_TEST_REMOTE="$ALIAS_UPSTREAM" "${SCRIPT}" --scope user update --all >/dev/null 2>&1
 printf -- '---\nname: aliased-folder\n---\nlocal-v1\n' >"${TMPDIR}/adhoc-src/aliased-folder/SKILL.md"
 "${SCRIPT}" -C "$ADHOC_WS" add "${TMPDIR}/adhoc-src/aliased-folder" >/dev/null 2>&1
 printf -- '---\nname: aliased-folder\n---\nlocal-v2\n' >"${TMPDIR}/adhoc-src/aliased-folder/SKILL.md"
@@ -501,13 +505,18 @@ mkdir -p "$COLLIDE_WS"
 git -C "$COLLIDE_WS" init -q
 _SKILL_TEST_REMOTE="$UP_A" "${SCRIPT}" -C "$COLLIDE_WS" add remote:alpha-creator >/dev/null 2>&1
 _SKILL_TEST_REMOTE="$UP_B" "${SCRIPT}" --scope user add remote:beta-creator >/dev/null 2>&1
+printf -- '---\nname: shared-name\n---\nalpha-local-edit\n' >"${COLLIDE_WS}/.agents/skills/shared-name/SKILL.md.check"
 printf -- '---\nname: shared-name\n---\nbeta-v2\n' >"${UP_B}/skills/shared-name/SKILL.md"
 git -C "$UP_B" commit -q -am "b2"
-_SKILL_TEST_REMOTE="$UP_B" "${SCRIPT}" -C "$COLLIDE_WS" update remote:beta-creator >/dev/null 2>&1
+printf -- '---\nname: shared-name\n---\nalpha-v2\n' >"${UP_A}/skills/shared-name/SKILL.md"
+git -C "$UP_A" commit -q -am "a2"
+rm -f "${COLLIDE_WS}/.agents/skills/shared-name/SKILL.md.check"
+beta_up_out=$(_SKILL_TEST_REMOTE="$UP_B" "${SCRIPT}" -C "$COLLIDE_WS" update remote:beta-creator 2>&1)
 if grep -q "^alpha-v1$" "${COLLIDE_WS}/.agents/skills/shared-name/SKILL.md" &&
+  [[ "$beta_up_out" != *"updated shared-name"* ]] &&
   grep -q "^beta-v2$" "${HOME}/.claude/skills/shared-name/SKILL.md"; then
-  echo "ok 20 - [Update] explicit catalog spec updates requested entry despite colliding basename"
+  echo "ok 20 - [Update] explicit catalog spec updates requested entry without touching colliding copy"
 else
-  echo "not ok 20 - [Update] explicit catalog spec misrouted on colliding basename"
+  echo "not ok 20 - [Update] explicit catalog spec misrouted on colliding basename: $beta_up_out"
 fi
 rm -f "${XDG_CONFIG_HOME}/skill/plugins/98_alias_remote.py"
