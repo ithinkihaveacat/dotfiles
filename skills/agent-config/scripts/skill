@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
-import stat
 import subprocess
 import sys
 import tarfile
@@ -139,527 +139,169 @@ def find_skill_anchor(start: Path, boundary: Path) -> Path:
 # ==============================================================================
 
 
-COPY_IGNORE_NAMES: frozenset[str] = frozenset(
-    {
-        ".git",
-        "__pycache__",
-        ".ruff_cache",
-        ".pytest_cache",
-        ".DS_Store",
-    }
+COPY_IGNORE_PATTERNS = (
+    ".git",
+    "__pycache__",
+    ".ruff_cache",
+    ".pytest_cache",
+    ".DS_Store",
+    ".SKILL.md.tmp-*",
 )
 
 
-def _split_frontmatter(content: str) -> tuple[list[str], str, str, str] | None:
-    """Split YAML frontmatter into (fm_lines, fence, rest, eol), or None."""
-    eol = "\r\n" if content.startswith("---\r\n") else "\n"
-    raw_lines = content.splitlines(keepends=True)
-    if not raw_lines:
-        return None
-    first = raw_lines[0].rstrip("\r\n")
-    if first.strip() != "---" or first.startswith((" ", "\t")):
-        return None
-    fm_lines: list[str] = []
-    for idx in range(1, len(raw_lines)):
-        line_no_eol = raw_lines[idx].rstrip("\r\n")
-        if not line_no_eol.startswith((" ", "\t")) and line_no_eol.strip() in (
-            "---",
-            "...",
-        ):
-            rest = "".join(raw_lines[idx + 1 :])
-            return fm_lines, line_no_eol.strip(), rest, eol
-        fm_lines.append(line_no_eol)
-    return None
-
-
-def _strip_yaml_comment(text: str) -> str:
-    """Remove a trailing unquoted YAML '# ...' comment."""
-    in_single = False
-    in_double = False
-    i = 0
-    while i < len(text):
-        ch = text[i]
-        if in_double:
-            if ch == "\\" and i + 1 < len(text):
-                i += 2
-                continue
-            if ch == '"':
-                in_double = False
-        elif in_single:
-            if ch == "'" and i + 1 < len(text) and text[i + 1] == "'":
-                i += 2
-                continue
-            if ch == "'":
-                in_single = False
-        else:
-            if ch == '"':
-                in_double = True
-            elif ch == "'":
-                in_single = True
-            elif ch == "#" and (i == 0 or text[i - 1] in (" ", "\t")):
-                return text[:i].rstrip()
-        i += 1
-    return text.rstrip()
-
-
-def _unquote_yaml_scalar(val: str) -> str:
-    """Parse a single YAML scalar value (double-quoted, single-quoted, or plain)."""
-    s = val.strip()
-    if len(s) >= 2 and s[0] == '"' and s[-1] == '"':
+def _unquote_scalar(raw: str) -> str:
+    val = raw.strip()
+    if len(val) >= 2 and val[0] == '"' and val[-1] == '"':
         try:
-            parsed = json.loads(s)
-            if isinstance(parsed, str):
-                return parsed
+            res = json.loads(val)
+            if isinstance(res, str):
+                return res
         except Exception:
-            pass
-        return s[1:-1]
-    if len(s) >= 2 and s[0] == "'" and s[-1] == "'":
-        return s[1:-1].replace("''", "'")
-    return _strip_yaml_comment(s).strip()
-
-
-def _find_flow_map_end(
-    lines: list[str], start_idx: int, brace_col: int
-) -> tuple[int, int] | None:
-    """Find (line_idx, col_idx) of the '}' closing the '{' at (start_idx, brace_col)."""
-    depth = 0
-    in_single = False
-    in_double = False
-    for l_idx in range(start_idx, len(lines)):
-        line = lines[l_idx]
-        c_idx = brace_col if l_idx == start_idx else 0
-        while c_idx < len(line):
-            ch = line[c_idx]
-            if in_double:
-                if ch == "\\" and c_idx + 1 < len(line):
-                    c_idx += 2
-                    continue
-                if ch == '"':
-                    in_double = False
-            elif in_single:
-                if ch == "'" and c_idx + 1 < len(line) and line[c_idx + 1] == "'":
-                    c_idx += 2
-                    continue
-                if ch == "'":
-                    in_single = False
-            else:
-                if ch == '"':
-                    in_double = True
-                elif ch == "'":
-                    in_single = True
-                elif ch == "#" and (c_idx == 0 or line[c_idx - 1] in (" ", "\t")):
-                    break
-                elif ch == "{":
-                    depth += 1
-                elif ch == "}":
-                    depth -= 1
-                    if depth == 0:
-                        return l_idx, c_idx
-            c_idx += 1
-    return None
-
-
-def _parse_flow_map_entries(inner: str) -> list[tuple[str, str, int, int]]:
-    """Parse top-level key: value entries inside a YAML flow map '{...}'.
-
-    Returns [(key_name, raw_value, val_start_offset, val_end_offset)].
-    """
-    tokens: list[tuple[str, int]] = []
-    in_single = False
-    in_double = False
-    i = 0
-    while i < len(inner):
-        ch = inner[i]
-        if in_double:
-            tokens.append((ch, i))
-            if ch == "\\" and i + 1 < len(inner):
-                tokens.append((inner[i + 1], i + 1))
-                i += 2
-                continue
-            if ch == '"':
-                in_double = False
-        elif in_single:
-            tokens.append((ch, i))
-            if ch == "'" and i + 1 < len(inner) and inner[i + 1] == "'":
-                tokens.append((inner[i + 1], i + 1))
-                i += 2
-                continue
-            if ch == "'":
-                in_single = False
-        else:
-            if ch == '"':
-                in_double = True
-                tokens.append((ch, i))
-            elif ch == "'":
-                in_single = True
-                tokens.append((ch, i))
-            elif ch == "#" and (
-                i == 0 or inner[i - 1] in (" ", "\t", "\n", "\r", ",", "{", "[")
-            ):
-                nl = inner.find("\n", i)
-                if nl == -1:
-                    break
-                i = nl
-                continue
-            else:
-                tokens.append((ch, i))
-        i += 1
-
-    segments: list[list[tuple[str, int]]] = []
-    cur_seg: list[tuple[str, int]] = []
-    depth = 0
-    in_s = False
-    in_d = False
-    t_idx = 0
-    while t_idx < len(tokens):
-        ch, orig = tokens[t_idx]
-        if in_d:
-            cur_seg.append((ch, orig))
-            if ch == "\\" and t_idx + 1 < len(tokens):
-                cur_seg.append(tokens[t_idx + 1])
-                t_idx += 2
-                continue
-            if ch == '"':
-                in_d = False
-        elif in_s:
-            cur_seg.append((ch, orig))
-            if ch == "'" and t_idx + 1 < len(tokens) and tokens[t_idx + 1][0] == "'":
-                cur_seg.append(tokens[t_idx + 1])
-                t_idx += 2
-                continue
-            if ch == "'":
-                in_s = False
-        else:
-            if ch == '"':
-                in_d = True
-                cur_seg.append((ch, orig))
-            elif ch == "'":
-                in_s = True
-                cur_seg.append((ch, orig))
-            elif ch in ("{", "["):
-                depth += 1
-                cur_seg.append((ch, orig))
-            elif ch in ("}", "]"):
-                depth = max(0, depth - 1)
-                cur_seg.append((ch, orig))
-            elif ch == "," and depth == 0:
-                segments.append(cur_seg)
-                cur_seg = []
-            else:
-                cur_seg.append((ch, orig))
-        t_idx += 1
-    if cur_seg:
-        segments.append(cur_seg)
-
-    entries: list[tuple[str, str, int, int]] = []
-    for seg in segments:
-        if not any(not c.isspace() for c, _ in seg):
-            continue
-        in_s = False
-        in_d = False
-        colon_pos = -1
-        j = 0
-        while j < len(seg):
-            c = seg[j][0]
-            if in_d:
-                if c == "\\" and j + 1 < len(seg):
-                    j += 2
-                    continue
-                if c == '"':
-                    in_d = False
-            elif in_s:
-                if c == "'" and j + 1 < len(seg) and seg[j + 1][0] == "'":
-                    j += 2
-                    continue
-                if c == "'":
-                    in_s = False
-            else:
-                if c == '"':
-                    in_d = True
-                elif c == "'":
-                    in_s = True
-                elif c == ":":
-                    colon_pos = j
-                    break
-            j += 1
-        if colon_pos == -1:
-            continue
-        k_name = _unquote_yaml_scalar("".join(c for c, _ in seg[:colon_pos]))
-        val_toks = seg[colon_pos + 1 :]
-        while val_toks and val_toks[0][0].isspace():
-            val_toks.pop(0)
-        while val_toks and val_toks[-1][0].isspace():
-            val_toks.pop()
-        if not val_toks:
-            v_pos = seg[colon_pos][1] + 1
-            entries.append((k_name, "", v_pos, v_pos))
-        else:
-            v_start = val_toks[0][1]
-            v_end = val_toks[-1][1] + 1
-            v_raw = "".join(c for c, _ in val_toks)
-            entries.append((k_name, v_raw, v_start, v_end))
-    return entries
-
-
-def _upsert_flow_map_source(flow_text: str, source_json: str) -> str:
-    """Insert or update 'source' inside a '{...}' YAML flow mapping string."""
-    # flow_text begins with '{' and ends with '}'
-    inner = flow_text[1:-1]
-    entries = _parse_flow_map_entries(inner)
-    for k_name, _v_raw, v_start, v_end in entries:
-        if k_name == "source":
-            prefix = "" if v_start > 0 and inner[v_start - 1] in (" ", "\t") else " "
-            return "{" + inner[:v_start] + prefix + source_json + inner[v_end:] + "}"
-    if not entries:
-        return "{source: " + source_json + "}"
-    _last_k, _last_v, _last_s, last_end = entries[-1]
-    after = inner[last_end:]
-    after_stripped = after.lstrip(" \t")
-    if after_stripped.startswith(","):
-        comma_idx = last_end + (len(after) - len(after_stripped))
-        return (
-            "{"
-            + inner[:last_end]
-            + f", source: {source_json}"
-            + inner[comma_idx + 1 :]
-            + "}"
-        )
-    return "{" + inner[:last_end] + f", source: {source_json}" + after + "}"
-
-
-def _read_legacy_stub_source(content: str) -> str | None:
-    for line in content.splitlines():
-        if line.startswith("<!-- skill-stub: ") and line.endswith(" -->"):
-            res = line[len("<!-- skill-stub: ") : -len(" -->")].strip()
-            return res or None
-    return None
+            return val[1:-1]
+    if len(val) >= 2 and val[0] == "'" and val[-1] == "'":
+        return val[1:-1].replace("''", "'")
+    for i, ch in enumerate(val):
+        if ch == "#" and (i == 0 or val[i - 1] in (" ", "\t")):
+            return val[:i].rstrip()
+    return val
 
 
 def read_copy_source_from_content(content: str) -> str | None:
-    """Return metadata.source (or legacy skill-stub target) from SKILL.md, or None."""
-    split = _split_frontmatter(content)
-    if split is None:
-        return _read_legacy_stub_source(content)
-    fm_lines, _fence, _rest, _eol = split
-
-    idx = 0
-    while idx < len(fm_lines):
-        line = fm_lines[idx]
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or line.startswith((" ", "\t")):
-            idx += 1
+    """Return metadata.source from a managed copy's SKILL.md frontmatter."""
+    lines = content.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return None
+    end = next(
+        (i for i in range(1, len(lines)) if lines[i].strip() in ("---", "...")),
+        None,
+    )
+    if end is None:
+        return None
+    fm = lines[1:end]
+    for i, line in enumerate(fm):
+        s = line.strip()
+        if (
+            not s
+            or s.startswith("#")
+            or line.startswith((" ", "\t"))
+            or ":" not in line
+        ):
             continue
-        if ":" not in line:
-            idx += 1
+        if _unquote_scalar(line.split(":", 1)[0]) != "metadata":
             continue
-        k_raw, v_raw = line.split(":", 1)
-        if _unquote_yaml_scalar(k_raw) != "metadata":
-            idx += 1
-            continue
-
-        v_clean = _strip_yaml_comment(v_raw).lstrip()
-        if v_clean.startswith("{"):
-            brace_col = line.index("{", len(k_raw) + 1)
-            end_pos = _find_flow_map_end(fm_lines, idx, brace_col)
-            if end_pos is None:
-                return None
-            end_line, end_col = end_pos
-            if end_line == idx:
-                flow_str = line[brace_col : end_col + 1]
-            else:
-                parts = [
-                    line[brace_col:],
-                    *fm_lines[idx + 1 : end_line],
-                    fm_lines[end_line][: end_col + 1],
-                ]
-                flow_str = "\n".join(parts)
-            for k_name, val_raw, _vs, _ve in _parse_flow_map_entries(flow_str[1:-1]):
-                if k_name == "source":
-                    res = _unquote_yaml_scalar(val_raw)
-                    return res or _read_legacy_stub_source(content)
-            return _read_legacy_stub_source(content)
-
-        # Block mapping under metadata:
-        block_end = idx + 1
-        while block_end < len(fm_lines):
-            b_line = fm_lines[block_end]
-            b_stripped = b_line.strip()
-            if (
-                not b_stripped
-                or b_stripped.startswith("#")
-                or b_line.startswith((" ", "\t"))
-            ):
-                block_end += 1
-            else:
-                break
-
         child_indent: str | None = None
-        for b_idx in range(idx + 1, block_end):
-            b_line = fm_lines[b_idx]
-            b_stripped = b_line.strip()
-            if b_stripped and not b_stripped.startswith("#"):
-                child_indent = b_line[: len(b_line) - len(b_line.lstrip(" \t"))]
-                break
-        if child_indent is None:
-            return _read_legacy_stub_source(content)
-
-        b_idx = idx + 1
-        while b_idx < block_end:
-            b_line = fm_lines[b_idx]
-            b_stripped = b_line.strip()
-            if not b_stripped or b_stripped.startswith("#"):
-                b_idx += 1
+        for b in fm[i + 1 :]:
+            bs = b.strip()
+            if not bs or bs.startswith("#"):
                 continue
-            ind = b_line[: len(b_line) - len(b_line.lstrip(" \t"))]
-            if ind == child_indent and ":" in b_stripped:
-                ck_raw, cv_raw = b_stripped.split(":", 1)
-                if _unquote_yaml_scalar(ck_raw) == "source":
-                    cv_clean = _strip_yaml_comment(cv_raw).strip()
-                    if cv_clean in ("", ">", "|", ">-", "|-", ">+", "|+"):
-                        cont: list[str] = []
-                        b_idx += 1
-                        while b_idx < block_end:
-                            cl = fm_lines[b_idx]
-                            cs = cl.strip()
-                            if not cs:
-                                b_idx += 1
-                                continue
-                            cind = cl[: len(cl) - len(cl.lstrip(" \t"))]
-                            if len(cind) <= len(child_indent):
-                                break
-                            if not cs.startswith("#"):
-                                cont.append(cs)
-                            b_idx += 1
-                        joined = " ".join(cont).strip()
-                        return joined or _read_legacy_stub_source(content)
-                    res = _unquote_yaml_scalar(cv_clean)
-                    return res or _read_legacy_stub_source(content)
-            b_idx += 1
-        return _read_legacy_stub_source(content)
-    return _read_legacy_stub_source(content)
+            if not b.startswith((" ", "\t")):
+                break
+            ind = b[: len(b) - len(b.lstrip(" \t"))]
+            if child_indent is None:
+                child_indent = ind
+            if ind == child_indent and ":" in bs:
+                ck, cv = bs.split(":", 1)
+                if _unquote_scalar(ck) == "source":
+                    res = _unquote_scalar(cv)
+                    if res and res not in (">", "|", ">-", "|-", ">+", "|+"):
+                        return res
+        return None
+    return None
 
 
 def inject_copy_source(content: str, source: str) -> str:
-    """Write metadata.source into SKILL.md YAML frontmatter without duplicate keys."""
-    source_json = json.dumps(source, ensure_ascii=False)
-    split = _split_frontmatter(content)
-    if split is None:
-        sep = "" if not content or content.startswith(("\n", "\r\n")) else "\n"
-        prefix = f"---\nmetadata:\n  source: {source_json}\n---\n"
-        return prefix + (content.lstrip("\r\n") if sep == "" and content else content)
+    """Stamp metadata.source into SKILL.md frontmatter in canonical block form."""
+    src_json = json.dumps(source, ensure_ascii=False)
+    eol = "\r\n" if content.startswith("---\r\n") else "\n"
+    raw_lines = content.splitlines(keepends=True)
+    end = None
+    if raw_lines and raw_lines[0].rstrip("\r\n").strip() == "---":
+        for i in range(1, len(raw_lines)):
+            ln = raw_lines[i].rstrip("\r\n")
+            if not ln.startswith((" ", "\t")) and ln.strip() in ("---", "..."):
+                end = i
+                break
+    if end is None:
+        body = content.lstrip("\r\n") if not content.strip() else content
+        return f"---\nmetadata:\n  source: {src_json}\n---\n" + body
 
-    fm_lines, fence, rest, eol = split
-    new_fm = list(fm_lines)
+    fm = [ln.rstrip("\r\n") for ln in raw_lines[1:end]]
+    fence = raw_lines[end].rstrip("\r\n").strip()
+    rest = "".join(raw_lines[end + 1 :])
 
-    meta_idx: int | None = None
-    for idx, line in enumerate(new_fm):
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or line.startswith((" ", "\t")):
-            continue
-        if ":" in line and _unquote_yaml_scalar(line.split(":", 1)[0]) == "metadata":
-            meta_idx = idx
-            break
-
+    meta_idx = next(
+        (
+            i
+            for i, ln in enumerate(fm)
+            if ln.strip()
+            and not ln.strip().startswith("#")
+            and not ln.startswith((" ", "\t"))
+            and ":" in ln
+            and _unquote_scalar(ln.split(":", 1)[0]) == "metadata"
+        ),
+        None,
+    )
     if meta_idx is None:
-        new_fm.append("metadata:")
-        new_fm.append(f"  source: {source_json}")
+        fm.extend(["metadata:", f"  source: {src_json}"])
     else:
-        line = new_fm[meta_idx]
-        k_raw, v_raw = line.split(":", 1)
-        v_clean = _strip_yaml_comment(v_raw).lstrip()
-        if v_clean.startswith("{"):
-            brace_col = line.index("{", len(k_raw) + 1)
-            end_pos = _find_flow_map_end(new_fm, meta_idx, brace_col)
-            if end_pos is not None:
-                end_line, end_col = end_pos
-                if end_line == meta_idx:
-                    flow_str = line[brace_col : end_col + 1]
-                    updated_flow = _upsert_flow_map_source(flow_str, source_json)
-                    new_fm[meta_idx] = (
-                        line[:brace_col] + updated_flow + line[end_col + 1 :]
-                    )
-                else:
-                    parts = [
-                        line[brace_col:],
-                        *new_fm[meta_idx + 1 : end_line],
-                        new_fm[end_line][: end_col + 1],
-                    ]
-                    updated_flow = _upsert_flow_map_source(
-                        "\n".join(parts), source_json
-                    )
-                    rebuilt = (
-                        line[:brace_col]
-                        + updated_flow
-                        + new_fm[end_line][end_col + 1 :]
-                    ).split("\n")
-                    new_fm[meta_idx : end_line + 1] = rebuilt
-            else:
-                new_fm[meta_idx] = "metadata:"
-                new_fm.insert(meta_idx + 1, f"  source: {source_json}")
+        v_part = fm[meta_idx].split(":", 1)[1].strip()
+        block_end = meta_idx + 1
+        if v_part.startswith("{"):
+            while block_end < len(fm) and "}" not in fm[block_end - 1]:
+                block_end += 1
+            flow_raw = " ".join(
+                [v_part, *(ln.strip() for ln in fm[meta_idx + 1 : block_end])]
+            )
+            inner = flow_raw[flow_raw.find("{") + 1 : flow_raw.rfind("}")]
+            kept = [
+                f"  {_unquote_scalar(m.group(1))}: {m.group(2).strip()}"
+                for m in re.finditer(
+                    r"""(?:^|,)\s*(['"]?[\w.-]+['"]?)\s*:\s*("(?:\\.|[^"])*"|'(?:''|[^'])*'|[^,#}]+)""",
+                    inner,
+                )
+                if _unquote_scalar(m.group(1)) != "source"
+            ]
+            fm[meta_idx:block_end] = ["metadata:", *kept, f"  source: {src_json}"]
         else:
-            # Block mapping (or empty/null metadata:)
-            new_fm[meta_idx] = "metadata:"
-            scan_end = meta_idx + 1
-            while scan_end < len(new_fm):
-                b_line = new_fm[scan_end]
-                b_stripped = b_line.strip()
-                if (
-                    not b_stripped
-                    or b_stripped.startswith("#")
-                    or b_line.startswith((" ", "\t"))
-                ):
-                    scan_end += 1
-                else:
-                    break
-            # Keep trailing blank lines outside the metadata block.
-            block_end = scan_end
-            while block_end > meta_idx + 1 and not new_fm[block_end - 1].strip():
+            while block_end < len(fm) and (
+                not fm[block_end].strip()
+                or fm[block_end].strip().startswith("#")
+                or fm[block_end].startswith((" ", "\t"))
+            ):
+                block_end += 1
+            while block_end > meta_idx + 1 and not fm[block_end - 1].strip():
                 block_end -= 1
-
+            kept_block: list[str] = []
             child_indent = "  "
-            for b_idx in range(meta_idx + 1, block_end):
-                b_line = new_fm[b_idx]
-                b_stripped = b_line.strip()
-                if b_stripped and not b_stripped.startswith("#"):
-                    child_indent = b_line[: len(b_line) - len(b_line.lstrip(" \t"))]
-                    break
-
-            src_start: int | None = None
-            src_end: int | None = None
-            b_idx = meta_idx + 1
-            while b_idx < block_end:
-                b_line = new_fm[b_idx]
-                b_stripped = b_line.strip()
-                if not b_stripped or b_stripped.startswith("#"):
-                    b_idx += 1
-                    continue
-                ind = b_line[: len(b_line) - len(b_line.lstrip(" \t"))]
-                if ind == child_indent and ":" in b_stripped:
-                    ck_raw = b_stripped.split(":", 1)[0]
-                    if _unquote_yaml_scalar(ck_raw) == "source":
-                        src_start = b_idx
-                        b_idx += 1
-                        while b_idx < block_end:
-                            cl = new_fm[b_idx]
-                            cs = cl.strip()
-                            if not cs:
-                                break
-                            cind = cl[: len(cl) - len(cl.lstrip(" \t"))]
-                            if len(cind) <= len(child_indent):
-                                break
-                            b_idx += 1
-                        src_end = b_idx
-                        break
-                b_idx += 1
-
-            source_line = f"{child_indent}source: {source_json}"
-            if src_start is not None and src_end is not None:
-                new_fm[src_start:src_end] = [source_line]
-            else:
-                new_fm.insert(block_end, source_line)
-
-    header = eol.join(["---", *new_fm, fence]) + eol
-    return header + rest
+            b_i = meta_idx + 1
+            while b_i < block_end:
+                bl = fm[b_i]
+                bs = bl.strip()
+                if bs and not bs.startswith("#"):
+                    ind = bl[: len(bl) - len(bl.lstrip(" \t"))]
+                    if child_indent == "  ":
+                        child_indent = ind
+                    if (
+                        ind == child_indent
+                        and ":" in bs
+                        and _unquote_scalar(bs.split(":", 1)[0]) == "source"
+                    ):
+                        b_i += 1
+                        while b_i < block_end and (
+                            not fm[b_i].strip()
+                            or len(fm[b_i]) - len(fm[b_i].lstrip(" \t"))
+                            > len(child_indent)
+                        ):
+                            b_i += 1
+                        continue
+                kept_block.append(bl)
+                b_i += 1
+            fm[meta_idx:block_end] = [
+                "metadata:",
+                *kept_block,
+                f"{child_indent}source: {src_json}",
+            ]
+    return eol.join(["---", *fm, fence]) + eol + rest
 
 
 def read_copy_source(entry_dir: Path) -> Path | None:
@@ -671,10 +313,9 @@ def read_copy_source(entry_dir: Path) -> Path | None:
         return None
     try:
         with open(skill_md, encoding="utf-8", errors="replace") as f:
-            content = f.read(65536)
+            raw = read_copy_source_from_content(f.read(65536))
     except OSError:
         return None
-    raw = read_copy_source_from_content(content)
     if not raw or not raw.startswith(("/", "~/")):
         return None
     return Path(raw).expanduser()
@@ -690,81 +331,37 @@ def copy_source_exists(target: Path) -> bool:
         return False
 
 
-def _should_ignore_copy_name(name: str) -> bool:
-    return name in COPY_IGNORE_NAMES or name.startswith(".SKILL.md.tmp-")
-
-
-def render_copied_skill_md(
-    read_dir: Path, source_str: str, fallback_name: str
-) -> bytes:
-    """Render the UTF-8 SKILL.md bytes expected in a copy from read_dir."""
-    src_md = read_dir / "SKILL.md"
-    if src_md.is_file():
-        content = src_md.read_text(encoding="utf-8", errors="replace")
-        return inject_copy_source(content, source_str).encode("utf-8")
-    fallback = (
-        "---\n"
-        f"name: {json.dumps(fallback_name, ensure_ascii=False)}\n"
-        "metadata:\n"
-        f"  source: {json.dumps(source_str, ensure_ascii=False)}\n"
-        "---\n"
-    )
-    return fallback.encode("utf-8")
-
-
-def _copy_tree_filtered(
-    src_dir: Path, dst_dir: Path, visited: set[tuple[int, int]] | None = None
-) -> None:
-    """Copy src_dir into dst_dir, dereferencing symlinks and skipping caches."""
-    if visited is None:
-        try:
-            st0 = src_dir.stat()
-            visited = {(st0.st_dev, st0.st_ino)}
-        except OSError:
-            visited = set()
-    for item in sorted(src_dir.iterdir(), key=lambda p: p.name):
-        if _should_ignore_copy_name(item.name):
-            continue
-        try:
-            st = item.stat()
-        except OSError:
-            # Skip broken internal symlinks or unreadable entries.
-            continue
-        if stat.S_ISDIR(st.st_mode):
-            dev_ino = (st.st_dev, st.st_ino)
-            if dev_ino in visited:
-                continue
-            sub_dst = dst_dir / item.name
-            sub_dst.mkdir(parents=True, exist_ok=True)
-            _copy_tree_filtered(item, sub_dst, visited | {dev_ino})
-        elif stat.S_ISREG(st.st_mode):
-            dst_file = dst_dir / item.name
-            shutil.copy2(item, dst_file, follow_symlinks=True)
-            mode = stat.S_IMODE(st.st_mode)
-            if (mode & 0o600) != 0o600:
-                os.chmod(dst_file, mode | 0o600)
-
-
 def copy_skill_dir(dest_skill_dir: Path, src: Path) -> None:
     """Atomically copy skill directory src to dest_skill_dir with metadata.source."""
-    scan_path = get_api().scan_paths.get(os.path.normpath(src))
-    read_dir = Path(scan_path) if scan_path else src
+    read_dir = Path(get_api().scan_paths.get(os.path.normpath(src)) or src)
     if not read_dir.is_dir():
         raise FileNotFoundError(f"skill source directory does not exist: {src}")
-
     dest_skill_dir.parent.mkdir(parents=True, exist_ok=True)
-    tmp_dir = Path(
-        tempfile.mkdtemp(
-            prefix=f".{dest_skill_dir.name}.tmp-",
-            dir=str(dest_skill_dir.parent),
-        )
-    )
+    tmp_dir = dest_skill_dir.with_name(f".{dest_skill_dir.name}.tmp-{os.getpid()}")
+    shutil.rmtree(tmp_dir, ignore_errors=True)
     old_dir: Path | None = None
     try:
-        _copy_tree_filtered(read_dir, tmp_dir)
-        (tmp_dir / "SKILL.md").write_bytes(
-            render_copied_skill_md(read_dir, str(src), src.name)
+        shutil.copytree(
+            read_dir,
+            tmp_dir,
+            symlinks=False,
+            ignore=shutil.ignore_patterns(*COPY_IGNORE_PATTERNS),
         )
+        for root_s, _dirs, files in os.walk(tmp_dir):
+            os.chmod(root_s, os.stat(root_s).st_mode | 0o200)
+            for fn in files:
+                fp = os.path.join(root_s, fn)
+                os.chmod(fp, os.stat(fp).st_mode | 0o600)
+        src_md = tmp_dir / "SKILL.md"
+        if src_md.is_file():
+            raw_md = src_md.read_text(encoding="utf-8", errors="replace")
+            stamped = inject_copy_source(raw_md, str(src))
+        else:
+            stamped = (
+                f"---\nname: {json.dumps(src.name, ensure_ascii=False)}\n"
+                f"metadata:\n  source: {json.dumps(str(src), ensure_ascii=False)}\n---\n"
+            )
+        src_md.write_text(stamped, encoding="utf-8")
         if dest_skill_dir.is_symlink() or dest_skill_dir.is_file():
             dest_skill_dir.unlink()
             os.replace(tmp_dir, dest_skill_dir)
@@ -781,99 +378,8 @@ def copy_skill_dir(dest_skill_dir: Path, src: Path) -> None:
     except Exception:
         shutil.rmtree(tmp_dir, ignore_errors=True)
         if old_dir is not None and old_dir.exists() and not dest_skill_dir.exists():
-            try:
-                os.replace(old_dir, dest_skill_dir)
-            except OSError:
-                pass
+            os.replace(old_dir, dest_skill_dir)
         raise
-
-
-def _walk_source_tree(
-    src_dir: Path,
-    rel_prefix: Path = Path(),
-    visited: set[tuple[int, int]] | None = None,
-) -> tuple[set[Path], dict[Path, Path]]:
-    """Collect (relative_dirs, {relative_file: real_source_file}) from src_dir."""
-    dirs: set[Path] = set()
-    files: dict[Path, Path] = {}
-    if visited is None:
-        try:
-            st0 = src_dir.stat()
-            visited = {(st0.st_dev, st0.st_ino)}
-        except OSError:
-            visited = set()
-    for item in sorted(src_dir.iterdir(), key=lambda p: p.name):
-        if _should_ignore_copy_name(item.name):
-            continue
-        try:
-            st = item.stat()
-        except OSError:
-            continue
-        rel = rel_prefix / item.name
-        if stat.S_ISDIR(st.st_mode):
-            dev_ino = (st.st_dev, st.st_ino)
-            if dev_ino in visited:
-                continue
-            dirs.add(rel)
-            sub_d, sub_f = _walk_source_tree(item, rel, visited | {dev_ino})
-            dirs |= sub_d
-            files.update(sub_f)
-        elif stat.S_ISREG(st.st_mode):
-            files[rel] = item
-    return dirs, files
-
-
-def copy_has_drifted(copy_dir: Path, src: Path) -> bool:
-    """Whether a managed copy's files differ from its canonical source directory."""
-    if not copy_source_exists(src):
-        return False
-    scan_path = get_api().scan_paths.get(os.path.normpath(src))
-    read_dir = Path(scan_path) if scan_path else src
-    try:
-        exp_dirs, exp_files = _walk_source_tree(read_dir)
-        exp_files.setdefault(Path("SKILL.md"), read_dir / "SKILL.md")
-
-        act_dirs: set[Path] = set()
-        act_files: set[Path] = set()
-        stack: list[tuple[Path, Path]] = [(copy_dir, Path())]
-        while stack:
-            cur_dir, rel_prefix = stack.pop()
-            for item in cur_dir.iterdir():
-                if _should_ignore_copy_name(item.name):
-                    continue
-                if item.is_symlink():
-                    return True
-                rel = rel_prefix / item.name
-                if item.is_dir():
-                    act_dirs.add(rel)
-                    stack.append((item, rel))
-                elif item.is_file():
-                    act_files.add(rel)
-                else:
-                    return True
-
-        if exp_dirs != act_dirs or set(exp_files.keys()) != act_files:
-            return True
-
-        expected_md = render_copied_skill_md(read_dir, str(src), src.name)
-        if (copy_dir / "SKILL.md").read_bytes() != expected_md:
-            return True
-
-        for rel, src_file in exp_files.items():
-            if rel == Path("SKILL.md"):
-                continue
-            dst_file = copy_dir / rel
-            src_st = src_file.stat()
-            dst_st = dst_file.stat(follow_symlinks=False)
-            if src_st.st_size != dst_st.st_size:
-                return True
-            if bool(src_st.st_mode & 0o111) != bool(dst_st.st_mode & 0o111):
-                return True
-            if src_file.read_bytes() != dst_file.read_bytes():
-                return True
-    except OSError:
-        return True
-    return False
 
 
 def remove_skill_entry(path: Path, uses_copies: bool = True) -> None:
@@ -994,15 +500,22 @@ class Workspace:
                         dangling.append(item)
                 elif self.is_tracked(item):
                     continue
-                elif self.uses_copies and read_copy_source(item) is not None:
-                    actual.add(item.name)
+                elif self.uses_copies:
+                    copy_src = read_copy_source(item)
+                    if copy_src is not None:
+                        if copy_source_exists(copy_src):
+                            actual.add(item.name)
+                        else:
+                            dangling.append(item)
+                    else:
+                        unmanaged.append(item)
                 else:
                     unmanaged.append(item)
         return actual, unmanaged, dangling
 
     def recorded_names(self) -> set[str]:
         """Entry names the scope's records list: every managed entry, broken or
-        not, so a broken link left by a demoted default stays out of 'git status'."""
+        not, so a broken entry stays out of 'git status'."""
         live, _, dangling = self.get_actual_skills()
         return live | {p.name for p in dangling}
 
@@ -1027,29 +540,6 @@ class Workspace:
     def doctor_issues(self) -> list[str]:
         """Returns backend-specific findings (read-only)."""
         return []
-
-
-class FileStateMixin:
-    """Stores the managed-skill list as one name per line in self.state_file."""
-
-    def get_managed_skills(self):
-        if not self.state_file.is_file():
-            return []
-        with open(self.state_file, encoding="utf-8", errors="replace") as f:
-            return sorted({line.strip() for line in f if line.strip()})
-
-    def save_managed_skills(self, skills):
-        skills = sorted(set(skills))
-        if not skills:
-            if self.state_file.is_file():
-                self.state_file.unlink()
-            return
-        self.state_file.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.state_file, "w", encoding="utf-8") as f:
-            f.writelines(item + "\n" for item in skills)
-
-    def is_managed(self) -> bool:
-        return self.state_file.is_file()
 
 
 class GitWorkspace(Workspace):
@@ -1270,9 +760,6 @@ class AgyBrainWorkspace(Workspace):
     def __init__(self, root: Path):
         super().__init__(root)
         self.dest_dir = self.root / ".agents" / "skills"
-        self.legacy_scratch_dir = self.root / "scratch" / "skills"
-        self.legacy_skills_json = self.root / ".agents" / "skills.json"
-        self.legacy_skills_meta = self.root / ".agents" / "skills.json.metadata.json"
 
     @classmethod
     def detect(cls):
@@ -1298,50 +785,6 @@ class AgyBrainWorkspace(Workspace):
                 self.root / d for d in os.environ["SKILL_DEST_DIRS"].split(":") if d
             ]
         return [self.dest_dir]
-
-    def save_exclude_block(self, _skills) -> None:
-        # Migrate any non-default legacy scratch/skills symlinks into copies,
-        # then remove legacy scratch/skills and .agents/skills.json.
-        if self.legacy_scratch_dir.is_dir():
-            user_gemini = Path.home() / ".gemini/config/skills"
-            for p in sorted(self.legacy_scratch_dir.iterdir(), key=lambda x: x.name):
-                if not p.is_symlink():
-                    continue
-                try:
-                    target = absolute_target(p)
-                except OSError:
-                    target = None
-                dest_copy = self.dest_dir / p.name
-                if (
-                    target is not None
-                    and link_origin(target) != "default"
-                    and copy_source_exists(target)
-                    and not (user_gemini / p.name).exists()
-                    and not dest_copy.exists()
-                ):
-                    copy_skill_dir(dest_copy, target)
-                p.unlink(missing_ok=True)
-            prune_dirs([self.legacy_scratch_dir])
-        self.legacy_skills_json.unlink(missing_ok=True)
-        self.legacy_skills_meta.unlink(missing_ok=True)
-        agents_dir = self.root / ".agents"
-        try:
-            if agents_dir.is_dir() and not any(agents_dir.iterdir()):
-                agents_dir.rmdir()
-        except OSError:
-            pass
-
-    def doctor_issues(self) -> list[str]:
-        issues = []
-        if self.legacy_skills_json.exists():
-            issues.append(
-                f"legacy {clean_p(self.legacy_skills_json)} present (run 'skill --scope session prune' to clean up)"
-            )
-        if self.legacy_scratch_dir.is_dir() and any(self.legacy_scratch_dir.iterdir()):
-            issues.append(
-                f"legacy {clean_p(self.legacy_scratch_dir)} entries present (run 'skill --scope session prune' to clean up)"
-            )
-        return issues
 
     @classmethod
     def from_conversation_env(cls):
@@ -1417,13 +860,6 @@ class UserWorkspace(Workspace):
                 home / ".gemini/jetski/cli",
             ],
         }
-
-
-def get_legacy_defaults_dir() -> Path:
-    """Legacy defaults directory (~/.local/state/skill/defaults), recognized so
-    'doctor' and 'prune' can identify and retire old indirect links."""
-    base = Path(os.environ.get("XDG_STATE_HOME") or "~/.local/state").expanduser()
-    return Path(os.path.abspath(base)) / "skill" / "defaults"
 
 
 class DefaultWorkspace(Workspace):
@@ -1766,7 +1202,6 @@ class SkillAPI:
     """Unified API surface passed to a plugin's register() function."""
 
     Workspace = Workspace
-    FileStateMixin = FileStateMixin
 
     def __init__(self):
         self.workspace_classes = []
@@ -2130,52 +1565,25 @@ def rel_to(root: Path, p: Path):
 
 
 class DiskEntry:
-    """A managed skill entry (symlink or session pointer stub)."""
+    """A managed skill entry (symlink or metadata.source-stamped copy)."""
 
     def __init__(self, dest, link_name, path, kind, target, tracked):
-        self.dest = dest  # the destination directory containing the entry
-        self.link_name = link_name  # the entry's basename
-        self.path = path  # dest / link_name
-        self.kind = kind  # "live" (target exists) or "dangling" (target missing)
-        self.target = target  # canonical source path, when readable
-        self.tracked = tracked  # whether the entry is VCS-tracked
-
-    @property
-    def origin(self) -> str:
-        """'default' for a legacy link through ~/.local/state/skill/defaults,
-        else 'added'."""
-        return link_origin(self.target)
+        self.dest = dest
+        self.link_name = link_name
+        self.path = path
+        self.kind = kind  # "live" (source exists) or "dangling" (source missing)
+        self.target = target
+        self.tracked = tracked
 
     @property
     def source(self) -> Path | None:
-        """The skill directory the entry stands for, following one legacy
-        defaults hop if present.
-
-        Read lexically, never resolved: resolving a link into a network-backed
-        mount costs a remote round trip per path component.
-        """
-        if self.target is None or link_origin(self.target) != "default":
-            return self.target
-        try:
-            return absolute_target(self.target)
-        except OSError:
-            return self.target
+        return self.target
 
 
 def absolute_target(link: Path) -> Path:
     """The link's target as an absolute path, without resolving it further."""
     target = Path(os.readlink(link))
     return target if target.is_absolute() else link.parent / target
-
-
-def link_origin(target: Path | None) -> str:
-    if target is not None:
-        parent_norm = os.path.normpath(target.parent)
-        if parent_norm == os.path.normpath(
-            get_legacy_defaults_dir()
-        ) or parent_norm.endswith(os.sep + os.path.join("skill", "defaults")):
-            return "default"
-    return "added"
 
 
 def _entry_target(p: Path, uses_copies: bool) -> Path | None:
@@ -2191,13 +1599,7 @@ def _entry_target(p: Path, uses_copies: bool) -> Path | None:
 
 def scan_links(ws) -> tuple[list[DiskEntry], list[Path]]:
     """Every managed skill entry in the scope's destination directories, plus
-    any untracked unmanaged items found there.
-
-    Whether a symlink is VCS-tracked is only worked out for broken links; live
-    non-symlink directories are checked per destination path so a VCS-tracked
-    skill sharing a name with an untracked copy in a sibling destination is
-    never treated as a managed copy.
-    """
+    any untracked unmanaged items found there."""
     live, unmanaged, dangling = ws.get_actual_skills()
     try:
         dest_dirs = ws.get_dest_dirs()
@@ -2224,12 +1626,9 @@ def scan_links(ws) -> tuple[list[DiskEntry], list[Path]]:
 
 
 def sync_records(ws) -> None:
-    """Rewrite the scope's records (git excludes, legacy cleanup) from disk."""
+    """Rewrite the scope's exclude records from disk."""
     if hasattr(ws, "save_exclude_block"):
         ws.save_exclude_block(ws.recorded_names())
-    if hasattr(ws, "save_managed_skills"):
-        live, _, _ = ws.get_actual_skills()
-        ws.save_managed_skills(list(live))
 
 
 def _expected_names_for_spec(spec: str) -> set[str]:
@@ -2487,94 +1886,6 @@ def cmd_add(specs):
         sys.exit(1)
 
 
-_SCOPE_LOCK_FD: int | None = None
-
-
-def lock_scope_root(root: Path) -> None:
-    """Hold an exclusive lock on the scope's root directory until exit.
-
-    flock(2) on a read-only descriptor of the directory itself: no lock file
-    to create or leave behind, and the kernel drops the lock when the process
-    ends. Best effort: a filesystem without flock support proceeds unlocked.
-    """
-    global _SCOPE_LOCK_FD
-    try:
-        import fcntl
-
-        fd = os.open(root, os.O_RDONLY)
-    except (ImportError, OSError):
-        return
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-    except OSError:
-        os.close(fd)
-        return
-    _SCOPE_LOCK_FD = fd
-
-
-def cmd_prune(args: list[str]) -> None:
-    """Retire legacy indirect default links, sync exclude records, and fail if
-    ERROR-level doctor findings remain (used by agent launch preflight)."""
-    quiet = any(a in ("-q", "--quiet") for a in args)
-    extra = [a for a in args if a not in ("-q", "--quiet")]
-    if extra:
-        cmderr("prune", f"unexpected argument '{extra[0]}'", code=2)
-
-    if _SCOPE == "workspace" and is_home_workspace():
-        return
-
-    ws = get_workspace()
-    if type(ws) is DefaultWorkspace and not any(
-        (ws.root / sd).is_dir() for sd in anchor_subdirs()
-    ):
-        return
-    try:
-        dest_dirs = ws.get_dest_dirs()
-    except RuntimeError as e:
-        cmderr("prune", str(e))
-
-    lock_scope_root(ws.root)
-
-    changes = []
-    entries, _ = scan_links(ws)
-    for e in entries:
-        if e.tracked:
-            continue
-        if e.origin == "default":
-            remove_skill_entry(e.path, ws.uses_copies)
-            changes.append(f"removed legacy default link {rel_to(ws.root, e.path)}")
-        elif e.kind == "dangling":
-            print(
-                f"skill: warning: kept broken link {rel_to(ws.root, e.path)} "
-                f"(its source is missing; 'skill remove {e.link_name}' drops it)",
-                file=sys.stderr,
-            )
-        elif (
-            not e.path.is_symlink()
-            and e.source is not None
-            and not copy_source_exists(e.source)
-        ):
-            print(
-                f"skill: warning: kept skill copy {rel_to(ws.root, e.path)} "
-                f"(its source {clean_p(e.source)} is missing; 'skill remove {e.link_name}' drops it)",
-                file=sys.stderr,
-            )
-
-    if changes or ws.doctor_issues():
-        sync_records(ws)
-        prune_dirs(dest_dirs)
-    if changes and not quiet:
-        print_workspace_root(ws)
-        for line in changes:
-            print(line, file=sys.stderr)
-
-    if not cmd_doctor(ws=ws, check_catalog=False, errors_only=True):
-        cmderr(
-            "prune",
-            f"{clean_p(ws.root)} has problems; see 'skill doctor'",
-        )
-
-
 def is_home_workspace() -> bool:
     """Whether the workspace scope would land in the home directory itself."""
     home = Path.home().resolve()
@@ -2634,17 +1945,7 @@ def cmd_remove(names):
             remove_skill_entry(e.path, ws.uses_copies)
             removed.append(e)
             removed_names.add(e.link_name)
-        legacy_removed = False
-        if isinstance(ws, AgyBrainWorkspace) and ws.legacy_scratch_dir.is_dir():
-            for cand in sorted(candidates):
-                if not cand or "/" in cand or cand in (".", ".."):
-                    continue
-                lp = ws.legacy_scratch_dir / cand
-                if lp.is_symlink():
-                    lp.unlink(missing_ok=True)
-                    legacy_removed = True
-                    removed_names.add(cand)
-        if not matched and not legacy_removed and not quiet:
+        if not matched and not quiet:
             print(f"skill remove: {arg} not present", file=sys.stderr)
 
     if not quiet:
@@ -2673,7 +1974,6 @@ def cmd_list(args):
                 [
                     {
                         "name": e.link_name,
-                        "origin": e.origin,
                         "scope": ws.scope,
                         "path": str(e.source) if e.source else None,
                     }
@@ -2702,10 +2002,7 @@ def cmd_clean():
     print_workspace_root(ws)
 
     entries, unmanaged = scan_links(ws)
-    has_legacy = isinstance(ws, AgyBrainWorkspace) and (
-        ws.legacy_skills_json.exists() or ws.legacy_scratch_dir.is_dir()
-    )
-    if not entries and not has_legacy and not any(d.is_dir() for d in dest_dirs):
+    if not entries and not any(d.is_dir() for d in dest_dirs):
         print("clean: nothing to do", file=sys.stderr)
         return
 
@@ -2716,12 +2013,6 @@ def cmd_clean():
         remove_skill_entry(e.path, ws.uses_copies)
         removed += 1
         print(f"removed {rel_to(ws.root, e.path)}", file=sys.stderr)
-    if isinstance(ws, AgyBrainWorkspace) and ws.legacy_scratch_dir.is_dir():
-        for lp in sorted(ws.legacy_scratch_dir.iterdir(), key=lambda x: x.name):
-            if lp.is_symlink():
-                lp.unlink(missing_ok=True)
-                removed += 1
-                print(f"removed {rel_to(ws.root, lp)}", file=sys.stderr)
     kind_desc = "managed skill" if ws.uses_copies else "symlink"
     for p in unmanaged:
         print(
@@ -2993,103 +2284,10 @@ def cmd_update(names):
                     file=sys.stderr,
                 )
 
-    def _catalog_entry_meta(key: str, entry: dict) -> tuple[set[str], set[str]]:
-        short = key.split(":", 1)[-1] if ":" in key else key
-        folder_names = {short.lower()}
-        source_norms: set[str] = set()
-        if "path" in entry:
-            p = Path(entry["path"]).expanduser()
-            folder_names.add(p.name.lower())
-            source_norms.add(os.path.normpath(p))
-            if entry.get("resolve", True) and p.exists():
-                source_norms.add(os.path.normpath(os.path.realpath(p)))
-        elif "repo" in entry and "ref" in entry:
-            rc = remote_cache_dir(entry["repo"], entry["ref"], entry.get("subpath"))
-            source_norms.add(os.path.normpath(rc))
-            if rc.exists():
-                source_norms.add(os.path.normpath(os.path.realpath(rc)))
-            folder_names.add(rc.name.lower())
-            if entry.get("subpath"):
-                folder_names.add(Path(entry["subpath"]).name.lower())
-        return folder_names, source_norms
-
-    def _source_norms_for_path(p: Path) -> set[str]:
-        norms = {os.path.normpath(p)}
-        if p.exists():
-            norms.add(os.path.normpath(os.path.realpath(p)))
-        return norms
-
-    def find_catalog_matches(
-        spec: str, source_paths: list[Path] | Path | None = None
-    ) -> list[tuple[str, dict]]:
-        if spec in api.plugin_catalog:
-            return [(spec, api.plugin_catalog[spec])]
-        if ":" in spec:
-            return [
-                (key, entry)
-                for key, entry in api.plugin_catalog.items()
-                if key.lower() == spec.lower()
-            ]
-        spec_low = spec.lower()
-        exact = [
-            (key, entry)
-            for key, entry in api.plugin_catalog.items()
-            if (key.split(":", 1)[-1] if ":" in key else key).lower() == spec_low
-        ]
-        by_folder = [
-            (key, entry)
-            for key, entry in api.plugin_catalog.items()
-            if spec_low in _catalog_entry_meta(key, entry)[0]
-        ]
-        src_list = (
-            [source_paths]
-            if isinstance(source_paths, Path)
-            else list(source_paths or [])
-        )
-        if src_list:
-            sp_norms: set[str] = set()
-            for sp in src_list:
-                sp_norms |= _source_norms_for_path(sp)
-            by_source = [
-                (key, entry)
-                for key, entry in api.plugin_catalog.items()
-                if _catalog_entry_meta(key, entry)[1] & sp_norms
-            ]
-            if exact:
-                overlap = [m for m in exact if m in by_source]
-                if overlap:
-                    return overlap
-                if len(exact) == 1:
-                    return exact
-            if by_folder:
-                overlap = [m for m in by_folder if m in by_source]
-                if overlap:
-                    return overlap
-            if by_source and not exact:
-                return by_source
-        matches = exact or by_folder
-        if len(matches) > 1:
-            non_remote = [m for m in matches if "repo" not in m[1]]
-            if non_remote:
-                return non_remote
-        return matches
-
-    def active_scope_workspace() -> Workspace | None:
-        if _SCOPE == "workspace":
-            if is_home_workspace() or AgyBrainWorkspace.detect():
-                return None
-            ws_cand = get_workspace()
-            if type(ws_cand) is DefaultWorkspace and not any(
-                (ws_cand.root / sd).is_dir() for sd in anchor_subdirs()
-            ):
-                return None
-            return ws_cand
-        return get_workspace()
-
     def refresh_copies(entries_to_refresh: list[DiskEntry]) -> None:
         reported: set[str] = set()
         for e in entries_to_refresh:
-            if e.source is None:
+            if e.source is None or e.path.is_symlink() or e.tracked:
                 continue
             if not copy_source_exists(e.source):
                 print(
@@ -3111,96 +2309,86 @@ def cmd_update(names):
         print("catalog: metadata index updated", file=sys.stderr)
         return
 
-    ws = active_scope_workspace()
+    ws = None
+    if _SCOPE != "workspace" or (
+        not is_home_workspace() and not AgyBrainWorkspace.detect()
+    ):
+        ws_cand = get_workspace()
+        if type(ws_cand) is not DefaultWorkspace or any(
+            (ws_cand.root / sd).is_dir() for sd in anchor_subdirs()
+        ):
+            ws = ws_cand
 
     if len(names) == 1 and names[0] == "--all":
-        if _SCOPE == "workspace":
-            for name, entry in api.plugin_catalog.items():
-                update_catalog_entry(name, entry)
-        if ws is not None:
-            entries, _ = scan_links(ws)
-            if ws.uses_copies:
-                copies = [
-                    e
-                    for e in entries
-                    if not e.path.is_symlink()
-                    and not e.tracked
-                    and e.source is not None
-                ]
-                if _SCOPE != "workspace":
-                    updated_cat: set[str] = set()
-                    for e in copies:
-                        for cat_name, cat_entry in find_catalog_matches(
-                            e.link_name, e.source
-                        ):
-                            if cat_name not in updated_cat and (
-                                "repo" in cat_entry or cat_entry.get("generated")
-                            ):
-                                updated_cat.add(cat_name)
-                                update_catalog_entry(
-                                    cat_name, cat_entry, quiet_local=True
-                                )
-                refresh_copies(copies)
-            else:
-                updated_cat = set()
-                for e in entries:
-                    if e.tracked:
-                        continue
-                    for cat_name, cat_entry in find_catalog_matches(
-                        e.link_name, e.source
-                    ):
-                        if cat_name not in updated_cat and (
-                            "repo" in cat_entry or cat_entry.get("generated")
-                        ):
-                            updated_cat.add(cat_name)
-                            update_catalog_entry(cat_name, cat_entry, quiet_local=True)
+        if _SCOPE != "session":
+            for cname, centry in api.plugin_catalog.items():
+                update_catalog_entry(cname, centry, quiet_local=(_SCOPE == "user"))
+        if ws is not None and ws.uses_copies:
+            refresh_copies(scan_links(ws)[0])
         return
 
-    ws_entries = scan_links(ws)[0] if ws is not None else []
-
-    # Update specific skill names
+    ws_entries = scan_links(ws)[0] if (ws is not None and ws.uses_copies) else []
     for name in names:
-        candidates = {
-            name,
-            name.split(":", 1)[-1],
-            os.path.basename(name.rstrip("/")),
-        } | _expected_names_for_spec(name)
-        entry_matches = [
+        cat_matches = (
+            [(name, api.plugin_catalog[name])]
+            if name in api.plugin_catalog
+            else (
+                [
+                    (k, v)
+                    for k, v in api.plugin_catalog.items()
+                    if k.lower() == name.lower()
+                ]
+                if ":" in name
+                else [
+                    (k, v)
+                    for k, v in api.plugin_catalog.items()
+                    if (k.split(":", 1)[-1] if ":" in k else k).lower() == name.lower()
+                ]
+            )
+        )
+        if len(cat_matches) > 1:
+            local_only = [m for m in cat_matches if "repo" not in m[1]]
+            if local_only:
+                cat_matches = local_only
+        copy_names = {name, name.split(":", 1)[-1]} | _expected_names_for_spec(name)
+        copies = [
             e
             for e in ws_entries
-            if not e.tracked and e.source is not None and e.link_name in candidates
+            if not e.path.is_symlink()
+            and not e.tracked
+            and e.source is not None
+            and e.link_name in copy_names
         ]
-        hint_sources = [e.source for e in entry_matches if e.source is not None]
-        cat_matches = find_catalog_matches(name, hint_sources)
-        for cat_name, _cat_entry in cat_matches:
-            candidates |= _expected_names_for_spec(cat_name)
-
-        cat_source_norms: set[str] = set()
-        for cat_name, cat_entry in cat_matches:
-            cat_source_norms |= _catalog_entry_meta(cat_name, cat_entry)[1]
-
-        copy_matches: list[DiskEntry] = []
-        if ws is not None and ws.uses_copies:
-            for e in ws_entries:
-                if e.path.is_symlink() or e.tracked or e.source is None:
-                    continue
-                if cat_matches:
-                    if _source_norms_for_path(e.source) & cat_source_norms:
-                        copy_matches.append(e)
-                elif e.link_name in candidates:
-                    copy_matches.append(e)
-
-        if not cat_matches and not copy_matches:
+        # An installed copy named directly by basename refreshes from its own
+        # metadata.source even if a remote catalog skill shares that name.
+        if copies and ":" not in name and any(e.link_name == name for e in copies):
+            copy_src_norms = {os.path.normpath(e.source) for e in copies if e.source}
+            cat_matches = [
+                (k, v)
+                for k, v in api.plugin_catalog.items()
+                if (
+                    "path" in v
+                    and {
+                        os.path.normpath(Path(v["path"]).expanduser()),
+                        os.path.realpath(Path(v["path"]).expanduser()),
+                    }
+                    & copy_src_norms
+                )
+                or (
+                    "repo" in v
+                    and "ref" in v
+                    and os.path.normpath(
+                        remote_cache_dir(v["repo"], v["ref"], v.get("subpath"))
+                    )
+                    in copy_src_norms
+                )
+            ]
+        if not cat_matches and not copies:
             print(f"skill update: unknown skill '{name}'", file=sys.stderr)
             continue
-        updated_cat_single: set[str] = set()
-        for cat_name, cat_entry in cat_matches:
-            if cat_name not in updated_cat_single:
-                updated_cat_single.add(cat_name)
-                update_catalog_entry(
-                    cat_name, cat_entry, quiet_local=bool(copy_matches)
-                )
-        refresh_copies(copy_matches)
+        for cname, centry in cat_matches:
+            update_catalog_entry(cname, centry, quiet_local=bool(copies))
+        refresh_copies(copies)
 
 
 def cmd_resolve(name):
@@ -3527,17 +2715,10 @@ def cmd_doctor(
     verbose: bool = False,
     check_catalog: bool = False,
     stream=sys.stderr,
-    errors_only: bool = False,
     as_json: bool = False,
     ws=None,
 ) -> bool:
-    """Checks the health of the scope's links and of the skill catalog.
-
-    Returns True if healthy, False otherwise. By default (a full 'doctor' audit)
-    both WARNING and ERROR findings count as unhealthy. With errors_only=True
-    (the check at the end of 'prune', run as an agent launches) only
-    ERROR findings fail; WARNING findings are left out of the report.
-    """
+    """Checks the health of the scope's links, copies, and skill catalog."""
     if ws is None:
         ws = get_workspace()
     # Styling is an enhancement only: disabled when NO_COLOR is set
@@ -3644,41 +2825,25 @@ def cmd_doctor(
             }
         )
 
-    # Check 3: Installed Skills (informational). There is no expected set to
-    # compare against: a link's target says where it came from.
-    live = {}
-    for e in entries:
-        if e.kind == "live":
-            live.setdefault(e.link_name, e.origin)
-    by_origin = {
-        origin: sorted(n for n, o in live.items() if o == origin)
-        for origin in ("default", "added")
-    }
+    # Check 3: Installed Skills (informational).
+    live_names = sorted({e.link_name for e in entries if e.kind == "live"})
     installed_details = []
-    import textwrap
+    if live_names:
+        import textwrap
 
-    for origin, names in by_origin.items():
-        if names:
-            wrapped = textwrap.wrap(
-                ", ".join(names),
-                width=72,
-                break_long_words=False,
-                break_on_hyphens=False,
-            )
-            label = "Legacy default" if origin == "default" else "Skills"
-            installed_details.append(f"{label}:")
-            installed_details += [f"  {line}" for line in wrapped]
+        wrapped = textwrap.wrap(
+            ", ".join(live_names),
+            width=72,
+            break_long_words=False,
+            break_on_hyphens=False,
+        )
+        installed_details = ["Skills:", *[f"  {line}" for line in wrapped]]
     installed_verb = "installed" if ws.uses_copies else "linked"
     checks.append(
         {
             "name": "Installed Skills",
             "status": "OK",
-            "summary": f"{len(live)} skill(s) {installed_verb}"
-            + (
-                f" ({len(by_origin['default'])} legacy default)"
-                if by_origin["default"]
-                else ""
-            ),
+            "summary": f"{len(live_names)} skill(s) {installed_verb}",
             "details": installed_details,
         }
     )
@@ -3722,51 +2887,22 @@ def cmd_doctor(
             }
         )
 
-    # Check 4: Symlink Health
-    # A VCS-tracked broken link is checked-in content, not something 'skill'
-    # made, so nothing here removes it; the fix names the repository instead.
-    # A broken link added by name is only a warning: its source may be
-    # unreachable for now (an unmounted network path, a pruned cache), and
-    # 'prune' keeps it, so it must not block an agent launch.
-    stray_dangling = [
-        e.path
-        for e in entries
-        if e.path.is_symlink()
-        and e.kind == "dangling"
-        and not e.tracked
-        and e.origin == "default"
-    ]
-    added_dangling = [
-        e.path
-        for e in entries
-        if e.path.is_symlink()
-        and e.kind == "dangling"
-        and not e.tracked
-        and e.origin != "default"
-    ]
-    tracked_dangling = [
-        e.path
-        for e in entries
-        if e.path.is_symlink() and e.kind == "dangling" and e.tracked
-    ]
-    if stray_dangling or tracked_dangling or added_dangling:
+    # Check 4: Symlink Health (broken symlinks and copies with missing sources)
+    added_dangling = [e for e in entries if e.kind == "dangling" and not e.tracked]
+    tracked_dangling = [e for e in entries if e.kind == "dangling" and e.tracked]
+    if tracked_dangling or added_dangling:
         dangling_details = []
-        if stray_dangling:
-            dangling_details.append("Broken links:")
-            dangling_details += [f"  - {rel(item)}" for item in stray_dangling]
         if added_dangling:
-            dangling_details.append("Broken links to skills added by name:")
-            dangling_details += [f"  - {rel(item)}" for item in added_dangling]
+            dangling_details.append("Entries whose source is missing:")
+            dangling_details += [f"  - {rel(e.path)}" for e in added_dangling]
         if tracked_dangling:
             dangling_details.append("Broken links tracked by version control:")
-            dangling_details += [f"  - {rel(item)}" for item in tracked_dangling]
-        total = len(stray_dangling) + len(tracked_dangling) + len(added_dangling)
+            dangling_details += [f"  - {rel(e.path)}" for e in tracked_dangling]
+        total = len(tracked_dangling) + len(added_dangling)
         checks.append(
             {
                 "name": "Symlink Health",
-                "status": (
-                    "ERROR" if stray_dangling or tracked_dangling else "WARNING"
-                ),
+                "status": "ERROR" if tracked_dangling else "WARNING",
                 "summary": f"Found {total} broken link(s)",
                 "details": dangling_details,
             }
@@ -3780,57 +2916,6 @@ def cmd_doctor(
                 "details": [],
             }
         )
-
-    # Check 4b: Copy Health (non-user scopes)
-    missing_source_copies: list[DiskEntry] = []
-    drifted_copies: list[DiskEntry] = []
-    if ws.uses_copies:
-        for e in entries:
-            if e.path.is_symlink() or e.tracked:
-                continue
-            if e.source is None or not copy_source_exists(e.source):
-                missing_source_copies.append(e)
-            elif copy_has_drifted(e.path, e.source):
-                drifted_copies.append(e)
-        if missing_source_copies or drifted_copies:
-            copy_details = []
-            if missing_source_copies:
-                copy_details.append("Skill copies whose source is missing:")
-                copy_details += [
-                    f"  - {rel(e.path)} (source missing: "
-                    f"{clean_p(e.source) if e.source else '?'})"
-                    for e in missing_source_copies
-                ]
-            if drifted_copies:
-                copy_details.append("Modified or out-of-date skill copies:")
-                copy_details += [
-                    f"  - {rel(e.path)} (drifted from {clean_p(e.source)})"
-                    for e in drifted_copies
-                ]
-            parts = []
-            if missing_source_copies:
-                parts.append(f"{len(missing_source_copies)} missing-source")
-            if drifted_copies:
-                parts.append(f"{len(drifted_copies)} drifted")
-            checks.append(
-                {
-                    "name": "Copy Health",
-                    "status": "WARNING",
-                    "summary": f"Found {', '.join(parts)} skill copy/copies",
-                    "details": copy_details,
-                }
-            )
-        else:
-            checks.append(
-                {
-                    "name": "Copy Health",
-                    "status": "OK",
-                    "summary": "All skill copies match their sources",
-                    "details": [],
-                }
-            )
-    missing_source_set = set(missing_source_copies)
-    drifted_set = set(drifted_copies)
 
     # Check 5: Directory Cleanliness. The user scope's directories are shared
     # with whatever else installs skills there (a cloud platform's own, for
@@ -4058,26 +3143,12 @@ def cmd_doctor(
         }
     )
 
-    # Render checks.
-    #
-    # 'doctor' is a full audit: every non-OK check (WARNING or ERROR) is a
-    # finding and makes the command exit non-zero. 'prune' passes
-    # errors_only=True: only ERROR checks fail an agent launch, so a
-    # WARNING-only scope renders nothing and passes. A check is rendered only
-    # when it is "visible".
+    # Render checks. Every non-OK check (WARNING or ERROR) is a finding and
+    # makes 'doctor' exit non-zero.
     def is_visible(check):
-        if verbose:
-            return True
-        if check["status"] == "ERROR":
-            return True
-        if check["status"] == "WARNING":
-            return not errors_only
-        return False
+        return verbose or check["status"] != "OK"
 
-    fail = any(
-        (c["status"] == "ERROR") if errors_only else (c["status"] != "OK")
-        for c in checks
-    )
+    fail = any(c["status"] != "OK" for c in checks)
 
     def format_status(status):
         if status == "OK":
@@ -4095,17 +3166,14 @@ def cmd_doctor(
             continue
         name = check["name"]
         if name == "Symlink Health":
-            if stray_dangling:
-                check["details"].append("To resolve: prune the retired default links:")
-                check["details"].append(f"  skill {scope_opt}prune")
             if added_dangling:
                 check["details"].append(
                     "To resolve: restore the missing sources (e.g. remount or "
-                    "'skill update NAME'), or remove the links:"
+                    "'skill update NAME'), or remove the entries:"
                 )
                 check["details"].append(
                     f"  skill {scope_opt}remove "
-                    + " ".join(sorted({p.name for p in added_dangling}))
+                    + " ".join(sorted({e.link_name for e in added_dangling}))
                 )
             if tracked_dangling:
                 check["details"].append(
@@ -4114,32 +3182,13 @@ def cmd_doctor(
                 )
                 check["details"].append(
                     "  rm "
-                    + " ".join(str(rel(item)) for item in tracked_dangling)
+                    + " ".join(str(rel(e.path)) for e in tracked_dangling)
                     + "   # then 'git rm --cached' if already staged/committed"
-                )
-        elif name == "Copy Health":
-            if missing_source_copies:
-                check["details"].append(
-                    "To resolve: restore the missing sources (e.g. remount or "
-                    "'skill update NAME'), or remove the copies:"
-                )
-                check["details"].append(
-                    f"  skill {scope_opt}remove "
-                    + " ".join(sorted({e.link_name for e in missing_source_copies}))
-                )
-            if drifted_copies:
-                check["details"].append(
-                    "To resolve: refresh from source (or port local edits back "
-                    "to the source first):"
-                )
-                check["details"].append(
-                    f"  skill {scope_opt}update "
-                    + " ".join(sorted({e.link_name for e in drifted_copies}))
                 )
         elif name == "Workspace Exclusions":
             check["details"].append(
-                "To repair: any 'skill add', 'skill remove' or "
-                f"'skill {scope_opt}prune' rewrites the records."
+                "To repair: run 'skill add <name>' or 'skill remove <name>' "
+                "to rewrite the exclude block."
             )
         elif name == "Directory Cleanliness":
             check["details"].append(
@@ -4190,9 +3239,7 @@ def cmd_doctor(
                         {
                             "name": e.link_name,
                             "path": str(rel(e.path)),
-                            "origin": e.origin,
-                            "broken": e.kind == "dangling" or e in missing_source_set,
-                            "drifted": e in drifted_set,
+                            "broken": e.kind == "dangling",
                             "tracked": e.tracked,
                         }
                         for e in entries
@@ -4289,8 +3336,6 @@ Commands:
   add [-q] [-p|--prune] -
                        Read skill names from stdin
   remove [-q] NAME...  Remove a skill's entries and exclude records (alias: rm)
-  prune [-q]           Retire legacy indirect default links, sync records, and
-                       fail if 'doctor' finds errors
   list [--json]        List installed skills in the scope
   clean                Remove all managed skill entries in the scope
   doctor [--json]      Check the scope's links, copies and catalog (read-only)
@@ -4309,8 +3354,8 @@ Commands:
 Options:
   -C, --directory DIR  Run as if started in DIR instead of the current directory
   --scope SCOPE        'user', 'workspace' (default) or 'session'; only add,
-                       remove, prune, list, doctor, clean and update take a
-                       scope other than 'workspace'
+                       remove, list, doctor, clean and update take a scope
+                       other than 'workspace'
   --offline            Never fetch remote skills or metadata over the network
                        (same as AGENT_OFFLINE=1)
   --help, -h           Display this help message and exit
@@ -4368,6 +3413,8 @@ def register(api):
             Return an instance of MyCustomWorkspace if detected, else None.
             """
             return None
+
+    api.register_workspace(MyCustomWorkspace)
 
     # Skills can be added to the catalog as a GitHub tree URL, or as a dict:
     #   path       Directory holding SKILL.md; installed links point here.
@@ -4470,7 +3517,6 @@ def register(api):
         "add",
         "remove",
         "rm",
-        "prune",
         "list",
         "doctor",
         "clean",
@@ -4508,8 +3554,6 @@ def register(api):
         cmd_update(args)
     elif cmd == "add":
         cmd_add(args)
-    elif cmd == "prune":
-        cmd_prune(args)
     elif cmd in ("remove", "rm"):
         cmd_remove(args)
     elif cmd == "list":

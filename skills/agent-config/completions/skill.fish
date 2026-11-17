@@ -35,7 +35,6 @@ end
 complete -f -c skill -n __fish_use_subcommand -a add -d 'Install a skill (path or catalog name)'
 complete -f -c skill -n __fish_use_subcommand -a remove -d 'Remove a skill\'s entries'
 complete -f -c skill -n __fish_use_subcommand -a rm -d 'Remove a skill\'s entries (alias of remove)'
-complete -f -c skill -n __fish_use_subcommand -a prune -d 'Retire legacy default links, sync records, and fail on errors'
 complete -f -c skill -n __fish_use_subcommand -a list -d 'List installed skills in the chosen scope'
 complete -f -c skill -n __fish_use_subcommand -a update -d 'Refresh skill copies and plugin-provided catalog entries'
 complete -f -c skill -n __fish_use_subcommand -a clean -d 'Remove all managed skills'
@@ -48,7 +47,7 @@ complete -f -c skill -n __fish_use_subcommand -a info -d 'Show details and metad
 complete -f -c skill -n __fish_use_subcommand -a mcp -d 'Serve skills over MCP'
 
 # list
-complete -c skill -f -n '__fish_seen_subcommand_from list' -l json -d 'Emit JSON (name, origin, scope, path)'
+complete -c skill -f -n '__fish_seen_subcommand_from list' -l json -d 'Emit JSON (name, scope, path)'
 
 # doctor
 complete -c skill -f -n '__fish_seen_subcommand_from doctor' -l json -d 'Emit JSON report'
@@ -82,8 +81,8 @@ complete -c skill -f -n '__fish_seen_subcommand_from add' -s p -l prune -d 'Remo
 # remove (and rm)
 complete -c skill -f -n '__fish_seen_subcommand_from remove rm' -a '(__fish_skill_managed_skills)' -d 'Managed skill'
 
-# quiet flag (add, remove, rm, prune)
-complete -c skill -f -n '__fish_seen_subcommand_from add remove rm prune' -s q -l quiet -d 'Report only errors and warnings'
+# quiet flag (add, remove, rm)
+complete -c skill -f -n '__fish_seen_subcommand_from add remove rm' -s q -l quiet -d 'Report only errors and warnings'
 
 # update
 complete -c skill -f -n '__fish_seen_subcommand_from update' -a '(__fish_skill_catalog)' -d 'Catalog skill'

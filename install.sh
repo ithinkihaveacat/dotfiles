@@ -2441,10 +2441,6 @@ function feature_agents {
 
     for ws in "${paths_to_approve[@]}"; do
       if [ -d "$ws/.git" ] || [ -d "$ws/.agents/skills" ]; then
-        if [ -x "$SRCDIR/bin/skill" ]; then
-          (cd "$ws" && x "$SRCDIR/bin/skill" prune --quiet) ||
-            echo "warning: failed to prune legacy skill links in $ws" >&2
-        fi
         (cd "$ws" && x "$permission_tool" apply) ||
           echo "warning: failed to apply permissions in $ws" >&2
       fi

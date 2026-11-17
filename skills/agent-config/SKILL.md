@@ -67,9 +67,9 @@ skill <command> [arguments]
   directory, symlinks to `~/.dotfiles` and overlays load natively in Antigravity
   and Jetski without workspace symlink confinement or `skills.json` files.
 - **Session Scope (Per-Session / Ephemeral / Temporary / Scratch — Copies)**:
-  `skill --scope session add|remove|prune|list|doctor|clean|update` installs
-  real directory copies stamped with `metadata.source` in `SKILL.md` frontmatter
-  into the calling agent's own conversation directory, without touching the
+  `skill --scope session add|remove|list|doctor|clean|update` installs real
+  directory copies stamped with `metadata.source` in `SKILL.md` frontmatter into
+  the calling agent's own conversation directory, without touching the
   repository or user scope:
   - **Claude Code** (started through the `claude` fish wrapper): copies under
     `$AGENT_SESSION_DIR/.claude/skills`. The wrapper passes that directory to
@@ -92,23 +92,23 @@ skill <command> [arguments]
   skills in Antigravity or Jetski. A marker block in `.git/info/exclude` is
   dynamically generated to keep `git status` clean without dirtying the shared
   `.gitignore`. If another tool rewrites the exclude file, `skill doctor`
-  detects the drift, and `skill prune`, `skill add`, or `skill remove` rewrites
+  detects the drift, and `skill add`, `skill remove`, or `skill clean` rewrites
   the block.
 - **Unmanaged Directories**: Works in plain directories without VCS, copying
   skills under local destination folders with `metadata.source` in `SKILL.md`.
 - **Plugins**: Additional workspace types can be registered by dropping a Python
   file into `~/.config/skill/plugins/` that defines `register(api)` and calls
-  `api.register_workspace(cls)` with a subclass of `api.Workspace` (see also
-  `api.FileStateMixin`) implementing a `detect()` classmethod. Plugin detectors
-  run before the built-in ones, in sorted filename order.
+  `api.register_workspace(cls)` with a subclass of `api.Workspace` implementing
+  a `detect()` classmethod. Plugin detectors run before the built-in ones, in
+  sorted filename order.
 
 ### Global Options
 
 - **`-C, --directory DIR`**: Run as if started in `DIR` instead of the current
   working directory.
 - **`--scope SCOPE`**: Where to install: `user`, `workspace` *(default)*, or
-  `session` (see above). Only `add`, `remove`, `prune`, `list`, `doctor`,
-  `clean`, and `update` take a scope other than `workspace`.
+  `session` (see above). Only `add`, `remove`, `list`, `doctor`, `clean`, and
+  `update` take a scope other than `workspace`.
 - **`--offline`**: Never fetch remote skills or metadata over the network (same
   as `AGENT_OFFLINE=1`).
 
@@ -121,10 +121,6 @@ skill <command> [arguments]
   unlisted managed entries in the scope).
 - **`remove [-q] NAME...`** (alias: **`rm`**): Remove a skill's entries and
   exclude records.
-- **`prune [-q]`**: Retire legacy indirect `.../skill/defaults` links, re-sync
-  exclude records, and fail if `doctor` would report an error. A broken link or
-  missing-source copy is kept with a warning, since its source may only be
-  unreachable for now.
 - **`list [--json]`**: List installed skills in the scope.
 - **`bundle [SPEC...]`**: Package skills into an archive (`.zip`, `.tar.gz`) or
   directory without installing them (`-w`/`--workspace` for the skills installed
@@ -135,8 +131,8 @@ skill <command> [arguments]
 - **`clean`**: Remove all managed skill entries in the scope and clear tracking
   records.
 - **`doctor [--json]`**: Check the scope's links and copies (broken links,
-  missing copy sources, drifted copies, unmanaged files, exclude records) and
-  the catalog (read-only).
+  missing copy sources, unmanaged files, exclude records) and the catalog
+  (read-only).
 - **`catalog [--json]`**: List all plugin-provided skills and their sources.
   `--json` outputs NDJSON (one JSON object per line) with each skill's
   description and structural profile — the discovery primitive described in
@@ -584,10 +580,9 @@ permission list                           # list commands and paths
 ### Health Checks
 
 ```bash
-skill doctor          # broken links and exclude drift (read-only)
+skill doctor          # broken links, missing copy sources, and exclude drift
 permission doctor     # missing pre-approvals (read-only)
 mcp doctor            # unparsable configs, missing commands, bad URLs
-skill prune           # retire legacy default links and re-sync records
 ```
 
 A `.envrc` that still has a legacy `skills` block is migrated by

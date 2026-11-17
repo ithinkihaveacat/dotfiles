@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
 # User-scope declarative defaults ('etc/skill/defaults', 'add --prune',
-# 'install.sh --apply --only skills'), 'skill prune' legacy migration, and the
-# fish agent wrappers (with _agent_preflight and agy.fish retired).
+# 'install.sh --apply --only skills') and fish agent wrappers (with
+# _agent_preflight and agy.fish retired).
 
 set -euo pipefail
 
@@ -10,9 +10,8 @@ set -euo pipefail
 source "$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 skill_test_init
 
-echo "1..17"
+echo "1..11"
 
-LEGACY_DEFAULTS_DIR="${XDG_STATE_HOME}/skill/defaults"
 REPO_DIR="${TMPDIR}/repo"
 mkdir -p "$REPO_DIR" "${HOME}/.codex" "${HOME}/.gemini/config"
 git -C "$REPO_DIR" init -q
@@ -66,140 +65,51 @@ fi
 rm -f "${XDG_CONFIG_HOME}/skill/plugins/99_alias.py" "${HOME}/.gemini/config/skills/ext-skill"
 rm -rf "${HOME}/.claude/skills/foreign-dir"
 
-# Test 3: removed --defaults flag and --scope defaults are usage errors (exit 2)
+# Test 3: removed --defaults flag, --scope defaults, and 'prune' subcommand fail cleanly
 def_flag_rc=0
 "${SCRIPT}" -C "$REPO_DIR" add --defaults >/dev/null 2>&1 || def_flag_rc=$?
 def_scope_rc=0
 "${SCRIPT}" --scope defaults list >/dev/null 2>&1 || def_scope_rc=$?
-if [ "$def_flag_rc" -eq 2 ] && [ "$def_scope_rc" -eq 2 ]; then
-  echo "ok 3 - [CLI] removed --defaults and --scope defaults exit 2"
+prune_cmd_rc=0
+"${SCRIPT}" -C "$REPO_DIR" prune >/dev/null 2>&1 || prune_cmd_rc=$?
+if [ "$def_flag_rc" -eq 2 ] && [ "$def_scope_rc" -eq 2 ] && [ "$prune_cmd_rc" -eq 1 ]; then
+  echo "ok 3 - [CLI] removed --defaults, --scope defaults, and prune subcommand are rejected"
 else
-  echo "not ok 3 - [CLI] expected exit 2 (flag=$def_flag_rc scope=$def_scope_rc)"
+  echo "not ok 3 - [CLI] unexpected exit codes (flag=$def_flag_rc scope=$def_scope_rc prune=$prune_cmd_rc)"
 fi
 
-# Test 4: prune on a clean repository writes nothing and leaves git clean
-prune_out=$("${SCRIPT}" prune --quiet 2>&1)
-prune_out=$(own_output "$prune_out")
-if [ -z "$prune_out" ] && [ ! -e .claude ] && [ ! -e .agents ] &&
-  [ -z "$(git status --porcelain)" ]; then
-  echo "ok 4 - [Prune] clean repository stays untouched"
-else
-  echo "not ok 4 - [Prune] clean repository modified: $prune_out"
-fi
-
-# Test 5: prune retires legacy ~/.local/state/skill/defaults links (live or
-# broken), keeps workspace copies, and clears empty skill dirs + excludes
-mkdir -p "$LEGACY_DEFAULTS_DIR" .claude/skills .agents/skills
-ln -s "${SKILL_SOURCE_DIRS}/coding-standards" "${LEGACY_DEFAULTS_DIR}/coding-standards"
-ln -s "${LEGACY_DEFAULTS_DIR}/coding-standards" .claude/skills/coding-standards
-ln -s "${LEGACY_DEFAULTS_DIR}/demoted" .agents/skills/demoted
-"${SCRIPT}" add emumanager >/dev/null 2>&1
-mig_out=$("${SCRIPT}" prune 2>&1)
-if [ ! -e .claude/skills/coding-standards ] &&
-  [ ! -e .agents/skills/demoted ] &&
-  [ -d .claude/skills/emumanager ] &&
-  [ ! -L .claude/skills/emumanager ] &&
-  [[ "$mig_out" == *"removed legacy default link"* ]] &&
-  ! grep -q 'coding-standards' .git/info/exclude &&
-  ! grep -q 'demoted' .git/info/exclude &&
-  grep -q '^/.claude/skills/emumanager$' .git/info/exclude &&
-  [ "$(json_get "$(doctor_json)" 'd["healthy"]')" = "true" ]; then
-  echo "ok 5 - [Prune] retires legacy default links while keeping workspace copies"
-else
-  echo "not ok 5 - [Prune] legacy migration failed: $mig_out"
-fi
-"${SCRIPT}" clean >/dev/null 2>&1 || true
-rm -rf "$LEGACY_DEFAULTS_DIR"
-
-# Test 6: prune keeps a broken direct link with a warning (without failing),
-# while doctor reports WARNING
-KEEP_DIR="${TMPDIR}/keep-broken"
-mkdir -p "${KEEP_DIR}/.claude/skills" "${KEEP_DIR}/.agents/skills"
-git -C "$KEEP_DIR" init -q
-cd "$KEEP_DIR"
-ln -s "${TMPDIR}/unmounted/remote-skill" .claude/skills/remote-skill
-ln -s "${TMPDIR}/unmounted/remote-skill" .agents/skills/remote-skill
-printf '# >>> skills >>>\n# managed by '\''skill'\''\n/.agents/skills/remote-skill\n/.claude/skills/remote-skill\n# <<< skills <<<\n' >.git/info/exclude
-keep_rc=0
-keep_out=$("${SCRIPT}" prune --quiet 2>&1) || keep_rc=$?
-kj=$(doctor_json)
-if [ "$keep_rc" -eq 0 ] &&
-  [ -L .claude/skills/remote-skill ] && [ -L .agents/skills/remote-skill ] &&
-  [[ "$keep_out" == *"kept broken link .claude/skills/remote-skill"* ]] &&
-  [[ "$keep_out" != *"[FAIL]"* ]] &&
-  [ "$(check_status "$kj" "Symlink Health")" = "WARNING" ]; then
-  echo "ok 6 - [Prune] keeps broken added links with a warning and exits 0"
-else
-  echo "not ok 6 - [Prune] broken added link handling wrong (rc=$keep_rc): $keep_out"
-fi
-cd "$TMPDIR"
-
-# Test 7: prune leaves a VCS-tracked broken link alone and fails, naming doctor
-TRACKED_DIR="${TMPDIR}/tracked"
-mkdir -p "${TRACKED_DIR}/.claude/skills"
-git -C "$TRACKED_DIR" init -q
-ln -s /nonexistent/target "${TRACKED_DIR}/.claude/skills/checked-in"
-git -C "$TRACKED_DIR" add .claude/skills/checked-in
-cd "$TRACKED_DIR"
-tracked_rc=0
-tracked_out=$("${SCRIPT}" prune --quiet 2>&1) || tracked_rc=$?
-if [ "$tracked_rc" -eq 1 ] && [ -L .claude/skills/checked-in ] &&
-  [[ "$tracked_out" == *"[FAIL] Symlink Health"* ]] &&
-  [[ "$tracked_out" == *"see 'skill doctor'"* ]]; then
-  echo "ok 7 - [Prune] keeps tracked broken link and fails, naming doctor"
-else
-  echo "not ok 7 - [Prune] tracked broken link mishandled (rc=$tracked_rc): $tracked_out"
-fi
-cd "$TMPDIR"
-
-# Test 8: in the home directory, workspace prune is a no-op and workspace list
-# points at --scope user
-home_rc=0
-(cd "$HOME" && "${SCRIPT}" prune --quiet >/dev/null 2>&1) || home_rc=$?
+# Test 4: in the home directory, workspace list points at --scope user
 list_rc=0
 list_err=$(cd "$HOME" && "${SCRIPT}" list 2>&1) || list_rc=$?
-if [ "$home_rc" -eq 0 ] && [ "$list_rc" -eq 1 ] && [[ "$list_err" == *"--scope user"* ]]; then
-  echo "ok 8 - [Home] workspace prune skips home directory; workspace list points at --scope user"
+if [ "$list_rc" -eq 1 ] && [[ "$list_err" == *"--scope user"* ]]; then
+  echo "ok 4 - [Home] workspace list in HOME points at --scope user"
 else
-  echo "not ok 8 - [Home] home directory handling wrong (prune=$home_rc list=$list_rc): $list_err"
+  echo "not ok 4 - [Home] home directory handling wrong (list=$list_rc): $list_err"
 fi
 
-# Test 9: outside a repository, prune writes nothing
-PLAIN_DIR="${TMPDIR}/plain/sub"
-mkdir -p "$PLAIN_DIR"
-cd "$PLAIN_DIR"
-plain_rc=0
-GIT_CEILING_DIRECTORIES="$TMPDIR" "${SCRIPT}" prune --quiet >/dev/null 2>&1 || plain_rc=$?
-if [ "$plain_rc" -eq 0 ] && [ -z "$(ls -A)" ]; then
-  echo "ok 9 - [Prune] outside a repository, prune writes nothing"
+# Test 5: add --prune skips unmounted optional plugin skills cleanly without failing
+mkdir -p "${XDG_CONFIG_HOME}/skill/plugins"
+cat <<EOF >"${XDG_CONFIG_HOME}/skill/plugins/99_optional_mount.py"
+def register(api):
+    api.register_skill(
+        "optmount:unmounted-skill",
+        {"path": "${TMPDIR}/unmounted_netfs/unmounted-skill", "resolve": False, "optional": True},
+    )
+EOF
+ln -s "${TMPDIR}/unmounted_netfs/unmounted-skill" "${HOME}/.claude/skills/unmounted-skill"
+opt_rc=0
+printf 'coding-standards\nunmounted-skill\n' |
+  "${SCRIPT}" --scope user add --prune --quiet - 2>/dev/null || opt_rc=$?
+if [ "$opt_rc" -eq 0 ] &&
+  [ -L "${HOME}/.claude/skills/coding-standards" ] &&
+  [ -L "${HOME}/.claude/skills/unmounted-skill" ]; then
+  echo "ok 5 - [Defaults] add --prune skips unmounted optional skills without failing or pruning"
 else
-  echo "not ok 9 - [Prune] non-repository prune failed (rc=$plain_rc)"
+  echo "not ok 5 - [Defaults] unmounted optional skill failed add --prune (rc=$opt_rc)"
 fi
-cd "$TMPDIR"
+rm -f "${XDG_CONFIG_HOME}/skill/plugins/99_optional_mount.py" "${HOME}/.claude/skills/unmounted-skill"
 
-# Test 10: parallel prune runs on one workspace all succeed
-PAR_DIR="${TMPDIR}/parallel"
-mkdir -p "${PAR_DIR}/.agents/skills"
-git -C "$PAR_DIR" init -q
-ln -s "${XDG_STATE_HOME}/skill/defaults/stale" "${PAR_DIR}/.agents/skills/stale"
-par_pids=()
-for i in 1 2 3 4 5 6 7 8; do
-  (cd "$PAR_DIR" && "${SCRIPT}" prune --quiet) >"${TMPDIR}/par-${i}.out" 2>&1 &
-  par_pids+=("$!")
-done
-par_failed=0
-for pid in "${par_pids[@]}"; do
-  wait "$pid" || par_failed=$((par_failed + 1))
-done
-pj=$(cd "$PAR_DIR" && doctor_json)
-if [ "$par_failed" -eq 0 ] && [ ! -e "${PAR_DIR}/.agents" ] &&
-  [ "$(json_get "$pj" 'd["healthy"]')" = "true" ]; then
-  echo "ok 10 - [Concurrency] parallel prune runs succeed cleanly"
-else
-  echo "not ok 10 - [Concurrency] $par_failed of 8 parallel prunes failed: $(cat "${TMPDIR}"/par-*.out)"
-fi
-
-# Test 11: install.sh --apply --only skills declaratively reconciles union of
+# Test 6: install.sh --apply --only skills declaratively reconciles union of
 # etc/skill/defaults across ~/.dotfiles, overlays, and ~/.config/skill/defaults
 # (honoring -name exclusions), prunes unlisted links, and runs doctor.
 FAKE_DST="${TMPDIR}/fake-dst"
@@ -231,27 +141,27 @@ if [ -f "${REPO_ROOT}/etc/skill/defaults" ] &&
   [ ! -e "${FAKE_DST}/.claude/skills/test-skill" ] &&
   [ ! -e "${FAKE_DST}/.claude/skills/stale-link" ] &&
   [[ "$inst_out" == *"[PASS] Workspace: User skill directories"* ]]; then
-  echo "ok 11 - [Install] install.sh --only skills reconciles layered defaults, prunes stale links, and runs doctor"
+  echo "ok 6 - [Install] install.sh --only skills reconciles layered defaults, prunes stale links, and runs doctor"
 else
-  echo "not ok 11 - [Install] install.sh --only skills failed: $inst_out"
+  echo "not ok 6 - [Install] install.sh --only skills failed: $inst_out"
 fi
 
-# Test 12: _agent_preflight.fish and agy.fish are retired
+# Test 7: _agent_preflight.fish and agy.fish are retired
 if [ ! -e "${REPO_ROOT}/fish/functions/_agent_preflight.fish" ] &&
   [ ! -e "${REPO_ROOT}/fish/functions/agy.fish" ]; then
-  echo "ok 12 - [Wrapper] _agent_preflight.fish and agy.fish are retired"
+  echo "ok 7 - [Wrapper] _agent_preflight.fish and agy.fish are retired"
 else
-  echo "not ok 12 - [Wrapper] _agent_preflight.fish or agy.fish still exists"
+  echo "not ok 7 - [Wrapper] _agent_preflight.fish or agy.fish still exists"
 fi
 
 # ==============================================================================
 # fish wrappers (skipped without fish)
 # ==============================================================================
 if ! command -v fish >/dev/null 2>&1; then
-  echo "ok 13 - [Wrapper] codex applies git hooks cleanly even with broken active venv # skip fish not available"
-  echo "ok 14 - [Wrapper] claude creates session .claude/skills without touching workspace # skip fish not available"
-  echo "ok 15 - [Wrapper] opencode launches without preflight # skip fish not available"
-  echo "ok 16 - [Wrapper] claude runs without arguments # skip fish not available"
+  echo "ok 8 - [Wrapper] codex applies git hooks cleanly without skill preflight # skip fish not available"
+  echo "ok 9 - [Wrapper] claude prepares session .claude/skills and leaves workspace clean # skip fish not available"
+  echo "ok 10 - [Wrapper] opencode launches directly without preflight # skip fish not available"
+  echo "ok 11 - [Wrapper] claude runs without arguments # skip fish not available"
   exit 0
 fi
 
@@ -279,8 +189,7 @@ wrap() {
     "set fish_function_path '${FISH_FUNCS}' \$fish_function_path; $1"
 }
 
-# Test 13: codex wrapper applies git hooks cleanly (even with a broken active
-# venv and without spawning skill prune)
+# Test 8: codex wrapper applies git hooks cleanly (even with a broken active venv)
 WRAP_REPO="${TMPDIR}/wrap-repo"
 mkdir -p "$WRAP_REPO/.venv/bin" "$WRAP_REPO/.agents/skills/unmanaged-local"
 git -C "$WRAP_REPO" init -q
@@ -292,13 +201,13 @@ codex_out=$(VIRTUAL_ENV="$WRAP_REPO/.venv" wrap "codex --help" 2>&1) || codex_rc
 if [ "$codex_rc" -eq 0 ] &&
   [[ "$codex_out" == *"codex_launched=ok"* ]] &&
   [ -x .git/hooks/commit-msg.d/10-agent ]; then
-  echo "ok 13 - [Wrapper] codex applies git hooks cleanly without skill preflight"
+  echo "ok 8 - [Wrapper] codex applies git hooks cleanly without skill preflight"
 else
-  echo "not ok 13 - [Wrapper] codex wrapper failed (rc=$codex_rc): $codex_out"
+  echo "not ok 8 - [Wrapper] codex wrapper failed (rc=$codex_rc): $codex_out"
 fi
 cd "$TMPDIR"
 
-# Test 14: claude wrapper prepares an empty session .claude/skills dir and
+# Test 9: claude wrapper prepares an empty session .claude/skills dir and
 # leaves the workspace untouched
 CLAUDE_REPO="${TMPDIR}/claude-repo"
 mkdir -p "$CLAUDE_REPO"
@@ -310,49 +219,27 @@ if [ "$claude_rc" -eq 0 ] && [[ "$claude_out" == *"session_skills_dir=ok"* ]] &&
   [[ "$claude_out" == *"outer=outer-session"* ]] &&
   [[ "$claude_out" =~ id=[0-9a-f-]{36} ]] &&
   [ ! -e .claude ] && [ ! -e .agents ]; then
-  echo "ok 14 - [Wrapper] claude prepares session .claude/skills and leaves workspace clean"
+  echo "ok 9 - [Wrapper] claude prepares session .claude/skills and leaves workspace clean"
 else
-  echo "not ok 14 - [Wrapper] claude wrapper failed (rc=$claude_rc): $claude_out"
+  echo "not ok 9 - [Wrapper] claude wrapper failed (rc=$claude_rc): $claude_out"
 fi
 cd "$TMPDIR"
 
-# Test 15: opencode wrapper launches directly without preflight
+# Test 10: opencode wrapper launches directly without preflight
 oc_rc=0
 oc_out=$(cd "$WRAP_REPO" && wrap "opencode --version" 2>&1) || oc_rc=$?
 if [ "$oc_rc" -eq 0 ] && [[ "$oc_out" == *"opencode_launched=ok"* ]]; then
-  echo "ok 15 - [Wrapper] opencode launches directly without preflight"
+  echo "ok 10 - [Wrapper] opencode launches directly without preflight"
 else
-  echo "not ok 15 - [Wrapper] opencode wrapper failed (rc=$oc_rc): $oc_out"
+  echo "not ok 10 - [Wrapper] opencode wrapper failed (rc=$oc_rc): $oc_out"
 fi
 
-# Test 16: claude without arguments parses no options cleanly
+# Test 11: claude without arguments parses no options cleanly
 noarg_rc=0
 noarg_out=$(cd "$CLAUDE_REPO" && wrap "claude" 2>&1) || noarg_rc=$?
 if [ "$noarg_rc" -eq 0 ] && [[ "$noarg_out" != *"array indices"* ]] &&
   [[ "$noarg_out" =~ id=[0-9a-f-]{36} ]]; then
-  echo "ok 16 - [Wrapper] claude runs without arguments"
+  echo "ok 11 - [Wrapper] claude runs without arguments"
 else
-  echo "not ok 16 - [Wrapper] claude failed with no arguments (rc=$noarg_rc): $noarg_out"
+  echo "not ok 11 - [Wrapper] claude failed with no arguments (rc=$noarg_rc): $noarg_out"
 fi
-
-# Test 17: add --prune skips unmounted optional plugin skills cleanly without failing
-mkdir -p "${XDG_CONFIG_HOME}/skill/plugins"
-cat <<EOF >"${XDG_CONFIG_HOME}/skill/plugins/99_optional_mount.py"
-def register(api):
-    api.register_skill(
-        "optmount:unmounted-skill",
-        {"path": "${TMPDIR}/unmounted_netfs/unmounted-skill", "resolve": False, "optional": True},
-    )
-EOF
-ln -s "${TMPDIR}/unmounted_netfs/unmounted-skill" "${HOME}/.claude/skills/unmounted-skill"
-opt_rc=0
-printf 'coding-standards\nunmounted-skill\n' |
-  "${SCRIPT}" --scope user add --prune --quiet - 2>/dev/null || opt_rc=$?
-if [ "$opt_rc" -eq 0 ] &&
-  [ -L "${HOME}/.claude/skills/coding-standards" ] &&
-  [ -L "${HOME}/.claude/skills/unmounted-skill" ]; then
-  echo "ok 17 - [Defaults] add --prune skips unmounted optional skills without failing or pruning"
-else
-  echo "not ok 17 - [Defaults] unmounted optional skill failed add --prune (rc=$opt_rc)"
-fi
-rm -f "${XDG_CONFIG_HOME}/skill/plugins/99_optional_mount.py" "${HOME}/.claude/skills/unmounted-skill"

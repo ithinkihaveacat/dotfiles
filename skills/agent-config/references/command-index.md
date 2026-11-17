@@ -41,8 +41,6 @@ Commands:
   add [-q] [-p|--prune] -
                        Read skill names from stdin
   remove [-q] NAME...  Remove a skill's entries and exclude records (alias: rm)
-  prune [-q]           Retire legacy indirect default links, sync records, and
-                       fail if 'doctor' finds errors
   list [--json]        List installed skills in the scope
   clean                Remove all managed skill entries in the scope
   doctor [--json]      Check the scope's links, copies and catalog (read-only)
@@ -61,8 +59,8 @@ Commands:
 Options:
   -C, --directory DIR  Run as if started in DIR instead of the current directory
   --scope SCOPE        'user', 'workspace' (default) or 'session'; only add,
-                       remove, prune, list, doctor, clean and update take a
-                       scope other than 'workspace'
+                       remove, list, doctor, clean and update take a scope
+                       other than 'workspace'
   --offline            Never fetch remote skills or metadata over the network
                        (same as AGENT_OFFLINE=1)
   --help, -h           Display this help message and exit

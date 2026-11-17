@@ -70,9 +70,9 @@ every agent:
    checks `ws.is_tracked()` before `read_copy_source()`, so committed repository
    skills and hand-authored untracked skills without a local `metadata.source`
    are never overwritten or deleted.
-1. **Drift visibility and refresh**: `skill doctor` flags copies whose
-   `metadata.source` is missing or whose files have drifted from their source,
-   and `skill update` refreshes managed copies in place.
+1. **Missing-source visibility and refresh**: `skill doctor` flags copies whose
+   `metadata.source` is missing, and `skill update` refreshes managed copies in
+   place.
 
 A Claude session directory (`$AGENT_SESSION_DIR/.claude/skills`) is honored only
 while `AGENT_SESSION_ID` matches `CLAUDE_CODE_SESSION_ID` and no foreign session
@@ -116,9 +116,9 @@ it, and dynamic skill pickup:
 - **`GitWorkspace`** keeps a marker block (`# >>> skills >>>` …
   `# <<< skills <<<`) in `.git/info/exclude` listing every managed workspace
   entry, broken ones included, so `git status` stays clean without touching
-  `.gitignore`. Every `add`, `remove`, `prune`, and `clean` rewrites the block
-  from disk (`sync_records()`).
+  `.gitignore`. Every `add`, `remove`, and `clean` rewrites the block from disk
+  (`sync_records()`).
 - **`doctor`** is strictly read-only: it reports broken symlinks, copies whose
-  `metadata.source` is missing or whose files have drifted, unmanaged files in
-  skill folders (only a warning in the user scope, whose folders other
-  installers share), and exclude records that do not match the entries on disk.
+  `metadata.source` is missing, unmanaged files in skill folders (only a warning
+  in the user scope, whose folders other installers share), and exclude records
+  that do not match the entries on disk.

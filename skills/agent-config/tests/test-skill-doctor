@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# `skill doctor` diagnostics, copy drift/missing-source checks, and YAML
-# metadata.source frontmatter round-tripping.
+# `skill doctor` diagnostics, missing-source copy checks, `skill update`, and
+# YAML metadata.source frontmatter normalization.
 
 set -euo pipefail
 
@@ -9,7 +9,7 @@ set -euo pipefail
 source "$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 skill_test_init
 
-echo "1..21"
+echo "1..20"
 
 # Test 1: doctor on a healthy workspace reports healthy JSON and renders the
 # canonical [PASS] tag style.
@@ -21,8 +21,7 @@ git init -q
 healthy_json=$(doctor_json)
 if [ "$(json_get "$healthy_json" 'd["healthy"]')" = "true" ] &&
   [ "$(check_status "$healthy_json" "Installed Skills")" = "OK" ] &&
-  [ "$(check_status "$healthy_json" "Copy Health")" = "OK" ] &&
-  [ "$(json_get "$healthy_json" '[l["origin"] for l in d["links"]]')" = "added added" ] &&
+  [ "$(check_status "$healthy_json" "Symlink Health")" = "OK" ] &&
   human=$("${SCRIPT}" doctor 2>&1) &&
   [[ "$human" == *"[PASS] Workspace:"* ]] &&
   [[ "$human" == *"[PASS] Installed Skills: 1 skill(s) installed"* ]]; then
@@ -48,9 +47,8 @@ else
 fi
 cd "$TMPDIR"
 
-# Test 3: doctor flags broken links and does not remove them (doctor is
-# read-only). A broken legacy default link is an error whose fix is 'skill
-# prune'; one added by name is a warning whose fix is 'skill remove'.
+# Test 3: doctor flags broken links as WARNING with fix 'skill remove' and does
+# not remove them (doctor is read-only).
 DANGLING_DIR="${TMPDIR}/dangling"
 mkdir -p "$DANGLING_DIR"
 cd "$DANGLING_DIR"
@@ -59,19 +57,14 @@ mkdir -p .claude/skills .agents/skills
 ln -s /nonexistent/target .claude/skills/broken
 aj=$(doctor_json)
 ah=$("${SCRIPT}" doctor 2>&1) || true
-ln -s "${XDG_STATE_HOME}/skill/defaults/demoted" .claude/skills/demoted
-dj=$(doctor_json)
-dh=$("${SCRIPT}" doctor 2>&1) || true
 if [ "$(check_status "$aj" "Symlink Health")" = "WARNING" ] &&
   [ "$(json_get "$aj" 'd["healthy"]')" = "false" ] &&
+  [ "$(json_get "$aj" '[l["path"] for l in d["links"] if l["broken"]]')" = ".claude/skills/broken" ] &&
   [[ "$ah" == *"skill remove broken"* ]] &&
-  [ "$(check_status "$dj" "Symlink Health")" = "ERROR" ] &&
-  [ "$(json_get "$dj" 'sorted(l["path"] for l in d["links"] if l["broken"])')" = ".claude/skills/broken .claude/skills/demoted" ] &&
-  [[ "$dh" == *"skill prune"* ]] &&
-  [ -L .claude/skills/broken ] && [ -L .claude/skills/demoted ]; then
-  echo "ok 3 - [Symlink Health] doctor flags broken links by origin and leaves them in place"
+  [ -L .claude/skills/broken ]; then
+  echo "ok 3 - [Symlink Health] doctor flags broken links and leaves them in place"
 else
-  echo "not ok 3 - [Symlink Health] doctor missed or removed a broken link: $ah / $dh"
+  echo "not ok 3 - [Symlink Health] doctor missed or removed a broken link: $ah / $aj"
 fi
 cd "$TMPDIR"
 
@@ -149,7 +142,8 @@ ln -s /nonexistent/tracked-target .claude/skills/tracked-broken
 git add .claude/skills/tracked-broken
 xj=$(doctor_json)
 xh=$("${SCRIPT}" doctor 2>&1) || true
-if [ "$(json_get "$xj" '[l["name"] for l in d["links"] if l["broken"] and not l["tracked"]]')" = "stray-broken" ] &&
+if [ "$(check_status "$xj" "Symlink Health")" = "ERROR" ] &&
+  [ "$(json_get "$xj" '[l["name"] for l in d["links"] if l["broken"] and not l["tracked"]]')" = "stray-broken" ] &&
   [ "$(json_get "$xj" '[l["name"] for l in d["links"] if l["tracked"]]')" = "tracked-broken" ] &&
   [[ "$xh" == *"Broken links tracked by version control:"* ]] &&
   [[ "$xh" == *"'skill' never removes a tracked link"* ]]; then
@@ -190,7 +184,7 @@ drift_h=$("${SCRIPT}" doctor 2>&1) || true
 "${SCRIPT}" add emumanager >/dev/null 2>&1
 fixed_json=$(doctor_json)
 if [ "$(check_status "$drift_json" "Workspace Exclusions")" = "ERROR" ] &&
-  [[ "$drift_h" == *"skill prune"* ]] &&
+  [[ "$drift_h" == *"skill add"* ]] &&
   [ "$(json_get "$fixed_json" 'd["healthy"]')" = "true" ] &&
   [ -z "$(git status --porcelain)" ]; then
   echo "ok 10 - [Exclusions] doctor flags exclude drift; the next add rewrites it"
@@ -307,8 +301,8 @@ else
 fi
 cd "$TMPDIR"
 
-# Test 15: Copy Health flags a copy whose source directory has vanished, leaving
-# the copy intact (read-only) and naming 'skill remove'.
+# Test 15: Symlink Health flags a copy whose metadata.source directory has
+# vanished, leaving the copy intact (read-only) and naming 'skill remove'.
 GONE_SRC="${TMPDIR}/ephemeral-src/temp-skill"
 GONE_WS="${TMPDIR}/copy-missing-src"
 mkdir -p "$GONE_SRC" "$GONE_WS"
@@ -319,81 +313,58 @@ git init -q
 rm -rf "${TMPDIR}/ephemeral-src"
 gj=$(doctor_json)
 gh=$("${SCRIPT}" doctor 2>&1) || true
-if [ "$(check_status "$gj" "Copy Health")" = "WARNING" ] &&
+if [ "$(check_status "$gj" "Symlink Health")" = "WARNING" ] &&
   [ "$(json_get "$gj" 'd["healthy"]')" = "false" ] &&
   [ "$(json_get "$gj" 'all(l["broken"] for l in d["links"])')" = "true" ] &&
   [[ "$gh" == *"skill remove temp-skill"* ]] &&
   [ -f .agents/skills/temp-skill/SKILL.md ]; then
-  echo "ok 15 - [Copy Health] doctor flags copies with missing metadata.source and keeps them"
+  echo "ok 15 - [Symlink Health] doctor flags copies with missing metadata.source and keeps them"
 else
-  echo "not ok 15 - [Copy Health] missing source check failed: $gh / $gj"
+  echo "not ok 15 - [Symlink Health] missing source check failed: $gh / $gj"
 fi
 cd "$TMPDIR"
 
-# Test 16: Copy Health ignores __pycache__/.ruff_cache in copies, flags content
-# drift on local or upstream edits, and clears once 'skill update' refreshes it.
-DRIFT_COPY_WS="${TMPDIR}/copy-drift-ws"
-mkdir -p "$DRIFT_COPY_WS"
-cd "$DRIFT_COPY_WS"
-git init -q
-"${SCRIPT}" add emumanager >/dev/null 2>&1
-mkdir -p .agents/skills/emumanager/__pycache__ .agents/skills/emumanager/.ruff_cache
-printf 'pyc' >.agents/skills/emumanager/__pycache__/x.pyc
-clean_cache_json=$(doctor_json)
-printf '\nlocal tweak\n' >>.agents/skills/emumanager/SKILL.md
-drifted_json=$(doctor_json)
-drifted_h=$("${SCRIPT}" doctor 2>&1) || true
-"${SCRIPT}" update emumanager >/dev/null 2>&1
-refreshed_json=$(doctor_json)
-if [ "$(json_get "$clean_cache_json" 'd["healthy"]')" = "true" ] &&
-  [ "$(check_status "$drifted_json" "Copy Health")" = "WARNING" ] &&
-  [ "$(json_get "$drifted_json" 'any(l["drifted"] for l in d["links"])')" = "true" ] &&
-  [[ "$drifted_h" == *"skill update emumanager"* ]] &&
-  [ "$(json_get "$refreshed_json" 'd["healthy"]')" = "true" ]; then
-  echo "ok 16 - [Copy Health] doctor ignores bytecode caches, flags content drift, and clears on update"
-else
-  echo "not ok 16 - [Copy Health] copy drift lifecycle failed: $drifted_h"
-fi
-cd "$TMPDIR"
-
-# Test 17: inject_copy_source and read_copy_source_from_content handle missing
-# frontmatter, missing metadata, block metadata, flow metadata, existing source,
-# and ignore metadata in the Markdown body without creating duplicate keys.
-if yaml_out=$(run_module '
-src = "/tmp/my:skill #1/dir"
+# Test 16: inject_copy_source normalizes block and flow mappings to canonical
+# block metadata without duplicate keys, and read_copy_source ignores URLs.
+if yaml_out=$(run_module "
+from pathlib import Path
+src = '/tmp/my:skill #1/dir'
 cases = [
-    "# Plain body\n",
-    "---\nname: a\ndescription: >-\n  hello\n---\nbody\n",
-    "---\nname: b\nmetadata:\n  version: \"1\"\n  author: me\ncompatibility: py\n---\nbody\n",
-    "---\nname: c\nmetadata:\n  source: \"/old\"\n  version: \"2\"\n---\nbody\n",
-    "---\nname: d\nmetadata: {version: '\''1'\'', author: \"x\"}\n---\nbody\n",
-    "---\nname: e\nmetadata: {}\n---\nbody\n",
-    "---\nname: f\nmetadata: {source: \"/old\", version: \"3\"}\n---\nbody\n",
-    "---\nname: g\nmetadata: {\n  version: \"4\"\n}\n---\nbody\n",
-    "---\nname: h\nmetadata: {\n  # leading comment\n  version: \"5\" # trailing comment\n}\n---\nbody\n",
-    "---\nname: i\nmetadata: {\n  source: \"/old\" # trailing comment\n}\n---\nbody\n",
+    '# Plain body\n',
+    '---\nname: a\ndescription: >-\n  hello\n---\nbody\n',
+    '---\nname: b\nmetadata:\n  version: \"1\"\n  author: me\ncompatibility: py\n---\nbody\n',
+    '---\nname: c\nmetadata:\n  source: \"/old\"\n  version: \"2\"\n---\nbody\n',
+    '---\nname: d\nmetadata: {version: \'1\', author: \"x\"}\n---\nbody\n',
+    '---\nname: e\nmetadata: {}\n---\nbody\n',
+    '---\nname: f\nmetadata: {source: \"/old\", version: \"3\"}\n---\nbody\n',
+    '---\nname: g\nmetadata: {\n  version: \"4\"\n}\n---\nbody\n',
 ]
 for idx, raw in enumerate(cases):
     out = m.inject_copy_source(raw, src)
     got = m.read_copy_source_from_content(out)
-    assert got == src, f"case {idx} got {got!r} from:\n{out}"
-    fm = out.split("---", 2)[1]
+    assert got == src, f'case {idx} got {got!r} from:\n{out}'
+    fm = out.split('---', 2)[1]
     meta_keys = [
         l for l in fm.splitlines()
-        if not l.startswith((" ", "\t")) and l.lstrip().startswith("metadata:")
+        if not l.startswith((' ', '\t')) and l.lstrip().startswith('metadata:')
     ]
-    assert len(meta_keys) == 1, f"case {idx} duplicate metadata keys:\n{out}"
+    assert len(meta_keys) == 1, f'case {idx} duplicate metadata keys:\n{out}'
 
-body_trap = "---\nname: trap\n---\nmetadata:\n  source: \"/should/ignore\"\n"
+body_trap = '---\nname: trap\n---\nmetadata:\n  source: \"/should/ignore\"\n'
 assert m.read_copy_source_from_content(body_trap) is None
-print("OK")
-' 2>&1) && [ "$yaml_out" = "OK" ]; then
-  echo "ok 17 - [YAML] metadata.source round-trips cleanly across block and flow mappings without duplicates"
+
+url_dir = Path('${TMPDIR}/url-meta-skill')
+url_dir.mkdir(parents=True, exist_ok=True)
+(url_dir / 'SKILL.md').write_text('---\nname: u\nmetadata:\n  source: \"https://example.com\"\n---\n')
+assert m.read_copy_source(url_dir) is None
+print('OK')
+" 2>&1) && [ "$yaml_out" = "OK" ]; then
+  echo "ok 16 - [YAML] metadata.source normalizes block/flow mappings cleanly and ignores non-paths"
 else
-  echo "not ok 17 - [YAML] metadata.source helper failed: ${yaml_out:-}"
+  echo "not ok 16 - [YAML] metadata.source helper failed: ${yaml_out:-}"
 fi
 
-# Test 18: a VCS-tracked skill in .claude/skills/<name> (even with metadata.source)
+# Test 17: a VCS-tracked skill in .claude/skills/<name> (even with metadata.source)
 # sharing a name with an untracked copy in .agents/skills/<name> is never flagged
 # or overwritten by doctor / update.
 MIXED_WS="${TMPDIR}/mixed-tracked-ws"
@@ -406,24 +377,25 @@ printf -- '---\nname: emumanager\nmetadata:\n  source: "/committed/origin"\n---\
 git -C "$MIXED_WS" add .claude/skills/emumanager/SKILL.md
 git -C "$MIXED_WS" commit -q -m "commit claude skill"
 mkdir -p "${MIXED_WS}/.agents/skills"
-"${SCRIPT}" -C "$MIXED_WS" update --all >/dev/null 2>&1 || true
 cp -r "${SKILL_SOURCE_DIRS}/emumanager" "${MIXED_WS}/.agents/skills/emumanager"
-printf -- '---\nname: emumanager\nmetadata:\n  source: "%s"\n---\ndrifted\n' \
+printf -- '---\nname: emumanager\nmetadata:\n  source: "%s"\n---\nstale copy\n' \
   "${SKILL_SOURCE_DIRS}/emumanager" >"${MIXED_WS}/.agents/skills/emumanager/SKILL.md"
 "${SCRIPT}" -C "$MIXED_WS" update emumanager >/dev/null 2>&1
-"${SCRIPT}" -C "$MIXED_WS" prune --quiet >/dev/null 2>&1
+"${SCRIPT}" -C "$MIXED_WS" add coding-standards >/dev/null 2>&1
 mixed_doc=$("${SCRIPT}" -C "$MIXED_WS" doctor --json 2>/dev/null || true)
 if grep -q "committed body" "${MIXED_WS}/.claude/skills/emumanager/SKILL.md" &&
+  ! grep -q "stale copy" "${MIXED_WS}/.agents/skills/emumanager/SKILL.md" &&
   [ "$(json_get "$mixed_doc" 'd["healthy"]')" = "true" ]; then
-  echo "ok 18 - [Tracked] sibling VCS-tracked skill is preserved during doctor and update"
+  echo "ok 17 - [Tracked] sibling VCS-tracked skill is preserved during doctor and update"
 else
-  echo "not ok 18 - [Tracked] sibling VCS-tracked skill was clobbered or flagged: $mixed_doc"
+  echo "not ok 17 - [Tracked] sibling VCS-tracked skill was clobbered or flagged: $mixed_doc"
 fi
 
-# Test 19: subpath-aliased remote skills refresh upstream on folder-name update
-# and on 'skill --scope user update --all'.
+# Test 18: subpath-aliased remote skills refresh by folder name and in
+# '--scope user update --all', and path-installed copies sharing a catalog
+# basename refresh from their own metadata.source without fetching remote.
 ALIAS_UPSTREAM="${TMPDIR}/alias-upstream"
-mkdir -p "${ALIAS_UPSTREAM}/skills/aliased-folder"
+mkdir -p "${ALIAS_UPSTREAM}/skills/aliased-folder" "${TMPDIR}/adhoc-src/aliased-folder"
 git -C "$ALIAS_UPSTREAM" init -q -b main
 git -C "$ALIAS_UPSTREAM" config user.email "t@e.st"
 git -C "$ALIAS_UPSTREAM" config user.name "Test"
@@ -438,10 +410,16 @@ def register(api):
         "remote:pkg-key-name",
         {"repo": "owner/repo", "ref": "main", "subpath": "skills/aliased-folder"},
     )
+    api.register_skill(
+        "remote:aliased-folder",
+        {"repo": "missing/offline-repo", "ref": "main"},
+    )
 EOF
 ALIAS_WS="${TMPDIR}/alias-ws"
-mkdir -p "$ALIAS_WS"
+ADHOC_WS="${TMPDIR}/adhoc-ws"
+mkdir -p "$ALIAS_WS" "$ADHOC_WS"
 git -C "$ALIAS_WS" init -q
+git -C "$ADHOC_WS" init -q
 _SKILL_TEST_REMOTE="$ALIAS_UPSTREAM" "${SCRIPT}" -C "$ALIAS_WS" add remote:pkg-key-name >/dev/null 2>&1
 _SKILL_TEST_REMOTE="$ALIAS_UPSTREAM" "${SCRIPT}" --scope user add remote:pkg-key-name >/dev/null 2>&1
 printf -- '---\nname: aliased-folder\ndescription: v2\n---\nv2\n' \
@@ -451,15 +429,34 @@ _SKILL_TEST_REMOTE="$ALIAS_UPSTREAM" "${SCRIPT}" -C "$ALIAS_WS" update aliased-f
 printf -- '---\nname: aliased-folder\ndescription: v3\n---\nv3\n' \
   >"${ALIAS_UPSTREAM}/skills/aliased-folder/SKILL.md"
 git -C "$ALIAS_UPSTREAM" commit -q -am "v3"
+rm -f "${XDG_CONFIG_HOME}/skill/plugins/98_alias_remote.py"
+cat <<'EOF' >"${XDG_CONFIG_HOME}/skill/plugins/98_alias_remote.py"
+def register(api):
+    api.register_skill(
+        "remote:pkg-key-name",
+        {"repo": "owner/repo", "ref": "main", "subpath": "skills/aliased-folder"},
+    )
+EOF
 _SKILL_TEST_REMOTE="$ALIAS_UPSTREAM" "${SCRIPT}" --scope user update --all >/dev/null 2>&1
+printf -- '---\nname: aliased-folder\n---\nlocal-v1\n' >"${TMPDIR}/adhoc-src/aliased-folder/SKILL.md"
+"${SCRIPT}" -C "$ADHOC_WS" add "${TMPDIR}/adhoc-src/aliased-folder" >/dev/null 2>&1
+printf -- '---\nname: aliased-folder\n---\nlocal-v2\n' >"${TMPDIR}/adhoc-src/aliased-folder/SKILL.md"
+cat <<'EOF' >>"${XDG_CONFIG_HOME}/skill/plugins/98_alias_remote.py"
+    api.register_skill(
+        "remote:aliased-folder",
+        {"repo": "missing/offline-repo", "ref": "main"},
+    )
+EOF
+AGENT_OFFLINE=1 "${SCRIPT}" -C "$ADHOC_WS" update aliased-folder >/dev/null 2>&1
 if grep -q "^v2$" "${ALIAS_WS}/.agents/skills/aliased-folder/SKILL.md" &&
-  grep -q "^v3$" "${HOME}/.claude/skills/aliased-folder/SKILL.md"; then
-  echo "ok 19 - [Update] subpath-aliased skills refresh by folder name and in --scope user update --all"
+  grep -q "^v3$" "${HOME}/.claude/skills/aliased-folder/SKILL.md" &&
+  grep -q "^local-v2$" "${ADHOC_WS}/.agents/skills/aliased-folder/SKILL.md"; then
+  echo "ok 18 - [Update] refreshes aliased remote copies, user --all, and path copies colliding with catalog names"
 else
-  echo "not ok 19 - [Update] subpath-aliased or user --all update failed"
+  echo "not ok 18 - [Update] subpath-aliased, user --all, or path copy update failed"
 fi
 
-# Test 20: add --prune skips removals when a requested spec fails to resolve.
+# Test 19: add --prune skips removals when a requested spec fails to resolve.
 PRUNE_SAFE_WS="${TMPDIR}/prune-safe-ws"
 mkdir -p "$PRUNE_SAFE_WS"
 git -C "$PRUNE_SAFE_WS" init -q
@@ -468,12 +465,12 @@ prune_err_rc=0
 "${SCRIPT}" -C "$PRUNE_SAFE_WS" add --prune coding-standards nonexistent-typo >/dev/null 2>&1 || prune_err_rc=$?
 if [ "$prune_err_rc" -ne 0 ] &&
   [ -d "${PRUNE_SAFE_WS}/.agents/skills/emumanager" ]; then
-  echo "ok 20 - [Prune] add --prune preserves installed skills when resolution fails"
+  echo "ok 19 - [Prune] add --prune preserves installed skills when resolution fails"
 else
-  echo "not ok 20 - [Prune] add --prune deleted installed skills on resolution error (rc=$prune_err_rc)"
+  echo "not ok 19 - [Prune] add --prune deleted installed skills on resolution error (rc=$prune_err_rc)"
 fi
 
-# Test 21: explicit catalog specs in update target the requested entry even when
+# Test 20: explicit catalog specs in update target the requested entry even when
 # another installed skill shares the same subpath folder basename.
 UP_A="${TMPDIR}/collide-up-a"
 UP_B="${TMPDIR}/collide-up-b"
@@ -509,8 +506,8 @@ git -C "$UP_B" commit -q -am "b2"
 _SKILL_TEST_REMOTE="$UP_B" "${SCRIPT}" -C "$COLLIDE_WS" update remote:beta-creator >/dev/null 2>&1
 if grep -q "^alpha-v1$" "${COLLIDE_WS}/.agents/skills/shared-name/SKILL.md" &&
   grep -q "^beta-v2$" "${HOME}/.claude/skills/shared-name/SKILL.md"; then
-  echo "ok 21 - [Update] explicit catalog spec updates requested entry despite colliding basename"
+  echo "ok 20 - [Update] explicit catalog spec updates requested entry despite colliding basename"
 else
-  echo "not ok 21 - [Update] explicit catalog spec misrouted on colliding basename"
+  echo "not ok 20 - [Update] explicit catalog spec misrouted on colliding basename"
 fi
 rm -f "${XDG_CONFIG_HOME}/skill/plugins/98_alias_remote.py"
