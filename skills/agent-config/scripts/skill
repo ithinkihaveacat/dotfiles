@@ -249,7 +249,11 @@ def _stamp_flow_metadata(
             nl = text.find("\n", i)
             i = len(text) if nl == -1 else nl + 1
             continue
-        elif ch in ("'", '"'):
+        elif ch in ("'", '"') and (
+            not (cs := "".join(cur).rstrip())
+            or cs[-1] in "{[,:"
+            or cs.split()[-1].startswith(("!", "&", "*"))
+        ):
             in_s, in_d = (ch == "'"), (ch == '"')
             cur.append(ch)
         elif ch in "{[":
@@ -320,7 +324,7 @@ def inject_copy_source(content: str, source: str) -> str:
         block_end = meta_idx + 1
         while block_end < len(fm) and (
             not (bs_end := fm[block_end].strip())
-            or bs_end.startswith("#")
+            or bs_end.startswith(("#", "}", "]"))
             or fm[block_end].startswith((" ", "\t", "- "))
             or bs_end == "-"
         ):
@@ -1532,7 +1536,18 @@ def resolve_skill_spec(spec: str) -> tuple[Path, str]:
     if explicit_path or ("/" in spec and ":" not in spec):
         p = Path(spec).expanduser()
         if (p / "SKILL.md").is_file():
-            resolved = Path(os.path.realpath(p))
+            copy_src = read_copy_source(p) if not p.is_symlink() else None
+            if copy_src is not None and copy_source_exists(copy_src):
+                api_nr = get_api().no_resolve_paths
+                norm_c = os.path.normpath(copy_src)
+                resolved = (
+                    copy_src
+                    if norm_c in api_nr
+                    or any(norm_c.startswith(nr + os.sep) for nr in api_nr)
+                    else Path(os.path.realpath(copy_src))
+                )
+            else:
+                resolved = Path(os.path.realpath(p))
             return resolved, resolved.name
         if explicit_path:
             raise ValueError(f"cannot resolve skill path '{spec}' (no SKILL.md found)")
@@ -2450,14 +2465,27 @@ def cmd_update(names):
 
     ws_entries = scan_links(ws)[0] if ws is not None else []
     if len(names) == 1 and names[0] == "--all":
+        offline = is_offline()
         for cname, centry in api.plugin_catalog.items():
-            if _SCOPE != "session" or any(
-                e.source and not e.path.is_symlink() and same_source(e.source, centry)
+            has_installed = any(
+                (t := entry_target(e)) is not None and same_source(t, centry)
                 for e in ws_entries
-            ):
-                update_catalog_entry(
-                    cname, centry, quiet_local=(_SCOPE in ("user", "session"))
-                )
+            )
+            if _SCOPE in ("user", "session") and not has_installed:
+                continue
+            if offline and "repo" in centry and cached_remote_dir(centry) is None:
+                continue
+            has_copy = any(
+                e.source is not None
+                and not e.path.is_symlink()
+                and same_source(e.source, centry)
+                for e in ws_entries
+            )
+            update_catalog_entry(
+                cname,
+                centry,
+                quiet_local=(_SCOPE in ("user", "session") or has_copy),
+            )
         if ws is not None and ws.uses_copies:
             refresh_copies(scan_links(ws)[0])
         return
