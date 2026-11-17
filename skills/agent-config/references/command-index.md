@@ -19,51 +19,45 @@ The block below is `scripts/skill --help`, kept in sync by
 ```text
 Usage: skill [-C DIR] [--scope SCOPE] <command> [skill...]
 
-Manage agent skills as untracked symlinks, in the directories each installed
-agent reads for the chosen scope:
-  user       ~/.claude/skills (Claude) and ~/.agents/skills (Codex, Agy)
+Manage agent skills in the directories each installed agent reads for the
+chosen scope:
+  user       ~/.claude/skills (Claude), ~/.agents/skills (Codex, OpenCode) and
+             ~/.gemini/config/skills (Antigravity, Jetski) -- holds default skills
   workspace  .claude/skills and .agents/skills at the repository's skill
              anchor, plus a block in .git/info/exclude (the default)
   session    the calling agent's own session: $AGENT_SESSION_DIR/.claude/skills
-             (Claude) or brain/<id>/scratch/skills + .agents/skills.json (Agy);
-             only launchers that give a session its own directory support it
-             (not 'claude remote-control' or Codex; see the agent-config
-             skill, references/model.md)
-  defaults   the default skills, which no agent reads; 'add --defaults' links
-             each one into a workspace, session or user through this directory
+             (Claude) or brain/<id>/.agents/skills pointer stubs (Antigravity,
+             Jetski); only launchers that give a session its own directory
+             support it (see the agent-config skill, references/model.md)
 
 Commands:
-  add SPEC...     Link a skill straight to its source: a catalog entry from
-                  'skill catalog', as NAME or NAMESPACE:NAME (replaces a
-                  default's link)
-  add -           Read skill names from stdin
-  add --defaults  Link every default through the defaults directory, keeping
-                  existing links; remove broken links to defaults (broken
-                  links added by name are kept, with a warning); then fail if
-                  'doctor' finds errors. Outside
-                  a repository or plugin-recognized workspace, does nothing
-                  unless the directory already has a skill folder
-                  -q, --quiet: report only errors and warnings
-  remove NAME...  Remove a skill's links and exclude entries (alias: rm)
-  list [--json]   List linked skills, each 'default' or 'added', in the scope
-  clean           Remove all skill links in the scope (and git excludes)
-  doctor [--json] Check the scope's links and the catalog (read-only)
-  bundle [SPEC...] Package skills into an archive or directory without installing
-  update SPEC...  Re-fetch a plugin-provided catalog entry; --all for every
-                  entry, --catalog to refresh the whole metadata index
-  catalog [--json] List plugin-provided skills and sources; --json adds each
-                  skill's description and structural profile (file counts and
-                  sizes for scripts/, references/ and tests/)
-  resolve NAME    Print the source path 'add NAME' would symlink to
-  show/info NAME  Show details and metadata of a skill
-  mcp [SCOPE]     Serve skills over MCP, to agents that cannot read them from
-                  disk; see 'skill mcp --help'
+  add [-q] SPEC...     Install a skill from 'skill catalog' (NAME or
+                       NAMESPACE:NAME) or a local skill directory path
+  add -                Read skill names from stdin
+  remove [-q] NAME...  Remove a skill's entries and exclude records (alias: rm)
+  prune [-q]           Retire legacy indirect default links, sync records, and
+                       fail if 'doctor' finds errors (used at agent launch)
+  list [--json]        List installed skills in the scope
+  clean                Remove all managed skill entries in the scope
+  doctor [--json]      Check the scope's links and the catalog (read-only)
+  bundle [SPEC...]     Package skills into an archive or directory
+  update SPEC...       Re-fetch a plugin-provided catalog entry; --all for every
+                       entry, --catalog to refresh the whole metadata index
+  catalog [--json]     List plugin-provided skills and sources; --json outputs
+                       NDJSON (one JSON object per line) with description and
+                       structural profile (scripts/, references/, tests/ counts)
+  resolve SPEC         Print the source path 'add SPEC' would resolve to
+  show/info SPEC       Show details and metadata of a skill
+  mcp [SCOPE]          Serve skills over MCP, to agents that cannot read them
+                       from disk; see 'skill mcp --help'
 
 Options:
   -C, --directory DIR  Run as if started in DIR instead of the current directory
-  --scope SCOPE        'user', 'workspace' (default), 'session' or 'defaults';
-                       only add, remove, list, doctor and clean take a scope
-                       other than 'workspace'
+  --scope SCOPE        'user', 'workspace' (default) or 'session'; only add,
+                       remove, prune, list, doctor and clean take a scope other
+                       than 'workspace'
+  --offline            Never fetch remote skills or metadata over the network
+                       (same as AGENT_OFFLINE=1)
   --help, -h           Display this help message and exit
   --plugin-template    Output a template/documentation for creating a Workspace plugin
 
@@ -76,14 +70,11 @@ Environment:
                      only while AGENT_SESSION_ID matches CLAUDE_CODE_SESSION_ID
   SKILL_CACHE_DIR    Cache directory for remote skills and catalog metadata
                      (default: ${XDG_CACHE_HOME:-$HOME/.cache}/skill)
-  SKILL_DEFAULTS_DIR Directory of the defaults scope
-                     (default: ${XDG_STATE_HOME:-$HOME/.local/state}/skill/defaults)
 
 Examples:
-  skill add coding-standards
+  skill add adb
   skill --scope session add jetpack
-  skill --scope defaults add workspace-tools
-  skill add --defaults
+  skill --scope user add workspace-tools
   printf '%s\n' adb jetpack | skill --scope session add -
   skill list --json
 ```

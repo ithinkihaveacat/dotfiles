@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+
+# Tests: skills/apk/tests/test-apk-info
+
+set -euo pipefail
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+SCRIPTS="$DIR/../scripts"
+
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
+MOCK_BIN="$TMP/mock-bin"
+WORK="$TMP/work"
+mkdir -p "$MOCK_BIN" "$WORK"
+export MOCK_LOG="$TMP/mock.log"
+
+cat >"$MOCK_BIN/apkanalyzer" <<'EOF'
+#!/usr/bin/env bash
+echo "apkanalyzer $*" >>"$MOCK_LOG"
+[[ "$1 $2" == "manifest application-id" ]] && echo "com.example.app" || exit 99
+EOF
+
+cat >"$MOCK_BIN/apktool" <<'EOF'
+#!/usr/bin/env bash
+echo "apktool $*" >>"$MOCK_LOG"
+EOF
+chmod +x "$MOCK_BIN/apkanalyzer" "$MOCK_BIN/apktool"
+
+python3 - "$WORK" <<'PY'
+import sys, zipfile
+w = sys.argv[1]
+with zipfile.ZipFile(f"{w}/base.apk", "w") as z:
+    z.writestr("META-INF/androidx.core_core.version", "1.16.0")
+    z.writestr("assets/whs.properties", "version = 1.1.0-alpha02")
+with zipfile.ZipFile(f"{w}/empty.apk", "w") as z:
+    z.writestr("AndroidManifest.xml", "bin")
+with zipfile.ZipFile(f"{w}/splits.zip", "w") as z:
+    z.write(f"{w}/base.apk", "base.apk")
+PY
+
+echo "1..4"
+
+: >"$MOCK_LOG"
+OUT=$(PATH="$MOCK_BIN:$PATH" "$SCRIPTS/apk-info" libraries --json "$WORK/base.apk")
+if [[ "$(jq -r '."androidx.core_core" + " " + .whs' <<<"$OUT")" == "1.16.0 1.1.0-alpha02" && ! -s "$MOCK_LOG" ]]; then
+  echo "ok 1 - apk-info libraries --json reads versions via unzip with zero apkanalyzer calls"
+else
+  echo "not ok 1 - apk-info libraries --json reads versions via unzip with zero apkanalyzer calls"
+fi
+
+OUT=$(PATH="$MOCK_BIN:$PATH" "$SCRIPTS/apk-info" libraries --only androidx.core_core "$WORK/base.apk")
+if [[ "$OUT" == "1.16.0" && ! -s "$MOCK_LOG" ]]; then
+  echo "ok 2 - apk-info libraries --only resolves version via unzip"
+else
+  echo "not ok 2 - apk-info libraries --only resolves version via unzip"
+fi
+
+OUT=$(PATH="$MOCK_BIN:$PATH" "$SCRIPTS/apk-info" libraries --json "$WORK/empty.apk")
+if [[ "$OUT" == "{}" ]]; then
+  echo "ok 3 - apk-info libraries --json prints {} when META-INF/*.version is absent"
+else
+  echo "not ok 3 - apk-info libraries --json prints {} when META-INF/*.version is absent"
+fi
+
+: >"$MOCK_LOG"
+PKG=$(PATH="$MOCK_BIN:$PATH" "$SCRIPTS/apk-info" package "$WORK/splits.zip")
+DEC=$(PATH="$MOCK_BIN:$PATH" "$SCRIPTS/apk-decode" -o "$WORK/dec" "$WORK/splits.zip")
+if [[ "$PKG" == "com.example.app" && "$DEC" == "$WORK/dec" && "$(<"$MOCK_LOG")" == *"apktool d -s "* ]]; then
+  echo "ok 4 - apk-info and apk-decode (-s) extract base.apk from split zip"
+else
+  echo "not ok 4 - apk-info and apk-decode (-s) extract base.apk from split zip"
+fi

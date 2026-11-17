@@ -123,7 +123,7 @@ managed marker comments so multiple configurations can co-exist safely. The
 
 Options:
   --output FILE  Path to the output file (default: .envrc)
-  --help         Display this help message and exit
+  --help, -h     Display this help message and exit
 
 Commands:
   create <type> [args...]  Create a configuration block
@@ -196,18 +196,18 @@ Arguments:
               - "22.13" installs the latest v22.13.x
               - "22" installs the latest v22.x.x
   PREFIX      Directory where Node.js will be installed (optional).
-              A subdirectory named node-vVERSION will be created.
+              Each version is installed in a PREFIX/node-vVERSION directory.
               Default: $XDG_DATA_HOME/node/versions or ~/.local/share/node/versions
 
 Options:
   -l, --list       List all available remote Node.js versions
-  -i, --installed  List all installed Node.js versions
+  -i, --installed  List installed Node.js version tags (vX.Y.Z under PREFIX/node-vX.Y.Z)
   --default [VERSION]
                    Install VERSION if it is missing (succeeding if it is
                    already installed) and make it the per-user default,
                    $XDG_DATA_HOME/node/default; print its path. Without
                    VERSION, print the current default's path
-  --help           Display this help message and exit
+  --help, -h       Display this help message and exit
 
 Examples:
   # Install latest Node.js 22.x

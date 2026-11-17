@@ -35,6 +35,7 @@ end
 complete -f -c skill -n __fish_use_subcommand -a add -d 'Link a skill (path or catalog name)'
 complete -f -c skill -n __fish_use_subcommand -a remove -d 'Remove a skill\'s links'
 complete -f -c skill -n __fish_use_subcommand -a rm -d 'Remove a skill\'s links (alias of remove)'
+complete -f -c skill -n __fish_use_subcommand -a prune -d 'Retire legacy default links, sync records, and fail on errors'
 complete -f -c skill -n __fish_use_subcommand -a list -d 'List linked skills in the chosen scope'
 complete -f -c skill -n __fish_use_subcommand -a update -d 'Re-fetch plugin-provided catalog entries'
 complete -f -c skill -n __fish_use_subcommand -a clean -d 'Remove all managed skills'
@@ -47,7 +48,10 @@ complete -f -c skill -n __fish_use_subcommand -a info -d 'Show details and metad
 complete -f -c skill -n __fish_use_subcommand -a mcp -d 'Serve skills over MCP'
 
 # list
-complete -c skill -f -n '__fish_seen_subcommand_from list' -l json -d 'Emit JSON (name, origin, path)'
+complete -c skill -f -n '__fish_seen_subcommand_from list' -l json -d 'Emit JSON (name, origin, scope, path)'
+
+# doctor
+complete -c skill -f -n '__fish_seen_subcommand_from doctor' -l json -d 'Emit JSON report'
 
 # bundle
 complete -c skill -n '__fish_seen_subcommand_from bundle' -a '(__fish_skill_catalog)' -d 'Catalog skill'
@@ -73,11 +77,12 @@ complete -f -c skill -n '__fish_seen_subcommand_from show info' -a '(__fish_skil
 # add
 complete -c skill -n '__fish_seen_subcommand_from add' -a '(__fish_skill_catalog)'
 complete -c skill -n '__fish_seen_subcommand_from add' -a '(__fish_skill_source_skills)' -d Skill
-complete -c skill -f -n '__fish_seen_subcommand_from add' -l defaults -d 'Link every default through the defaults directory'
-complete -c skill -f -n '__fish_seen_subcommand_from add' -s q -l quiet -d 'Report only errors and warnings'
 
 # remove (and rm)
 complete -c skill -f -n '__fish_seen_subcommand_from remove rm' -a '(__fish_skill_managed_skills)' -d 'Managed skill'
+
+# quiet flag (add, remove, rm, prune)
+complete -c skill -f -n '__fish_seen_subcommand_from add remove rm prune' -s q -l quiet -d 'Report only errors and warnings'
 
 # update
 complete -c skill -f -n '__fish_seen_subcommand_from update' -a '(__fish_skill_catalog)' -d 'Catalog skill'
@@ -102,5 +107,6 @@ complete -c skill -n '__fish_seen_subcommand_from mcp' -l log -r -F -d 'Request 
 # Complete flags
 complete -c skill -f -s h -l help -d 'Display help message and exit'
 complete -c skill -s C -l directory -x -a '(__fish_complete_directories)' -d 'Run as if started in DIR'
-complete -c skill -f -l scope -x -a 'user workspace session defaults' -d 'Where to install skills'
+complete -c skill -f -l scope -x -a 'user workspace session' -d 'Where to install skills'
+complete -c skill -f -l offline -d 'Never fetch remote skills or metadata'
 complete -c skill -f -l plugin-template -d 'Output a template for creating a Workspace plugin'

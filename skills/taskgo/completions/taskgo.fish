@@ -39,6 +39,7 @@ complete -f -c taskgo -n __fish_use_subcommand -a info -d 'Show project metadata
 complete -f -c taskgo -n __fish_use_subcommand -a skills -d "List a project's required skills"
 complete -f -c taskgo -n __fish_use_subcommand -a status -d "Show a task's or project's status"
 complete -f -c taskgo -n __fish_use_subcommand -a handoff -d 'Print agent instructions for a project or task'
+complete -f -c taskgo -n __fish_use_subcommand -a handover -d 'Print agent instructions for a project or task'
 complete -f -c taskgo -n __fish_use_subcommand -a dispatch -d 'Print agent instructions for a project or task'
 complete -f -c taskgo -n __fish_use_subcommand -a sync -d 'Update STATUS.md snapshot'
 complete -f -c taskgo -n __fish_use_subcommand -a check -d 'Sweep wait_for gates and date horizons'
@@ -135,8 +136,8 @@ complete -f -c taskgo -n '__fish_seen_subcommand_from handoff handover dispatch'
 complete -f -c taskgo -n '__fish_seen_subcommand_from list' -s s -l state -l status -x -a 'todo in-progress blocked done cancelled ready' -d 'Filter by state'
 complete -f -c taskgo -n '__fish_seen_subcommand_from list' -s j -l json -d 'Emit JSON output'
 
-# info, status, and check options
-complete -f -c taskgo -n '__fish_seen_subcommand_from info status check' -s j -l json -d 'Emit JSON output'
+# info, skills, status, and check options
+complete -f -c taskgo -n '__fish_seen_subcommand_from info skills status check' -s j -l json -d 'Emit JSON output'
 
 # fix options
 complete -f -c taskgo -n '__fish_seen_subcommand_from fix' -l dry-run -d 'Preview repairs without modifying files'
@@ -144,7 +145,7 @@ complete -f -c taskgo -n '__fish_seen_subcommand_from fix' -l no-commit -d 'Appl
 
 # checkpoint options
 complete -f -c taskgo -n '__fish_seen_subcommand_from checkpoint' -s a -l all -d 'Stage all modified/untracked project files'
-complete -c taskgo -n '__fish_seen_subcommand_from checkpoint' -s p -l path -r -d 'Include additional modified project file'
+complete -c taskgo -n '__fish_seen_subcommand_from checkpoint' -s p -l path -r -d 'Include additional modified project file or directory'
 complete -f -c taskgo -n '__fish_seen_subcommand_from checkpoint' -s b -l body -x -d 'Commit body'
 complete -f -c taskgo -n '__fish_seen_subcommand_from checkpoint' -s r -l ref -x -d 'External reference URL/ID'
 complete -f -c taskgo -n '__fish_seen_subcommand_from checkpoint' -s C -l conv -l conversation -x -d 'Session ID (default: from environment)'
@@ -176,6 +177,7 @@ complete -f -c taskgo -n '__fish_seen_subcommand_from mcp' -l path -x -d 'Endpoi
 complete -f -c taskgo -n '__fish_seen_subcommand_from mcp' -l remote -x -a '(git -C (__fish_taskgo_root) remote 2>/dev/null)' -d 'Remote to fetch from (default origin)'
 complete -f -c taskgo -n '__fish_seen_subcommand_from mcp' -l branch -x -d 'Branch to serve (default main)'
 complete -f -c taskgo -n '__fish_seen_subcommand_from mcp' -l no-fetch -d 'Serve the local branch without fetching'
+complete -f -c taskgo -n '__fish_seen_subcommand_from mcp' -l local -d 'Serve the local branch and refresh the checkout on writes'
 complete -x -c taskgo -n '__fish_seen_subcommand_from mcp' -l fetch-ttl -d 'Seconds a fetched or pushed head serves reads'
 complete -f -c taskgo -n '__fish_seen_subcommand_from mcp' -l auth -x -a 'access none' -d 'Check Access JWTs, or nothing (loopback only)'
 complete -f -c taskgo -n '__fish_seen_subcommand_from mcp' -l access-team -x -d 'Access team domain'

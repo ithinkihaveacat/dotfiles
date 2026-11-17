@@ -24,11 +24,12 @@ taskgo_test_init() {
   unset NO_COLOR FORCE_COLOR
 
   # Isolate test suite from ambient agent runtime variables.
-  unset AI_AGENT
-  unset ANTIGRAVITY_CONVERSATION_ID ANTIGRAVITY_SESSION
+  unset AI_AGENT INVOKER_INFO_NAME
+  unset JETSKI_CONVERSATION_ID ANTIGRAVITY_CONVERSATION_ID ANTIGRAVITY_SESSION
   unset CLAUDE_CODE_SESSION_ID CLAUDE_CODE_REMOTE_SESSION_ID CLAUDE_SESSION_ID CLAUDE_PROJECT_ID
   unset OPENCODE_SESSION_ID CODEX_SESSION_ID
   unset CONVERSATION_ID
+  unset TASKGO_ROOT
 
   export GIT_AUTHOR_NAME="Taskgo Test"
   export GIT_AUTHOR_EMAIL="taskgo@example.com"
@@ -37,6 +38,7 @@ taskgo_test_init() {
 
   TEST_ROOT="$(mktemp -d)"
   trap 'rm -rf -- "$TEST_ROOT"' EXIT
+  export UV_CACHE_DIR="${UV_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/uv}"
   export XDG_CACHE_HOME="$TEST_ROOT/xdg-cache"
   export TASKGO_MCP_LOG="$TEST_ROOT/mcp-requests.jsonl"
 

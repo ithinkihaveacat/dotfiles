@@ -80,23 +80,30 @@ Examples:
 
 ### Raw API Command
 
-Model: `gemini-3.6-flash`
+Model: `gemini-flash-latest`
 
 ```bash
-IMAGE_BASE64=$(magick image.png -alpha off -define webp:lossless=true webp:- | base64 -w 0)
+B64_FILE=$(mktemp)
+REQ_FILE=$(mktemp)
+trap 'rm -f "$B64_FILE" "$REQ_FILE"' EXIT
+magick image.png -alpha off -define webp:lossless=true webp:- | base64 -w 0 >"$B64_FILE"
 
-curl -s -X POST \
-  "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent" \
-  -H "x-goog-api-key: $GEMINI_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "contents": [{
-      "parts": [
-        {"inlineData": {"mimeType": "image/webp", "data": "'"$IMAGE_BASE64"'"}},
-        {"text": "Generate concise alt text (up to 300 chars) describing the content of this screenshot."}
+jq -n \
+  --rawfile img "$B64_FILE" \
+  '{
+    contents: [{
+      parts: [
+        {inlineData: {mimeType: "image/webp", data: $img}},
+        {text: "Generate concise alt text (up to 300 chars) describing the content of this screenshot."}
       ]
     }]
-  }' | jq -r '.candidates[0].content.parts[0].text'
+  }' >"$REQ_FILE"
+
+curl -sS -X POST \
+  "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent" \
+  -H "x-goog-api-key: $GEMINI_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d @- <"$REQ_FILE" | jq -r '.candidates[0].content.parts[0].text'
 ```
 
 ______________________________________________________________________
@@ -143,25 +150,34 @@ Exit Codes:
 
 ### Raw API Command
 
-Model: `gemini-3.6-flash`
+Model: `gemini-flash-latest`
 
 ```bash
-IMG1_B64=$(magick before.png -background magenta -flatten -define webp:lossless=true webp:- | base64 -w 0)
-IMG2_B64=$(magick after.png -background magenta -flatten -define webp:lossless=true webp:- | base64 -w 0)
+IMG1_FILE=$(mktemp)
+IMG2_FILE=$(mktemp)
+REQ_FILE=$(mktemp)
+trap 'rm -f "$IMG1_FILE" "$IMG2_FILE" "$REQ_FILE"' EXIT
+magick before.png -background magenta -flatten -define webp:lossless=true webp:- | base64 -w 0 >"$IMG1_FILE"
+magick after.png -background magenta -flatten -define webp:lossless=true webp:- | base64 -w 0 >"$IMG2_FILE"
 
-curl -s -X POST \
-  "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent" \
-  -H "x-goog-api-key: $GEMINI_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "contents": [{
-      "parts": [
-        {"text": "Compare these two screenshots. Describe the visual differences."},
-        {"inlineData": {"mimeType": "image/webp", "data": "'"$IMG1_B64"'"}},
-        {"inlineData": {"mimeType": "image/webp", "data": "'"$IMG2_B64"'"}}
+jq -n \
+  --rawfile img1 "$IMG1_FILE" \
+  --rawfile img2 "$IMG2_FILE" \
+  '{
+    contents: [{
+      parts: [
+        {text: "Compare these two screenshots. Describe the visual differences."},
+        {inlineData: {mimeType: "image/webp", data: $img1}},
+        {inlineData: {mimeType: "image/webp", data: $img2}}
       ]
     }]
-  }' | jq -r '.candidates[0].content.parts[0].text'
+  }' >"$REQ_FILE"
+
+curl -sS -X POST \
+  "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent" \
+  -H "x-goog-api-key: $GEMINI_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d @- <"$REQ_FILE" | jq -r '.candidates[0].content.parts[0].text'
 ```
 
 ______________________________________________________________________
@@ -302,9 +318,10 @@ scripts/photo-query "Describe the scene in under 200 chars." room.jpg
 ### Cache
 
 Pre-processed WebP bytes are stored at
-`~/.cache/agent-tools/photo-query/<sha256>-<max_size>-v<N>.webp`. Cache key
-includes the file's content hash, so renames/moves still hit. Clear manually if
-it grows unbounded; no automatic eviction.
+`~/.cache/photo-query/<sha256>-<max_size>-v<N>.webp` (or
+`$PHOTO_QUERY_CACHE_DIR` if set). Cache key includes the file's content hash, so
+renames/moves still hit. Clear manually if it grows unbounded; no automatic
+eviction.
 
 ### Exit-Code Semantics
 
@@ -453,17 +470,18 @@ Examples:
 
 ### Raw API Command
 
-Model: `gemini-3.1-pro-preview` with `thinking_level="high"` and Google Search
-tools enabled. *(Complex Python script recursively walking directories and
-processing media files.)*
+Model: `gemini-4-carbon` with `thinking_level="high"` and Google Search tools
+enabled by default (`--no-search` disables grounding). *(Complex Python script
+recursively walking directories and processing media files.)*
 
 ### Exit Codes
 
-| Code | Description                 |
-| ---- | --------------------------- |
-| 0    | Success                     |
-| 1    | General error               |
-| 127  | Missing required dependency |
+| Code | Description                                            |
+| ---- | ------------------------------------------------------ |
+| 0    | Success                                                |
+| 1    | General error (including incomplete or empty response) |
+| 130  | Interrupted (SIGINT or SIGTERM)                        |
+| 141  | stdout closed early (SIGPIPE)                          |
 
 ______________________________________________________________________
 
@@ -584,36 +602,34 @@ Notes:
 
 ### Raw API Command
 
-Model: `gemini-3.1-pro-preview` with `thinking_level="high"`, Google Search and
-code execution enabled, and a `search_and_replace` / `write_file` /
-`delete_file` / `read_file` / `list_files` / `complete_task` tool loop under
-`function_calling_config(mode="ANY")`. *(Complex Python script; see the source
-for the agent loop and sandbox.)*
+Model: `gemini-4-carbon` with `thinking_level="high"`, Google Search enabled by
+default (`--code` is off unless requested), and a `search_and_replace` /
+`write_file` / `delete_file` / `read_file` / `list_files` / `grep_search` /
+`complete_task` tool loop under `function_calling_config(mode="ANY")`. *(Complex
+Python script; see the source for the agent loop and path policy.)*
 
 ### Safety Model
 
-| Mode                | Tools offered                                                    |
-| ------------------- | ---------------------------------------------------------------- |
-| default (read-only) | `read_file`, `list_files`, `complete_task`                       |
-| `-i` / `-o DIR`     | the above plus `search_and_replace`, `write_file`, `delete_file` |
+| Mode               | Tools offered                                                    |
+| ------------------ | ---------------------------------------------------------------- |
+| default (`--read`) | `read_file`, `list_files`, `grep_search`, `complete_task`        |
+| `--edit PATH...`   | the above plus `search_and_replace`, `write_file`, `delete_file` |
 
-- All tool paths are resolved with `realpath` and must stay inside the target
-  directory; traversal and escaping symlinks are refused.
-- `-i` refuses to run on a git worktree with uncommitted changes unless
-  `--force` is given. Undoing a partial run takes `git checkout -- .` for
+- Caxton runs only inside a Git worktree; all tool paths are resolved with
+  `realpath` and confined to the repository root and the resolved `--read` /
+  `--edit` path policy.
+- Any `--edit` run requires a clean Git worktree and refuses git-ignored targets
+  unless `--force` is given. Undoing a partial run takes `git checkout -- .` for
   modified files and `git clean -fd` for created ones; both sets are listed on
   stderr at the end of every run.
-- `-o` refuses a destination that already holds files.
-- `--dry-run` reports the payload, mode, and resolved file list without calling
-  the API or reading any file's contents.
-- Ignore filtering inside a repository is delegated to `git ls-files`, so it
-  matches git exactly; outside one, a simpler `.gitignore` matcher applies.
-  Common vendor/build directories and `.DS_Store` are excluded on top, from both
-  the context and the `-o` copy, as are credential paths (`.ssh/`, `.npmrc`,
-  `.netrc`, `*.pem`, `id_rsa*` and similar), which `--dry-run` lists separately.
-  A filter that leaves no files at all is an error, not an empty run.
-- Non-regular files are skipped, and `--timeout` covers traversal as well as the
-  agent loop.
+- `--dry-run` reports the resolved policy, mode, and file list without calling
+  the API.
+- Ignore filtering is delegated directly to
+  `git ls-files --cached --others --exclude-standard`. Credential paths
+  (`.ssh/`, `.npmrc`, `.netrc`, `*.pem`, `id_rsa*`, and similar), `.git/`,
+  symlinks, submodules, and non-regular files are always excluded, and naming
+  one explicitly is an error.
+- `--timeout` covers directory traversal as well as the agent loop.
 
 ### Exit Codes
 
@@ -630,10 +646,10 @@ ______________________________________________________________________
 
 ## emerson
 
-Generate essay-length (~3000 words) analysis from text input using Gemini 3 Pro.
-Operates as a strict, sandboxed, closed-book text-generation tool with no access
-to external search, instructed to prevent hallucination by strictly adhering to
-the provided text.
+Generate essay-length (~3000 words) analysis from text input using the Gemini
+Pro model (`gemini-4-carbon` by default). Operates as a strict, sandboxed,
+closed-book text-generation tool with no access to external search, instructed
+to prevent hallucination by strictly adhering to the provided text.
 
 ### Help
 
@@ -676,7 +692,7 @@ Examples:
 
 ### Raw API Command
 
-Model: `gemini-3.1-pro-preview`
+Model: `gemini-4-carbon`
 
 ```bash
 PROMPT="Summarize the key points"
@@ -705,8 +721,8 @@ ______________________________________________________________________
 
 ## pascal
 
-Asks a question to the Gemini 3 Flash model and prints a short, paragraph-style
-response (wrapped to 80 columns).
+Asks a question to the Gemini Flash model (`gemini-flash-latest` by default) and
+prints a short, paragraph-style response (wrapped to 80 columns).
 
 ### Help
 
@@ -746,7 +762,7 @@ Examples:
 
 ### Raw API Command
 
-Model: `gemini-3.6-flash`
+Model: `gemini-flash-latest`
 
 ```bash
 PROMPT="What is the capital of Peru?"
@@ -755,7 +771,7 @@ SYSTEM_INSTRUCTION="You are a helpful assistant. Provide a short, direct answer 
 lists, or markdown formatting (like bold or headers). Just plain text."
 
 curl -s -X POST \
-  "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent" \
+  "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent" \
   -H "x-goog-api-key: $GEMINI_API_KEY" \
   -H "Content-Type: application/json" \
   -d "$(jq -n \
@@ -884,14 +900,14 @@ Examples:
 
 ### Raw API Command
 
-Model: `gemini-2.5-flash-lite`
+Model: `gemini-flash-lite-latest`
 
 ```bash
 CONDITION="mentions Elvis"
 
 # --rawfile avoids ARG_MAX limits on large inputs
 RESPONSE=$(curl -s -X POST \
-  "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent" \
+  "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-lite-latest:generateContent" \
   -H "x-goog-api-key: $GEMINI_API_KEY" \
   -H "Content-Type: application/json" \
   -d "$(jq -n \
@@ -906,7 +922,7 @@ RESPONSE=$(curl -s -X POST \
       }],
       generationConfig: {
         responseMimeType: "application/json",
-        responseSchema: {
+        responseJsonSchema: {
           type: "object",
           properties: {satisfies: {type: "boolean"}},
           required: ["satisfies"]
@@ -1274,8 +1290,6 @@ Examples:
 
 ______________________________________________________________________
 
-______________________________________________________________________
-
 ## Image Encoding
 
 ### Platform Differences
@@ -1395,7 +1409,7 @@ Use structured output to get JSON boolean response:
   ],
   "generationConfig": {
     "responseMimeType": "application/json",
-    "responseSchema": {
+    "responseJsonSchema": {
       "type": "object",
       "properties": { "satisfies": { "type": "boolean" } },
       "required": ["satisfies"]

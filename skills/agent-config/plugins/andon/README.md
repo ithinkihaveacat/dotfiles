@@ -26,13 +26,16 @@ plugins/
     claude/                        the Claude Code plugin
     opencode/                      the OpenCode V2 server and terminal plugin
     chatgpt/                       the local ChatGPT desktop plugin and MCP App board
-../scripts/andon                   the store and triage CLI, shared by every harness
+../scripts/andon                   the stdlib store and triage CLI, shared by every harness
+../scripts/andon-mcp               the uv-backed stdio MCP server run by 'andon mcp'
 ```
 
 The store format and the `andon` command are the shared, harness-neutral half.
-CLI commands and MCP tools call the same operations, so validation, locking,
-fingerprints and record shapes live in one place. The existing adapters invoke
-CLI commands; another harness can use either that interface or MCP.
+`scripts/andon` uses only the Python standard library; `andon mcp` delegates to
+`scripts/andon-mcp`, which carries the MCP SDK dependencies. CLI commands and
+MCP tools call the same operations, so validation, locking, fingerprints and
+record shapes live in one place. The existing adapters invoke CLI commands;
+another harness can use either that interface or MCP.
 
 `andon mcp --stdio` exposes the shared operations through the MCP Python SDK,
 using Taskgo's SDK/server and separate-transport pattern. It needs no HTTP

@@ -38,9 +38,15 @@ empty. **Solution**:
 
 **Symptom**: Device status is `offline`. **Solution**:
 
-1. Reconnect USB cable.
-1. Restart ADB server: `adb kill-server && adb start-server`.
+1. Reconnect USB cable, or restart ADB for local USB/AVDs
+   (`adb kill-server && adb start-server`).
 1. Reboot device if persistent.
+
+> [!CAUTION] **Forwarded TCP Bridges (`localhost:<port>`)**: Do not run
+> `adb disconnect localhost:<port>` or `adb kill-server` on dynamic TCP tunnels;
+> disconnecting can close the local listener (`Connection refused` on
+> reconnect). Check the listener first (`ss -tlnp` or
+> `lsof -iTCP:<port> -sTCP:LISTEN`).
 
 ## Targeting Specific Devices
 

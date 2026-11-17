@@ -7,8 +7,8 @@ set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 BIN="$DIR/../scripts/andon"
 
-if ! command -v uv >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
-  echo "1..0 # SKIP uv or jq not installed"
+if ! command -v python3 >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
+  echo "1..0 # SKIP python3 or jq not installed"
   exit 0
 fi
 
@@ -30,7 +30,7 @@ not_ok() {
 }
 detail=""
 
-echo "1..17"
+echo "1..21"
 
 # 1: a pull from flags prints its ID on stdout and guidance on stderr
 id1=$("$BIN" pull --color yellow --kind stale_instruction \
@@ -237,4 +237,55 @@ if [[ "$prompt17" == *'opencode run --session "session-open" --fork'* && "$promp
   ok "prompt offers an OpenCode session follow-up"
 else
   not_ok "prompt offers an OpenCode session follow-up" "$detail"
+fi
+
+# 18: CLI subcommands run via stdlib python3 without uv on PATH
+mkdir -p "$TMP/nouv-bin"
+ln -s "$(command -v python3)" "$TMP/nouv-bin/python3"
+nouv_out=$(PATH="$TMP/nouv-bin:/bin:/usr/bin" UV_CACHE_DIR="/dev/null/impossible" "$BIN" stats --json)
+detail="$nouv_out"
+if [[ "$(jq -r '.total >= 1' <<<"$nouv_out")" == true ]]; then
+  ok "CLI runs via stdlib python3 without uv"
+else
+  not_ok "CLI runs via stdlib python3 without uv" "$detail"
+fi
+
+# 19: per-alert level vs session_level
+id19=$(printf '%s' '{"color":"yellow","kind":"stale_instruction","level":2,"summary":"tier 2 defect","details":"d","mcp_error":null}' |
+  ANDON_LEVEL=5 "$BIN" pull --json - | jq -r .id)
+detail=$("$BIN" show "$id19" --json)
+if [[ "$(jq -r '[.level, .session_level] | @tsv' <<<"$detail")" == $'2\t5' ]]; then
+  ok "stores intrinsic defect level alongside session_level"
+else
+  not_ok "stores intrinsic defect level alongside session_level" "$detail"
+fi
+
+# 20: symlink-canonicalized, rule-tag-stripped, generic-tool-stripped, kind-free fingerprint
+mkdir -p "$TMP/real/demo-skill" "$TMP/ws/.agents/skills"
+printf 'skill\n' >"$TMP/real/demo-skill/SKILL.md"
+ln -s "$TMP/real/demo-skill" "$TMP/ws/.agents/skills/demo-skill"
+fp_a=$("$BIN" pull --json --color yellow --kind stale_instruction \
+  --summary "via symlink" --details "d" \
+  --source "$TMP/ws/.agents/skills/demo-skill/SKILL.md" \
+  --source "<RULE[user_global]>" --source "run_command")
+fp_b=$("$BIN" pull --json --color yellow --kind rule_conflict \
+  --summary "via canonical path" --details "d" \
+  --source "$TMP/real/demo-skill/SKILL.md" \
+  --source "user_global")
+detail="$fp_a / $fp_b"
+if [[ "$(jq -r .fingerprint <<<"$fp_a")" == "$(jq -r .fingerprint <<<"$fp_b")" && "$(jq -r .recurrences <<<"$fp_b")" == 2 ]]; then
+  ok "symlinks, RULE wrappers, generic tools, and kind variations share one fingerprint"
+else
+  not_ok "symlinks, RULE wrappers, generic tools, and kind variations share one fingerprint" "$detail"
+fi
+
+# 21: list supports --conv alias, --limit N, and --workspace substring fallback
+conv_cnt=$("$BIN" list --conv session-open --json | jq length)
+ws_cnt=$("$BIN" list --workspace work/app --json | jq length)
+lim_cnt=$("$BIN" list --limit 2 --json | jq length)
+detail="conv=$conv_cnt ws=$ws_cnt lim=$lim_cnt"
+if [[ "$conv_cnt" == 1 && "$ws_cnt" -ge 1 && "$lim_cnt" == 2 ]]; then
+  ok "list supports --conv, --limit, and --workspace substring matching"
+else
+  not_ok "list supports --conv, --limit, and --workspace substring matching" "$detail"
 fi

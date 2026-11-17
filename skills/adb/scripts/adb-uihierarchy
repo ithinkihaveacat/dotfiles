@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+
+# Tests: skills/adb/tests/test-adb-cli
+
 set -euo pipefail
 
 usage() {
@@ -20,7 +23,8 @@ Options:
                   Target device serial; must precede arguments or commands.
   -o, --output FILE The path to save the hierarchy to.
                     If '-', the hierarchy is written to stdout.
-  --help            Display this help message and exit
+  --compressed      Skip non-important views during dump (faster on busy UIs).
+  -h, --help        Display this help message and exit
 
 Environment:
   ANDROID_SERIAL  Serial number of device to connect to (see 'adb devices -l').
@@ -43,6 +47,8 @@ EOF
 }
 
 OUTPUT_FILE=""
+DUMP_TIMEOUT="${ADB_UIHIERARCHY_TIMEOUT:-10}"
+COMPRESSED_ONLY=false
 ARGUMENT_SEEN=false
 
 # Manual parsing for --output, compatible with macOS getopt
@@ -72,6 +78,23 @@ while [[ $# -gt 0 ]]; do
       ARGUMENT_SEEN=true
       shift 2
       ;;
+    --compressed)
+      COMPRESSED_ONLY=true
+      shift
+      ;;
+    -)
+      if [ -n "$OUTPUT_FILE" ]; then
+        echo "$(basename "$0"): cannot specify both FILE and --output" >&2
+        exit 1
+      fi
+      OUTPUT_FILE="-"
+      ARGUMENT_SEEN=true
+      shift
+      ;;
+    -*)
+      echo "$(basename "$0"): unknown option: $1" >&2
+      exit 1
+      ;;
     *)
       if [ -n "$OUTPUT_FILE" ] && [ -n "$1" ]; then
         echo "$(basename "$0"): cannot specify both FILE and --output" >&2
@@ -96,22 +119,47 @@ require xmllint
 require sed
 
 # Check if device is available
-if [ "$(adb get-state 2>/dev/null)" != "device" ]; then
-  echo "error: no device connected" >&2
-  exit 1
-fi
+adb get-state >/dev/null || exit 1
 
 if [ -z "$OUTPUT_FILE" ]; then
   OUTPUT_FILE=$(date -u +'adb-uihierarchy-%Y%m%d%H%M%S.xml')
 fi
 
+TIMEOUT_BIN=$(command -v timeout || command -v gtimeout)
+
+dump_hierarchy() {
+  local raw="" rc=0
+  if ! $COMPRESSED_ONLY; then
+    raw=$("$TIMEOUT_BIN" "$DUMP_TIMEOUT" adb exec-out uiautomator dump /dev/stdout 2>/dev/null) || rc=$?
+    raw="${raw//UI hierchary dumped to: \/dev\/stdout/}"
+    if [[ "$raw" == *"<hierarchy"* ]]; then
+      printf '%s\n' "$raw"
+      return 0
+    fi
+  fi
+
+  rc=0
+  raw=$("$TIMEOUT_BIN" "$DUMP_TIMEOUT" adb exec-out uiautomator dump --compressed /dev/stdout 2>/dev/null) || rc=$?
+  raw="${raw//UI hierchary dumped to: \/dev\/stdout/}"
+  if [[ "$raw" == *"<hierarchy"* ]]; then
+    printf '%s\n' "$raw"
+    return 0
+  fi
+
+  if [[ $rc -eq 124 ]]; then
+    echo "$(basename "$0"): uiautomator dump timed out after ${DUMP_TIMEOUT}s" >&2
+  else
+    echo "$(basename "$0"): failed to dump UI hierarchy from device" >&2
+  fi
+  return 1
+}
+
+RAW_XML=$(dump_hierarchy) || exit 1
+
 if [[ "$OUTPUT_FILE" == "-" ]]; then
-  adb exec-out uiautomator dump /dev/stdout |
-    sed 's/UI hierchary dumped to: \/dev\/stdout//' |
-    xmllint --format -
+  printf '%s\n' "$RAW_XML" | xmllint --format -
 else
-  adb exec-out uiautomator dump /dev/stdout |
-    sed 's/UI hierchary dumped to: \/dev\/stdout//' |
-    xmllint --format - >"$OUTPUT_FILE"
+  mkdir -p "$(dirname "$OUTPUT_FILE")"
+  printf '%s\n' "$RAW_XML" | xmllint --format - >"$OUTPUT_FILE"
   echo "Saved to $OUTPUT_FILE" >&2
 fi

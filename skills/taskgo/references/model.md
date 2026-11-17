@@ -32,12 +32,14 @@ README.md          # optional landing page; frontmatter may set timezone:
   references/      # compounding reference pages, playbooks, domain notes
   scripts/         # repeatable project helpers (queries, audits, reports)
   results/         # run logs, benchmark telemetry, audit outputs
-  reports/         # authored reports and other prose deliverables
+  docs/            # authored prose deliverables, specs, or guides
+  reports/         # authored reports, bugreports/, or reviews/
 ```
 
-Other directories (`docs/`, `data/`, and so on) are fine when a project needs
-them; name them in the project README's map. `PROJECT.md` is a legacy name for
-the project README; the CLI still reads it when `README.md` is absent.
+Other directories (`bugreports/`, `reviews/`, `data/`, `dist/`, and so on) are
+fine when a project needs them; name them in the project README's map.
+`PROJECT.md` is a legacy name for the project README; the CLI still reads it
+when `README.md` is absent.
 
 **`references/`** holds topic and entity pages that outlive single tasks: domain
 syntheses, capability matrices, playbooks, and catalogues of external resources.
@@ -71,21 +73,21 @@ copying its facts.
 Each fact has one owner; other places link to it. Choose the owner by who needs
 the fact and how often it changes:
 
-| Kind of fact                                                 | Owner                                               |
-| ------------------------------------------------------------ | --------------------------------------------------- |
-| How the code works and is built; code-level rules and ADRs   | Artifact repository                                 |
-| What a system, account, person, or place is; how to reach it | Knowledge skill                                     |
-| Authored reports, specs, guides, bug reports, reviews        | External canonical copy, or `<project>/reports/`    |
-| Repeatable project queries, probes, report helpers           | `<project>/scripts/` (or a skill once promoted)     |
-| Why the project exists, scope, map, standing rules           | Project `README.md`                                 |
-| Reasoning behind a private or cross-artifact rule            | Project `decisions/`                                |
-| Intended route                                               | `PLAN.md`                                           |
-| Current situation and next actions                           | `STATUS.md`                                         |
-| A unit of work, its outcome, and findings                    | `tasks/`                                            |
-| Domain notes, playbooks, syntheses across tasks              | Project `references/`, linked from the README       |
-| Run evidence and benchmark telemetry                         | Project `results/`                                  |
-| Repo-wide local policy (time zone, reports, environment)     | Root `AGENTS.md`, outside the managed block         |
-| What changed, when, and why                                  | Git history (commit prose, `Ref:`, `Conversation:`) |
+| Kind of fact                                                 | Owner                                                                                |
+| ------------------------------------------------------------ | ------------------------------------------------------------------------------------ |
+| How the code works and is built; code-level rules and ADRs   | Artifact repository                                                                  |
+| What a system, account, person, or place is; how to reach it | Knowledge skill                                                                      |
+| Authored reports, specs, guides, bug reports, reviews        | External canonical copy, or `<project>/docs/`, `reports/`, `bugreports/`, `reviews/` |
+| Repeatable project queries, probes, report helpers           | `<project>/scripts/` (or a skill once promoted)                                      |
+| Why the project exists, scope, map, standing rules           | Project `README.md`                                                                  |
+| Reasoning behind a private or cross-artifact rule            | Project `decisions/`                                                                 |
+| Intended route                                               | `PLAN.md`                                                                            |
+| Current situation and next actions                           | `STATUS.md`                                                                          |
+| A unit of work, its outcome, and findings                    | `tasks/`                                                                             |
+| Domain notes, playbooks, syntheses across tasks              | Project `references/`, linked from the README                                        |
+| Run evidence and benchmark telemetry                         | Project `results/`                                                                   |
+| Repo-wide local policy (time zone, reports, environment)     | Root `AGENTS.md`, outside the managed block                                          |
+| What changed, when, and why                                  | Git history (commit prose, `Ref:`, `Conversation:`)                                  |
 
 The project files differ mainly in how often they change: `README.md` over
 months, `PLAN.md` over weeks, and `STATUS.md` nearly every commit.
@@ -179,7 +181,8 @@ reads it from Git.
 
 Projects with durable architectural rules keep Nygard-style ADRs in
 `<project>/decisions/NNN-slug.md`, with `## Status`, `## Context`,
-`## Decision`, and `## Consequences` sections.
+`## Decision`, and `## Consequences` sections (written directly as Markdown
+files on the CLI and committed with `commit` or `checkpoint --all`).
 
 - **Superseding:** when a newer ADR replaces an older decision, record
   `supersedes: [001-old-decision.md]` (filename, stem, or numeric prefix such as

@@ -58,8 +58,12 @@ Standalone scripts must follow these naming rules:
   `clip_index.py`. This matches shell-script convention and is consistent with
   how the scripts are invoked on the command line.
 
-These rules apply to new scripts and to scripts being significantly reworked.
-Renaming an existing script solely for style is not required.
+These rules apply to new CLI entrypoints in `bin/` or skill `scripts/`
+directories and to entrypoints being significantly reworked. Renaming an
+existing script solely for style is not required, and explicit filenames
+specified by a caller/prompt or established conventions in external projects or
+scratch directories (such as `scripts/foo_bar.py` or `scratch/.../verify.py`)
+take precedence.
 
 Use this pattern (declaring any third-party packages or CLI tools in
 `dependencies`):

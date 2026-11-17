@@ -5,6 +5,11 @@ tasked with modifying code (e.g., fixing a bug, adding a feature), apply the
 changes to the working directory but refrain from committing them. Only proceed
 with `git commit` when explicitly commanded to do so.
 
+Exception: In a `taskgo` control repository whose committed `AGENTS.md` declares
+`taskgo`, guarded tracker commands (`taskgo create`, `checkpoint`, `commit`, and
+`fix`) carry standing commit and push authorization for tracker state as defined
+in the `taskgo` skill.
+
 ## Commit Messages
 
 When generating git commit messages, use the following specification (copied

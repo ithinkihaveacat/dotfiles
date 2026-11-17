@@ -434,23 +434,28 @@ is_managed_subhook() {
   return 1
 }
 
-# Repositories cloned before init.templatedir was retired carry a copy of the
-# old global post-checkout template at .git/hooks/post-checkout. Every version
-# of that template opened with this comment line.
-RETIRED_TEMPLATE_MARKER="# Installed via init.templatedir in ~/.gitconfig."
+# Repositories cloned before init.templatedir or the multiplexer existed may
+# carry the old post-checkout template or standalone '# git-hook(s)-<profile>:'
+# scripts in .git/hooks/ or .d/00-legacy.
+RETIRED_HOOK_RE='^# (Installed via init\.templatedir in ~/\.gitconfig\.|git-hooks?-(agent|markdown|node):([[:space:]]|$))'
 
-is_retired_template_hook() {
+is_retired_hook() {
   local n=0 line
-  [ -f "$1" ] || return 1
+  [ -f "$1" ] && [ ! -L "$1" ] || return 1
   while [ "$n" -lt "$MARKER_SCAN_LINES" ] && IFS= read -r line; do
     n=$((n + 1))
-    case "$line" in
-      "$RETIRED_TEMPLATE_MARKER"*)
-        return 0
-        ;;
-    esac
+    [[ "$line" =~ $RETIRED_HOOK_RE ]] && return 0
   done <"$1"
   return 1
+}
+
+purge_retired_hooks() {
+  local f
+  for f in "$HOOKS_DIR"/* "$HOOKS_DIR"/*.d/"$LEGACY_KEY"; do
+    is_retired_hook "$f" || continue
+    rm -f "$f"
+    info "removed retired hook at $f"
+  done
 }
 
 abs_path() {
@@ -764,6 +769,8 @@ cmd_apply() {
     is_profile "$profile" || die "unknown profile in AGENT_REQUIRED_HOOKS: $profile"
   done
 
+  purge_retired_hooks
+
   for profile in $PROFILES; do
     found=no
     for want in $wanted; do
@@ -775,11 +782,6 @@ cmd_apply() {
       remove_profile "$profile"
     fi
   done
-
-  if is_retired_template_hook "$HOOKS_DIR/post-checkout"; then
-    rm -f "$HOOKS_DIR/post-checkout"
-    info "removed retired template hook at $HOOKS_DIR/post-checkout"
-  fi
 
   if [ -z "$wanted" ]; then
     info "AGENT_REQUIRED_HOOKS is empty; no hooks to install"
@@ -912,11 +914,13 @@ cmd_doctor() {
     esac
   done < <(external_subhooks)
 
-  if is_retired_template_hook "$HOOKS_DIR/post-checkout"; then
-    report WARN "post-checkout: retired init.templatedir hook is still installed"
+  local rf
+  for rf in "$HOOKS_DIR"/* "$HOOKS_DIR"/*.d/"$LEGACY_KEY"; do
+    is_retired_hook "$rf" || continue
+    report WARN "${rf#"$HOOKS_DIR/"}: retired init.templatedir hook or pre-multiplexer hook is still installed"
     printf '        run '\''%s apply'\'' to remove it\n' "$SCRIPT_NAME"
     rc=1
-  fi
+  done
 
   return "$rc"
 }
@@ -935,16 +939,13 @@ cmd_clean() {
     return 0
   fi
 
+  purge_retired_hooks
+
   for profile in $PROFILES; do
     if profile_installed "$profile"; then
       remove_profile "$profile"
     fi
   done
-
-  if is_retired_template_hook "$HOOKS_DIR/post-checkout"; then
-    rm -f "$HOOKS_DIR/post-checkout"
-    info "removed retired template hook at $HOOKS_DIR/post-checkout"
-  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -1155,7 +1156,7 @@ case "$cmd" in
     [ "${#args[@]}" -eq 0 ] || die "takes no positional arguments"
     cmd_catalog
     ;;
-  doctor)
+  doctor | status)
     [ "${#args[@]}" -eq 0 ] || die "takes no positional arguments"
     cmd_doctor
     ;;

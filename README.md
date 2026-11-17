@@ -66,25 +66,23 @@ ten photos and videos, for sharing with agents), [`pinboard`](skills/pinboard/),
 [`taskgo`](skills/taskgo/), [`technical-writing`](skills/technical-writing/),
 and [`travel`](skills/travel/).
 
-### Installing skills into a workspace
+### Installing skills
 
-Skills are intentionally **not** installed globally — every project seeing every
-skill would be noise. Instead, the bundled `skill` command manages them per
-workspace as untracked symlinks in `.claude/skills/` or `.agents/skills/`,
-auto-detecting which agent is installed:
+Only a curated baseline of default skills is linked into the user scope
+(`~/.claude/skills/`, `~/.agents/skills/`, `~/.gemini/config/skills/`), set by
+`etc/skill/defaults.sh` in each layer when `install.sh` runs. Specialized skills
+stay out of global prompts and are added per session or per workspace with the
+bundled `skill` command:
 
 ```sh
-skill add --defaults # link the default skills
-skill add jetpack    # add one skill by name
-skill list           # what's linked here, 'default' or 'added'
+skill --scope session add jetpack # add a skill for this conversation only
+skill add jetpack                 # or link into the workspace (.git/info/exclude)
+skill --scope user list           # list global default skills
 ```
 
 Skill names resolve against `skills/` in this repo and its `.private`/`.corp`
 overlays (later layers shadow by name); plugins in `config/skill/plugins/`
-register additional remote skills from third-party catalogs. The default skills
-are set by `etc/skill/defaults.sh` in each layer, which `install.sh` runs. A
-fresh clone links them into the repository, and the agent wrappers link them
-into each session.
+register additional remote skills from third-party catalogs.
 
 ## Overlays
 
@@ -129,25 +127,25 @@ the last overlay to provide a given filename wins.
 
 ### Overlay-aware paths
 
-| Path                                                 | Mechanism                           | Notes                                                                                           |
-| ---------------------------------------------------- | ----------------------------------- | ----------------------------------------------------------------------------------------------- |
-| `home/.*`                                            | `link_home_dotfiles` (all overlays) | Last overlay wins per filename                                                                  |
-| `etc/agents/AGENTS.md`                               | `overlay_path` (highest wins)       | Symlinked to `~/.codex/`, `~/.gemini/`, `~/.claude/`, `~/.config/opencode/` (gated on binaries) |
-| `etc/agents/agy/hooks.json`                          | `link_overlay_path`                 | Symlinked to `~/.gemini/config/hooks.json` (gated on `agy`)                                     |
-| `etc/agents/agy/hooks`                               | `link_overlay_path`                 | Symlinked to `~/.gemini/config/hooks` (gated on `agy`)                                          |
-| `etc/agents/hooks/ensure-commit-hooks`               | `overlay_path`                      | Registered as a `PreToolUse` hook in `~/.claude/settings.json` (gated on `claude`)              |
-| `etc/agents/opencode/plugins/ensure-commit-hooks.ts` | `link_overlay_path`                 | Symlinked to `~/.config/opencode/plugins/` (gated on `opencode`)                                |
-| `skills/agent-config/plugins/andon/opencode`         | `link_overlay_path`                 | Symlinked to `~/.config/opencode/plugins/andon` (gated on `opencode`)                           |
-| `etc/shpool/config.toml`                             | `link_overlay_path`                 |                                                                                                 |
-| `etc/starship/starship.toml`                         | `link_overlay_path`                 |                                                                                                 |
-| `etc/ghostty/config`                                 | `link_overlay_path`                 |                                                                                                 |
-| `etc/bat/config`                                     | `link_overlay_path`                 |                                                                                                 |
-| `etc/uv/uv.toml`                                     | `link_overlay_path`                 | Restricts uv to its own Python builds (`only-managed`)                                          |
-| `etc/code/`                                          | `link_overlay_files`                | VS Code `settings.json`, `keybindings.json`, etc.                                               |
-| `etc/macos/KeyBindings`                              | `overlay_path`                      | rsync'd (not symlinked) due to macOS bug                                                        |
-| `etc/macos/Solarized.clr`                            | `overlay_path`                      | Copied to `~/Library/Colors/`                                                                   |
-| `etc/skill/defaults.sh`                              | run by `install.sh`                 | Adds or removes default skills with `skill --scope defaults`                                    |
-| `skills/*/`                                          | `skill` catalog source              | Not linked globally; added per workspace via `skill add` (see [Agent skills](#agent-skills))    |
+| Path                                                 | Mechanism                           | Notes                                                                                                 |
+| ---------------------------------------------------- | ----------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `home/.*`                                            | `link_home_dotfiles` (all overlays) | Last overlay wins per filename                                                                        |
+| `etc/agents/AGENTS.md`                               | `overlay_path` (highest wins)       | Symlinked to `~/.codex/`, `~/.gemini/`, `~/.claude/`, `~/.config/opencode/` (gated on binaries)       |
+| `etc/agents/agy/hooks.json`                          | `link_overlay_path`                 | Symlinked to `~/.gemini/config/hooks.json` (gated on `agy`)                                           |
+| `etc/agents/agy/hooks`                               | `link_overlay_path`                 | Symlinked to `~/.gemini/config/hooks` (gated on `agy`)                                                |
+| `etc/agents/hooks/ensure-commit-hooks`               | `overlay_path`                      | Registered as a `PreToolUse` hook in `~/.claude/settings.json` (gated on `claude`)                    |
+| `etc/agents/opencode/plugins/ensure-commit-hooks.ts` | `link_overlay_path`                 | Symlinked to `~/.config/opencode/plugins/` (gated on `opencode`)                                      |
+| `skills/agent-config/plugins/andon/opencode`         | `link_overlay_path`                 | Symlinked to `~/.config/opencode/plugins/andon` (gated on `opencode`)                                 |
+| `etc/shpool/config.toml`                             | `link_overlay_path`                 |                                                                                                       |
+| `etc/starship/starship.toml`                         | `link_overlay_path`                 |                                                                                                       |
+| `etc/ghostty/config`                                 | `link_overlay_path`                 |                                                                                                       |
+| `etc/bat/config`                                     | `link_overlay_path`                 |                                                                                                       |
+| `etc/uv/uv.toml`                                     | `link_overlay_path`                 | Restricts uv to its own Python builds (`only-managed`)                                                |
+| `etc/code/`                                          | `link_overlay_files`                | VS Code `settings.json`, `keybindings.json`, etc.                                                     |
+| `etc/macos/KeyBindings`                              | `overlay_path`                      | rsync'd (not symlinked) due to macOS bug                                                              |
+| `etc/macos/Solarized.clr`                            | `overlay_path`                      | Copied to `~/Library/Colors/`                                                                         |
+| `etc/skill/defaults.sh`                              | run by `install.sh`                 | Adds or removes baseline default skills in the user scope (`skill --scope user`)                      |
+| `skills/*/`                                          | `skill` catalog source              | Specialized skills added per session or workspace via `skill add` (see [Agent skills](#agent-skills)) |
 
 ### Per-overlay `update` hooks
 
@@ -377,21 +375,26 @@ ready PR whose relevant checks passed for that SHA; do not use `--admin` or
 Publishing and merging do not activate changes on other machines. Run
 `./install.sh` deliberately to inspect incoming commits and a diffstat; enter
 `d` for the full diff, `y` to approve, or anything else to stop. All overlays
-are checked and approved before any checkout advances. Dirty incoming updates,
-unfinished Git operations, and divergence stop the run. Failed updates stop
-before applying features. If an update fails after earlier repositories
-advanced, they stay advanced: no rollback or history repair is attempted.
+are checked and approved before any checkout advances. Dirty incoming updates
+and unfinished Git operations stop the run. Failed updates stop before applying
+features. If an update fails after earlier repositories advanced, they stay
+advanced: no rollback or history repair is attempted.
 
 The installer never rebases, resets, or stashes, regardless of `pull.rebase`.
-Diagnose unusual states separately using `git status` and
-`git log --graph --oneline --all`. In particular, old squash-merged local
-commits need individual reconciliation, not a blanket reset. Local commits with
-no incoming updates are left intact and reported.
+When local commits have diverged from upstream, the run stops unless every local
+commit is unpublished and the two sides merge cleanly; in that case it offers a
+merge, keeping each local commit as it is (`--integrate` accepts that for
+automation). Local commits that are already published, including old
+squash-merged ones, still stop the run for individual reconciliation. Diagnose
+those using `git status` and `git log --graph --oneline --all`. Local commits
+with no incoming updates are left intact; unpublished ones are reported with a
+warning that names the `git push-pr` command.
 
 Macs, work computers, and server host configuration should use manual
 interactive updates, not unattended pulls. Agent hosts can explicitly accept
 fast-forwards with `./install.sh --accept-updates --no-input`; `--no-input`
-alone does not approve incoming code. `--apply` skips only Git updates; use
+alone does not approve incoming code, and `--integrate` is the further explicit
+choice to merge unpublished divergence. `--apply` skips only Git updates; use
 `AGENT_OFFLINE=1` to skip network-dependent features too. The installer does not
 update `~/.ssh`.
 

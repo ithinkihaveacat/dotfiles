@@ -115,6 +115,27 @@ adb shell monkey -p <package_name> -c android.intent.category.LAUNCHER 1
 
 ______________________________________________________________________
 
+## Cached App Freezer & the `adb` Unfreeze Observer Effect
+
+Roughly 60 seconds after a Wear OS (or Android 12+) app leaves the foreground,
+the OS places its process into the cgroup freezer (`I/am_freeze` in
+`adb logcat -b events`).
+
+- **The `adb shell run-as` Observer Effect**: Running `adb` commands that spawn
+  a helper inside the target app's UID or sandbox—such as
+  `adb shell run-as <package_name> stat ...`—transiently **thaws (unfreezes)**
+  the frozen app process for roughly 5 seconds before the OS freezes it again
+  (it does *not* kill the process). This transition is recorded only in the
+  `events` logcat buffer under the **`am_unfreeze`** tag (`I/am_unfreeze`
+  followed ~5s later by `I/am_freeze`).
+- **Testing Rule**: When verifying whether background pushes, alarms, or stray
+  callbacks wake a frozen app over a multi-minute window, stream
+  `adb logcat -b all` passively to the host and **never** poll `run-as` during
+  the observation window—otherwise your own `adb` probe creates periodic
+  5-second wake-ups in the log.
+
+______________________________________________________________________
+
 ## Language & Localization
 
 Test localized strings across system and app locales without navigating the
@@ -184,11 +205,64 @@ Play Services (`WearableService`):
   node** (`DataClient.putDataItem()`) are cached locally and **survive
   uninstalling and reinstalling the local app**. They are only purged when the
   companion app on the remote device is also uninstalled or cleared.
+
 - **Advertised Capabilities & Background Listeners**: An installed companion app
   on the paired device continues advertising `CapabilityClient` capabilities
   (`res/values/wear.xml`) and responding to background `MessageClient` requests
   even if never opened during the test. To test standalone or missing-companion
   behavior, uninstall (or disable) the package on **both** the phone and watch.
+
+- **Cold-Stopped & Locked Companion Phone QA (`am force-stop`)**: Testing
+  watch-initiated `MessageClient` flows (such as watch-to-phone sign-in
+  confirmation sheets) while the companion phone app is already open in the
+  foreground masks two severe background-start failures when Play Services
+  cold-starts the phone's `WearableListenerService` (`bound-service`):
+
+  1. **`WindowManager$BadTokenException`**
+     (`Unable to add window -- token null is not valid; is your activity running?`):
+     Thrown immediately if the background-started listener service attempts to
+     display a `Dialog` (`Dialog.show()`) or attach UI without a running
+     `Activity`.
+  1. **Silent Background Activity Launch (BAL) Blocking**: On Android 10+ / 14+,
+     calling `startActivity()` directly from a background-bound phone service is
+     silently blocked by `ActivityTaskManager` unless surfaced via a
+     high-priority notification (e.g., `setFullScreenIntent()` or a tap
+     `PendingIntent`).
+
+  Always re-test watch-to-phone Data Layer handshakes with the companion phone
+  app force-stopped and the phone screen locked:
+
+  ```bash
+  adb -s <phone_serial> shell am force-stop <your.package.name>
+  adb -s <phone_serial> shell input keyevent KEYCODE_SLEEP
+  ```
+
+- **Notification Bridging Masquerading & `BridgingManager` Lifecycle**:
+
+  - **Spotting Phone-Bridged vs. Native Watch Notifications**: On a paired
+    watch, phone-bridged notifications look and buzz like watch alerts even when
+    the watch app's own push delivery is broken. In
+    `adb shell dumpsys notification`, compare the trailing UID of
+    `NotificationRecord` keys (`0|<pkg>|<id>|<tag>|<posting_uid>`, which carries
+    the *phone* app's UID on bridged items) against
+    `adb shell dumpsys package <pkg> | grep userId=`, and check
+    `adb logcat -b events` for `I/notification_enqueue` under the local watch
+    UID.
+  - **Never Use Static `NO_BRIDGING` When Watch Sign-In Is Required**: Adding
+    `<meta-data android:name="com.google.android.wearable.notificationBridgeMode" android:value="NO_BRIDGING"/>`
+    to `AndroidManifest.xml` disables phone-to-watch bridging as soon as the
+    watch APK is installed—silencing all notifications if the watch app was
+    auto-installed during setup before the user signs in, or after sign-out.
+  - **Dynamic Runtime Bridging + Dismissal Sync**: Once standalone watch push
+    delivery is verified working, toggle bridging dynamically based on auth
+    state via `androidx.wear.phone.interactions.notifications.BridgingManager`:
+    disable bridging when signed in
+    (`BridgingManager.fromContext(context).setConfig(BridgingConfig.Builder(context, false).build())`),
+    re-enable it (`BridgingConfig.Builder(context, true).build()`) on sign-out,
+    and attach matching
+    `NotificationCompat.WearableExtender().setDismissalId(<sync_id>)` to both
+    phone and watch notifications so dismissing one dismisses the other while
+    bridging is disabled.
 
 ### 4. Pre-Installed System Apps (`pm disable-user`)
 

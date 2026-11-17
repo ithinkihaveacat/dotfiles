@@ -136,12 +136,101 @@ def find_skill_anchor(start: Path, boundary: Path) -> Path:
 # ==============================================================================
 
 
+STUB_MARKER_PREFIX = "<!-- skill-stub: "
+STUB_MARKER_SUFFIX = " -->"
+
+
+def read_stub_target(entry_dir: Path) -> Path | None:
+    """Return the canonical skill directory for a session pointer stub, or None."""
+    if entry_dir.is_symlink() or not entry_dir.is_dir():
+        return None
+    try:
+        children = [
+            p.name
+            for p in entry_dir.iterdir()
+            if not p.name.startswith(".SKILL.md.tmp-")
+        ]
+    except OSError:
+        return None
+    if children != ["SKILL.md"]:
+        return None
+    skill_md = entry_dir / "SKILL.md"
+    if skill_md.is_symlink() or not skill_md.is_file():
+        return None
+    try:
+        with open(skill_md, encoding="utf-8", errors="replace") as f:
+            content = f.read(8192)
+    except OSError:
+        return None
+    for line in content.splitlines():
+        if line.startswith(STUB_MARKER_PREFIX) and line.endswith(STUB_MARKER_SUFFIX):
+            raw = line[len(STUB_MARKER_PREFIX) : -len(STUB_MARKER_SUFFIX)].strip()
+            if raw:
+                return Path(raw)
+    return None
+
+
+def stub_target_exists(target: Path) -> bool:
+    """Whether a pointer stub's canonical skill directory exists."""
+    scan_path = get_api().scan_paths.get(os.path.normpath(target))
+    check_dir = Path(scan_path) if scan_path else target
+    return check_dir.is_dir()
+
+
+def write_skill_stub(dest_skill_dir: Path, src: Path) -> None:
+    """Write a pointer-stub SKILL.md inside dest_skill_dir pointing at src."""
+    scan_path = get_api().scan_paths.get(os.path.normpath(src))
+    meta_dir = Path(scan_path) if scan_path else src
+    meta = get_skill_metadata(meta_dir, src.name)
+    skill_name = (meta.get("name") or src.name).replace("---", "--")
+    desc = " ".join((meta.get("description") or "").replace("---", "--").split())
+
+    fm_lines = ["---", f"name: {json.dumps(skill_name, ensure_ascii=False)}"]
+    if desc:
+        fm_lines.append("description: >-")
+        fm_lines.append(f"  {desc}")
+    fm_lines.append("---")
+
+    src_str = str(src)
+    skill_md_path = f"{src_str}/SKILL.md"
+    content = (
+        "\n".join(fm_lines)
+        + f"\n{STUB_MARKER_PREFIX}{src_str}{STUB_MARKER_SUFFIX}\n"
+        + f"Canonical skill directory: `{src_str}`\n\n"
+        + f"Read `{skill_md_path}` for full instructions. Resolve all `scripts/`, "
+        + f"`references/`, and edits directly in `{src_str}`.\n"
+    )
+
+    if dest_skill_dir.is_symlink():
+        dest_skill_dir.unlink()
+    dest_skill_dir.mkdir(parents=True, exist_ok=True)
+    skill_md = dest_skill_dir / "SKILL.md"
+    tmp_md = dest_skill_dir / f".SKILL.md.tmp-{os.getpid()}"
+    tmp_md.unlink(missing_ok=True)
+    try:
+        with open(tmp_md, "w", encoding="utf-8") as f:
+            f.write(content)
+        os.replace(tmp_md, skill_md)
+    except Exception:
+        tmp_md.unlink(missing_ok=True)
+        raise
+
+
+def remove_skill_entry(path: Path) -> None:
+    """Remove a managed symlink or session pointer-stub directory."""
+    if path.is_symlink():
+        path.unlink(missing_ok=True)
+    elif read_stub_target(path) is not None:
+        shutil.rmtree(path, ignore_errors=True)
+
+
 class Workspace:
     """Base class defining the workspace interface."""
 
     # The install scope this class serves ('--scope'), and entry names in its
     # destination directories that belong to the agent itself, not to 'skill'.
     scope = "workspace"
+    uses_stubs = False
     reserved_names: frozenset[str] = frozenset()
 
     def __init__(self, root):
@@ -151,11 +240,17 @@ class Workspace:
     def get_supported_configs(cls) -> dict[str, list[Path]]:
         """Returns a mapping of local destination folders to their global config directories."""
         home = Path.home()
+        xdg_config = Path(os.environ.get("XDG_CONFIG_HOME") or (home / ".config"))
         return {
             ".claude/skills": [home / ".claude"],
             ".agents/skills": [
                 home / ".codex",
+                xdg_config / "opencode",
+                home / ".opencode",
+                home / ".gemini/config",
                 home / ".gemini/antigravity-cli",
+                home / ".gemini/antigravity",
+                home / ".gemini/jetski",
                 home / ".gemini/jetski/cli",
             ],
         }
@@ -237,6 +332,15 @@ class Workspace:
                         actual.add(item.name)
                     else:
                         dangling.append(item)
+                elif self.uses_stubs:
+                    stub_target = read_stub_target(item)
+                    if stub_target is not None:
+                        if stub_target_exists(stub_target):
+                            actual.add(item.name)
+                        else:
+                            dangling.append(item)
+                    elif not self.is_tracked(item):
+                        unmanaged.append(item)
                 else:
                     if self.is_tracked(item):
                         continue
@@ -514,19 +618,21 @@ class GitWorkspace(Workspace):
 class AgyBrainWorkspace(Workspace):
     """Antigravity (Agy) session artifact directory (.../brain/<id>).
 
-    Links skills into 'scratch/skills/<name>' (skipped by the artifact UI
-    scanner and auto-allowed for view_file reads) and registers them in
-    '.agents/skills.json' (with '.agents/skills.json.metadata.json' marking
-    userFacing: false).
+    Writes thin pointer-stub SKILL.md files under '.agents/skills/<name>/' so
+    non-global symlink confinement never drops external skills, no
+    'skills.json' manifest is needed, and edits target the canonical skill
+    directory directly.
     """
 
     scope = "session"
+    uses_stubs = True
 
     def __init__(self, root: Path):
         super().__init__(root)
-        self.dest_dir = self.root / "scratch" / "skills"
-        self.skills_json = self.root / ".agents" / "skills.json"
-        self.skills_meta = self.root / ".agents" / "skills.json.metadata.json"
+        self.dest_dir = self.root / ".agents" / "skills"
+        self.legacy_scratch_dir = self.root / "scratch" / "skills"
+        self.legacy_skills_json = self.root / ".agents" / "skills.json"
+        self.legacy_skills_meta = self.root / ".agents" / "skills.json.metadata.json"
 
     @classmethod
     def detect(cls):
@@ -553,88 +659,57 @@ class AgyBrainWorkspace(Workspace):
             ]
         return [self.dest_dir]
 
-    def _read_skills_json_names(self) -> list[str] | None:
-        if not self.skills_json.is_file():
-            return None
-        try:
-            data = json.loads(self.skills_json.read_text(encoding="utf-8"))
-            for d in data.get("entries", []):
-                if d.get("path") == "scratch/skills" and isinstance(
-                    d.get("include_only"), list
-                ):
-                    return sorted({str(s) for s in d["include_only"] if s})
-        except Exception:
-            return None
+    def check_conflict(self, relpath: Path) -> str | None:
+        if (
+            relpath.exists()
+            and not relpath.is_symlink()
+            and read_stub_target(relpath) is None
+        ):
+            return f"{relpath} exists and is not a managed skill stub; refusing to overwrite"
         return None
 
-    def save_exclude_block(self, skills) -> None:
-        names = sorted(set(skills))
-        if not names:
-            self.skills_json.unlink(missing_ok=True)
-            self.skills_meta.unlink(missing_ok=True)
-            agents_dir = self.root / ".agents"
-            try:
-                if agents_dir.is_dir() and not any(agents_dir.iterdir()):
-                    agents_dir.rmdir()
-            except OSError:
-                pass
-            return
-
-        self.skills_json.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "entries": [
-                {
-                    "path": "scratch/skills",
-                    "include_only": names,
-                }
-            ]
-        }
-        temp_fd, temp_path_str = tempfile.mkstemp(dir=str(self.skills_json.parent))
-        temp_path = Path(temp_path_str)
+    def save_exclude_block(self, _skills) -> None:
+        # Migrate any non-default legacy scratch/skills symlinks into pointer
+        # stubs, then remove legacy scratch/skills and .agents/skills.json.
+        if self.legacy_scratch_dir.is_dir():
+            user_gemini = Path.home() / ".gemini/config/skills"
+            for p in sorted(self.legacy_scratch_dir.iterdir(), key=lambda x: x.name):
+                if not p.is_symlink():
+                    continue
+                try:
+                    target = absolute_target(p)
+                except OSError:
+                    target = None
+                dest_stub = self.dest_dir / p.name
+                if (
+                    target is not None
+                    and link_origin(target) != "default"
+                    and stub_target_exists(target)
+                    and not (user_gemini / p.name).exists()
+                    and not dest_stub.exists()
+                ):
+                    write_skill_stub(dest_stub, target)
+                p.unlink(missing_ok=True)
+            prune_dirs([self.legacy_scratch_dir])
+        self.legacy_skills_json.unlink(missing_ok=True)
+        self.legacy_skills_meta.unlink(missing_ok=True)
+        agents_dir = self.root / ".agents"
         try:
-            with os.fdopen(temp_fd, "w", encoding="utf-8") as f:
-                json.dump(payload, f, indent=2)
-                f.write("\n")
-            os.replace(temp_path, self.skills_json)
-        except Exception:
-            temp_path.unlink(missing_ok=True)
-            raise
-
-        meta_fd, meta_path_str = tempfile.mkstemp(dir=str(self.skills_meta.parent))
-        meta_path = Path(meta_path_str)
-        try:
-            with os.fdopen(meta_fd, "w", encoding="utf-8") as f:
-                json.dump({"userFacing": False}, f)
-                f.write("\n")
-            os.replace(meta_path, self.skills_meta)
-        except Exception:
-            meta_path.unlink(missing_ok=True)
-            raise
-
-    def recorded_names(self) -> set[str]:
-        # skills.json registers what the harness loads, so only live links.
-        live, _, _ = self.get_actual_skills()
-        return live
+            if agents_dir.is_dir() and not any(agents_dir.iterdir()):
+                agents_dir.rmdir()
+        except OSError:
+            pass
 
     def doctor_issues(self) -> list[str]:
         issues = []
-        actual_skills = sorted(self.recorded_names())
-
-        recorded = self._read_skills_json_names()
-        if not actual_skills:
-            if self.skills_json.exists():
-                issues.append(
-                    f"{clean_p(self.skills_json)} exists but no skills are installed in {clean_p(self.dest_dir)}"
-                )
-        else:
-            if recorded != actual_skills:
-                issues.append(
-                    f"{clean_p(self.skills_json)} include_only list does not match installed skills in {clean_p(self.dest_dir)}"
-                )
-            if not self.skills_meta.is_file():
-                issues.append(
-                    f"{clean_p(self.skills_meta)} is missing (required to hide skills.json from artifact UI)"
-                )
+        if self.legacy_skills_json.exists():
+            issues.append(
+                f"legacy {clean_p(self.legacy_skills_json)} present (run 'skill --scope session prune' to clean up)"
+            )
+        if self.legacy_scratch_dir.is_dir() and any(self.legacy_scratch_dir.iterdir()):
+            issues.append(
+                f"legacy {clean_p(self.legacy_scratch_dir)} entries present (run 'skill --scope session prune' to clean up)"
+            )
         return issues
 
     @classmethod
@@ -645,7 +720,9 @@ class AgyBrainWorkspace(Workspace):
         directory (ANTIGRAVITY_APP_DATA_DIR, e.g. ~/.gemini/antigravity-cli);
         without the latter, the known app directories are tried.
         """
-        app_data = os.environ.get("ANTIGRAVITY_APP_DATA_DIR", "")
+        app_data = os.environ.get("ANTIGRAVITY_APP_DATA_DIR", "") or os.environ.get(
+            "AGY_APP_DATA_DIR", ""
+        )
         gemini = Path.home() / ".gemini"
         bases = (
             [Path(app_data)]
@@ -683,40 +760,36 @@ class ClaudeSessionWorkspace(Workspace):
 
 
 class UserWorkspace(Workspace):
-    """User-level skill directories (~/.claude/skills, ~/.agents/skills)."""
+    """User-level skill directories (~/.claude/skills, ~/.agents/skills, ~/.gemini/config/skills)."""
 
     scope = "user"
     # Claude's own claude.ai skill sync lives in ~/.claude/skills/synced.
     reserved_names = frozenset({"synced"})
 
-
-class DefaultsWorkspace(Workspace):
-    """The default skills: one link per default, straight to its source.
-
-    No agent reads this directory. Workspace and session links to a default
-    point through it ('add --defaults'), so removing a default here breaks
-    every link to it at once, and the next seeding cleans them up.
-    """
-
-    scope = "defaults"
-
     @classmethod
     def get_supported_configs(cls) -> dict[str, list[Path]]:
-        return {}
+        home = Path.home()
+        xdg_config = Path(os.environ.get("XDG_CONFIG_HOME") or (home / ".config"))
+        return {
+            ".claude/skills": [home / ".claude"],
+            ".agents/skills": [
+                home / ".codex",
+                xdg_config / "opencode",
+                home / ".opencode",
+            ],
+            ".gemini/config/skills": [
+                home / ".gemini/config",
+                home / ".gemini/antigravity-cli",
+                home / ".gemini/antigravity",
+                home / ".gemini/jetski",
+                home / ".gemini/jetski/cli",
+            ],
+        }
 
-    def get_dest_dirs(self) -> list[Path]:
-        return [self.root]
 
-
-def get_defaults_dir() -> Path:
-    """The defaults scope's directory (SKILL_DEFAULTS_DIR names it outright).
-
-    Kept absolute but unresolved: a link's origin is read from its target
-    text, which is written from this path.
-    """
-    override = os.environ.get("SKILL_DEFAULTS_DIR")
-    if override:
-        return Path(os.path.abspath(Path(override).expanduser()))
+def get_legacy_defaults_dir() -> Path:
+    """Legacy defaults directory (~/.local/state/skill/defaults), recognized so
+    'doctor' and 'prune' can identify and retire old indirect links."""
     base = Path(os.environ.get("XDG_STATE_HOME") or "~/.local/state").expanduser()
     return Path(os.path.abspath(base)) / "skill" / "defaults"
 
@@ -969,44 +1042,35 @@ def fetch_skill_md(
 
 def load_skill_md_frontmatter(content: str) -> dict:
     """Parses a simple YAML frontmatter block from a SKILL.md file string."""
-    meta = {}
+    meta: dict[str, str] = {}
     lines = content.strip().splitlines()
-    if not lines or lines[0] != "---":
+    if not lines or lines[0].strip() != "---":
         return meta
 
-    current_key = None
-    multiline_val = []
-
-    for line in lines[1:]:
-        if line == "---":
-            break
-
+    key: str | None = None
+    parts: list[str] = []
+    for line in [*lines[1:], "---"]:
         stripped = line.strip()
-        if not line.startswith(" ") and ":" in line:
-            if current_key and multiline_val:
-                meta[current_key] = " ".join(multiline_val).strip().strip("'\"")
-                multiline_val = []
-
-            key, val = line.split(":", 1)
-            current_key = key.strip()
-            val_str = val.strip()
-
-            if val_str in (">", "|", ">-", "|-"):
-                multiline_val = []
-            else:
-                meta[current_key] = val_str.strip().strip("'\"")
-                current_key = None
-        elif current_key is not None:
-            if line.startswith(" ") or not line:
-                multiline_val.append(stripped)
-            else:
-                meta[current_key] = " ".join(multiline_val).strip().strip("'\"")
-                current_key = None
-                multiline_val = []
-
-    if current_key and multiline_val:
-        meta[current_key] = " ".join(multiline_val).strip().strip("'\"")
-
+        if stripped == "---":
+            if key is not None:
+                meta[key] = " ".join(parts).strip()
+            break
+        if not line.startswith((" ", "\t")):
+            if not stripped or stripped.startswith("#"):
+                continue
+            if key is not None:
+                meta[key] = " ".join(parts).strip()
+                key, parts = None, []
+            if ":" in line:
+                k, val = line.split(":", 1)
+                key, val = k.strip(), val.strip()
+                parts = (
+                    []
+                    if val in (">", "|", ">-", "|-", ">+", "|+")
+                    else [val.strip("'\"")]
+                )
+        elif key is not None and stripped and not stripped.startswith("#"):
+            parts.append(stripped)
     return meta
 
 
@@ -1267,8 +1331,6 @@ def get_workspace() -> Workspace:
         return get_session_workspace()
     if _SCOPE == "user":
         return UserWorkspace(Path.home())
-    if _SCOPE == "defaults":
-        return DefaultsWorkspace(get_defaults_dir())
     if is_home_workspace():
         die(
             "the home directory's skill folders are the user scope; "
@@ -1301,6 +1363,15 @@ def get_workspace() -> Workspace:
 
 def resolve_skill_spec(spec: str) -> tuple[Path, str]:
     """Resolves a skill spec/name to its (absolute_source_path, skill_name)."""
+    explicit_path = spec == "~" or spec.startswith(("/", "./", "../", "~/"))
+    if explicit_path or ("/" in spec and ":" not in spec):
+        p = Path(spec).expanduser()
+        if (p / "SKILL.md").is_file():
+            resolved = Path(os.path.realpath(p))
+            return resolved, resolved.name
+        if explicit_path:
+            raise ValueError(f"cannot resolve skill path '{spec}' (no SKILL.md found)")
+
     api = get_api()
 
     # 1. Parse the requested spec for namespace
@@ -1427,27 +1498,26 @@ def rel_to(root: Path, p: Path):
 
 
 class DiskEntry:
-    """A symlink found in a destination directory."""
+    """A managed skill entry (symlink or session pointer stub)."""
 
     def __init__(self, dest, link_name, path, kind, target, tracked):
-        self.dest = dest  # the destination directory containing the link
-        self.link_name = link_name  # the symlink's basename
+        self.dest = dest  # the destination directory containing the entry
+        self.link_name = link_name  # the entry's basename
         self.path = path  # dest / link_name
         self.kind = kind  # "live" (target exists) or "dangling" (target missing)
-        self.target = target  # absolute symlink target, when readable
-        self.tracked = tracked  # whether the link is VCS-tracked
+        self.target = target  # canonical source path, when readable
+        self.tracked = tracked  # whether the entry is VCS-tracked
 
     @property
     def origin(self) -> str:
-        """'default' for a link through the defaults directory (or one in it),
+        """'default' for a legacy link through ~/.local/state/skill/defaults,
         else 'added'."""
-        if os.path.normpath(self.dest) == os.path.normpath(get_defaults_dir()):
-            return "default"
         return link_origin(self.target)
 
     @property
     def source(self) -> Path | None:
-        """The skill directory the link stands for, one defaults hop followed.
+        """The skill directory the entry stands for, following one legacy
+        defaults hop if present.
 
         Read lexically, never resolved: resolving a link into a network-backed
         mount costs a remote round trip per path component.
@@ -1467,16 +1537,29 @@ def absolute_target(link: Path) -> Path:
 
 
 def link_origin(target: Path | None) -> str:
-    if target is not None and os.path.normpath(target.parent) == os.path.normpath(
-        get_defaults_dir()
-    ):
-        return "default"
+    if target is not None:
+        parent_norm = os.path.normpath(target.parent)
+        if parent_norm == os.path.normpath(
+            get_legacy_defaults_dir()
+        ) or parent_norm.endswith(os.sep + os.path.join("skill", "defaults")):
+            return "default"
     return "added"
 
 
+def _entry_target(p: Path, uses_stubs: bool) -> Path | None:
+    if p.is_symlink():
+        try:
+            return absolute_target(p)
+        except OSError:
+            return None
+    if uses_stubs:
+        return read_stub_target(p)
+    return None
+
+
 def scan_links(ws) -> tuple[list[DiskEntry], list[Path]]:
-    """Every symlink in the scope's destination directories, plus the untracked
-    items there that are not symlinks.
+    """Every managed skill entry in the scope's destination directories, plus
+    any untracked unmanaged items found there.
 
     Whether a link is VCS-tracked is only worked out for broken links, the
     only ones that need it (tracked links are never pruned): asking git about
@@ -1491,18 +1574,14 @@ def scan_links(ws) -> tuple[list[DiskEntry], list[Path]]:
     for name in sorted(live):
         for d in dest_dirs:
             p = d / name
-            if not p.is_symlink() or p in dangling:
+            if p in dangling:
                 continue
-            try:
-                target = absolute_target(p)
-            except OSError:
-                target = None
+            target = _entry_target(p, ws.uses_stubs)
+            if target is None and not p.is_symlink():
+                continue
             entries.append(DiskEntry(d, name, p, "live", target, False))
     for p in dangling:
-        try:
-            target = absolute_target(p)
-        except OSError:
-            target = None
+        target = _entry_target(p, ws.uses_stubs)
         entries.append(
             DiskEntry(p.parent, p.name, p, "dangling", target, ws.is_tracked(p))
         )
@@ -1510,7 +1589,7 @@ def scan_links(ws) -> tuple[list[DiskEntry], list[Path]]:
 
 
 def sync_records(ws) -> None:
-    """Rewrite the scope's records (git excludes, skills.json) from disk."""
+    """Rewrite the scope's records (git excludes, legacy cleanup) from disk."""
     if hasattr(ws, "save_exclude_block"):
         ws.save_exclude_block(ws.recorded_names())
     if hasattr(ws, "save_managed_skills"):
@@ -1521,10 +1600,12 @@ def sync_records(ws) -> None:
 def cmd_add(specs):
     quiet = any(a in ("-q", "--quiet") for a in specs)
     specs = [a for a in specs if a not in ("-q", "--quiet")]
-    if specs == ["--defaults"]:
-        return cmd_add_defaults(quiet=quiet)
     if "--defaults" in specs:
-        cmderr("add", "--defaults takes no skill names", code=2)
+        cmderr(
+            "add",
+            "--defaults has been removed; default skills live in the user scope ('skill --scope user add ...')",
+            code=2,
+        )
     log = (lambda *a, **k: None) if quiet else print
     if not specs:
         cmderr("add", "skill name required")
@@ -1571,20 +1652,56 @@ def cmd_add(specs):
     resolved_skills = deduped_skills
 
     # A session add names a project's skills without working out which ones
-    # the workspace already links, so skip those: the harness has them.
+    # the user scope or workspace already links, so skip those: the harness
+    # already loads them. Exception: Antigravity/Gemini workspace discovery
+    # drops .agents/skills/ symlinks whose resolved target escapes the
+    # workspace root, so those must still be staged into the session directory.
     if ws.scope == "session":
+        home = Path.home()
+        user_dirs = (
+            [home / ".gemini" / "config" / "skills"]
+            if isinstance(ws, AgyBrainWorkspace)
+            else [home / ".claude" / "skills"]
+        )
         project_ws = detect_project_workspace()
         try:
             active_dirs = project_ws.get_dest_dirs() if project_ws else []
         except RuntimeError:
             active_dirs = []
+        if isinstance(ws, AgyBrainWorkspace):
+            active_dirs = [
+                d
+                for d in active_dirs
+                if d.name == "skills" and d.parent.name == ".agents"
+            ] or active_dirs
         kept = []
         for src, name in resolved_skills:
+            user_link = next(
+                (d / src.name for d in user_dirs if (d / src.name).is_symlink()),
+                None,
+            )
+            if user_link is not None and os.path.realpath(
+                user_link
+            ) == os.path.realpath(src):
+                log(
+                    f"already active {name} (user {clean_p(user_link)})",
+                    file=sys.stderr,
+                )
+                continue
+
             link = next(
                 (d / src.name for d in active_dirs if (d / src.name).is_symlink()),
                 None,
             )
-            if link is not None and os.path.realpath(link) == os.path.realpath(src):
+            if (
+                link is not None
+                and os.path.realpath(link) == os.path.realpath(src)
+                and (
+                    not isinstance(ws, AgyBrainWorkspace)
+                    or project_ws is None
+                    or Path(link).resolve().is_relative_to(project_ws.root.resolve())
+                )
+            ):
                 log(
                     f"already active {name} (workspace {clean_p(link)})",
                     file=sys.stderr,
@@ -1596,49 +1713,43 @@ def cmd_add(specs):
     # Check for conflicts across all destinations first
     for src, _name in resolved_skills:
         for d in dest_dirs:
-            # UNIQUENESS CONSTRAINT:
-            # We create the symlink using the target directory's basename (src.name)
-            # rather than the registered name (which can be anything, e.g., wear-vcs).
-            # This decouples the namespacing/lookup name from the actual symlink,
-            # but implies that all installed skills in a workspace must have unique
-            # directory basenames to avoid name collisions in .agents/skills/.
             link_name = src.name
             relpath = d / link_name
             conflict = ws.check_conflict(relpath)
             if conflict:
                 cmderr("add", conflict)
-            if relpath.exists() and not relpath.is_symlink():
+            if (
+                relpath.exists()
+                and not relpath.is_symlink()
+                and not (ws.uses_stubs and read_stub_target(relpath) is not None)
+            ):
                 cmderr(
                     "add",
                     f"{relpath} exists and is not a symlink; refusing to overwrite",
                 )
 
-    # Link straight at the source. This replaces a link through the defaults
-    # directory, so the skill stays when it stops being a default.
     for src, name in resolved_skills:
         for d in dest_dirs:
             link_name = src.name
             relpath = d / link_name
             d.mkdir(parents=True, exist_ok=True)
-
-            # Atomic symlink replacement (concurrency-safe swap)
-            tmp_link = relpath.with_name(f".{relpath.name}.tmp-{os.getpid()}")
-            tmp_link.unlink(missing_ok=True)
-            try:
-                tmp_link.symlink_to(src)
-                os.replace(tmp_link, relpath)
-            except Exception:
+            if ws.uses_stubs:
+                write_skill_stub(relpath, src)
+            else:
+                tmp_link = relpath.with_name(f".{relpath.name}.tmp-{os.getpid()}")
                 tmp_link.unlink(missing_ok=True)
-                raise
+                try:
+                    tmp_link.symlink_to(src)
+                    os.replace(tmp_link, relpath)
+                except Exception:
+                    tmp_link.unlink(missing_ok=True)
+                    raise
         log(f"added {name} -> {src}", file=sys.stderr)
 
     sync_records(ws)
 
     if resolved_skills and isinstance(ws, AgyBrainWorkspace):
-        # The harness reads skills.json at the start of a turn.
-        paths = [
-            clean_p(ws.dest_dir / src.name / "SKILL.md") for src, _ in resolved_skills
-        ]
+        paths = [clean_p(src / "SKILL.md") for src, _ in resolved_skills]
         if len(paths) == 1:
             log(
                 "session skills are in <skills> from the next turn; to use it "
@@ -1646,10 +1757,10 @@ def cmd_add(specs):
                 file=sys.stderr,
             )
         else:
-            names = ", ".join(src.name for src, _ in resolved_skills)
+            joined = ", ".join(paths)
             log(
                 "session skills are in <skills> from the next turn; to use one "
-                f"now, read {clean_p(ws.dest_dir)}/<name>/SKILL.md ({names})",
+                f"now, read its SKILL.md directly ({joined})",
                 file=sys.stderr,
             )
 
@@ -1682,101 +1793,47 @@ def lock_scope_root(root: Path) -> None:
     _SCOPE_LOCK_FD = fd
 
 
-def cmd_add_defaults(quiet=False):
-    """Link every default into the scope, through the defaults directory.
+def cmd_prune(args: list[str]) -> None:
+    """Retire legacy indirect default links, sync exclude records, and fail if
+    ERROR-level doctor findings remain (used by agent launch preflight)."""
+    quiet = any(a in ("-q", "--quiet") for a in args)
+    extra = [a for a in args if a not in ("-q", "--quiet")]
+    if extra:
+        cmderr("prune", f"unexpected argument '{extra[0]}'", code=2)
 
-    Untracked broken links to a default are removed first: a demoted or
-    renamed default leaves its links dangling, and this is where they get
-    cleaned up. A broken link added by name is kept with a warning: its source
-    may only be unreachable for now (an unmounted network path, a pruned
-    cache), and nothing would bring it back. A name that already has a link
-    keeps it, so a skill added by hand is never replaced. Ends with the error
-    checks of 'doctor', so an agent wrapper can seed and check its workspace
-    in one call.
-
-    The user scope is seeded only when asked for (--scope user), e.g. in an
-    ephemeral environment where the user is the project.
-
-    In the workspace scope, a directory outside any repository or
-    plugin-recognized workspace is left alone unless it already has a skill
-    folder, so launching an agent from an arbitrary directory (or ~) writes
-    nothing there.
-    """
-    if _SCOPE == "defaults":
-        cmderr("add", "--defaults does not apply to --scope defaults", code=2)
     if _SCOPE == "workspace" and is_home_workspace():
-        # The home directory's skill folders are the user scope, which stays
-        # empty; an agent launched from ~ gets no workspace defaults.
         return
 
     ws = get_workspace()
     if type(ws) is DefaultWorkspace and not any(
         (ws.root / sd).is_dir() for sd in anchor_subdirs()
     ):
-        if not quiet:
-            print(
-                f"skill: {clean_p(ws.root)} is not in a repository; no defaults "
-                "linked (create .agents/skills there to opt in)",
-                file=sys.stderr,
-            )
         return
     try:
         dest_dirs = ws.get_dest_dirs()
     except RuntimeError as e:
-        cmderr("add", str(e))
+        cmderr("prune", str(e))
 
-    # Agents launched at the same time in one workspace each seed it: take
-    # turns, so none sees another's half-written links or records.
     lock_scope_root(ws.root)
 
     changes = []
     entries, _ = scan_links(ws)
     for e in entries:
-        if e.kind != "dangling" or e.tracked:
+        if e.tracked:
             continue
         if e.origin == "default":
-            e.path.unlink(missing_ok=True)
-            changes.append(f"removed broken link {rel_to(ws.root, e.path)}")
-        else:
+            remove_skill_entry(e.path)
+            changes.append(f"removed legacy default link {rel_to(ws.root, e.path)}")
+        elif e.kind == "dangling":
             print(
                 f"skill: warning: kept broken link {rel_to(ws.root, e.path)} "
                 f"(its source is missing; 'skill remove {e.link_name}' drops it)",
                 file=sys.stderr,
             )
 
-    defaults_dir = get_defaults_dir()
-    defaults = []
-    if defaults_dir.is_dir():
-        for p in sorted(defaults_dir.iterdir()):
-            if p.name.startswith(".") or not p.is_symlink():
-                continue
-            try:
-                if link_target_exists(p):
-                    defaults.append(p)
-            except OSError:
-                pass
-
-    added = []
-    for src in defaults:
-        for d in dest_dirs:
-            p = d / src.name
-            # Any existing entry stays: a default already, a skill added by
-            # hand, or something 'doctor' reports.
-            if p.is_symlink() or p.exists() or ws.check_conflict(p):
-                continue
-            d.mkdir(parents=True, exist_ok=True)
-            try:
-                p.symlink_to(src)
-            except FileExistsError:
-                # A concurrent seeding (two agents launched at once) linked
-                # it first; whatever is there now stays, as above.
-                continue
-            if src.name not in added:
-                added.append(src.name)
-    changes += [f"added {name} (default)" for name in added]
-
     if changes or ws.doctor_issues():
         sync_records(ws)
+        prune_dirs(dest_dirs)
     if changes and not quiet:
         print_workspace_root(ws)
         for line in changes:
@@ -1784,7 +1841,7 @@ def cmd_add_defaults(quiet=False):
 
     if not cmd_doctor(ws=ws, check_catalog=False, errors_only=True):
         cmderr(
-            "add",
+            "prune",
             f"{clean_p(ws.root)} has problems; see 'skill doctor'",
         )
 
@@ -1805,6 +1862,8 @@ def is_home_workspace() -> bool:
 
 
 def cmd_remove(names):
+    quiet = any(a in ("-q", "--quiet") for a in names)
+    names = [a for a in names if a not in ("-q", "--quiet")]
     if not names:
         cmderr("remove", "skill name required")
 
@@ -1814,10 +1873,12 @@ def cmd_remove(names):
     except RuntimeError as e:
         cmderr("remove", str(e))
 
-    print_workspace_root(ws)
+    if not quiet:
+        print_workspace_root(ws)
     entries, _ = scan_links(ws)
 
     removed = []
+    removed_names: set[str] = set()
     for arg in names:
         candidates = {
             arg,
@@ -1841,13 +1902,25 @@ def cmd_remove(names):
                     file=sys.stderr,
                 )
                 continue
-            e.path.unlink(missing_ok=True)
+            remove_skill_entry(e.path)
             removed.append(e)
-        if not matched:
+            removed_names.add(e.link_name)
+        legacy_removed = False
+        if isinstance(ws, AgyBrainWorkspace) and ws.legacy_scratch_dir.is_dir():
+            for cand in sorted(candidates):
+                if not cand or "/" in cand or cand in (".", ".."):
+                    continue
+                lp = ws.legacy_scratch_dir / cand
+                if lp.is_symlink():
+                    lp.unlink(missing_ok=True)
+                    legacy_removed = True
+                    removed_names.add(cand)
+        if not matched and not legacy_removed and not quiet:
             print(f"skill remove: {arg} not present", file=sys.stderr)
 
-    for name in sorted({e.link_name for e in removed}):
-        print(f"removed {name}", file=sys.stderr)
+    if not quiet:
+        for name in sorted(removed_names):
+            print(f"removed {name}", file=sys.stderr)
 
     sync_records(ws)
     prune_dirs(ws.get_dest_dirs())
@@ -1872,6 +1945,7 @@ def cmd_list(args):
                     {
                         "name": e.link_name,
                         "origin": e.origin,
+                        "scope": ws.scope,
                         "path": str(e.source) if e.source else None,
                     }
                     for e in rows
@@ -1884,7 +1958,7 @@ def cmd_list(args):
         max_len = max(len(e.link_name) for e in rows)
         for e in rows:
             print(
-                f"{e.link_name.ljust(max_len)}  {e.origin:<7}  -> "
+                f"{e.link_name.ljust(max_len)}  {ws.scope:<9}  -> "
                 f"{clean_p(e.source) if e.source else '?'}"
             )
 
@@ -1899,7 +1973,10 @@ def cmd_clean():
     print_workspace_root(ws)
 
     entries, unmanaged = scan_links(ws)
-    if not entries and not any(d.is_dir() for d in dest_dirs):
+    has_legacy = isinstance(ws, AgyBrainWorkspace) and (
+        ws.legacy_skills_json.exists() or ws.legacy_scratch_dir.is_dir()
+    )
+    if not entries and not has_legacy and not any(d.is_dir() for d in dest_dirs):
         print("clean: nothing to do", file=sys.stderr)
         return
 
@@ -1907,9 +1984,15 @@ def cmd_clean():
     for e in entries:
         if ws.is_tracked(e.path):
             continue
-        e.path.unlink(missing_ok=True)
+        remove_skill_entry(e.path)
         removed += 1
         print(f"removed {rel_to(ws.root, e.path)}", file=sys.stderr)
+    if isinstance(ws, AgyBrainWorkspace) and ws.legacy_scratch_dir.is_dir():
+        for lp in sorted(ws.legacy_scratch_dir.iterdir(), key=lambda x: x.name):
+            if lp.is_symlink():
+                lp.unlink(missing_ok=True)
+                removed += 1
+                print(f"removed {rel_to(ws.root, lp)}", file=sys.stderr)
     for p in unmanaged:
         print(
             f"clean: {rel_to(ws.root, p)} is not a symlink; leaving it in place",
@@ -1995,7 +2078,7 @@ def cmd_bundle(args: list[str]) -> None:
         for e in entries:
             if e.kind == "live" and e.link_name not in seen:
                 seen.add(e.link_name)
-                src = Path(os.path.realpath(e.path))
+                src = Path(os.path.realpath(e.source or e.path))
                 workspace_skills.append((src, e.link_name, e.link_name))
         if not workspace_skills and not specs:
             cmderr("bundle", f"no skills linked in {clean_p(ws.root)}")
@@ -2526,7 +2609,7 @@ def cmd_doctor(
 
     Returns True if healthy, False otherwise. By default (a full 'doctor' audit)
     both WARNING and ERROR findings count as unhealthy. With errors_only=True
-    (the check at the end of 'add --defaults', run as an agent launches) only
+    (the check at the end of 'prune', run as an agent launches) only
     ERROR findings fail; WARNING findings are left out of the report.
     """
     if ws is None:
@@ -2571,8 +2654,6 @@ def cmd_doctor(
         ws_type = "Claude session directory"
     elif isinstance(ws, UserWorkspace):
         ws_type = "User skill directories"
-    elif isinstance(ws, DefaultsWorkspace):
-        ws_type = "Default skills"
     elif isinstance(ws, GitWorkspace):
         ws_type = "Git repository"
     else:
@@ -2658,19 +2739,17 @@ def cmd_doctor(
                 break_long_words=False,
                 break_on_hyphens=False,
             )
-            installed_details.append(f"{origin.capitalize()}:")
+            label = "Legacy default" if origin == "default" else "Skills"
+            installed_details.append(f"{label}:")
             installed_details += [f"  {line}" for line in wrapped]
-    if ws.scope != "defaults":
-        installed_details.append(f"Defaults: {clean_p(get_defaults_dir())}")
     checks.append(
         {
             "name": "Installed Skills",
             "status": "OK",
             "summary": f"{len(live)} skill(s) linked"
             + (
-                f" ({len(by_origin['default'])} default, "
-                f"{len(by_origin['added'])} added)"
-                if ws.scope != "defaults"
+                f" ({len(by_origin['default'])} legacy default)"
+                if by_origin["default"]
                 else ""
             ),
             "details": installed_details,
@@ -2721,8 +2800,7 @@ def cmd_doctor(
     # made, so nothing here removes it; the fix names the repository instead.
     # A broken link added by name is only a warning: its source may be
     # unreachable for now (an unmounted network path, a pruned cache), and
-    # 'add --defaults' keeps it, so it must not block an agent launch. In the
-    # defaults scope every link is a default.
+    # 'prune' keeps it, so it must not block an agent launch.
     stray_dangling = [
         e.path
         for e in entries
@@ -2857,15 +2935,6 @@ def cmd_doctor(
                 "name": "Workspace Exclusions",
                 "status": "OK",
                 "summary": f"{clean_p(ws.exclude_file)} is fully synchronized",
-                "details": [],
-            }
-        )
-    elif isinstance(ws, AgyBrainWorkspace):
-        checks.append(
-            {
-                "name": "Workspace Exclusions",
-                "status": "OK",
-                "summary": f"{clean_p(ws.skills_json)} is fully synchronized",
                 "details": [],
             }
         )
@@ -3004,7 +3073,7 @@ def cmd_doctor(
     # Render checks.
     #
     # 'doctor' is a full audit: every non-OK check (WARNING or ERROR) is a
-    # finding and makes the command exit non-zero. 'add --defaults' passes
+    # finding and makes the command exit non-zero. 'prune' passes
     # errors_only=True: only ERROR checks fail an agent launch, so a
     # WARNING-only scope renders nothing and passes. A check is rendered only
     # when it is "visible".
@@ -3038,17 +3107,9 @@ def cmd_doctor(
             continue
         name = check["name"]
         if name == "Symlink Health":
-            if stray_dangling and ws.scope in ("workspace", "session", "user"):
-                check["details"].append(
-                    "To resolve: remove the broken links (and add any new defaults):"
-                )
-                check["details"].append(f"  skill {scope_opt}add --defaults")
-            elif stray_dangling:
-                check["details"].append("To resolve: remove the broken links:")
-                check["details"].append(
-                    f"  skill {scope_opt}remove "
-                    + " ".join(sorted({p.name for p in stray_dangling}))
-                )
+            if stray_dangling:
+                check["details"].append("To resolve: prune the retired default links:")
+                check["details"].append(f"  skill {scope_opt}prune")
             if added_dangling:
                 check["details"].append(
                     "To resolve: restore the missing sources (e.g. remount or "
@@ -3070,8 +3131,8 @@ def cmd_doctor(
                 )
         elif name == "Workspace Exclusions":
             check["details"].append(
-                "To repair: any 'skill add' or 'skill remove' rewrites the "
-                f"records, e.g. 'skill {scope_opt}add --defaults'."
+                "To repair: any 'skill add', 'skill remove' or "
+                f"'skill {scope_opt}prune' rewrites the records."
             )
         elif name == "Directory Cleanliness":
             check["details"].append(
@@ -3195,51 +3256,45 @@ def usage():
     print(
         """Usage: skill [-C DIR] [--scope SCOPE] <command> [skill...]
 
-Manage agent skills as untracked symlinks, in the directories each installed
-agent reads for the chosen scope:
-  user       ~/.claude/skills (Claude) and ~/.agents/skills (Codex, Agy)
+Manage agent skills in the directories each installed agent reads for the
+chosen scope:
+  user       ~/.claude/skills (Claude), ~/.agents/skills (Codex, OpenCode) and
+             ~/.gemini/config/skills (Antigravity, Jetski) -- holds default skills
   workspace  .claude/skills and .agents/skills at the repository's skill
              anchor, plus a block in .git/info/exclude (the default)
   session    the calling agent's own session: $AGENT_SESSION_DIR/.claude/skills
-             (Claude) or brain/<id>/scratch/skills + .agents/skills.json (Agy);
-             only launchers that give a session its own directory support it
-             (not 'claude remote-control' or Codex; see the agent-config
-             skill, references/model.md)
-  defaults   the default skills, which no agent reads; 'add --defaults' links
-             each one into a workspace, session or user through this directory
+             (Claude) or brain/<id>/.agents/skills pointer stubs (Antigravity,
+             Jetski); only launchers that give a session its own directory
+             support it (see the agent-config skill, references/model.md)
 
 Commands:
-  add SPEC...     Link a skill straight to its source: a catalog entry from
-                  'skill catalog', as NAME or NAMESPACE:NAME (replaces a
-                  default's link)
-  add -           Read skill names from stdin
-  add --defaults  Link every default through the defaults directory, keeping
-                  existing links; remove broken links to defaults (broken
-                  links added by name are kept, with a warning); then fail if
-                  'doctor' finds errors. Outside
-                  a repository or plugin-recognized workspace, does nothing
-                  unless the directory already has a skill folder
-                  -q, --quiet: report only errors and warnings
-  remove NAME...  Remove a skill's links and exclude entries (alias: rm)
-  list [--json]   List linked skills, each 'default' or 'added', in the scope
-  clean           Remove all skill links in the scope (and git excludes)
-  doctor [--json] Check the scope's links and the catalog (read-only)
-  bundle [SPEC...] Package skills into an archive or directory without installing
-  update SPEC...  Re-fetch a plugin-provided catalog entry; --all for every
-                  entry, --catalog to refresh the whole metadata index
-  catalog [--json] List plugin-provided skills and sources; --json adds each
-                  skill's description and structural profile (file counts and
-                  sizes for scripts/, references/ and tests/)
-  resolve NAME    Print the source path 'add NAME' would symlink to
-  show/info NAME  Show details and metadata of a skill
-  mcp [SCOPE]     Serve skills over MCP, to agents that cannot read them from
-                  disk; see 'skill mcp --help'
+  add [-q] SPEC...     Install a skill from 'skill catalog' (NAME or
+                       NAMESPACE:NAME) or a local skill directory path
+  add -                Read skill names from stdin
+  remove [-q] NAME...  Remove a skill's entries and exclude records (alias: rm)
+  prune [-q]           Retire legacy indirect default links, sync records, and
+                       fail if 'doctor' finds errors (used at agent launch)
+  list [--json]        List installed skills in the scope
+  clean                Remove all managed skill entries in the scope
+  doctor [--json]      Check the scope's links and the catalog (read-only)
+  bundle [SPEC...]     Package skills into an archive or directory
+  update SPEC...       Re-fetch a plugin-provided catalog entry; --all for every
+                       entry, --catalog to refresh the whole metadata index
+  catalog [--json]     List plugin-provided skills and sources; --json outputs
+                       NDJSON (one JSON object per line) with description and
+                       structural profile (scripts/, references/, tests/ counts)
+  resolve SPEC         Print the source path 'add SPEC' would resolve to
+  show/info SPEC       Show details and metadata of a skill
+  mcp [SCOPE]          Serve skills over MCP, to agents that cannot read them
+                       from disk; see 'skill mcp --help'
 
 Options:
   -C, --directory DIR  Run as if started in DIR instead of the current directory
-  --scope SCOPE        'user', 'workspace' (default), 'session' or 'defaults';
-                       only add, remove, list, doctor and clean take a scope
-                       other than 'workspace'
+  --scope SCOPE        'user', 'workspace' (default) or 'session'; only add,
+                       remove, prune, list, doctor and clean take a scope other
+                       than 'workspace'
+  --offline            Never fetch remote skills or metadata over the network
+                       (same as AGENT_OFFLINE=1)
   --help, -h           Display this help message and exit
   --plugin-template    Output a template/documentation for creating a Workspace plugin
 
@@ -3252,14 +3307,11 @@ Environment:
                      only while AGENT_SESSION_ID matches CLAUDE_CODE_SESSION_ID
   SKILL_CACHE_DIR    Cache directory for remote skills and catalog metadata
                      (default: ${XDG_CACHE_HOME:-$HOME/.cache}/skill)
-  SKILL_DEFAULTS_DIR Directory of the defaults scope
-                     (default: ${XDG_STATE_HOME:-$HOME/.local/state}/skill/defaults)
 
 Examples:
-  skill add coding-standards
+  skill add adb
   skill --scope session add jetpack
-  skill --scope defaults add workspace-tools
-  skill add --defaults
+  skill --scope user add workspace-tools
   printf '%s\\n' adb jetpack | skill --scope session add -
   skill list --json"""
     )
@@ -3347,7 +3399,7 @@ def register(api):
             if idx >= len(raw_argv):
                 print(
                     "skill: option '--scope' requires an argument "
-                    "('user', 'workspace', 'session' or 'defaults')",
+                    "('user', 'workspace' or 'session')",
                     file=sys.stderr,
                 )
                 sys.exit(2)
@@ -3355,6 +3407,9 @@ def register(api):
             idx += 1
         elif arg.startswith("--scope="):
             explicit_scope = arg[len("--scope=") :].lower()
+            idx += 1
+        elif arg == "--offline":
+            os.environ["AGENT_OFFLINE"] = "1"
             idx += 1
         else:
             filtered_argv.append(arg)
@@ -3385,10 +3440,10 @@ def register(api):
         print("Try 'skill --help' for more information.", file=sys.stderr)
         sys.exit(2)
     if explicit_scope is not None:
-        if explicit_scope not in ("user", "workspace", "session", "defaults"):
+        if explicit_scope not in ("user", "workspace", "session"):
             print(
                 f"skill: invalid --scope value '{explicit_scope}'; "
-                "expected 'user', 'workspace', 'session' or 'defaults'",
+                "expected 'user', 'workspace' or 'session'",
                 file=sys.stderr,
             )
             sys.exit(2)
@@ -3397,6 +3452,7 @@ def register(api):
         "add",
         "remove",
         "rm",
+        "prune",
         "list",
         "doctor",
         "clean",
@@ -3433,6 +3489,8 @@ def register(api):
         cmd_update(args)
     elif cmd == "add":
         cmd_add(args)
+    elif cmd == "prune":
+        cmd_prune(args)
     elif cmd in ("remove", "rm"):
         cmd_remove(args)
     elif cmd == "list":

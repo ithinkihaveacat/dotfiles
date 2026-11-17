@@ -16,7 +16,7 @@
 > 1. **Dimension 2 (Surface Form & Container Size):** Iterate through all
 >    supported surface forms and container sizes:
 >    - **Full-Screen Widget (Tile Compatibility Mode):** Standalone full-screen
->      tile translation (on Wear OS $\\le$ 6 or via a FULLSCREEN `DEBUG_SURFACE`
+>      tile translation (on Wear OS ≤ 6 or via a FULLSCREEN `DEBUG_SURFACE`
 >      `add-tile` broadcast, such as `adb-tile-add --type FULLSCREEN` if
 >      available).
 >    - **Modular "Real" Widgets:** Partial-height modular containers on Wear OS
@@ -104,7 +104,7 @@ ______________________________________________________________________
 - **Media & Sync Services:**
   `<List companion playback or synchronization services if relevant>`
 - **Remote Compose Payload Archival (`D13`):**
-  `<Status and relative paths of exported binary .rc / .rcdoc payloads captured via DUMP_RC_DOC (or adb-tile-dump if available) for deterministic replay and regression diffing>`
+  `<Status and relative paths of exported binary .rc / .rcdoc payloads captured via DUMP_RC_DOC (or adb-tile-dump if available; requires renderer >= 1.6.6.13 and root/userdebug—mark N/A on user builds or older 1.6.5.41.* .emu renderers) for deterministic replay and regression diffing>`
 
 ### Resource Dimensions & Localization Overview (`D12`)
 

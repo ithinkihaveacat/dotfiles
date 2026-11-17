@@ -41,10 +41,11 @@ repository.
 
 ## Fish Script Formatting
 
-All Fish shell scripts, whether new or updated, _must_ be formatted by
-`fish_indent -w`.
-
-Example command:
+All Fish shell scripts (`.fish` files and scripts with a `fish` shebang),
+whether new or updated, _must_ be formatted with `fish_indent`. Passing Fish
+files or directories to `scripts/shell-format` dispatches them to `fish_indent`
+automatically (`--write` or `--check`), or you can run `fish_indent -w`
+directly:
 
 ```bash
 fish_indent -w skills/jetpack/completions/jetpack.fish

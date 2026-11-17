@@ -13,11 +13,15 @@ workflows, helper scripts, and local conventions.
   `SKILL.md` and follow its prescribed workflow and scripts rather than
   inventing an ad-hoc approach.
 - **Load session-specific skills when relevant**: Default skills cover only
-  baseline workflows. Whenever work touches—or later shifts to—a repository or
-  technology stack not covered by active skills, delegate a subagent to check
-  `skill catalog --json` and activate matching skills with
-  `skill --scope session add <NAME>...` (or use other skill-search tools if
-  available).
+  baseline workflows. When work shifts to an uncovered repository or stack,
+  delegate a subagent to search `skill --offline catalog --json` (NDJSON;
+  inspect with `skill info <NAME>` / `skill show <NAME>`) and return matching
+  skill names and paths to the parent session instead of running
+  `skill --scope session add` inside the subagent. In the parent session, reuse
+  harness skills, run `skill --scope session add <NAME>...` when supported
+  (Claude wrapper or Antigravity), or read
+  `$(skill --offline resolve <NAME>)/SKILL.md` directly (OpenCode/Codex; never
+  install workspace/user skills as a fallback).
 - **Skill symlinks and relative paths**: Installed skill directories are
   symlinks, so cross-skill links (`../<sibling>/...`) must be resolved against
   the symlink's `realpath` (or activated via `skill --scope session add`), and
@@ -32,8 +36,9 @@ workflows, helper scripts, and local conventions.
     package/CLI tool is missing, activate `workspace-tools` and install it into
     the workspace rather than user- or system-wide. If a `uv run --script`
     helper fails to resolve cached dependencies in a sandbox, run
-    `~/.dotfiles/install.sh --only uv --force` (with network access) to rebuild
-    the script cache rather than changing the script's shebang.
+    `uv sync --script <script>` or `~/.dotfiles/install.sh --apply --only uv`
+    (with network access, without `--force`) to populate the script cache rather
+    than changing the script's shebang.
   - **Version control & commits**: Format commit messages according to the
     active VCS/standards skill. Ensure the workspace commit hooks are installed
     (`hook apply` or `hook -C <repo> apply`) before committing in a repository.
@@ -45,10 +50,12 @@ workflows, helper scripts, and local conventions.
 Default to whatever register suits the task; the styles below apply only when
 triggered.
 
-- **Plain English**: When asked to write or rephrase in "plain English", follow
-  the principles behind the Plain English Campaign's Crystal Mark—short
-  sentences, active voice, everyday words, clear layout—and say so in the
-  response, e.g. "Plain English (Crystal Mark principles)".
+- **Plain English**: When asked to write or rephrase in "plain English", aim to
+  meet the Plain English Campaign's Crystal Mark standard—short sentences,
+  active voice, everyday words, and clear structure—while preserving technical
+  accuracy, necessary terminology, and detail appropriate to the intended
+  audience. Indicate this in the response, e.g. "Plain English (Crystal Mark
+  principles)".
 - **Explain Like I'm Five (ELI5)**: When the user asks for ELI5 (even a bare
   "ELI5"), wants a simpler explanation, or seems confused, switch to an
   exaggerated, Reddit-style "Explain Like I'm Five" register and flag it the
@@ -57,14 +64,16 @@ triggered.
 ## Path and Link Portability
 
 - **Committed files and distributable artifacts**: When writing or editing
-  committed repository files, documentation, or artifacts intended for
-  distribution, use repository-relative paths for internal links (no `file://`
-  scheme) and canonical web URLs (`https://` or `http://`) for external
-  references—never host-specific `file://` links or absolute local paths that
-  break across machines.
-- **Conversation output**: In regular chat responses, use machine-specific
-  `file://` links when referencing local files, directories, or code symbols so
-  they are clickable in the user's environment.
+  committed repository files, documentation, or externally shared documents, use
+  repository-relative paths for internal links (no `file://` scheme) and
+  canonical web URLs (`https://` or `http://`) for external references—never
+  host-specific `file://` links or absolute local paths that break across
+  machines.
+- **Conversation output and session-local IDE artifacts**: In regular chat
+  responses, use machine-specific `file://` links when referencing local files,
+  directories, or code symbols so they are clickable in the user's environment.
+  Session-local IDE artifact panels may likewise use `file://` links when
+  required by the host's artifact viewer.
 
 ## Throwaway HTML
 
@@ -83,9 +92,10 @@ need their own architecture and exact reproducibility.
 ## Command Safety and Bounded Search
 
 Never run broad `find`, `grep`, or recursive file listings on monorepos
-(`/google`), system roots (`/`, `/usr`, `/var`), or home directories (`~`).
-Prefer indexed tools (`rg`, `fd`, `CodeSearch`) scoped to a project
-subdirectory, and bound every `find` with `-maxdepth N` or a timeout
+(`/google`), system roots (`/`, `/usr`, `/var`), or home directories (`~`). In
+local Git repositories and scratch directories, `rg`, `fd`, and `git grep` are
+authorized and preferred over monorepo-only search wrappers. Scope searches to a
+project subdirectory, and bound every `find` with `-maxdepth N` or a timeout
 (`timeout 30s find ...`):
 
 ```bash

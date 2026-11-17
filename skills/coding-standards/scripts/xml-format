@@ -1,19 +1,26 @@
 #!/usr/bin/env bash
 
+# Tests: skills/coding-standards/tests/test-xml-format
+
+set -euo pipefail
+
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [FILE...]
+Usage: $(basename "$0") [OPTIONS] [PATH...]
 
 Format XML files using xmllint.
 
-When FILEs are provided, each file is formatted in place. When no FILE is
-provided, reads from standard input and writes to standard output.
+When PATHs are provided, each file is formatted in place. If a directory is
+provided, recursively formats all .xml files in it. When no PATH is provided,
+reads from standard input and writes to standard output.
 
 Arguments:
-  FILE...     Paths to XML files to format (optional)
+  PATH...     Paths to XML files or directories to format (optional)
 
 Options:
-  --help      Display this help message and exit
+  --check     Check formatting without changing files or emitting XML
+  --help, -h  Display this help message and exit
+  --          Treat remaining arguments as file names
 
 Examples:
 
@@ -27,7 +34,7 @@ Examples:
 
 # Format from stdin to stdout
 
-  curl -s <https://example.com/feed.xml> | $(basename "$0")
+  curl -s https://example.com/feed.xml | $(basename "$0")
 
 # Format a file and see the result
 
@@ -36,11 +43,27 @@ EOF
   exit 0
 }
 
-if [[ "$1" == "--help" || "$1" == "-h" ]]; then
-  usage
-fi
+CHECK=0
+PATHS=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --help | -h) usage ;;
+    --check) CHECK=1 ;;
+    --)
+      shift
+      PATHS+=("$@")
+      break
+      ;;
+    -*)
+      echo "$(basename "$0"): unknown option: $1" >&2
+      exit 1
+      ;;
+    *) PATHS+=("$1") ;;
+  esac
+  shift
+done
 
-if [[ $# -eq 0 && -t 0 ]]; then
+if [[ ${#PATHS[@]} -eq 0 && -t 0 ]]; then
   usage
 fi
 
@@ -52,33 +75,52 @@ require() {
 }
 
 require xmllint
-require curl
+require cmp
 
-if [[ $# -eq 0 ]]; then
+FILES=()
+for P in "${PATHS[@]}"; do
+  if [[ -d "$P" ]]; then
+    while IFS= read -r FOUND; do
+      [[ -n "$FOUND" ]] && FILES+=("$FOUND")
+    done < <(find "$P" \( -name .git -o -name node_modules -o -name .venv -o -name .direnv \) -prune -o -type f -name '*.xml' -print | sort)
+  elif [[ -f "$P" ]]; then
+    FILES+=("$P")
+  else
+    echo "$(basename "$0"): $P: No such file or directory" >&2
+    exit 1
+  fi
+done
 
-  # Read from stdin, write to stdout
-
+if [[ ${#PATHS[@]} -eq 0 && "$CHECK" -eq 0 ]]; then
   xmllint --format -
-else
-
-  # Format files in place
-
-  TMPFILE=$(mktemp)
-  trap 'rm -f -- "$TMPFILE"' EXIT
-  FAILED=0
-  for FILE in "$@"; do
-    if [[ ! -f "$FILE" ]]; then
-      echo "$(basename "$0"): $FILE: No such file or directory" >&2
-      FAILED=1
-      continue
-    fi
-    if xmllint --format "$FILE" >"$TMPFILE"; then
-      cat "$TMPFILE" >"$FILE"
-      echo "$(basename "$0"): $FILE: formatted"
-    else
-      echo "$(basename "$0"): $FILE: failed to format" >&2
-      FAILED=1
-    fi
-  done
-  exit $FAILED
+  exit $?
 fi
+
+TMPFILE=$(mktemp)
+trap 'rm -f -- "$TMPFILE"' EXIT
+
+if [[ ${#PATHS[@]} -eq 0 ]]; then
+  IN=$(cat)
+  OUT=$(printf '%s\n' "$IN" | xmllint --format -) || exit 1
+  [[ "$IN" == "$OUT" ]]
+  exit $?
+fi
+
+FAILED=0
+for FILE in "${FILES[@]}"; do
+  if xmllint --format "$FILE" >"$TMPFILE"; then
+    if [[ "$CHECK" -eq 1 ]]; then
+      if ! cmp -s "$FILE" "$TMPFILE"; then
+        echo "$(basename "$0"): $FILE: needs formatting" >&2
+        FAILED=1
+      fi
+    else
+      cat "$TMPFILE" >"$FILE"
+      echo "$(basename "$0"): $FILE: formatted" >&2
+    fi
+  else
+    echo "$(basename "$0"): $FILE: failed to format" >&2
+    FAILED=1
+  fi
+done
+exit "$FAILED"

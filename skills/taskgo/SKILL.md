@@ -19,8 +19,11 @@ taskgo keeps a private **control repository** of projects and tasks in Markdown.
 Run `taskgo <command>` if it is on `$PATH`, or
 `<skill-dir>/scripts/taskgo <command>`, where `<skill-dir>` holds this
 `SKILL.md`. The root is `-R DIR` (before the command), else `$TASKGO_ROOT`, else
-`~/.projects`; `taskgo root` prints it. When the control repository is not your
-workspace and your harness has the taskgo MCP tools, you may use those instead.
+a control repository containing `$PWD`, else `~/.projects`; `taskgo root` prints
+it. Pass `--offline` (before or on the command) or set `AGENT_OFFLINE=1` to skip
+remote Git fetch and push when the remote is unreachable or unauthenticated.
+When the control repository is not your workspace and your harness has the
+taskgo MCP tools, you may use those instead.
 
 ## Core Rules
 
@@ -49,9 +52,12 @@ IDs are `TASK-XXXXX` (five hex digits), in `tasks/TASK-XXXXX-<slug>.md`. Pass
 `in-progress`, `blocked`, `done`, and `cancelled`.
 
 Use only the labels and sections in these templates. Do not add one-off headings
-or bold labels; put that text under the nearest section.
+or bold labels; put that text under the nearest section, using `###` (never
+`##`) for subheadings inside a section.
 
 ### Open Task Template
+
+Front-load external stakeholder or impact context in the opening fields.
 
 ```markdown
 ---
@@ -62,8 +68,6 @@ conversations:
 ---
 
 # Title as imperative verb phrase
-
-*(Tip: Front-load external stakeholder or impact context)*
 
 **Problem:** (optional) Current behavior and why it is a problem.
 **Cost:** (optional) Consequence of leaving the task undone and who absorbs it.
@@ -104,7 +108,7 @@ Immediate follow-up actions.
 ```
 
 **On completion,** keep Problem, Cost, Goal, and Criteria as written. Delete
-Sketch and Constraints (`update` cannot; use `taskgo edit` or your file tools):
+Sketch and Constraints (`--sketch "" --constraints ""`, or with `taskgo edit`):
 Outcome and Findings replace them. Marking a task done needs `--outcome`; the
 CLI refuses without it.
 
@@ -128,17 +132,25 @@ CLI refuses without it.
 - `## Next`: the next few concrete actions, not a backlog.
 
 Sessions are recorded in commit trailers and each task's `conversations`, not in
-the Summary.
+the Summary. The CLI reads known agent session variables automatically; pass
+`--conv <scheme>://<id>` when your harness exports none (and on `update` for any
+extra task staged in the same `checkpoint`).
 
 ## Start and Finish
 
 **Before work:**
 
 1. Run `taskgo handoff <project|TASK_ID>`. Read the root `AGENTS.md`, the
-   project `README.md`, and the files the note names.
-1. If your harness has a skill manager, activate the project's skills:
-   `taskgo skills <project> | skill --scope session add -`. Otherwise read each
-   skill's `SKILL.md`.
+   project `README.md`, and the files the note names. Task handoff accepts only
+   unfinished work; to investigate a completed or cancelled task, hand off its
+   project and read the task record directly.
+1. Reuse the project's skills already available in your environment. Load
+   missing ones through a supported discovery/loading mechanism, or locate and
+   read their `SKILL.md` files directly. If the optional `skill` CLI is
+   installed and supports session scope in your launcher, you can use
+   `taskgo skills <project> | skill --scope session add -`. Its
+   `skill resolve <NAME>` command may also help locate local skills. Neither
+   command is required by taskgo.
 1. For work that may span sessions, mark the task `in-progress` and commit that
    first (`taskgo update TASK --status in-progress`, then
    `taskgo checkpoint TASK "chore(<project>): start …"`). A small task finished
@@ -155,7 +167,8 @@ the Summary.
    `PLAN.md` only if the direction changed.
 
 1. Rewrite the Summary and Next of `<project>/STATUS.md` with `taskgo edit` or
-   your file tools.
+   your file tools (`update`, `sync`, and `edit` wrap tracker Markdown at 80
+   columns, so re-read a file before exact-text edits).
 
 1. Commit the task change and the `STATUS.md` prose together, in one commit:
 
@@ -164,27 +177,30 @@ the Summary.
      --ref compiler@1a2b3c4
    ```
 
-   `checkpoint` syncs the generated block, formats the records, records the
-   session, and refuses while `taskgo doctor` reports problems in the files it
-   commits; other findings in the project are counted, not refused. Subjects are
-   Conventional Commits of at most 50 characters, prefix included.
+   `checkpoint` requires an empty Git index, syncs the generated block, formats
+   the records, records the session, and refuses unlisted project changes unless
+   `--all` or `--path` is passed (including `update --slug` renames). It refuses
+   while `taskgo doctor` reports problems in the files it commits; other
+   findings in the project are counted, not refused. Subjects are Conventional
+   Commits of at most 50 characters, prefix included.
 
 1. Leave the project [handoff-ready](references/workflows.md#handoff-ready).
 
 ## Common Commands
 
-| Command                                        | Use                                                  |
-| ---------------------------------------------- | ---------------------------------------------------- |
-| `taskgo handoff PROJECT\|TASK_ID`              | Onboarding note: files to read, skills to activate   |
-| `taskgo status [PROJECT\|TASK_ID]`             | Current state of a task or project                   |
-| `taskgo list [PROJECT] --state ready`          | Tasks ready to start                                 |
-| `taskgo create PROJECT TITLE --goal …`         | New task (commits)                                   |
-| `taskgo update TASK --findings … --next …`     | Change state (`--status`) or sections in place       |
-| `taskgo update TASK --status done --outcome …` | Close a task                                         |
-| `taskgo edit PATH --old … --new …`             | Exact-text edit; validates and formats records       |
-| `taskgo sync [PROJECT]`                        | Refresh generated `STATUS.md` blocks                 |
-| `taskgo doctor [PROJECT]`                      | Read-only checks; non-zero on problems               |
-| `taskgo checkpoint TASK SUBJECT`               | Guarded commit for one task (`commit`: staged files) |
+| Command                                        | Use                                                         |
+| ---------------------------------------------- | ----------------------------------------------------------- |
+| `taskgo handoff PROJECT\|TASK_ID`              | Onboarding note: files to read, skills to activate          |
+| `taskgo status [PROJECT\|TASK_ID]`             | Current state of a task or project                          |
+| `taskgo list [PROJECT] --state ready`          | Tasks ready to start                                        |
+| `taskgo create PROJECT TITLE --goal …`         | New task (commits)                                          |
+| `taskgo update TASK --findings … --next …`     | Change state (`--status`) or sections in place              |
+| `taskgo update TASK --status done --outcome …` | Close a task                                                |
+| `taskgo edit PATH --old … --new …`             | Exact-text edit; validates and formats records              |
+| `taskgo sync [PROJECT]`                        | Refresh generated `STATUS.md` blocks                        |
+| `taskgo doctor [PROJECT]`                      | Read-only checks; non-zero on problems                      |
+| `taskgo checkpoint TASK SUBJECT [--all]`       | Guarded commit for one task (positional `SUBJECT`, no `-m`) |
+| `taskgo commit SUBJECT`                        | Commit staged files in one project (positional `SUBJECT`)   |
 
 Everything else, including every option, is in
 [the command index](references/command-index.md) and `taskgo <command> --help`.

@@ -21,6 +21,10 @@
 .end annotation
 
 
+# static fields
+.field public static final TAG:Ljava/lang/String; = "MyServiceTag"
+
+
 # instance fields
 .field private cacheSize:I
 
@@ -62,9 +66,11 @@
 
 # virtual methods
 .method public onCreate()V
-    .registers 1
+    .registers 2
 
     invoke-super {p0}, Landroid/app/Service;->onCreate()V
+
+    const-string v0, "/sync/status"
 
     return-void
 .end method

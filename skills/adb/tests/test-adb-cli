@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+
+# Tests: skills/adb/tests/test-adb-cli
+
+set -euo pipefail
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+SCRIPTS="$DIR/../scripts"
+
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
+MOCK_BIN="$TMP/mock-bin"
+WORK="$TMP/work"
+mkdir -p "$MOCK_BIN" "$WORK"
+ADB_LOG="$TMP/adb.log"
+
+cat >"$MOCK_BIN/adb" <<'EOF'
+#!/usr/bin/env bash
+echo "$*" >>"$MOCK_ADB_LOG"
+case "$*" in
+  "get-state") echo "device" ;;
+  "exec-out wm size") echo "Physical size: 1080x2400" ;;
+  "exec-out screencap -p 2>/dev/null") printf 'PNGDATA' ;;
+  "exec-out dumpsys window displays") echo "  mCurrentFocus=Window{1234 u0 com.example.app/.MainActivity}" ;;
+  "exec-out uiautomator dump /dev/stdout")
+    [[ "${MOCK_HANG_PLAIN_DUMP:-0}" == "1" ]] && { sleep 10; exit 1; }
+    printf '<?xml version="1.0" encoding="UTF-8"?><hierarchy rotation="0"><node index="0" class="androidx.compose.ui.platform.ComposeView" package="com.example.app"/></hierarchy>UI hierchary dumped to: /dev/stdout'
+    ;;
+  "exec-out uiautomator dump --compressed /dev/stdout")
+    printf '<?xml version="1.0" encoding="UTF-8"?><hierarchy rotation="0"><node index="0" class="androidx.compose.ui.platform.ComposeView" package="com.example.app"/></hierarchy>UI hierchary dumped to: /dev/stdout'
+    ;;
+  "shell cmd package query-activities"*category.LAUNCHER*)
+    cat <<'ACT'
+2 activities found:
+  Activity #0:
+    ActivityInfo:
+      name=com.example.app.MainActivity
+      packageName=com.example.app
+  Activity #1:
+    ActivityInfo:
+      name=com.other.app.HomeActivity
+      packageName=com.other.app
+ACT
+    ;;
+esac
+EOF
+
+cat >"$MOCK_BIN/magick" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null || true
+EOF
+chmod +x "$MOCK_BIN/adb" "$MOCK_BIN/magick"
+
+run_mock() {
+  : >"$ADB_LOG"
+  PATH="$MOCK_BIN:$PATH" MOCK_ADB_LOG="$ADB_LOG" "$@"
+}
+
+echo "1..4"
+
+run_mock "$SCRIPTS/adb-screenshot" -o "$WORK/wake.png" 2>/dev/null
+LOG_WAKE=$(<"$ADB_LOG")
+run_mock "$SCRIPTS/adb-screenshot" --no-wake -o "$WORK/ambient/aod.png" 2>/dev/null
+LOG_NOWAKE=$(<"$ADB_LOG")
+if [[ "$LOG_WAKE" == *"KEYCODE_WAKEUP"* && "$LOG_NOWAKE" != *"KEYCODE_WAKEUP"* && -f "$WORK/ambient/aod.png" ]]; then
+  echo "ok 1 - adb-screenshot --no-wake skips KEYCODE_WAKEUP and creates parent directories"
+else
+  echo "not ok 1 - adb-screenshot --no-wake skips KEYCODE_WAKEUP and creates parent directories"
+fi
+
+OUT=$(ADB_UIHIERARCHY_TIMEOUT=1 MOCK_HANG_PLAIN_DUMP=1 run_mock "$SCRIPTS/adb-uihierarchy" - 2>/dev/null)
+if [[ "$OUT" == *"<hierarchy"* && "$(<"$ADB_LOG")" == *"--compressed"* ]]; then
+  echo "ok 2 - adb-uihierarchy bounds uiautomator dump with timeout and falls back to --compressed"
+else
+  echo "not ok 2 - adb-uihierarchy bounds uiautomator dump with timeout and falls back to --compressed"
+fi
+
+TK=$(ADB_UIHIERARCHY_TIMEOUT=1 MOCK_HANG_PLAIN_DUMP=1 run_mock "$SCRIPTS/adb-currentfocus" --toolkit)
+if [[ "$TK" == "compose" ]]; then
+  echo "ok 3 - adb-currentfocus --toolkit bounds dump timeout and falls back to --compressed"
+else
+  echo "not ok 3 - adb-currentfocus --toolkit bounds dump timeout and falls back to --compressed"
+fi
+
+ACT_OUT=$(run_mock "$SCRIPTS/adb-activities" com.example.app)
+if [[ "$ACT_OUT" == "L    com.example.app/com.example.app.MainActivity" ]]; then
+  echo "ok 4 - adb-activities [PACKAGE] filters output to the specified package"
+else
+  echo "not ok 4 - adb-activities [PACKAGE] filters output to the specified package"
+fi

@@ -33,6 +33,8 @@ Test how complications and watch faces render across different system states
 - **Force Ambient Mode (Low Power / Screen Dimmed)**:
   ```bash
   adb shell cmd wearable_sensing set-ambient-mode true
+  # Capture AOD without waking the screen (use --no-wake if adb-screenshot is available)
+  adb-screenshot --no-wake ambient.png
   ```
 - **Exit Ambient Mode**:
   ```bash

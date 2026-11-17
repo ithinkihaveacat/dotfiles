@@ -71,7 +71,6 @@ skill_test_init() {
     "${XDG_CONFIG_HOME}/skill/plugins/05_local.py"
   export XDG_CACHE_HOME="${TMPDIR}/.cache"
   export XDG_STATE_HOME="${TMPDIR}/.local/state"
-  unset SKILL_DEFAULTS_DIR
   # Ensure p4 is not found by default during Git/Unmanaged tests.
   export PATH="$MOCK_BIN_DIR:$PATH"
   unset AGENT_PREFLIGHT_SKIP _agent_preflight_skip
@@ -188,4 +187,20 @@ m = importlib.util.module_from_spec(spec)
 loader.exec_module(m)
 $1
 "
+}
+
+# require_node [--ts] -- set NODE_BIN to a Node.js binary with node:test (and
+# native TypeScript support when --ts is passed), or print a TAP SKIP and exit.
+require_node() {
+  local flag="${1:-}" data="${XDG_DATA_HOME:-$HOME/.local/share}/node" cand
+  local expr='import "node:test"; process.exit(process.argv[1] === "--ts" && !process.features.typescript ? 1 : 0)'
+  for cand in "$(command -v node 2>/dev/null || true)" "$data/default/bin/node" $(compgen -G "$data/versions/node-v*/bin/node" | sort -V -r || true); do
+    if [[ -x "$cand" ]] && "$cand" --input-type=module -e "$expr" -- "$flag" >/dev/null 2>&1; then
+      export NODE_BIN="$cand"
+      PATH="${cand%/*}:$PATH"
+      return 0
+    fi
+  done
+  echo "1..0 # SKIP Node.js with node:test${flag:+ and native TypeScript} is not installed"
+  exit 0
 }

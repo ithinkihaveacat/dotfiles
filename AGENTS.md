@@ -60,24 +60,29 @@ authorization.
 Live development can happen on any machine. A shared checkout is one stream of
 work: serialize edits there; use worktrees for independent or risky changes. On
 trusted personal or work computers, stage broad agent changes in a worktree
-before deliberately activating them. Local edits to symlinked code are already
-live, regardless of PR status.
+before deliberately activating them. If the user explicitly asks for commits on
+a named local topic or experiment branch without opening a PR, keep the live
+checkout on `main` and create the branch in a temporary linked worktree
+(`git worktree add -b <branch> <dir> main`). Local edits to symlinked code are
+already live, regardless of PR status.
 
 `./install.sh --apply` applies the current checkout without Git updates. Normal
 runs preflight all overlays, show the exact incoming range, and prompt `[y/N/d]`
-(`d` prints the diff) before any checkout advances. Updates only fast-forward;
-divergence, dirty incoming updates, or declined approval stop the run before
-applying features. There is no automatic rebase, reset, stash, or rollback.
-`pull.rebase` does not change this policy. Diagnose unexpected states
-separately. Offline work stays local; `AGENT_OFFLINE=1` skips network features
-and Git updates.
+(`d` prints the diff) before any checkout advances. Updates fast-forward;
+unpublished divergence that merges cleanly is offered as a merge with the same
+approval (`--integrate` for agent hosts), while published divergence, dirty
+incoming updates, or declined approval stop the run before applying features.
+There is no automatic rebase, reset, stash, or rollback. `pull.rebase` does not
+change this policy. Diagnose unexpected states separately. Offline work stays
+local; `AGENT_OFFLINE=1` skips network features and Git updates.
 
 Macs, work computers, and server host configuration require deliberate incoming
 updates; do not pass `--accept-updates` or schedule unattended pulls there. On
 agent hosts, explicit `--accept-updates --no-input` permits unattended
-fast-forwards. Publishing or merging a PR never updates another machine.
-`./install.sh` intentionally does not pull `~/.ssh`; inspect and fast-forward it
-manually. CI is a reliability check, not a security boundary against its author.
+fast-forwards, and adding `--integrate` also merges unpublished divergence.
+Publishing or merging a PR never updates another machine. `./install.sh`
+intentionally does not pull `~/.ssh`; inspect and fast-forward it manually. CI
+is a reliability check, not a security boundary against its author.
 
 ## Privacy and Information Control
 
