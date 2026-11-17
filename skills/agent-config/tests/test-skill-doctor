@@ -9,7 +9,7 @@ set -euo pipefail
 source "$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 skill_test_init
 
-echo "1..19"
+echo "1..21"
 
 # Test 1: doctor on a healthy workspace reports healthy JSON and renders the
 # canonical [PASS] tag style.
@@ -457,5 +457,60 @@ if grep -q "^v2$" "${ALIAS_WS}/.agents/skills/aliased-folder/SKILL.md" &&
   echo "ok 19 - [Update] subpath-aliased skills refresh by folder name and in --scope user update --all"
 else
   echo "not ok 19 - [Update] subpath-aliased or user --all update failed"
+fi
+
+# Test 20: add --prune skips removals when a requested spec fails to resolve.
+PRUNE_SAFE_WS="${TMPDIR}/prune-safe-ws"
+mkdir -p "$PRUNE_SAFE_WS"
+git -C "$PRUNE_SAFE_WS" init -q
+"${SCRIPT}" -C "$PRUNE_SAFE_WS" add coding-standards emumanager >/dev/null 2>&1
+prune_err_rc=0
+"${SCRIPT}" -C "$PRUNE_SAFE_WS" add --prune coding-standards nonexistent-typo >/dev/null 2>&1 || prune_err_rc=$?
+if [ "$prune_err_rc" -ne 0 ] &&
+  [ -d "${PRUNE_SAFE_WS}/.agents/skills/emumanager" ]; then
+  echo "ok 20 - [Prune] add --prune preserves installed skills when resolution fails"
+else
+  echo "not ok 20 - [Prune] add --prune deleted installed skills on resolution error (rc=$prune_err_rc)"
+fi
+
+# Test 21: explicit catalog specs in update target the requested entry even when
+# another installed skill shares the same subpath folder basename.
+UP_A="${TMPDIR}/collide-up-a"
+UP_B="${TMPDIR}/collide-up-b"
+mkdir -p "${UP_A}/skills/shared-name" "${UP_B}/skills/shared-name"
+git -C "$UP_A" init -q -b main
+git -C "$UP_A" config user.email "t@e.st"
+git -C "$UP_A" config user.name "Test"
+printf -- '---\nname: shared-name\n---\nalpha-v1\n' >"${UP_A}/skills/shared-name/SKILL.md"
+git -C "$UP_A" add . && git -C "$UP_A" commit -q -m "a1"
+git -C "$UP_B" init -q -b main
+git -C "$UP_B" config user.email "t@e.st"
+git -C "$UP_B" config user.name "Test"
+printf -- '---\nname: shared-name\n---\nbeta-v1\n' >"${UP_B}/skills/shared-name/SKILL.md"
+git -C "$UP_B" add . && git -C "$UP_B" commit -q -m "b1"
+cat <<'EOF' >"${XDG_CONFIG_HOME}/skill/plugins/98_alias_remote.py"
+def register(api):
+    api.register_skill(
+        "remote:alpha-creator",
+        {"repo": "owner/alpha", "ref": "main", "subpath": "skills/shared-name"},
+    )
+    api.register_skill(
+        "remote:beta-creator",
+        {"repo": "owner/beta", "ref": "main", "subpath": "skills/shared-name"},
+    )
+EOF
+COLLIDE_WS="${TMPDIR}/collide-ws"
+mkdir -p "$COLLIDE_WS"
+git -C "$COLLIDE_WS" init -q
+_SKILL_TEST_REMOTE="$UP_A" "${SCRIPT}" -C "$COLLIDE_WS" add remote:alpha-creator >/dev/null 2>&1
+_SKILL_TEST_REMOTE="$UP_B" "${SCRIPT}" --scope user add remote:beta-creator >/dev/null 2>&1
+printf -- '---\nname: shared-name\n---\nbeta-v2\n' >"${UP_B}/skills/shared-name/SKILL.md"
+git -C "$UP_B" commit -q -am "b2"
+_SKILL_TEST_REMOTE="$UP_B" "${SCRIPT}" -C "$COLLIDE_WS" update remote:beta-creator >/dev/null 2>&1
+if grep -q "^alpha-v1$" "${COLLIDE_WS}/.agents/skills/shared-name/SKILL.md" &&
+  grep -q "^beta-v2$" "${HOME}/.claude/skills/shared-name/SKILL.md"; then
+  echo "ok 21 - [Update] explicit catalog spec updates requested entry despite colliding basename"
+else
+  echo "not ok 21 - [Update] explicit catalog spec misrouted on colliding basename"
 fi
 rm -f "${XDG_CONFIG_HOME}/skill/plugins/98_alias_remote.py"

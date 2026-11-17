@@ -291,6 +291,157 @@ def new_id() -> str:
     return f"ANDON-{stamp}-{secrets.token_hex(2)}"
 
 
+def _unquote_yaml_scalar(raw: str) -> str:
+    val = raw.strip()
+    if len(val) >= 2 and val[0] == '"' and val[-1] == '"':
+        try:
+            parsed = json.loads(val)
+            if isinstance(parsed, str):
+                return parsed
+        except Exception:
+            pass
+        return val[1:-1]
+    if len(val) >= 2 and val[0] == "'" and val[-1] == "'":
+        return val[1:-1].replace("''", "'")
+    for idx, ch in enumerate(val):
+        if ch == "#" and (idx == 0 or val[idx - 1] in (" ", "\t")):
+            val = val[:idx].rstrip()
+            break
+    return val
+
+
+def _strip_yaml_comment_line(line: str) -> str:
+    in_s = False
+    in_d = False
+    i = 0
+    while i < len(line):
+        ch = line[i]
+        if in_d:
+            if ch == "\\" and i + 1 < len(line):
+                i += 2
+                continue
+            if ch == '"':
+                in_d = False
+        elif in_s:
+            if ch == "'" and i + 1 < len(line) and line[i + 1] == "'":
+                i += 2
+                continue
+            if ch == "'":
+                in_s = False
+        elif ch == '"':
+            in_d = True
+        elif ch == "'":
+            in_s = True
+        elif ch == "#" and (i == 0 or line[i - 1] in (" ", "\t")):
+            return line[:i]
+        i += 1
+    return line
+
+
+def _extract_skill_copy_source(content: str) -> str | None:
+    """Reads metadata.source (or legacy skill-stub) from a copied SKILL.md."""
+    lines = content.splitlines()
+    if lines and lines[0].strip() == "---":
+        end_idx = next(
+            (i for i in range(1, len(lines)) if lines[i].strip() in ("---", "...")),
+            None,
+        )
+        if end_idx is not None:
+            fm = lines[1:end_idx]
+            for idx, line in enumerate(fm):
+                stripped = line.strip()
+                if (
+                    not stripped
+                    or stripped.startswith("#")
+                    or line.startswith((" ", "\t"))
+                    or ":" not in line
+                ):
+                    continue
+                k_raw, v_raw = line.split(":", 1)
+                if _unquote_yaml_scalar(k_raw) != "metadata":
+                    continue
+                v_clean = _strip_yaml_comment_line(v_raw).lstrip()
+                if v_clean.startswith("{"):
+                    flow_parts = [_strip_yaml_comment_line(v_raw)]
+                    j = idx + 1
+                    while j < len(fm) and "}" not in flow_parts[-1]:
+                        flow_parts.append(_strip_yaml_comment_line(fm[j]))
+                        j += 1
+                    joined = "\n".join(flow_parts)
+                    b_start = joined.find("{")
+                    b_end = joined.rfind("}")
+                    if b_start != -1 and b_end > b_start:
+                        inner = joined[b_start + 1 : b_end]
+                        for m in re.finditer(
+                            r"""(?:^|,)\s*['"]?source['"]?\s*:\s*('(?:''|[^'])*'|"(?:\\.|[^"])*"|[^,}]+)""",
+                            inner,
+                        ):
+                            res = _unquote_yaml_scalar(m.group(1))
+                            if res:
+                                return res
+                    break
+                child_indent: str | None = None
+                for b_line in fm[idx + 1 :]:
+                    bs = b_line.strip()
+                    if not bs or bs.startswith("#"):
+                        continue
+                    if not b_line.startswith((" ", "\t")):
+                        break
+                    ind = b_line[: len(b_line) - len(b_line.lstrip(" \t"))]
+                    if child_indent is None:
+                        child_indent = ind
+                    if ind == child_indent and ":" in bs:
+                        ck, cv = bs.split(":", 1)
+                        if _unquote_yaml_scalar(ck) == "source":
+                            res = _unquote_yaml_scalar(cv)
+                            if res:
+                                return res
+                break
+    for line in lines:
+        if line.startswith("<!-- skill-stub: ") and line.endswith(" -->"):
+            stub = line[len("<!-- skill-stub: ") : -len(" -->")].strip()
+            if stub:
+                return stub
+    return None
+
+
+def _resolve_copied_skill_path(real_path_str: str) -> str:
+    """Maps a path inside a metadata.source-stamped skill copy to its canonical source."""
+    real_p = Path(real_path_str)
+    home_real = Path(os.path.realpath(Path.home()))
+    anc = real_p if real_p.is_dir() else real_p.parent
+    for _ in range(6):
+        if anc == anc.parent or anc == home_real:
+            break
+        skill_md = anc / "SKILL.md"
+        if skill_md.is_file():
+            try:
+                with open(skill_md, encoding="utf-8", errors="replace") as f:
+                    copy_src = _extract_skill_copy_source(f.read(16384))
+            except OSError:
+                copy_src = None
+            if copy_src:
+                src_dir = Path(copy_src).expanduser()
+                src_base = (
+                    os.path.realpath(src_dir)
+                    if (
+                        src_dir.exists()
+                        or (src_dir.parent != Path(".") and src_dir.parent.exists())
+                    )
+                    else os.path.normpath(src_dir)
+                )
+                rel = real_p.relative_to(anc)
+                mapped = Path(src_base) if rel == Path(".") else Path(src_base) / rel
+                return (
+                    os.path.realpath(mapped)
+                    if mapped.exists()
+                    else os.path.normpath(mapped)
+                )
+            break
+        anc = anc.parent
+    return real_path_str
+
+
 def normalize_source(source: str) -> str:
     """Spells a source the same way from every workspace and session."""
     source = re.sub(
@@ -306,7 +457,7 @@ def normalize_source(source: str) -> str:
         if expanded.exists() or (
             expanded.parent != Path(".") and expanded.parent.exists()
         ):
-            source = os.path.realpath(expanded)
+            source = _resolve_copied_skill_path(os.path.realpath(expanded))
         elif source.startswith("~"):
             source = str(expanded)
     for home in (os.path.realpath(Path.home()), str(Path.home())):

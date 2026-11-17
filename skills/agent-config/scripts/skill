@@ -2424,34 +2424,44 @@ def cmd_add(specs):
         log(f"added {name} -> {src}", file=sys.stderr)
 
     if prune:
-        entries, _ = scan_links(ws)
-        home_dir = Path.home()
-        home_real = home_dir.resolve()
-        pruned_names: set[str] = set()
-        for e in entries:
-            if e.link_name in desired_link_names or ws.is_tracked(e.path):
-                continue
-            if e.path.is_symlink() and e.kind == "dangling" and e.target is not None:
-                in_home = e.target.is_relative_to(home_dir) or e.target.is_relative_to(
-                    home_real
-                )
-                if not in_home:
-                    try:
-                        parent_ok = e.target.parent.is_dir()
-                    except OSError:
-                        parent_ok = False
-                    if not parent_ok:
-                        print(
-                            f"skill: warning: kept unlisted link {clean_p(e.path)} "
-                            f"(source mount {clean_p(e.target.parent)} is unreachable)",
-                            file=sys.stderr,
-                        )
-                        continue
-            remove_skill_entry(e.path, ws.uses_copies)
-            pruned_names.add(e.link_name)
-        for pname in sorted(pruned_names):
-            log(f"removed {pname}", file=sys.stderr)
-        prune_dirs(dest_dirs)
+        if has_errors or get_api().load_failures:
+            print(
+                "skill: warning: skipping --prune due to resolution or plugin load errors",
+                file=sys.stderr,
+            )
+        else:
+            entries, _ = scan_links(ws)
+            home_dir = Path.home()
+            home_real = home_dir.resolve()
+            pruned_names: set[str] = set()
+            for e in entries:
+                if e.link_name in desired_link_names or ws.is_tracked(e.path):
+                    continue
+                if (
+                    e.path.is_symlink()
+                    and e.kind == "dangling"
+                    and e.target is not None
+                ):
+                    in_home = e.target.is_relative_to(
+                        home_dir
+                    ) or e.target.is_relative_to(home_real)
+                    if not in_home:
+                        try:
+                            parent_ok = e.target.parent.is_dir()
+                        except OSError:
+                            parent_ok = False
+                        if not parent_ok:
+                            print(
+                                f"skill: warning: kept unlisted link {clean_p(e.path)} "
+                                f"(source mount {clean_p(e.target.parent)} is unreachable)",
+                                file=sys.stderr,
+                            )
+                            continue
+                remove_skill_entry(e.path, ws.uses_copies)
+                pruned_names.add(e.link_name)
+            for pname in sorted(pruned_names):
+                log(f"removed {pname}", file=sys.stderr)
+            prune_dirs(dest_dirs)
 
     sync_records(ws)
 
@@ -3003,20 +3013,15 @@ def cmd_update(names):
                 folder_names.add(Path(entry["subpath"]).name.lower())
         return folder_names, source_norms
 
+    def _source_norms_for_path(p: Path) -> set[str]:
+        norms = {os.path.normpath(p)}
+        if p.exists():
+            norms.add(os.path.normpath(os.path.realpath(p)))
+        return norms
+
     def find_catalog_matches(
-        spec: str, source_path: Path | None = None
+        spec: str, source_paths: list[Path] | Path | None = None
     ) -> list[tuple[str, dict]]:
-        if source_path is not None:
-            sp_norms = {os.path.normpath(source_path)}
-            if source_path.exists():
-                sp_norms.add(os.path.normpath(os.path.realpath(source_path)))
-            by_source = [
-                (key, entry)
-                for key, entry in api.plugin_catalog.items()
-                if _catalog_entry_meta(key, entry)[1] & sp_norms
-            ]
-            if by_source:
-                return by_source
         if spec in api.plugin_catalog:
             return [(spec, api.plugin_catalog[spec])]
         if ":" in spec:
@@ -3031,11 +3036,38 @@ def cmd_update(names):
             for key, entry in api.plugin_catalog.items()
             if (key.split(":", 1)[-1] if ":" in key else key).lower() == spec_low
         ]
-        matches = exact or [
+        by_folder = [
             (key, entry)
             for key, entry in api.plugin_catalog.items()
             if spec_low in _catalog_entry_meta(key, entry)[0]
         ]
+        src_list = (
+            [source_paths]
+            if isinstance(source_paths, Path)
+            else list(source_paths or [])
+        )
+        if src_list:
+            sp_norms: set[str] = set()
+            for sp in src_list:
+                sp_norms |= _source_norms_for_path(sp)
+            by_source = [
+                (key, entry)
+                for key, entry in api.plugin_catalog.items()
+                if _catalog_entry_meta(key, entry)[1] & sp_norms
+            ]
+            if exact:
+                overlap = [m for m in exact if m in by_source]
+                if overlap:
+                    return overlap
+                if len(exact) == 1:
+                    return exact
+            if by_folder:
+                overlap = [m for m in by_folder if m in by_source]
+                if overlap:
+                    return overlap
+            if by_source and not exact:
+                return by_source
+        matches = exact or by_folder
         if len(matches) > 1:
             non_remote = [m for m in matches if "repo" not in m[1]]
             if non_remote:
@@ -3138,24 +3170,26 @@ def cmd_update(names):
             for e in ws_entries
             if not e.tracked and e.source is not None and e.link_name in candidates
         ]
-        copy_matches = [
-            e
-            for e in entry_matches
-            if ws is not None and ws.uses_copies and not e.path.is_symlink()
-        ]
-        hint_source = entry_matches[0].source if entry_matches else None
-        cat_matches = find_catalog_matches(name, hint_source)
+        hint_sources = [e.source for e in entry_matches if e.source is not None]
+        cat_matches = find_catalog_matches(name, hint_sources)
         for cat_name, _cat_entry in cat_matches:
             candidates |= _expected_names_for_spec(cat_name)
-        if ws is not None and ws.uses_copies and not copy_matches:
-            copy_matches = [
-                e
-                for e in ws_entries
-                if not e.path.is_symlink()
-                and not e.tracked
-                and e.source is not None
-                and e.link_name in candidates
-            ]
+
+        cat_source_norms: set[str] = set()
+        for cat_name, cat_entry in cat_matches:
+            cat_source_norms |= _catalog_entry_meta(cat_name, cat_entry)[1]
+
+        copy_matches: list[DiskEntry] = []
+        if ws is not None and ws.uses_copies:
+            for e in ws_entries:
+                if e.path.is_symlink() or e.tracked or e.source is None:
+                    continue
+                if cat_matches:
+                    if _source_norms_for_path(e.source) & cat_source_norms:
+                        copy_matches.append(e)
+                elif e.link_name in candidates:
+                    copy_matches.append(e)
+
         if not cat_matches and not copy_matches:
             print(f"skill update: unknown skill '{name}'", file=sys.stderr)
             continue
