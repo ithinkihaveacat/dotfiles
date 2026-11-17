@@ -1,0 +1,10 @@
+# completions for wear-widget-audit
+complete -c wear-widget-audit -F -a '(__fish_complete_suffix .apk .zip .apks)' -d 'APK, split archive, or split directory'
+complete -c wear-widget-audit -l pretty -d 'Emit indented JSON output'
+complete -c wear-widget-audit -l compact -d 'Emit single-line compact JSON output'
+complete -c wear-widget-audit -l json -d 'Emit JSON output'
+complete -c wear-widget-audit -l summary -d 'Emit a human-readable summary table'
+complete -c wear-widget-audit -l array -d 'Always wrap JSON output in a list'
+complete -c wear-widget-audit -l runtime-json -r -F -d 'Load runtime check overrides from JSON file'
+complete -c wear-widget-audit -s o -l output -r -F -d 'Write output to file'
+complete -c wear-widget-audit -s h -l help -d 'Display help message and exit'

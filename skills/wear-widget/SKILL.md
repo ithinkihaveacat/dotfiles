@@ -9,9 +9,9 @@ description: >-
   Use when developing, testing, or reverse-engineering Wear OS tiles or widgets,
   inspecting tile/widget manifests, or auditing Wear OS surface integrations.
 compatibility: >-
-  Requires apkanalyzer. Optional: apktool (for full resource decoding or
-  apk-decode), baksmali (for apk-smali bytecode analysis), popper or adb for
-  device automation.
+  Requires aapt2 and uv (for wear-widget-audit). Optional: apkanalyzer, dexdump,
+  apktool (for full resource decoding or apk-decode), baksmali (for apk-smali
+  bytecode analysis), popper or adb for device automation.
 ---
 
 # Wear OS Tiles & Widgets
@@ -24,11 +24,45 @@ Use this skill when:
 
 - Analyzing an Android application package (APK) to identify tile or widget
   services and declarations.
+- Running deterministic static launch-readiness audits (`C01–C19` and `D01–D13`)
+  across monolithic APKs or split-APK bundles with `scripts/wear-widget-audit`.
 - Inspecting tile and widget manifest declarations, configuration XML, and
   preview assets.
 - Understanding Wear OS tile and widget host behaviors (SysUI carousel,
   standalone renderer tray, and Samsung One UI Watch pages).
 - Developing, testing, or auditing custom Wear OS tiles or widgets.
+
+______________________________________________________________________
+
+## Automated Static Audit (`wear-widget-audit`)
+
+Run `scripts/wear-widget-audit` (`wear-widget-audit` when symlinked onto `PATH`)
+as the primary static evaluator before manual decompilation. It accepts one or
+more monolithic `.apk` files, split-APK directories (`base.apk` +
+`config.*.apk`), or `.zip`/`.apks` split bundles and evaluates all 32
+launch-readiness attributes (`C01–C19` quality checks and `D01–D13`
+architectural metadata) into deterministic JSON or a summary table without
+leaking temporary files:
+
+```bash
+# Pretty JSON audit of a single APK or split-APK directory
+scripts/wear-widget-audit app-wear-release.apk
+scripts/wear-widget-audit splits/com.example.watch/
+
+# Human-readable summary table across one or more targets
+scripts/wear-widget-audit --summary splits/com.example.watch/
+
+# Merge live device runtime verdicts (C16-C19, D13) into the report
+scripts/wear-widget-audit --runtime-json runtime-checks.json -o audit.json app.apk
+```
+
+It resolves shortened/obfuscated resource paths across `base.apk` and density or
+locale splits via `aapt2`, inspects preview dimensions, `nodpi` qualifiers,
+SHA-256 uniqueness, and 4-corner pixel alpha (`C10–C15`), and performs
+obfuscation-proof DEX verification of `@AssociateWithGlanceWearWidget`,
+dead-code tree-shaking, DI initialization, and R8 horizontal class merging
+(`C06`). See the [Command Index](references/command-index.md) for full CLI
+options.
 
 ______________________________________________________________________
 
@@ -577,6 +611,8 @@ ______________________________________________________________________
 
 ## Reference Material & Reporting
 
+- **[Command Index](references/command-index.md)** — CLI synopsis, flags, and
+  examples for `wear-widget-audit`.
 - **[Audit Template](references/audit-template.md)** — Standardized reporting
   template and authoring directives for Wear OS widget and tile integration
   audits.

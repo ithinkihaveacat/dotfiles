@@ -1,0 +1,3259 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11,<3.15"
+# dependencies = [
+#     "pillow==13.0.0",
+# ]
+# ///
+"""Audit Wear OS widget and tile APKs against the 32-attribute launch checklist."""
+
+# Tests: skills/wear-widget/tests/test-wear-widget-audit
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import io
+import json
+import os
+import re
+import shutil
+import signal
+import struct
+import subprocess
+import sys
+import tempfile
+import xml.etree.ElementTree as ET
+import zipfile
+import zlib
+from dataclasses import dataclass, field
+from enum import StrEnum
+from pathlib import Path
+from typing import Any
+
+try:
+    from PIL import Image as PILImage
+except ImportError:  # pragma: no cover - fallback for bare python3 unittest runs
+    PILImage = None  # type: ignore[assignment]
+
+PROG = os.path.basename(sys.argv[0]) or "wear-widget-audit"
+
+ACTION_WIDGET = "androidx.glance.wear.action.BIND_WIDGET_PROVIDER"
+ACTION_TILE = "androidx.wear.tiles.action.BIND_TILE_PROVIDER"
+ACTION_APPWIDGET = "android.appwidget.action.APPWIDGET_UPDATE"
+PERM_BIND_TILE = "com.google.android.wearable.permission.BIND_TILE_PROVIDER"
+
+META_WIDGET_PROVIDER = "androidx.glance.wear.widget.provider"
+META_TILE_PREVIEW = "androidx.wear.tiles.PREVIEW"
+META_TILE_GROUP = "androidx.wear.tiles.GROUP"
+META_MULTI_INSTANCE = "com.google.android.clockwork.tiles.MULTI_INSTANCES_SUPPORTED"
+META_STANDALONE = "com.google.android.wearable.standalone"
+META_TILE_CONFIG_ACTION = "com.google.android.clockwork.tiles.PROVIDER_CONFIG_ACTION"
+
+CAT_ANDROIDX_CONFIG = "androidx.wear.tiles.category.PROVIDER_CONFIG"
+CAT_CLOCKWORK_CONFIG = "com.google.android.clockwork.tiles.category.PROVIDER_CONFIG"
+
+NOISE_ANNOTATION_EXACT = frozenset(
+    {
+        "Lkotlin/Metadata;",
+        "Lkotlin/coroutines/jvm/internal/DebugMetadata;",
+        "Ljavax/inject/Singleton;",
+    }
+)
+NOISE_ANNOTATION_PREFIXES = (
+    "Ldalvik/annotation/",
+    "Landroidx/compose/",
+    "Lkotlin/jvm/",
+    "Ldagger/",
+    "Ljavax/annotation/",
+    "Landroidx/annotation/",
+    "Lorg/jetbrains/annotations/",
+)
+
+SMALL_TARGET_RATIO = 448.0 / 168.0  # 2.6667
+SMALL_RATIO_MIN = 2.20
+SMALL_RATIO_MAX = 3.15
+
+LARGE_TARGET_RATIO = 464.0 / 288.0  # 1.6111
+LARGE_RATIO_MIN = 1.36
+LARGE_RATIO_MAX = 1.86
+
+RUNTIME_GAP_DEFAULT = "[GAP] Requires live device/emulator verification"
+
+_ACTIVE_PROCS: set[subprocess.Popen[Any]] = set()
+
+
+class CheckPrefix(StrEnum):
+    PASS = "PASS"
+    WARN = "WARN"
+    FAIL = "FAIL"
+    NA = "N/A"
+    GAP = "[GAP]"
+
+
+@dataclass(slots=True, frozen=True)
+class XmlNode:
+    tag: str
+    attrs: dict[str, str]
+    children: tuple[XmlNode, ...]
+
+
+@dataclass(slots=True, frozen=True)
+class ResourceEntry:
+    apk_name: str
+    apk_path: Path
+    qualifier: str
+    file_path: str | None
+    file_type: str | None
+    value: str | None
+
+
+@dataclass(slots=True)
+class ResourceRecord:
+    res_id: str
+    res_type: str
+    name: str
+    entries: list[ResourceEntry] = field(default_factory=list)
+
+
+@dataclass(slots=True, frozen=True)
+class PreviewMetrics:
+    res_ref: str
+    logical_name: str
+    apk_name: str
+    qualifier: str
+    archive_path: str
+    is_nodpi: bool
+    is_xml_drawable: bool
+    width: int | None
+    height: int | None
+    aspect_ratio: float | None
+    corners: tuple[tuple[int, int, int, int], ...] | None
+    transparent_percent: float | None
+    is_unmasked: bool
+    sha256: str
+
+
+@dataclass(slots=True)
+class ContainerSpec:
+    container_type: str  # "SMALL" | "LARGE"
+    preview_ref: str | None
+    preview: PreviewMetrics | None = None
+
+
+@dataclass(slots=True)
+class ProviderXmlSpec:
+    res_ref: str
+    archive_path: str | None
+    label: str | None
+    description: str | None
+    icon: str | None
+    group: str | None
+    preferred_type: str | None
+    config_intent_action: str | None
+    containers: list[ContainerSpec] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class ServiceRecord:
+    name: str
+    descriptor: str
+    exported: bool
+    enabled: bool
+    permission: str | None
+    label_ref: str | None
+    label: str | None
+    actions: list[str]
+    meta_data: dict[str, str]
+    provider_xml: ProviderXmlSpec | None = None
+    tile_preview: PreviewMetrics | None = None
+
+    @property
+    def is_widget(self) -> bool:
+        return ACTION_WIDGET in self.actions or META_WIDGET_PROVIDER in self.meta_data
+
+    @property
+    def is_tile(self) -> bool:
+        return ACTION_TILE in self.actions
+
+
+@dataclass(slots=True)
+class DexServiceInfo:
+    descriptor: str
+    found_in_dex: bool = False
+    superclass: str | None = None
+    runtime_annotations: list[tuple[str, list[str]]] = field(default_factory=list)
+    init_widget_classes: list[str] = field(default_factory=list)
+    has_di_or_lazy_init: bool = False
+    has_on_create: bool = False
+
+
+@dataclass(slots=True)
+class DexAuditSummary:
+    live_recovery_reader: bool = False
+    reader_classes: list[str] = field(default_factory=list)
+    services: dict[str, DexServiceInfo] = field(default_factory=dict)
+    has_wear_widget_params: bool = False
+    has_dynamic_theme_tokens: bool = False
+    has_static_color_tokens: bool = False
+
+
+SHORT_HELP = f"""\
+Usage: {PROG} [OPTIONS] TARGET [TARGET ...]
+
+Audit Wear OS widget and tile APKs against the 32-attribute launch checklist.
+
+Examples:
+  {PROG} app-release.apk
+  {PROG} --summary apks/com.example.watch/
+
+Try '{PROG} --help' for more information.
+"""
+
+FULL_HELP = f"""\
+Usage: {PROG} [OPTIONS] TARGET [TARGET ...]
+
+Evaluate one or more Android APKs or split-APK directories against the
+32-attribute Wear OS widget and tile launch-readiness schema (checks C01-C19
+and architectural attributes D01-D13).
+
+Arguments:
+  TARGET                Path to a monolithic .apk, a split-APK directory
+                        (base.apk + config.*.apk), a split-APK .zip/.apks
+                        archive, or a directory containing AndroidManifest.xml.
+
+Options:
+  --pretty              Emit indented JSON output (default).
+  --compact             Emit single-line compact JSON output.
+  --json                Emit JSON output (default unless --summary is set).
+  --summary             Emit a human-readable summary table instead of JSON
+                        (or combine with --json to print summary to stderr).
+  --array               Always wrap JSON output in a list, even for one TARGET.
+  --runtime-json FILE   Load runtime check overrides (C16-C19, D13) from FILE.
+  -o, --output FILE     Write output to FILE instead of standard output.
+  -h, --help            Display this help message and exit.
+
+Examples:
+  # Audit a single Wear OS APK and print pretty JSON
+  {PROG} app-wear-release.apk
+
+  # Audit a split-APK bundle directory and display a human summary table
+  {PROG} --summary splits/com.example.app/
+
+  # Batch-audit multiple targets into a single JSON report file
+  {PROG} --pretty -o cohort-audit.json apks/com.example.one apks/com.example.two
+"""
+
+
+def _err(msg: str) -> None:
+    print(f"{PROG}: {msg}", file=sys.stderr)
+
+
+def _run_cmd(cmd: list[str]) -> str:
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    _ACTIVE_PROCS.add(proc)
+    try:
+        out_bytes, err_bytes = proc.communicate()
+    finally:
+        _ACTIVE_PROCS.discard(proc)
+    if proc.returncode != 0:
+        stderr_txt = err_bytes.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(
+            f"command failed (exit {proc.returncode}): {' '.join(cmd)}"
+            + (f": {stderr_txt}" if stderr_txt else "")
+        )
+    return out_bytes.decode("utf-8", errors="replace")
+
+
+def _version_sort_key(path: Path) -> tuple[int, ...]:
+    parts = re.findall(r"\d+", path.parent.name)
+    return tuple(int(p) for p in parts) if parts else (0,)
+
+
+def find_sdk_tool(name: str, env_var: str) -> str | None:
+    override = os.environ.get(env_var, "").strip()
+    if override:
+        if os.path.isfile(override) and os.access(override, os.X_OK):
+            return override
+        found = shutil.which(override)
+        if found:
+            return found
+
+    on_path = shutil.which(name)
+    if on_path:
+        return on_path
+
+    sdk_roots: list[Path] = []
+    for var in ("ANDROID_HOME", "ANDROID_SDK_ROOT"):
+        val = os.environ.get(var, "").strip()
+        if val:
+            sdk_roots.append(Path(val))
+    home = Path.home()
+    sdk_roots.extend(
+        [
+            home / ".local" / "share" / "android-sdk",
+            home / "Android" / "Sdk",
+            home / "Library" / "Android" / "sdk",
+            Path("/opt/android-sdk"),
+            Path("/usr/lib/android-sdk"),
+        ]
+    )
+    candidates: list[Path] = []
+    for root in sdk_roots:
+        bt = root / "build-tools"
+        if bt.is_dir():
+            for child in bt.iterdir():
+                cand = child / name
+                if cand.is_file() and os.access(cand, os.X_OK):
+                    candidates.append(cand)
+    if candidates:
+        candidates.sort(key=_version_sort_key, reverse=True)
+        return str(candidates[0])
+
+    for sys_dir in (Path("/usr/bin"), Path("/usr/local/bin")):
+        cand = sys_dir / name
+        if cand.is_file() and os.access(cand, os.X_OK):
+            return str(cand)
+    return None
+
+
+# =============================================================================
+# XMLTREE & PLAIN-XML PARSING
+# =============================================================================
+
+_XMLTREE_ELEM_RE = re.compile(r"^(\s*)E:\s+([^\s(]+)")
+_XMLTREE_ATTR_RE = re.compile(r"^(\s*)A:\s+(.+)$")
+_ATTR_NAME_RE = re.compile(
+    r"^(?:http://schemas\.android\.com/apk/res/android:|android:)?"
+    r"([A-Za-z0-9_.-]+)(?:\(0x[0-9a-fA-F]+\))?=(.*)$"
+)
+
+
+def _clean_xmltree_val(raw_rhs: str) -> str:
+    rhs = raw_rhs.strip()
+    if rhs.startswith('"'):
+        # Format: "literal" (Raw: "literal")
+        m = re.match(r'^"((?:[^"\\]|\\.)*)"', rhs)
+        if m:
+            return m.group(1)
+    if rhs.startswith("(type "):
+        # Format: (type 0x12)0xffffffff or (type 0x10)0x24
+        parts = rhs.split(")", 1)
+        if len(parts) == 2:
+            val_tok = parts[1].strip()
+            if parts[0] == "(type 0x12":
+                return "true" if val_tok != "0x0" and val_tok != "0" else "false"
+            if val_tok.startswith("0x"):
+                try:
+                    return str(int(val_tok, 16))
+                except ValueError:
+                    return val_tok
+            return val_tok
+    # Strip trailing (Raw: ...) if unquoted
+    rhs = re.sub(r'\s+\(Raw:\s+".*"\)\s*$', "", rhs)
+    return rhs
+
+
+def parse_aapt2_xmltree(text: str) -> XmlNode | None:
+    stack: list[tuple[int, str, dict[str, str], list[XmlNode]]] = []
+    root_built: XmlNode | None = None
+
+    def pop_to(indent: int) -> None:
+        nonlocal root_built
+        while stack and stack[-1][0] >= indent:
+            _, tag, attrs, children = stack.pop()
+            node = XmlNode(tag=tag, attrs=attrs, children=tuple(children))
+            if stack:
+                stack[-1][3].append(node)
+            else:
+                root_built = node
+
+    for line in text.splitlines():
+        m_e = _XMLTREE_ELEM_RE.match(line)
+        if m_e:
+            indent = len(m_e.group(1))
+            tag = m_e.group(2)
+            pop_to(indent)
+            stack.append((indent, tag, {}, []))
+            continue
+        m_a = _XMLTREE_ATTR_RE.match(line)
+        if m_a and stack:
+            attr_expr = m_a.group(2)
+            m_nv = _ATTR_NAME_RE.match(attr_expr)
+            if m_nv:
+                key = m_nv.group(1)
+                val = _clean_xmltree_val(m_nv.group(2))
+                stack[-1][2][key] = val
+
+    pop_to(-1)
+    return root_built
+
+
+def parse_plain_xml_bytes(data: bytes) -> XmlNode | None:
+    try:
+        elem = ET.fromstring(data.decode("utf-8", errors="replace"))
+    except ET.ParseError:
+        return None
+
+    def convert(el: ET.Element) -> XmlNode:
+        tag = el.tag.split("}", 1)[-1] if "}" in el.tag else el.tag
+        attrs: dict[str, str] = {}
+        for k, v in el.attrib.items():
+            clean_k = k.split("}", 1)[-1] if "}" in k else k
+            clean_k = clean_k.removeprefix("android:")
+            attrs[clean_k] = v
+        children = tuple(convert(ch) for ch in el)
+        return XmlNode(tag=tag, attrs=attrs, children=children)
+
+    return convert(elem)
+
+
+def dump_xml_from_apk(
+    apk_path: Path, archive_file: str, aapt2_bin: str | None
+) -> XmlNode | None:
+    with zipfile.ZipFile(apk_path) as z:
+        if archive_file not in z.namelist():
+            return None
+        raw = z.read(archive_file)
+    # Plain UTF-8 XML support (e.g., synthetic fixtures or uncompiled XML)
+    stripped = raw.lstrip()
+    if stripped.startswith((b"<?xml", b"<")):
+        parsed = parse_plain_xml_bytes(raw)
+        if parsed is not None:
+            return parsed
+    if not aapt2_bin:
+        raise RuntimeError(
+            "aapt2 not found on PATH or ANDROID_HOME/build-tools; cannot decode binary XML"
+        )
+    out = _run_cmd(
+        [aapt2_bin, "dump", "xmltree", str(apk_path), "--file", archive_file]
+    )
+    return parse_aapt2_xmltree(out)
+
+
+# =============================================================================
+# RESOURCE TABLE PARSING ACROSS SPLITS
+# =============================================================================
+
+_RES_HEADER_RE = re.compile(r"^\s*resource\s+(0x[0-9a-fA-F]+)\s+([^/\s]+)/(.+?)\s*$")
+_RES_FILE_RE = re.compile(r"^\s*\(([^)]*)\)\s+\(file\)\s+(\S+)(?:\s+type=(\S+))?")
+_RES_STR_RE = re.compile(r'^\s*\(([^)]*)\)\s+"((?:[^"\\]|\\.)*)"')
+_RES_BOOL_INT_RE = re.compile(
+    r"^\s*\(([^)]*)\)\s+(true|false|-?\d+|0x[0-9a-fA-F]+)\s*$"
+)
+
+
+class ResourceTable:
+    def __init__(self) -> None:
+        self.by_id: dict[str, ResourceRecord] = {}
+        self.by_type_name: dict[str, ResourceRecord] = {}
+        self.string_locales: set[str] = set()
+        self.width_qualifiers: set[str] = set()
+
+    def add_entry(
+        self,
+        res_id: str,
+        res_type: str,
+        name: str,
+        entry: ResourceEntry,
+    ) -> None:
+        norm_id = res_id.lower()
+        rec = self.by_id.get(norm_id)
+        if rec is None:
+            rec = ResourceRecord(res_id=norm_id, res_type=res_type, name=name)
+            self.by_id[norm_id] = rec
+        elif rec.name == "(name removed)" and name != "(name removed)":
+            rec.name = name
+        rec.entries.append(entry)
+        if name != "(name removed)":
+            self.by_type_name[f"{res_type}/{name}"] = rec
+
+        qual = entry.qualifier
+        if qual:
+            for tok in qual.split("-"):
+                if re.match(r"^s?w\d+dp$", tok):
+                    self.width_qualifiers.add(tok)
+            if res_type == "string":
+                loc = _extract_locale_from_qualifier(qual)
+                if loc:
+                    self.string_locales.add(loc)
+
+    def resolve(self, ref: str | None) -> ResourceRecord | None:
+        if not ref:
+            return None
+        clean = ref.strip()
+        clean = clean.removeprefix("@")
+        if clean.startswith(("0x", "0X")):
+            return self.by_id.get(clean.lower())
+        if "/" in clean:
+            return self.by_type_name.get(clean)
+        return None
+
+    def resolve_string(self, ref: str | None) -> str | None:
+        if not ref:
+            return None
+        if not ref.startswith("@"):
+            return ref
+        rec = self.resolve(ref)
+        if not rec:
+            return None
+        for entry in rec.entries:
+            if entry.qualifier == "" and entry.value is not None:
+                return entry.value
+        for entry in rec.entries:
+            if entry.value is not None:
+                return entry.value
+        return None
+
+    def resolve_bool(self, ref: str | None) -> bool | None:
+        if ref is None:
+            return None
+        low = ref.strip().lower()
+        if low in ("true", "1", "0xffffffff"):
+            return True
+        if low in ("false", "0", "0x0"):
+            return False
+        if ref.startswith("@"):
+            rec = self.resolve(ref)
+            if rec:
+                for entry in rec.entries:
+                    if entry.value is not None:
+                        v = entry.value.strip().lower()
+                        if v in ("true", "1", "0xffffffff"):
+                            return True
+                        if v in ("false", "0", "0x0"):
+                            return False
+        return None
+
+
+def _extract_locale_from_qualifier(qual: str) -> str | None:
+    if not qual:
+        return None
+    tokens = qual.split("-")
+    first = tokens[0]
+    if first.startswith("b+"):
+        return first
+    if re.match(r"^[a-z]{2,3}$", first) and first not in (
+        "ldrtl",
+        "ldltr",
+        "car",
+        " television",
+        "watch",
+        "desk",
+        "any",
+        "mcc",
+        "mnc",
+        "nav",
+        "nonav",
+        "v4",
+        "v8",
+    ):
+        if len(tokens) >= 2 and re.match(r"^r[A-Z]{2}$", tokens[1]):
+            return f"{first}-{tokens[1]}"
+        return first
+    return None
+
+
+def load_resources_across_apks(
+    apks: list[Path], aapt2_bin: str | None
+) -> ResourceTable:
+    table = ResourceTable()
+    for apk in apks:
+        # Record config.<locale>.apk split names as locale signals
+        m_cfg = re.match(r"^config\.([a-z]{2,3}(?:_[A-Z]{2})?)\.apk$", apk.name)
+        if m_cfg and m_cfg.group(1) not in (
+            "ldpi",
+            "mdpi",
+            "tvdpi",
+            "hdpi",
+            "xhdpi",
+            "xxhdpi",
+            "xxxhdpi",
+            "x86",
+            "arm",
+        ):
+            table.string_locales.add(m_cfg.group(1))
+
+        with zipfile.ZipFile(apk) as z:
+            names = set(z.namelist())
+            has_arsc = "resources.arsc" in names
+            # Fallback scan of uncompiled res/ paths when resources.arsc is absent
+            if not has_arsc:
+                _populate_uncompiled_resources(apk, z, table)
+                continue
+
+        if not aapt2_bin:
+            raise RuntimeError(
+                "aapt2 not found on PATH or ANDROID_HOME/build-tools; cannot dump resources.arsc"
+            )
+        out = _run_cmd([aapt2_bin, "dump", "resources", str(apk)])
+        cur_id: str | None = None
+        cur_type: str | None = None
+        cur_name: str | None = None
+        for line in out.splitlines():
+            m_h = _RES_HEADER_RE.match(line)
+            if m_h:
+                cur_id, cur_type, cur_name = m_h.group(1), m_h.group(2), m_h.group(3)
+                continue
+            if cur_id is None or cur_type is None or cur_name is None:
+                continue
+            m_f = _RES_FILE_RE.match(line)
+            if m_f:
+                table.add_entry(
+                    cur_id,
+                    cur_type,
+                    cur_name,
+                    ResourceEntry(
+                        apk_name=apk.name,
+                        apk_path=apk,
+                        qualifier=m_f.group(1),
+                        file_path=m_f.group(2),
+                        file_type=m_f.group(3),
+                        value=None,
+                    ),
+                )
+                continue
+            m_s = _RES_STR_RE.match(line)
+            if m_s:
+                table.add_entry(
+                    cur_id,
+                    cur_type,
+                    cur_name,
+                    ResourceEntry(
+                        apk_name=apk.name,
+                        apk_path=apk,
+                        qualifier=m_s.group(1),
+                        file_path=None,
+                        file_type="STRING",
+                        value=m_s.group(2),
+                    ),
+                )
+                continue
+            m_b = _RES_BOOL_INT_RE.match(line)
+            if m_b:
+                table.add_entry(
+                    cur_id,
+                    cur_type,
+                    cur_name,
+                    ResourceEntry(
+                        apk_name=apk.name,
+                        apk_path=apk,
+                        qualifier=m_b.group(1),
+                        file_path=None,
+                        file_type="SCALAR",
+                        value=m_b.group(2),
+                    ),
+                )
+    return table
+
+
+def _populate_uncompiled_resources(
+    apk: Path, zf: zipfile.ZipFile, table: ResourceTable
+) -> None:
+    """Support synthetic/uncompiled APK ZIPs in hermetic tests without aapt2."""
+    synthetic_idx = 1
+    for member in sorted(zf.namelist()):
+        if not member.startswith("res/") or member.endswith("/"):
+            continue
+        parts = member.split("/")
+        if len(parts) != 3:
+            continue
+        folder, filename = parts[1], parts[2]
+        base_type, _, qual = folder.partition("-")
+        stem = Path(filename).stem
+        if base_type == "values" and filename.endswith(".xml"):
+            try:
+                et_root = ET.fromstring(
+                    zf.read(member).decode("utf-8", errors="replace")
+                )
+                for child in et_root:
+                    rname = child.attrib.get("name")
+                    if rname and child.tag in ("string", "bool", "integer"):
+                        rid = f"0x7f99{synthetic_idx:04x}"
+                        synthetic_idx += 1
+                        table.add_entry(
+                            rid,
+                            child.tag,
+                            rname,
+                            ResourceEntry(
+                                apk_name=apk.name,
+                                apk_path=apk,
+                                qualifier=qual,
+                                file_path=None,
+                                file_type=child.tag.upper(),
+                                value=(child.text or "").strip(),
+                            ),
+                        )
+            except ET.ParseError:
+                pass
+        elif base_type in ("drawable", "mipmap", "xml"):
+            existing = table.by_type_name.get(f"{base_type}/{stem}")
+            rid = existing.res_id if existing else f"0x7f88{synthetic_idx:04x}"
+            if not existing:
+                synthetic_idx += 1
+            ftype = (
+                "XML"
+                if filename.endswith(".xml")
+                else Path(filename).suffix.lstrip(".").upper()
+            )
+            table.add_entry(
+                rid,
+                base_type,
+                stem,
+                ResourceEntry(
+                    apk_name=apk.name,
+                    apk_path=apk,
+                    qualifier=qual,
+                    file_path=member,
+                    file_type=ftype,
+                    value=None,
+                ),
+            )
+
+
+# =============================================================================
+# IMAGE DECODING (PILLOW + PURE-PYTHON STDLIB PNG/WEBP/JPEG FALLBACK)
+# =============================================================================
+
+
+def _paeth(a: int, b: int, c: int) -> int:
+    p = a + b - c
+    pa = abs(p - a)
+    pb = abs(p - b)
+    pc = abs(p - c)
+    if pa <= pb and pa <= pc:
+        return a
+    if pb <= pc:
+        return b
+    return c
+
+
+def _decode_png_stdlib(
+    data: bytes,
+) -> tuple[int, int, tuple[tuple[int, int, int, int], ...], float]:
+    """Decode PNG dimensions, 4-corner RGBA tuples, and transparent % via stdlib."""
+    if len(data) < 24 or data[:8] != b"\x89PNG\r\n\x1a\n":
+        raise ValueError("not a valid PNG")
+    pos = 8
+    width = height = bit_depth = color_type = interlace = 0
+    plte: list[tuple[int, int, int]] = []
+    trns = b""
+    idat_parts: list[bytes] = []
+
+    while pos + 8 <= len(data):
+        length, ctype = struct.unpack_from(">I4s", data, pos)
+        pos += 8
+        chunk = data[pos : pos + length]
+        pos += length + 4  # skip CRC
+        if ctype == b"IHDR":
+            width, height, bit_depth, color_type, _, _, interlace = struct.unpack(
+                ">IIBBBBB", chunk[:13]
+            )
+        elif ctype == b"PLTE":
+            plte = [
+                (chunk[i], chunk[i + 1], chunk[i + 2])
+                for i in range(0, len(chunk) - 2, 3)
+            ]
+        elif ctype == b"tRNS":
+            trns = chunk
+        elif ctype == b"IDAT":
+            idat_parts.append(chunk)
+        elif ctype == b"IEND":
+            break
+
+    if width <= 0 or height <= 0:
+        raise ValueError("invalid PNG dimensions")
+    if interlace != 0 or bit_depth not in (8, 16) or color_type not in (0, 2, 3, 4, 6):
+        # Uncommon interlaced/sub-byte PNG: return dimensions and assume opaque if no alpha
+        has_alpha = color_type in (4, 6) or bool(trns)
+        c = (0, 0, 0, 255) if not has_alpha else (255, 255, 255, 255)
+        return width, height, (c, c, c, c), 0.0
+
+    channels = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}[color_type]
+    bytes_per_sample = 2 if bit_depth == 16 else 1
+    bpp = channels * bytes_per_sample
+    stride = width * bpp
+    raw = zlib.decompress(b"".join(idat_parts))
+
+    prev = bytearray(stride)
+    rows_first_last: dict[int, bytes] = {}
+    trans_count = 0
+    offset = 0
+
+    for y in range(height):
+        ftype = raw[offset]
+        offset += 1
+        cur = bytearray(raw[offset : offset + stride])
+        offset += stride
+        if ftype == 1:
+            for i in range(bpp, stride):
+                cur[i] = (cur[i] + cur[i - bpp]) & 0xFF
+        elif ftype == 2:
+            for i in range(stride):
+                cur[i] = (cur[i] + prev[i]) & 0xFF
+        elif ftype == 3:
+            for i in range(stride):
+                left = cur[i - bpp] if i >= bpp else 0
+                cur[i] = (cur[i] + ((left + prev[i]) >> 1)) & 0xFF
+        elif ftype == 4:
+            for i in range(stride):
+                left = cur[i - bpp] if i >= bpp else 0
+                up = prev[i]
+                up_left = prev[i - bpp] if i >= bpp else 0
+                cur[i] = (cur[i] + _paeth(left, up, up_left)) & 0xFF
+
+        if y == 0 or y == height - 1:
+            rows_first_last[y] = bytes(cur)
+
+        if color_type == 6:
+            a_off = 3 * bytes_per_sample
+            for x in range(width):
+                if cur[x * bpp + a_off] < 128:
+                    trans_count += 1
+        elif color_type == 4:
+            a_off = 1 * bytes_per_sample
+            for x in range(width):
+                if cur[x * bpp + a_off] < 128:
+                    trans_count += 1
+        elif color_type == 3 and trns:
+            for x in range(width):
+                idx = cur[x]
+                alpha = trns[idx] if idx < len(trns) else 255
+                if alpha < 128:
+                    trans_count += 1
+
+        prev = cur
+
+    def pixel_rgba(row: bytes, x: int) -> tuple[int, int, int, int]:
+        base = x * bpp
+        if color_type == 6:
+            return (
+                row[base],
+                row[base + bytes_per_sample],
+                row[base + 2 * bytes_per_sample],
+                row[base + 3 * bytes_per_sample],
+            )
+        if color_type == 2:
+            return (
+                row[base],
+                row[base + bytes_per_sample],
+                row[base + 2 * bytes_per_sample],
+                255,
+            )
+        if color_type == 4:
+            g = row[base]
+            return (g, g, g, row[base + bytes_per_sample])
+        if color_type == 0:
+            g = row[base]
+            return (g, g, g, 255)
+        idx = row[base]
+        rgb = plte[idx] if idx < len(plte) else (0, 0, 0)
+        a = trns[idx] if idx < len(trns) else 255
+        return (rgb[0], rgb[1], rgb[2], a)
+
+    top = rows_first_last[0]
+    bot = rows_first_last[height - 1]
+    corners = (
+        pixel_rgba(top, 0),
+        pixel_rgba(top, width - 1),
+        pixel_rgba(bot, 0),
+        pixel_rgba(bot, width - 1),
+    )
+    trans_pct = (trans_count * 100.0) / (width * height)
+    return width, height, corners, trans_pct
+
+
+def _decode_image_bytes(
+    data: bytes,
+) -> tuple[int, int, tuple[tuple[int, int, int, int], ...], float]:
+    if PILImage is not None:
+        with PILImage.open(io.BytesIO(data)) as im:
+            w, h = im.size
+            rgba = im.convert("RGBA")
+            corners = (
+                rgba.getpixel((0, 0)),
+                rgba.getpixel((w - 1, 0)),
+                rgba.getpixel((0, h - 1)),
+                rgba.getpixel((w - 1, h - 1)),
+            )
+            alpha_bytes = rgba.split()[3].tobytes()
+            trans_pct = sum(1 for b in alpha_bytes if b < 128) * 100.0 / (w * h)
+            return w, h, corners, trans_pct  # type: ignore[return-value]
+
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return _decode_png_stdlib(data)
+
+    # Minimal RIFF/WebP header fallback when Pillow is absent
+    if len(data) >= 30 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        chunk_type = data[12:16]
+        if chunk_type == b"VP8X" and len(data) >= 30:
+            flags = data[20]
+            has_alpha = bool(flags & 0x10)
+            w = 1 + int.from_bytes(data[24:27], "little")
+            h = 1 + int.from_bytes(data[27:30], "little")
+            a = 255 if not has_alpha else 0
+            c = (0, 0, 0, a)
+            return w, h, (c, c, c, c), (0.0 if not has_alpha else 20.0)
+        if chunk_type == b"VP8 " and len(data) >= 30:
+            w, h = struct.unpack_from("<HH", data, 26)
+            w &= 0x3FFF
+            h &= 0x3FFF
+            c = (0, 0, 0, 255)
+            return w, h, (c, c, c, c), 0.0
+        if chunk_type == b"VP8L" and len(data) >= 25:
+            bits = struct.unpack_from("<I", data, 21)[0]
+            w = (bits & 0x3FFF) + 1
+            h = ((bits >> 14) & 0x3FFF) + 1
+            has_alpha = bool((bits >> 28) & 1)
+            a = 255 if not has_alpha else 0
+            c = (0, 0, 0, a)
+            return w, h, (c, c, c, c), (0.0 if not has_alpha else 20.0)
+
+    # Minimal JPEG SOF header fallback when Pillow is absent
+    if len(data) >= 4 and data[:2] == b"\xff\xd8":
+        idx = 2
+        while idx + 9 < len(data):
+            if data[idx] != 0xFF:
+                idx += 1
+                continue
+            marker = data[idx + 1]
+            if marker in (0xC0, 0xC1, 0xC2, 0xC3):
+                h, w = struct.unpack_from(">HH", data, idx + 5)
+                c = (0, 0, 0, 255)
+                return w, h, (c, c, c, c), 0.0
+            seg_len = struct.unpack_from(">H", data, idx + 2)[0]
+            idx += 2 + seg_len
+
+    raise ValueError("unsupported or corrupt raster image format")
+
+
+def inspect_preview_resource(ref: str, table: ResourceTable) -> list[PreviewMetrics]:
+    rec = table.resolve(ref)
+    if not rec:
+        return []
+    logical = (
+        f"@{rec.res_type}/{rec.name}" if rec.name != "(name removed)" else rec.res_id
+    )
+    results: list[PreviewMetrics] = []
+    for entry in rec.entries:
+        if not entry.file_path:
+            continue
+        try:
+            with zipfile.ZipFile(entry.apk_path) as z:
+                if entry.file_path not in z.namelist():
+                    continue
+                raw = z.read(entry.file_path)
+        except OSError:
+            continue
+
+        digest = hashlib.sha256(raw).hexdigest()[:16]
+        qual_tokens = entry.qualifier.split("-") if entry.qualifier else []
+        path_has_nodpi = (
+            "nodpi" in entry.file_path.split("/")[1]
+            if "/" in entry.file_path
+            else False
+        )
+        is_nodpi = ("nodpi" in qual_tokens) or path_has_nodpi
+        is_xml = (entry.file_type == "XML") or entry.file_path.lower().endswith(".xml")
+
+        if is_xml:
+            results.append(
+                PreviewMetrics(
+                    res_ref=ref,
+                    logical_name=logical,
+                    apk_name=entry.apk_name,
+                    qualifier=entry.qualifier,
+                    archive_path=entry.file_path,
+                    is_nodpi=is_nodpi,
+                    is_xml_drawable=True,
+                    width=None,
+                    height=None,
+                    aspect_ratio=None,
+                    corners=None,
+                    transparent_percent=None,
+                    is_unmasked=False,
+                    sha256=digest,
+                )
+            )
+            continue
+
+        try:
+            w, h, corners, trans_pct = _decode_image_bytes(raw)
+            ratio = round(w / h, 4) if h else None
+            opaque_corners = all(c[3] >= 250 for c in corners)
+            is_unmasked = opaque_corners and trans_pct < 1.0
+            results.append(
+                PreviewMetrics(
+                    res_ref=ref,
+                    logical_name=logical,
+                    apk_name=entry.apk_name,
+                    qualifier=entry.qualifier,
+                    archive_path=entry.file_path,
+                    is_nodpi=is_nodpi,
+                    is_xml_drawable=False,
+                    width=w,
+                    height=h,
+                    aspect_ratio=ratio,
+                    corners=corners,
+                    transparent_percent=round(trans_pct, 2),
+                    is_unmasked=is_unmasked,
+                    sha256=digest,
+                )
+            )
+        except Exception:
+            results.append(
+                PreviewMetrics(
+                    res_ref=ref,
+                    logical_name=logical,
+                    apk_name=entry.apk_name,
+                    qualifier=entry.qualifier,
+                    archive_path=entry.file_path,
+                    is_nodpi=is_nodpi,
+                    is_xml_drawable=False,
+                    width=None,
+                    height=None,
+                    aspect_ratio=None,
+                    corners=None,
+                    transparent_percent=None,
+                    is_unmasked=False,
+                    sha256=digest,
+                )
+            )
+    return results
+
+
+def select_primary_preview(variants: list[PreviewMetrics]) -> PreviewMetrics | None:
+    if not variants:
+        return None
+
+    # Prefer default/nodpi non-round raster variant first
+    def rank(pm: PreviewMetrics) -> tuple[int, int, int, str]:
+        q_tokens = pm.qualifier.split("-") if pm.qualifier else []
+        is_round = 1 if "round" in q_tokens else 0
+        has_locale = 1 if _extract_locale_from_qualifier(pm.qualifier) else 0
+        is_xml = 1 if pm.is_xml_drawable else 0
+        nodpi_bonus = 0 if pm.is_nodpi else 1
+        return (is_xml, is_round, has_locale, f"{nodpi_bonus}:{pm.qualifier}")
+
+    return min(variants, key=rank)
+
+
+# =============================================================================
+# BINARY DEX & DEXDUMP PARSING FOR OBFUSCATION-PROOF 5-STATE C06
+# =============================================================================
+
+
+def _is_noise_annotation(desc: str) -> bool:
+    if desc in NOISE_ANNOTATION_EXACT:
+        return True
+    return any(desc.startswith(p) for p in NOISE_ANNOTATION_PREFIXES)
+
+
+def _read_uleb128(buf: bytes, pos: int) -> tuple[int, int]:
+    result = 0
+    shift = 0
+    while True:
+        b = buf[pos]
+        pos += 1
+        result |= (b & 0x7F) << shift
+        if (b & 0x80) == 0:
+            return result, pos
+        shift += 7
+
+
+def _skip_encoded_value(buf: bytes, pos: int) -> tuple[int | None, int]:
+    """Parse one DEX encoded_value; returns (type_idx if VALUE_TYPE else None, new_pos)."""
+    hdr = buf[pos]
+    pos += 1
+    vtype = hdr & 0x1F
+    varg = (hdr >> 5) & 0x07
+
+    if vtype == 0x18:  # VALUE_TYPE (Class literal L...;)
+        size = varg + 1
+        type_idx = int.from_bytes(buf[pos : pos + size], "little")
+        return type_idx, pos + size
+    if vtype in (
+        0x00,
+        0x02,
+        0x03,
+        0x04,
+        0x06,
+        0x10,
+        0x11,
+        0x15,
+        0x16,
+        0x17,
+        0x19,
+        0x1A,
+        0x1B,
+    ):
+        return None, pos + (varg + 1)
+    if vtype in (0x1E, 0x1F):  # VALUE_NULL, VALUE_BOOLEAN
+        return None, pos
+    if vtype == 0x1C:  # VALUE_ARRAY
+        arr_len, pos = _read_uleb128(buf, pos)
+        first_type: int | None = None
+        for _ in range(arr_len):
+            t_idx, pos = _skip_encoded_value(buf, pos)
+            if first_type is None and t_idx is not None:
+                first_type = t_idx
+        return first_type, pos
+    if vtype == 0x1D:  # VALUE_ANNOTATION
+        _, pos = _read_uleb128(buf, pos)
+        num_elems, pos = _read_uleb128(buf, pos)
+        for _ in range(num_elems):
+            _, pos = _read_uleb128(buf, pos)
+            _, pos = _skip_encoded_value(buf, pos)
+        return None, pos
+    return None, pos
+
+
+def inspect_dex_bytes(
+    raw: bytes,
+    service_descriptors: set[str],
+    summary: DexAuditSummary,
+) -> bool:
+    """Parse binary DEX directly; returns True if parsed, False if non-standard."""
+    if len(raw) < 112 or raw[:4] != b"dex\n":
+        return False
+
+    # Quick byte-level checks for D10/D11 design strategy signals
+    if (
+        b"WearWidgetParams" in raw
+        or b"usableWidthDp" in raw
+        or b"usableHeightDp" in raw
+    ):
+        summary.has_wear_widget_params = True
+    if b"WearM3" in raw or b"remoteColorScheme" in raw or b"RemoteMaterialTheme" in raw:
+        summary.has_dynamic_theme_tokens = True
+    if b"Color(" in raw or b"ColorKt" in raw or b"argb" in raw:
+        summary.has_static_color_tokens = True
+
+    (
+        string_ids_size,
+        string_ids_off,
+        type_ids_size,
+        type_ids_off,
+        proto_ids_size,
+        proto_ids_off,
+        field_ids_size,
+        field_ids_off,
+        method_ids_size,
+        method_ids_off,
+        class_defs_size,
+        class_defs_off,
+    ) = struct.unpack_from("<12I", raw, 56)
+
+    str_cache: dict[int, str] = {}
+
+    def get_str(idx: int) -> str:
+        cached = str_cache.get(idx)
+        if cached is not None:
+            return cached
+        if idx < 0 or idx >= string_ids_size:
+            return ""
+        data_off = struct.unpack_from("<I", raw, string_ids_off + idx * 4)[0]
+        _, pos = _read_uleb128(raw, data_off)
+        end = raw.find(0, pos)
+        s = (
+            raw[pos:end].replace(b"\xc0\x80", b"\x00").decode("utf-8", errors="replace")
+            if end != -1
+            else ""
+        )
+        str_cache[idx] = s
+        return s
+
+    def get_type(t_idx: int) -> str:
+        if t_idx < 0 or t_idx >= type_ids_size:
+            return ""
+        s_idx = struct.unpack_from("<I", raw, type_ids_off + t_idx * 4)[0]
+        return get_str(s_idx)
+
+    def get_field(f_idx: int) -> tuple[str, str, str]:
+        if f_idx < 0 or f_idx >= field_ids_size:
+            return ("", "", "")
+        c_idx, t_idx, n_idx = struct.unpack_from("<HHI", raw, field_ids_off + f_idx * 8)
+        return (get_type(c_idx), get_str(n_idx), get_type(t_idx))
+
+    def get_method(m_idx: int) -> tuple[str, str, int]:
+        if m_idx < 0 or m_idx >= method_ids_size:
+            return ("", "", -1)
+        c_idx, p_idx, n_idx = struct.unpack_from(
+            "<HHI", raw, method_ids_off + m_idx * 8
+        )
+        return (get_type(c_idx), get_str(n_idx), p_idx)
+
+    def get_proto_params(p_idx: int) -> list[str]:
+        if p_idx < 0 or p_idx >= proto_ids_size:
+            return []
+        _, _, params_off = struct.unpack_from("<3I", raw, proto_ids_off + p_idx * 12)
+        if params_off == 0:
+            return []
+        sz = struct.unpack_from("<I", raw, params_off)[0]
+        return [
+            get_type(struct.unpack_from("<H", raw, params_off + 4 + i * 2)[0])
+            for i in range(sz)
+        ]
+
+    def find_string_idx(target: str) -> int | None:
+        # DEX string_ids are sorted by UTF-16 code unit order; ASCII strings sort identically.
+        lo, hi = 0, string_ids_size - 1
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            val = get_str(mid)
+            if val == target:
+                return mid
+            if val < target:
+                lo = mid + 1
+            else:
+                hi = mid - 1
+        return None
+
+    bind_str_idx = find_string_idx(ACTION_WIDGET)
+    qis_name_idx = find_string_idx("queryIntentServices")
+    get_anno_name_idx = find_string_idx("getAnnotation")
+    init_name_idx = find_string_idx("<init>")
+    on_create_name_idx = find_string_idx("onCreate")
+
+    # Map service descriptor -> type_idx via binary search on string_ids
+    target_type_indices: dict[int, str] = {}
+    if service_descriptors:
+        desc_str_indices = {
+            idx: d
+            for d in service_descriptors
+            if (idx := find_string_idx(d)) is not None
+        }
+        if desc_str_indices:
+            for t_i in range(type_ids_size):
+                s_i = struct.unpack_from("<I", raw, type_ids_off + t_i * 4)[0]
+                if s_i in desc_str_indices:
+                    target_type_indices[t_i] = desc_str_indices[s_i]
+
+    need_reader_scan = (
+        (not summary.live_recovery_reader)
+        and bind_str_idx is not None
+        and (qis_name_idx is not None or get_anno_name_idx is not None)
+    )
+    if not need_reader_scan and not target_type_indices:
+        return True
+
+    bind_lo_bytes = (
+        struct.pack("<H", bind_str_idx & 0xFFFF) if bind_str_idx is not None else b""
+    )
+
+    for c_i in range(class_defs_size):
+        c_off = class_defs_off + c_i * 32
+        (
+            class_idx,
+            _access_flags,
+            superclass_idx,
+            _interfaces_off,
+            _source_file_idx,
+            annotations_off,
+            class_data_off,
+            _static_values_off,
+        ) = struct.unpack_from("<8I", raw, c_off)
+
+        is_target_svc = class_idx in target_type_indices
+        scan_reader_here = need_reader_scan and (not summary.live_recovery_reader)
+        if not is_target_svc and not scan_reader_here:
+            continue
+
+        if is_target_svc:
+            desc = target_type_indices[class_idx]
+            info = summary.services.setdefault(desc, DexServiceInfo(descriptor=desc))
+            info.found_in_dex = True
+            if superclass_idx != 0xFFFFFFFF:
+                info.superclass = get_type(superclass_idx)
+            if annotations_off != 0:
+                _parse_dex_class_annotations(raw, annotations_off, get_type, info)
+
+        if class_data_off == 0:
+            continue
+
+        pos = class_data_off
+        static_fields_sz, pos = _read_uleb128(raw, pos)
+        instance_fields_sz, pos = _read_uleb128(raw, pos)
+        direct_methods_sz, pos = _read_uleb128(raw, pos)
+        virtual_methods_sz, pos = _read_uleb128(raw, pos)
+
+        for _ in range(static_fields_sz + instance_fields_sz):
+            _, pos = _read_uleb128(raw, pos)
+            _, pos = _read_uleb128(raw, pos)
+
+        cls_code_offs: list[int] = []
+        cls_might_have_bind = False
+
+        for is_virtual, count in (
+            (False, direct_methods_sz),
+            (True, virtual_methods_sz),
+        ):
+            m_idx = 0
+            for _ in range(count):
+                diff, pos = _read_uleb128(raw, pos)
+                m_idx += diff
+                _m_flags, pos = _read_uleb128(raw, pos)
+                code_off, pos = _read_uleb128(raw, pos)
+
+                if is_target_svc:
+                    _, p_i, name_i = struct.unpack_from(
+                        "<HHI", raw, method_ids_off + m_idx * 8
+                    )
+                    if is_virtual and name_i == on_create_name_idx:
+                        summary.services[
+                            target_type_indices[class_idx]
+                        ].has_on_create = True
+                    elif (
+                        (not is_virtual)
+                        and name_i == init_name_idx
+                        and code_off != 0
+                        and not get_proto_params(p_i)
+                    ):
+                        _analyze_dex_init_code(
+                            raw,
+                            code_off,
+                            target_type_indices[class_idx],
+                            get_type,
+                            get_field,
+                            get_method,
+                            get_proto_params,
+                            summary.services[target_type_indices[class_idx]],
+                        )
+
+                if scan_reader_here and code_off != 0:
+                    cls_code_offs.append(code_off)
+                    if not cls_might_have_bind:
+                        insns_sz = struct.unpack_from("<I", raw, code_off + 12)[0]
+                        ins_start = code_off + 16
+                        if (
+                            raw.find(bind_lo_bytes, ins_start, ins_start + insns_sz * 2)
+                            != -1
+                        ):
+                            cls_might_have_bind = True
+
+        if cls_might_have_bind:
+            cls_has_bind_str = False
+            cls_has_qis_or_anno = False
+            for c_code_off in cls_code_offs:
+                has_b, has_q = _scan_code_for_recovery_reader(
+                    raw,
+                    c_code_off,
+                    bind_str_idx,  # type: ignore[arg-type]
+                    qis_name_idx,
+                    get_anno_name_idx,
+                    method_ids_off,
+                    method_ids_size,
+                )
+                if has_b:
+                    cls_has_bind_str = True
+                if has_q:
+                    cls_has_qis_or_anno = True
+            if cls_has_bind_str and cls_has_qis_or_anno:
+                summary.live_recovery_reader = True
+                c_desc = get_type(class_idx)
+                if c_desc not in summary.reader_classes:
+                    summary.reader_classes.append(c_desc)
+
+    return True
+
+
+def _parse_dex_class_annotations(
+    raw: bytes,
+    annotations_off: int,
+    get_type: Any,
+    info: DexServiceInfo,
+) -> None:
+    class_annos_off = struct.unpack_from("<I", raw, annotations_off)[0]
+    if class_annos_off == 0:
+        return
+    size = struct.unpack_from("<I", raw, class_annos_off)[0]
+    for i in range(size):
+        item_off = struct.unpack_from("<I", raw, class_annos_off + 4 + i * 4)[0]
+        visibility = raw[item_off]
+        if visibility != 0x01:  # VISIBILITY_RUNTIME
+            continue
+        pos = item_off + 1
+        anno_type_idx, pos = _read_uleb128(raw, pos)
+        anno_desc = get_type(anno_type_idx)
+        num_elems, pos = _read_uleb128(raw, pos)
+        class_vals: list[str] = []
+        for _ in range(num_elems):
+            _elem_name_idx, pos = _read_uleb128(raw, pos)
+            val_type_idx, pos = _skip_encoded_value(raw, pos)
+            if val_type_idx is not None:
+                c_val = get_type(val_type_idx)
+                if c_val.startswith("L") and c_val.endswith(";"):
+                    class_vals.append(c_val)
+        if not _is_noise_annotation(anno_desc):
+            info.runtime_annotations.append((anno_desc, class_vals))
+
+
+# Dalvik instruction lengths in 16-bit code units by opcode (0x00..0xFF)
+_DALVIK_INSN_WIDTH: tuple[int, ...] = tuple(
+    (
+        1
+        if op
+        in (
+            0x00,
+            0x01,
+            0x04,
+            0x07,
+            0x0A,
+            0x0B,
+            0x0C,
+            0x0D,
+            0x0E,
+            0x0F,
+            0x10,
+            0x11,
+            0x12,
+            0x1D,
+            0x1E,
+            0x21,
+            0x27,
+            0x28,
+            0x29,
+        )
+        else 1
+        if 0x7B <= op <= 0xCF
+        else 2
+        if op
+        in (
+            0x02,
+            0x05,
+            0x08,
+            0x13,
+            0x15,
+            0x16,
+            0x19,
+            0x1A,
+            0x1C,
+            0x1F,
+            0x20,
+            0x22,
+            0x23,
+            0x2D,
+            0x2E,
+            0x2F,
+            0x30,
+            0x31,
+        )
+        else 2
+        if (0x32 <= op <= 0x3D) or (0x44 <= op <= 0x6D) or (0xD0 <= op <= 0xE2)
+        else 3
+        if op
+        in (0x03, 0x06, 0x09, 0x14, 0x17, 0x1B, 0x24, 0x25, 0x26, 0x2A, 0x2B, 0x2C)
+        else 3
+        if (0x6E <= op <= 0x72) or (0x74 <= op <= 0x78)
+        else 5
+        if op == 0x18
+        else 4
+        if op in (0xFA, 0xFB, 0xFC, 0xFD)
+        else 2
+        if op in (0xFE, 0xFF)
+        else 1
+    )
+    for op in range(256)
+)
+
+
+def _iter_dalvik_insns(raw: bytes, code_off: int) -> list[tuple[int, int, int, int]]:
+    """Decode code_item instructions as (opcode, word0, word1, word2)."""
+    insns_size = struct.unpack_from("<I", raw, code_off + 12)[0]
+    base = code_off + 16
+    out: list[tuple[int, int, int, int]] = []
+    pc = 0
+    while pc < insns_size:
+        w0 = struct.unpack_from("<H", raw, base + pc * 2)[0]
+        op = w0 & 0xFF
+        if op == 0x00 and w0 != 0x0000:
+            # Payload pseudo-instruction (packed-switch / sparse-switch / fill-array-data)
+            ident = w0 >> 8
+            if ident == 0x01 and pc + 1 < insns_size:
+                sz = struct.unpack_from("<H", raw, base + (pc + 1) * 2)[0]
+                pc += sz * 2 + 4
+                continue
+            if ident == 0x02 and pc + 1 < insns_size:
+                sz = struct.unpack_from("<H", raw, base + (pc + 1) * 2)[0]
+                pc += sz * 4 + 2
+                continue
+            if ident == 0x03 and pc + 3 < insns_size:
+                elem_w = struct.unpack_from("<H", raw, base + (pc + 1) * 2)[0]
+                sz = struct.unpack_from("<I", raw, base + (pc + 2) * 2)[0]
+                pc += (sz * elem_w + 1) // 2 + 4
+                continue
+        width = _DALVIK_INSN_WIDTH[op]
+        w1 = (
+            struct.unpack_from("<H", raw, base + (pc + 1) * 2)[0]
+            if width >= 2 and pc + 1 < insns_size
+            else 0
+        )
+        w2 = (
+            struct.unpack_from("<H", raw, base + (pc + 2) * 2)[0]
+            if width >= 3 and pc + 2 < insns_size
+            else 0
+        )
+        out.append((op, w0, w1, w2))
+        pc += width
+    return out
+
+
+def _scan_code_for_recovery_reader(
+    raw: bytes,
+    code_off: int,
+    bind_str_idx: int,
+    qis_name_idx: int | None,
+    get_anno_name_idx: int | None,
+    method_ids_off: int,
+    method_ids_size: int,
+) -> tuple[bool, bool]:
+    has_bind = False
+    has_qis = False
+    for op, _w0, w1, w2 in _iter_dalvik_insns(raw, code_off):
+        if (op == 0x1A and w1 == bind_str_idx) or (
+            op == 0x1B and (w1 | (w2 << 16)) == bind_str_idx
+        ):
+            has_bind = True
+        elif (
+            op in (0x6E, 0x6F, 0x70, 0x71, 0x72, 0x74, 0x75, 0x76, 0x77, 0x78)
+            and w1 < method_ids_size
+        ):
+            _, _, n_i = struct.unpack_from("<HHI", raw, method_ids_off + w1 * 8)
+            if n_i in (qis_name_idx, get_anno_name_idx):
+                has_qis = True
+    return has_bind, has_qis
+
+
+def _analyze_dex_init_code(
+    raw: bytes,
+    code_off: int,
+    svc_desc: str,
+    get_type: Any,
+    get_field: Any,
+    get_method: Any,
+    get_proto_params: Any,
+    info: DexServiceInfo,
+) -> None:
+    """Track direct new-instance -> iput-object on this.<field> inside <init>()V."""
+    registers_size, ins_size = struct.unpack_from("<HH", raw, code_off)
+    this_reg = registers_size - ins_size
+
+    # reg -> class_desc if reg holds a freshly allocated instance not capturing `this`
+    fresh_regs: dict[int, str] = {}
+    tainted_regs: set[int] = {this_reg}
+
+    for op, w0, w1, w2 in _iter_dalvik_insns(raw, code_off):
+        if op == 0x22:  # new-instance vA, type@BBBB
+            reg_a = (w0 >> 8) & 0xFF
+            cls_desc = get_type(w1)
+            if cls_desc and not cls_desc.startswith(
+                ("Ljava/", "Landroid/", "Lkotlin/", "Lkotlinx/")
+            ):
+                fresh_regs[reg_a] = cls_desc
+                tainted_regs.discard(reg_a)
+            else:
+                fresh_regs.pop(reg_a, None)
+        elif op == 0x07:  # move-object vA, vB
+            dst = (w0 >> 8) & 0x0F
+            src = (w0 >> 12) & 0x0F
+            if src in tainted_regs:
+                fresh_regs.pop(dst, None)
+                tainted_regs.add(dst)
+        elif op in (0x0C, 0x0A, 0x0B):  # move-result* vAA
+            reg_aa = (w0 >> 8) & 0xFF
+            fresh_regs.pop(reg_aa, None)
+            tainted_regs.add(reg_aa)
+        elif op == 0x70:  # invoke-direct {vC..}, method@BBBB
+            argc = (w0 >> 12) & 0x0F
+            arg_regs = [
+                w2 & 0x0F,
+                (w2 >> 4) & 0x0F,
+                (w2 >> 8) & 0x0F,
+                (w2 >> 12) & 0x0F,
+                (w0 >> 8) & 0x0F,
+            ][:argc]
+            if arg_regs:
+                recv = arg_regs[0]
+                # If constructor passes `this` or any `this`-tainted object (e.g. Koin lambda
+                # or R8-inlined SynchronizedLazyImpl(lambda)), `recv` is a lazy/DI wrapper.
+                if any(r in tainted_regs for r in arg_regs[1:]):
+                    fresh_regs.pop(recv, None)
+                    tainted_regs.add(recv)
+                    info.has_di_or_lazy_init = True
+        elif op == 0x76:  # invoke-direct/range {vCCCC..vNNNN}, method@BBBB
+            argc = (w0 >> 8) & 0xFF
+            start_reg = w2
+            arg_regs = list(range(start_reg, start_reg + argc))
+            if arg_regs and any(r in tainted_regs for r in arg_regs[1:]):
+                fresh_regs.pop(arg_regs[0], None)
+                tainted_regs.add(arg_regs[0])
+                info.has_di_or_lazy_init = True
+        elif op == 0x5B:  # iput-object vA, vB, field@CCCC
+            reg_a = (w0 >> 8) & 0x0F
+            reg_b = (w0 >> 12) & 0x0F
+            owner_cls, _fname, ftype = get_field(w1)
+            # Check if storing `this` or tainted object into a helper/lambda field
+            if reg_a in tainted_regs and reg_b != this_reg:
+                fresh_regs.pop(reg_b, None)
+                tainted_regs.add(reg_b)
+                info.has_di_or_lazy_init = True
+            elif reg_b == this_reg and owner_cls == svc_desc:
+                if reg_a in fresh_regs and reg_a not in tainted_regs:
+                    w_cls = fresh_regs[reg_a]
+                    # Exclude coroutine scopes / dispatchers / locks
+                    if (
+                        not ftype.startswith(("Ljava/", "Landroid/"))
+                        and w_cls not in info.init_widget_classes
+                    ):
+                        info.init_widget_classes.append(w_cls)
+                elif reg_a in tainted_regs:
+                    info.has_di_or_lazy_init = True
+
+
+def parse_dexdump_output(
+    text: str,
+    service_descriptors: set[str],
+    summary: DexAuditSummary,
+) -> None:
+    """Parse `dexdump -d -a` plain-text output (used when binary DEX is mocked)."""
+    if "WearWidgetParams" in text or "usableWidthDp" in text:
+        summary.has_wear_widget_params = True
+    if "WearM3" in text or "remoteColorScheme" in text:
+        summary.has_dynamic_theme_tokens = True
+
+    pending_annos: dict[str, list[tuple[str, list[str]]]] = {}
+    cur_anno_cls: str | None = None
+    in_cls_anno = False
+
+    cur_cls_desc: str | None = None
+    cur_cls_annos: list[tuple[str, list[str]]] = []
+    in_target = False
+    cur_method: str | None = None
+    this_reg: str | None = None
+    fresh_regs: dict[str, str] = {}
+    tainted_regs: set[str] = set()
+
+    reader_has_bind = False
+    reader_has_qis = False
+    reader_cls: str | None = None
+
+    def flush_reader() -> None:
+        nonlocal reader_has_bind, reader_has_qis, reader_cls
+        if reader_has_bind and reader_has_qis:
+            summary.live_recovery_reader = True
+            if reader_cls and reader_cls not in summary.reader_classes:
+                summary.reader_classes.append(reader_cls)
+        reader_has_bind = False
+        reader_has_qis = False
+        reader_cls = None
+
+    for line in text.splitlines():
+        m_ac = re.match(r"^\s*Class #(\d+) annotations:", line)
+        if m_ac:
+            flush_reader()
+            cur_anno_cls = m_ac.group(1)
+            pending_annos[cur_anno_cls] = []
+            in_cls_anno = False
+            in_target = False
+            cur_method = None
+            continue
+
+        if cur_anno_cls is not None:
+            s = line.strip()
+            if s == "Annotations on class":
+                in_cls_anno = True
+                continue
+            if s.startswith("Annotations on "):
+                in_cls_anno = False
+                continue
+            if not s.startswith("Class #"):
+                if in_cls_anno and s.startswith("VISIBILITY_RUNTIME"):
+                    # e.g. VISIBILITY_RUNTIME Lgvl; a=Lwrh;
+                    parts = s.split()
+                    if len(parts) >= 2:
+                        anno_desc = parts[1]
+                        if not _is_noise_annotation(anno_desc):
+                            cvals = re.findall(r"=(L[A-Za-z0-9_/$]+;)", s)
+                            pending_annos[cur_anno_cls].append((anno_desc, cvals))
+                continue
+            cur_anno_cls = None
+            in_cls_anno = False
+
+        m_ch = re.match(r"^\s*Class #(\d+)\s+-", line)
+        if m_ch:
+            flush_reader()
+            cnum = m_ch.group(1)
+            cur_cls_annos = pending_annos.pop(cnum, [])
+            cur_cls_desc = None
+            in_target = False
+            cur_method = None
+            continue
+
+        if cur_cls_desc is None and "Class descriptor" in line:
+            m_cd = re.search(r"Class descriptor\s*:\s*'([^']+)'", line)
+            if m_cd:
+                cur_cls_desc = m_cd.group(1)
+                reader_cls = cur_cls_desc
+                if cur_cls_desc in service_descriptors:
+                    in_target = True
+                    info = summary.services.setdefault(
+                        cur_cls_desc, DexServiceInfo(descriptor=cur_cls_desc)
+                    )
+                    info.found_in_dex = True
+                    info.runtime_annotations.extend(cur_cls_annos)
+            continue
+
+        if f'"{ACTION_WIDGET}"' in line:
+            reader_has_bind = True
+        if "queryIntentServices:" in line or "Class;.getAnnotation:" in line:
+            reader_has_qis = True
+
+        if in_target and cur_cls_desc:
+            info = summary.services[cur_cls_desc]
+            if "Superclass" in line and info.superclass is None:
+                m_sp = re.search(r"Superclass\s*:\s*'([^']+)'", line)
+                if m_sp:
+                    info.superclass = m_sp.group(1)
+            elif "name          : '<init>'" in line:
+                cur_method = "<init>"
+                this_reg = None
+                fresh_regs = {}
+                tainted_regs = set()
+            elif "name          : 'onCreate'" in line:
+                cur_method = "onCreate"
+                info.has_on_create = True
+            elif "name          : '" in line:
+                m_mn = re.search(r"name\s*:\s*'([^']+)'", line)
+                if m_mn:
+                    cur_method = m_mn.group(1)
+            elif cur_method == "<init>":
+                m_regs = re.match(r"^\s*registers\s*:\s*(\d+)", line)
+                if m_regs:
+                    # For ()V constructor, ins=1 so this_reg is v{registers-1}
+                    r_cnt = int(m_regs.group(1))
+                    if r_cnt >= 1:
+                        this_reg = f"v{r_cnt - 1}"
+                        tainted_regs.add(this_reg)
+                if "|0000: invoke-direct {" in line and this_reg is None:
+                    m_tr = re.search(r"invoke-direct \{(v\d+)\}", line)
+                    if m_tr:
+                        this_reg = m_tr.group(1)
+                        tainted_regs.add(this_reg)
+                m_ni = re.search(r"new-instance (v\d+),\s*(L[^\s;]+;)", line)
+                if m_ni:
+                    reg, cdesc = m_ni.group(1), m_ni.group(2)
+                    if not cdesc.startswith(
+                        ("Ljava/", "Landroid/", "Lkotlin/", "Lkotlinx/")
+                    ):
+                        fresh_regs[reg] = cdesc
+                        tainted_regs.discard(reg)
+                if "move-result-object " in line:
+                    m_mr = re.search(r"move-result-object (v\d+)", line)
+                    if m_mr:
+                        fresh_regs.pop(m_mr.group(1), None)
+                        tainted_regs.add(m_mr.group(1))
+                if "invoke-direct" in line and this_reg:
+                    m_inv = re.search(r"invoke-direct(?:/range)? \{([^}]+)\}", line)
+                    if m_inv:
+                        args = [a.strip() for a in m_inv.group(1).split(",")]
+                        if len(args) >= 2 and any(a in tainted_regs for a in args[1:]):
+                            fresh_regs.pop(args[0], None)
+                            tainted_regs.add(args[0])
+                            info.has_di_or_lazy_init = True
+                if "iput-object " in line:
+                    m_ip = re.search(
+                        r"iput-object (v\d+),\s*(v\d+),\s*(L[^.]+;)\.([^:]+):(L[^\s;]+;)",
+                        line,
+                    )
+                    if m_ip:
+                        val_r, obj_r, owner, _fn, ftype = m_ip.groups()
+                        if this_reg and val_r in tainted_regs and obj_r != this_reg:
+                            fresh_regs.pop(obj_r, None)
+                            tainted_regs.add(obj_r)
+                            info.has_di_or_lazy_init = True
+                        elif (
+                            this_reg is None or obj_r == this_reg
+                        ) and owner == cur_cls_desc:
+                            if val_r in fresh_regs and val_r not in tainted_regs:
+                                w_cls = fresh_regs[val_r]
+                                if (
+                                    not ftype.startswith(("Ljava/", "Landroid/"))
+                                    and w_cls not in info.init_widget_classes
+                                ):
+                                    info.init_widget_classes.append(w_cls)
+                            elif val_r in tainted_regs:
+                                info.has_di_or_lazy_init = True
+
+    flush_reader()
+
+
+def inspect_apks_dex(
+    apks: list[Path],
+    widget_services: list[ServiceRecord],
+    temp_dir: Path,
+    dexdump_bin: str | None,
+) -> DexAuditSummary:
+    summary = DexAuditSummary()
+    svc_descs = {s.descriptor for s in widget_services}
+    for s in widget_services:
+        summary.services[s.descriptor] = DexServiceInfo(descriptor=s.descriptor)
+
+    dex_re = re.compile(r"^classes\d*\.dex$")
+    for apk in apks:
+        with zipfile.ZipFile(apk) as z:
+            for member in sorted(z.namelist()):
+                if not dex_re.match(member):
+                    continue
+                raw = z.read(member)
+                if inspect_dex_bytes(raw, svc_descs, summary):
+                    continue
+                # Fallback to dexdump -d -a if non-standard/mock DEX file
+                if not dexdump_bin:
+                    raise RuntimeError(
+                        "dexdump not found on PATH or ANDROID_HOME/build-tools"
+                    )
+                dex_tmp = temp_dir / f"{apk.stem}_{member}"
+                dex_tmp.write_bytes(raw)
+                out = _run_cmd([dexdump_bin, "-d", "-a", str(dex_tmp)])
+                parse_dexdump_output(out, svc_descs, summary)
+    return summary
+
+
+def evaluate_c06(
+    widget_services: list[ServiceRecord], dex_summary: DexAuditSummary
+) -> tuple[str, dict[str, Any]]:
+    if not widget_services:
+        return (
+            "N/A: No GlanceWearWidgetService (BIND_WIDGET_PROVIDER) declared",
+            {"state": "not_applicable", "live_recovery_reader": False, "mappings": {}},
+        )
+
+    annotated_map: dict[str, str] = {}
+    init_map: dict[str, str] = {}
+    unannotated_svcs: list[str] = []
+    di_uninit_svcs: list[str] = []
+
+    for svc in widget_services:
+        info = dex_summary.services.get(svc.descriptor)
+        short_name = svc.name.rsplit(".", 1)[-1]
+        anno_widget: str | None = None
+        if info:
+            for _anno_desc, cvals in info.runtime_annotations:
+                if cvals:
+                    anno_widget = cvals[0]
+                    break
+        if anno_widget:
+            annotated_map[short_name] = anno_widget
+        else:
+            unannotated_svcs.append(short_name)
+            if info and info.init_widget_classes:
+                init_map[short_name] = info.init_widget_classes[0]
+            else:
+                di_uninit_svcs.append(short_name)
+
+    # Check for R8 horizontal class merging across services (annotated OR live <init> fallback)
+    effective_map: dict[str, str] = {}
+    effective_map.update(annotated_map)
+    if dex_summary.live_recovery_reader:
+        for k, v in init_map.items():
+            effective_map.setdefault(k, v)
+
+    by_widget: dict[str, list[str]] = {}
+    for svc_short, w_desc in effective_map.items():
+        by_widget.setdefault(w_desc, []).append(svc_short)
+    collisions = {w: svcs for w, svcs in by_widget.items() if len(svcs) > 1}
+
+    details: dict[str, Any] = {
+        "live_recovery_reader": dex_summary.live_recovery_reader,
+        "reader_classes": dex_summary.reader_classes,
+        "annotated_mappings": annotated_map,
+        "init_fallback_mappings": init_map,
+        "unannotated_services": unannotated_svcs,
+        "di_uninitialized_services": di_uninit_svcs,
+        "merged_collisions": collisions,
+    }
+
+    if collisions:
+        details["state"] = "fail_r8_class_merged"
+        col_str = "; ".join(
+            f"{', '.join(svcs)} -> {w_desc}"
+            for w_desc, svcs in sorted(collisions.items())
+        )
+        return (
+            f"FAIL: R8 horizontal class merging collapses multiple services to same widget class ({col_str})",
+            details,
+        )
+
+    if not unannotated_svcs:
+        details["state"] = "pass_annotated_unmerged"
+        pairs = ", ".join(f"{s} -> {w}" for s, w in annotated_map.items())
+        return (
+            f"PASS: All {len(widget_services)} widget service(s) retain distinct runtime widget annotation ({pairs})",
+            details,
+        )
+
+    if not dex_summary.live_recovery_reader:
+        details["state"] = "pass_r8_shaken_out"
+        return (
+            "PASS: Annotation stripped by R8 with no live BIND_WIDGET_PROVIDER recovery reader (programmatic update APIs unused)",
+            details,
+        )
+
+    if di_uninit_svcs:
+        details["state"] = "fail_missing_annotation_di"
+        return (
+            f"FAIL: Live BIND_WIDGET_PROVIDER reader with missing runtime annotation and DI/uninitialized widget on {', '.join(di_uninit_svcs)}",
+            details,
+        )
+
+    details["state"] = "warn_init_fallback"
+    pairs = ", ".join(f"{s} -> {w}" for s, w in init_map.items())
+    return (
+        f"WARN: Live BIND_WIDGET_PROVIDER reader with missing runtime annotation on {', '.join(unannotated_svcs)}; relies on reflective <init>() fallback ({pairs})",
+        details,
+    )
+
+
+# =============================================================================
+# MANIFEST, PROVIDER XML, VERSION, AND 32-ATTRIBUTE EVALUATION
+# =============================================================================
+
+
+def _normalize_class_name(package_name: str, raw_name: str) -> str:
+    if raw_name.startswith("."):
+        return f"{package_name}{raw_name}"
+    if "." not in raw_name and package_name:
+        return f"{package_name}.{raw_name}"
+    return raw_name
+
+
+def _to_descriptor(fqcn: str) -> str:
+    return f"L{fqcn.replace('.', '/')};"
+
+
+def _parse_version_tuple(ver: str) -> tuple[int, int, int, int, int]:
+    """Compare Maven versions: (major, minor, patch, stage_rank, stage_num)."""
+    m = re.match(
+        r"^(\d+)\.(\d+)\.(\d+)(?:-(alpha|beta|rc)(\d+)?)?", ver.strip().lower()
+    )
+    if not m:
+        return (0, 0, 0, 0, 0)
+    maj, min_, pat = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    stage = m.group(4)
+    snum = int(m.group(5) or 0)
+    stage_rank = {"alpha": 1, "beta": 2, "rc": 3, None: 4}[stage]
+    return (maj, min_, pat, stage_rank, snum)
+
+
+def extract_jetpack_versions_and_abis(
+    apks: list[Path],
+) -> tuple[dict[str, str], list[str]]:
+    versions: dict[str, str] = {}
+    abis: set[str] = set()
+    for apk in apks:
+        with zipfile.ZipFile(apk) as z:
+            for member in z.namelist():
+                if member.startswith("META-INF/") and member.endswith(".version"):
+                    coord = member.removeprefix("META-INF/").removesuffix(".version")
+                    try:
+                        ver = z.read(member).decode("utf-8", errors="replace").strip()
+                        if ver:
+                            versions[coord] = ver
+                    except OSError:
+                        pass
+                elif member.startswith("lib/") and member.endswith(".so"):
+                    parts = member.split("/")
+                    if len(parts) >= 3:
+                        abis.add(parts[1])
+    return versions, sorted(abis)
+
+
+def parse_provider_xml(
+    res_ref: str,
+    table: ResourceTable,
+    base_apk: Path,
+    aapt2_bin: str | None,
+) -> ProviderXmlSpec:
+    spec = ProviderXmlSpec(
+        res_ref=res_ref,
+        archive_path=None,
+        label=None,
+        description=None,
+        icon=None,
+        group=None,
+        preferred_type=None,
+        config_intent_action=None,
+    )
+    target_apk = base_apk
+    archive_file: str | None = None
+
+    rec = table.resolve(res_ref)
+    if rec:
+        for entry in rec.entries:
+            if entry.file_path:
+                target_apk = entry.apk_path
+                archive_file = entry.file_path
+                break
+    elif res_ref.startswith("@xml/"):
+        cand = f"res/xml/{res_ref.removeprefix('@xml/')}.xml"
+        archive_file = cand
+
+    if not archive_file:
+        return spec
+
+    spec.archive_path = archive_file
+    root = dump_xml_from_apk(target_apk, archive_file, aapt2_bin)
+    if not root:
+        return spec
+
+    prov_node = root if root.tag == "wearwidget-provider" else None
+    if prov_node is None:
+        for ch in root.children:
+            if ch.tag == "wearwidget-provider":
+                prov_node = ch
+                break
+    if prov_node is None:
+        return spec
+
+    spec.label = table.resolve_string(
+        prov_node.attrs.get("label")
+    ) or prov_node.attrs.get("label")
+    spec.description = table.resolve_string(
+        prov_node.attrs.get("description")
+    ) or prov_node.attrs.get("description")
+    spec.icon = prov_node.attrs.get("icon")
+    spec.group = prov_node.attrs.get("group")
+    pref = prov_node.attrs.get("preferredType")
+    spec.preferred_type = _normalize_container_type(pref) if pref else None
+    spec.config_intent_action = prov_node.attrs.get("configIntentAction")
+
+    for ch in prov_node.children:
+        if ch.tag == "container":
+            ctype = _normalize_container_type(ch.attrs.get("type"))
+            p_ref = ch.attrs.get("previewImage")
+            c_spec = ContainerSpec(container_type=ctype, preview_ref=p_ref)
+            if p_ref:
+                variants = inspect_preview_resource(p_ref, table)
+                c_spec.preview = select_primary_preview(variants)
+            spec.containers.append(c_spec)
+    return spec
+
+
+def _normalize_container_type(raw: str | None) -> str:
+    if not raw:
+        return "UNKNOWN"
+    up = raw.strip().upper()
+    if up in ("SMALL", "LARGE", "FULLSCREEN"):
+        return up
+    if up in ("1", "0X1"):
+        return "LARGE"
+    if up in ("2", "0X2"):
+        return "SMALL"
+    return up
+
+
+def _resolve_target_inputs(
+    target: Path, temp_dir: Path
+) -> tuple[str, Path | None, list[Path], Path | None]:
+    """Return (packaging_kind, base_apk, all_apks, manifest_only_xml)."""
+    if not target.exists():
+        raise FileNotFoundError(f"target does not exist: {target}")
+
+    if target.is_file():
+        low = target.name.lower()
+        if low == "androidmanifest.xml" or low.endswith(".xml"):
+            return ("manifest_only", None, [], target)
+        if low.endswith((".zip", ".apks", ".xapk")):
+            unpack_dir = temp_dir / "bundle_unpacked"
+            unpack_dir.mkdir(parents=True, exist_ok=True)
+            with zipfile.ZipFile(target) as z:
+                for member in z.namelist():
+                    if member.lower().endswith(".apk") and not member.endswith("/"):
+                        dest = unpack_dir / Path(member).name
+                        dest.write_bytes(z.read(member))
+            apks = sorted(unpack_dir.glob("*.apk"))
+            if not apks:
+                raise ValueError(f"archive contains no .apk slices: {target}")
+            base = _pick_base_apk(apks)
+            kind = "split_apk_archive" if len(apks) > 1 else "monolithic_apk"
+            return (kind, base, apks, None)
+        if low.endswith(".apk"):
+            return ("monolithic_apk", target, [target], None)
+        raise ValueError(f"unsupported target file type: {target}")
+
+    # Directory target
+    apks = sorted(target.glob("*.apk"))
+    if apks:
+        base = _pick_base_apk(apks)
+        kind = "split_apk_bundle" if len(apks) > 1 else "monolithic_apk"
+        return (kind, base, apks, None)
+
+    manifest_xml = target / "AndroidManifest.xml"
+    if manifest_xml.is_file():
+        return ("manifest_only", None, [], manifest_xml)
+
+    raise ValueError(
+        f"no .apk files or AndroidManifest.xml found in directory: {target}"
+    )
+
+
+def _pick_base_apk(apks: list[Path]) -> Path:
+    for cand_name in ("base.apk", "base-master.apk"):
+        for p in apks:
+            if p.name == cand_name:
+                return p
+    for p in apks:
+        if p.name.endswith("-base-split.apk") or p.name.startswith("base"):
+            return p
+    non_cfg = [p for p in apks if not p.name.startswith("config.")]
+    return non_cfg[0] if non_cfg else apks[0]
+
+
+def audit_target(
+    target_str: str,
+    runtime_overrides: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    target_path = Path(target_str)
+    with tempfile.TemporaryDirectory(prefix="wear_widget_audit_") as td_str:
+        temp_dir = Path(td_str)
+        packaging_kind, base_apk, all_apks, manifest_only_path = _resolve_target_inputs(
+            target_path, temp_dir
+        )
+
+        aapt2_bin = find_sdk_tool("aapt2", "WEAR_WIDGET_AUDIT_AAPT2")
+        dexdump_bin = find_sdk_tool("dexdump", "WEAR_WIDGET_AUDIT_DEXDUMP")
+
+        if manifest_only_path is not None:
+            manifest_root = parse_plain_xml_bytes(manifest_only_path.read_bytes())
+            if manifest_root is None:
+                if not aapt2_bin:
+                    raise RuntimeError("aapt2 required for binary AndroidManifest.xml")
+                manifest_root = parse_aapt2_xmltree(
+                    _run_cmd([aapt2_bin, "dump", "xmltree", str(manifest_only_path)])
+                )
+            res_table = ResourceTable()
+        else:
+            assert base_apk is not None
+            res_table = load_resources_across_apks(all_apks, aapt2_bin)
+            manifest_root = dump_xml_from_apk(
+                base_apk, "AndroidManifest.xml", aapt2_bin
+            )
+
+        if manifest_root is None or manifest_root.tag != "manifest":
+            raise RuntimeError(f"failed to parse AndroidManifest.xml from {target_str}")
+
+        return _evaluate_schema(
+            target_str=target_str,
+            packaging_kind=packaging_kind,
+            base_apk=base_apk,
+            all_apks=all_apks,
+            manifest_root=manifest_root,
+            res_table=res_table,
+            temp_dir=temp_dir,
+            aapt2_bin=aapt2_bin,
+            dexdump_bin=dexdump_bin,
+            runtime_overrides=runtime_overrides,
+        )
+
+
+def _evaluate_schema(
+    *,
+    target_str: str,
+    packaging_kind: str,
+    base_apk: Path | None,
+    all_apks: list[Path],
+    manifest_root: XmlNode,
+    res_table: ResourceTable,
+    temp_dir: Path,
+    aapt2_bin: str | None,
+    dexdump_bin: str | None,
+    runtime_overrides: dict[str, Any] | None,
+) -> dict[str, Any]:
+    pkg_name = manifest_root.attrs.get("package", "")
+    version_name = manifest_root.attrs.get("versionName", "unknown")
+    version_code_raw = manifest_root.attrs.get("versionCode", "0")
+    try:
+        version_code: int | str = int(version_code_raw)
+    except ValueError:
+        version_code = version_code_raw
+
+    compile_sdk_raw = manifest_root.attrs.get(
+        "compileSdkVersion"
+    ) or manifest_root.attrs.get("platformBuildVersionCode")
+    compile_sdk = (
+        int(compile_sdk_raw) if compile_sdk_raw and compile_sdk_raw.isdigit() else None
+    )
+    required_split_types = manifest_root.attrs.get("requiredSplitTypes", "")
+
+    min_sdk: int | None = None
+    target_sdk: int | None = None
+    standalone_val: bool | None = None
+    activity_action_categories: dict[str, set[str]] = {}
+    services: list[ServiceRecord] = []
+    all_preview_variants_by_slot: list[tuple[str, str, list[PreviewMetrics]]] = []
+
+    for child in manifest_root.children:
+        if child.tag == "uses-sdk":
+            ms = child.attrs.get("minSdkVersion")
+            ts = child.attrs.get("targetSdkVersion")
+            if ms and ms.lstrip("-").isdigit():
+                min_sdk = int(ms)
+            if ts and ts.lstrip("-").isdigit():
+                target_sdk = int(ts)
+        elif child.tag == "application":
+            for app_ch in child.children:
+                if app_ch.tag == "meta-data":
+                    mname = app_ch.attrs.get("name", "")
+                    if mname == META_STANDALONE:
+                        raw_v = app_ch.attrs.get("value") or app_ch.attrs.get(
+                            "resource"
+                        )
+                        standalone_val = res_table.resolve_bool(raw_v)
+                elif app_ch.tag == "activity" or app_ch.tag == "activity-alias":
+                    for sub in app_ch.children:
+                        if sub.tag == "intent-filter":
+                            acts: list[str] = []
+                            cats: set[str] = set()
+                            for if_ch in sub.children:
+                                if if_ch.tag == "action" and "name" in if_ch.attrs:
+                                    acts.append(if_ch.attrs["name"])
+                                elif if_ch.tag == "category" and "name" in if_ch.attrs:
+                                    cats.add(if_ch.attrs["name"])
+                            for act in acts:
+                                activity_action_categories.setdefault(
+                                    act, set()
+                                ).update(cats)
+                elif app_ch.tag == "service":
+                    raw_sname = app_ch.attrs.get("name", "")
+                    if not raw_sname:
+                        continue
+                    fq_sname = _normalize_class_name(pkg_name, raw_sname)
+                    exported_b = res_table.resolve_bool(app_ch.attrs.get("exported"))
+                    enabled_b = res_table.resolve_bool(app_ch.attrs.get("enabled"))
+                    perm = app_ch.attrs.get("permission")
+                    lbl_ref = app_ch.attrs.get("label")
+                    s_actions: list[str] = []
+                    s_meta: dict[str, str] = {}
+                    for sub in app_ch.children:
+                        if sub.tag == "intent-filter":
+                            for if_ch in sub.children:
+                                if if_ch.tag == "action" and "name" in if_ch.attrs:
+                                    s_actions.append(if_ch.attrs["name"])
+                        elif sub.tag == "meta-data":
+                            mk = sub.attrs.get("name")
+                            mv = (
+                                sub.attrs.get("resource")
+                                or sub.attrs.get("value")
+                                or ""
+                            )
+                            if mk:
+                                s_meta[mk] = mv
+                    is_wear_surface = (
+                        ACTION_WIDGET in s_actions
+                        or ACTION_TILE in s_actions
+                        or META_WIDGET_PROVIDER in s_meta
+                    )
+                    if not is_wear_surface:
+                        continue
+                    svc = ServiceRecord(
+                        name=fq_sname,
+                        descriptor=_to_descriptor(fq_sname),
+                        exported=bool(exported_b) if exported_b is not None else False,
+                        enabled=True if enabled_b is None else bool(enabled_b),
+                        permission=perm,
+                        label_ref=lbl_ref,
+                        label=res_table.resolve_string(lbl_ref),
+                        actions=s_actions,
+                        meta_data=s_meta,
+                    )
+                    if base_apk is not None and META_WIDGET_PROVIDER in s_meta:
+                        svc.provider_xml = parse_provider_xml(
+                            s_meta[META_WIDGET_PROVIDER], res_table, base_apk, aapt2_bin
+                        )
+                        for c_spec in svc.provider_xml.containers:
+                            if c_spec.preview_ref:
+                                p_vars = inspect_preview_resource(
+                                    c_spec.preview_ref, res_table
+                                )
+                                all_preview_variants_by_slot.append(
+                                    (svc.name, c_spec.container_type, p_vars)
+                                )
+                    if base_apk is not None and META_TILE_PREVIEW in s_meta:
+                        t_vars = inspect_preview_resource(
+                            s_meta[META_TILE_PREVIEW], res_table
+                        )
+                        svc.tile_preview = select_primary_preview(t_vars)
+                        if svc.is_tile:
+                            all_preview_variants_by_slot.append(
+                                (svc.name, "TILE", t_vars)
+                            )
+                    services.append(svc)
+
+    widget_services = [s for s in services if s.is_widget]
+    tile_services = [s for s in services if s.is_tile]
+    is_manifest_only = packaging_kind == "manifest_only"
+
+    if is_manifest_only:
+        jetpack_versions: dict[str, str] = {}
+        native_abis: list[str] = []
+        dex_summary = DexAuditSummary()
+    else:
+        jetpack_versions, native_abis = extract_jetpack_versions_and_abis(all_apks)
+        dex_summary = inspect_apks_dex(all_apks, widget_services, temp_dir, dexdump_bin)
+
+    checks: dict[str, str] = {}
+
+    # C01: Target SDK >= 34
+    sdk_tuple_str = (
+        f"minSdk {min_sdk if min_sdk is not None else '?'} / "
+        f"targetSdk {target_sdk if target_sdk is not None else '?'} / "
+        f"compileSdk {compile_sdk if compile_sdk is not None else '?'}"
+    )
+    if target_sdk is not None and target_sdk >= 34:
+        checks["C01"] = f"PASS: targetSdkVersion {target_sdk} >= 34 ({sdk_tuple_str})"
+    else:
+        checks["C01"] = f"FAIL: targetSdkVersion {target_sdk} < 34 ({sdk_tuple_str})"
+
+    # C02: 64-Bit ABI Support
+    if is_manifest_only:
+        checks["C02"] = "[GAP] Manifest-only input (APK lib/ directory unavailable)"
+    elif not native_abis:
+        checks["C02"] = "PASS: Pure Java/Kotlin (no native .so libraries bundled)"
+    elif "arm64-v8a" in native_abis or "x86_64" in native_abis:
+        checks["C02"] = (
+            f"PASS: 64-bit native libraries present ({', '.join(native_abis)})"
+        )
+    else:
+        split_note = (
+            " (bundle declares base__abi split; arm64-v8a slice absent from directory)"
+            if "base__abi" in required_split_types
+            else ""
+        )
+        checks["C02"] = (
+            f"FAIL: 32-bit native libraries only ({', '.join(native_abis)}); "
+            f"missing arm64-v8a/x86_64{split_note}"
+        )
+
+    # C03: Glance Wear Library >= 1.0.0-alpha14
+    glance_ver = (
+        jetpack_versions.get("androidx.glance.wear_wear")
+        or jetpack_versions.get("androidx.glance.wear_wear-core")
+        or next(
+            (
+                v
+                for k, v in sorted(jetpack_versions.items())
+                if "glance" in k and "wear" in k
+            ),
+            None,
+        )
+    )
+    if is_manifest_only:
+        checks["C03"] = "[GAP] Manifest-only input (META-INF/*.version unavailable)"
+    elif glance_ver:
+        if _parse_version_tuple(glance_ver) >= (1, 0, 0, 1, 14):
+            checks["C03"] = (
+                f"PASS: androidx.glance.wear:wear {glance_ver} (>= 1.0.0-alpha14)"
+            )
+        else:
+            checks["C03"] = (
+                f"WARN: androidx.glance.wear:wear {glance_ver} (< 1.0.0-alpha14)"
+            )
+    elif not widget_services:
+        checks["C03"] = "N/A: No Glance Wear widget service declared"
+    else:
+        checks["C03"] = (
+            "WARN: META-INF/androidx.glance.wear_*.version omitted or stripped by build"
+        )
+
+    # C04: BIND_TILE_PROVIDER Permission & Exported
+    if not services:
+        checks["C04"] = (
+            "FAIL: No Wear OS widget or tile services declared in AndroidManifest.xml"
+        )
+    else:
+        bad_c04: list[str] = []
+        for s in services:
+            short = s.name.rsplit(".", 1)[-1]
+            if not s.exported:
+                bad_c04.append(f'{short} missing exported="true"')
+            if s.permission != PERM_BIND_TILE:
+                bad_c04.append(f"{short} permission={s.permission!r}")
+        if not bad_c04:
+            checks["C04"] = (
+                f"PASS: All {len(services)} Wear surface service(s) declare "
+                f'exported="true" and {PERM_BIND_TILE}'
+            )
+        else:
+            checks["C04"] = (
+                f"FAIL: Non-compliant service declaration(s): {'; '.join(bad_c04)}"
+            )
+
+    # C05: No Redundant Tile Metadata on Glance Widgets
+    if not widget_services:
+        if tile_services:
+            checks["C05"] = (
+                "PASS: Tile-only services declare androidx.wear.tiles.PREVIEW cleanly"
+            )
+        else:
+            checks["C05"] = "N/A: No Wear OS widget or tile services declared"
+    else:
+        missing_prov = [
+            s.name.rsplit(".", 1)[-1]
+            for s in widget_services
+            if META_WIDGET_PROVIDER not in s.meta_data
+        ]
+        redundant_prev = [
+            s.name.rsplit(".", 1)[-1]
+            for s in widget_services
+            if META_TILE_PREVIEW in s.meta_data
+        ]
+        if missing_prov:
+            checks["C05"] = (
+                f"WARN: Missing {META_WIDGET_PROVIDER} meta-data on {', '.join(missing_prov)}"
+            )
+        elif redundant_prev:
+            checks["C05"] = (
+                f"WARN: Redundant {META_TILE_PREVIEW} declared on Glance widget service(s): "
+                f"{', '.join(redundant_prev)}"
+            )
+        else:
+            checks["C05"] = (
+                f"PASS: All {len(widget_services)} Glance widget service(s) scoped cleanly "
+                f"without redundant {META_TILE_PREVIEW}"
+            )
+
+    # C06: @AssociateWithGlanceWearWidget & R8 Class Merging
+    if is_manifest_only:
+        checks["C06"] = "[GAP] Manifest-only input (DEX bytecode unavailable)"
+        c06_details: dict[str, Any] = {"state": "gap_manifest_only"}
+    else:
+        c06_text, c06_details = evaluate_c06(widget_services, dex_summary)
+        checks["C06"] = c06_text
+
+    # C07: Config Activity Categories
+    if is_manifest_only:
+        checks["C07"] = "[GAP] Manifest-only input (provider XML unavailable)"
+    else:
+        cfg_actions: list[tuple[str, str]] = []
+        for s in widget_services:
+            if s.provider_xml and s.provider_xml.config_intent_action:
+                cfg_actions.append(
+                    (s.name.rsplit(".", 1)[-1], s.provider_xml.config_intent_action)
+                )
+        if not cfg_actions:
+            checks["C07"] = "N/A: No custom configIntentAction declared"
+        else:
+            bad_cfg: list[str] = []
+            for svc_short, act_name in cfg_actions:
+                cats = activity_action_categories.get(act_name, set())
+                missing_cats = [
+                    c
+                    for c in (CAT_ANDROIDX_CONFIG, CAT_CLOCKWORK_CONFIG)
+                    if c not in cats
+                ]
+                if not cats:
+                    bad_cfg.append(f"{svc_short} ({act_name}: no matching <activity>)")
+                elif missing_cats:
+                    bad_cfg.append(
+                        f"{svc_short} ({act_name}: missing {', '.join(missing_cats)})"
+                    )
+            if not bad_cfg:
+                checks["C07"] = (
+                    f"PASS: All {len(cfg_actions)} configIntentAction activity filter(s) "
+                    "declare both androidx and clockwork PROVIDER_CONFIG categories"
+                )
+            else:
+                checks["C07"] = (
+                    f"FAIL: Incomplete config activity categories: {'; '.join(bad_cfg)}"
+                )
+
+    # C08: Provider Group Deduplication
+    if is_manifest_only:
+        checks["C08"] = "[GAP] Manifest-only input (provider XML unavailable)"
+    elif not widget_services:
+        checks["C08"] = "N/A: No wearwidget-provider XML declared"
+    else:
+        missing_grp: list[str] = []
+        groups_found: list[str] = []
+        for s in widget_services:
+            short = s.name.rsplit(".", 1)[-1]
+            grp = (s.provider_xml.group if s.provider_xml else None) or s.meta_data.get(
+                META_TILE_GROUP
+            )
+            if grp:
+                groups_found.append(f"{short}={grp.rsplit('.', 1)[-1]}")
+            else:
+                missing_grp.append(short)
+        if not missing_grp:
+            checks["C08"] = (
+                f"PASS: All {len(widget_services)} widget provider(s) declare group ({', '.join(groups_found)})"
+            )
+        else:
+            checks["C08"] = f"WARN: Missing group attribute on {', '.join(missing_grp)}"
+
+    # C09: SMALL & LARGE Containers
+    if is_manifest_only:
+        checks["C09"] = "[GAP] Manifest-only input (provider XML unavailable)"
+    elif not widget_services:
+        checks["C09"] = "FAIL: No Glance Wear widget containers declared (Tiles only)"
+    else:
+        both_cnt = 0
+        missing_large: list[str] = []
+        single_size: list[str] = []
+        for s in widget_services:
+            short = s.name.rsplit(".", 1)[-1]
+            ctypes = {
+                c.container_type
+                for c in (s.provider_xml.containers if s.provider_xml else [])
+            }
+            if "SMALL" in ctypes and "LARGE" in ctypes:
+                both_cnt += 1
+            elif "LARGE" not in ctypes:
+                missing_large.append(f"{short} ({','.join(sorted(ctypes)) or 'none'})")
+            else:
+                single_size.append(f"{short} ({','.join(sorted(ctypes))})")
+        if both_cnt == len(widget_services):
+            checks["C09"] = (
+                f"PASS: All {len(widget_services)} widget provider(s) declare both SMALL and LARGE containers"
+            )
+        elif len(missing_large) == len(widget_services):
+            checks["C09"] = (
+                f"FAIL: Missing LARGE container ({'; '.join(missing_large)})"
+            )
+        elif missing_large:
+            checks["C09"] = (
+                f"FAIL: Primary/declared widget omits LARGE container ({'; '.join(missing_large)})"
+            )
+        else:
+            checks["C09"] = (
+                f"WARN: Single container size declared ({'; '.join(single_size)})"
+            )
+
+    # Collect widget container previews & tile previews
+    small_previews: list[tuple[str, PreviewMetrics | None]] = []
+    large_previews: list[tuple[str, PreviewMetrics | None]] = []
+    widget_slot_variants: list[tuple[str, str, list[PreviewMetrics]]] = []
+    tile_slot_previews: list[
+        tuple[str, PreviewMetrics | None, list[PreviewMetrics]]
+    ] = []
+
+    for s in widget_services:
+        short = s.name.rsplit(".", 1)[-1]
+        if s.provider_xml:
+            for c in s.provider_xml.containers:
+                pvars = (
+                    inspect_preview_resource(c.preview_ref, res_table)
+                    if (base_apk is not None and c.preview_ref)
+                    else []
+                )
+                widget_slot_variants.append((short, c.container_type, pvars))
+                if c.container_type == "SMALL":
+                    small_previews.append((short, c.preview))
+                elif c.container_type == "LARGE":
+                    large_previews.append((short, c.preview))
+
+    for s in tile_services:
+        short = s.name.rsplit(".", 1)[-1]
+        t_ref = s.meta_data.get(META_TILE_PREVIEW)
+        tvars = (
+            inspect_preview_resource(t_ref, res_table)
+            if (base_apk is not None and t_ref)
+            else []
+        )
+        tile_slot_previews.append((short, s.tile_preview, tvars))
+
+    # C10: Preview Density Qualifier (nodpi)
+    if is_manifest_only:
+        checks["C10"] = "[GAP] Manifest-only input (drawable resources unavailable)"
+    else:
+        target_slots = widget_slot_variants or [
+            (sh, "TILE", tv) for sh, _, tv in tile_slot_previews
+        ]
+        if not target_slots:
+            checks["C10"] = "FAIL: No static preview drawables declared"
+        else:
+            non_nodpi_issues: list[str] = []
+            for short, stype, pvars in target_slots:
+                if not pvars:
+                    non_nodpi_issues.append(f"{short}/{stype}: unresolved preview")
+                    continue
+                raster_vars = [v for v in pvars if not v.is_xml_drawable]
+                if not raster_vars:
+                    non_nodpi_issues.append(
+                        f"{short}/{stype}: XML drawable {pvars[0].archive_path} (not raster nodpi)"
+                    )
+                    continue
+                bad_q = [
+                    f"{v.archive_path} ({v.qualifier or 'default/mdpi'})"
+                    for v in raster_vars
+                    if not v.is_nodpi
+                ]
+                if bad_q:
+                    non_nodpi_issues.append(f"{short}/{stype}: {bad_q[0]}")
+            if not non_nodpi_issues:
+                checks["C10"] = (
+                    "PASS: Static raster preview assets reside in nodpi qualifiers"
+                )
+            else:
+                checks["C10"] = (
+                    f"FAIL: Non-nodpi preview asset(s): {'; '.join(non_nodpi_issues)}"
+                )
+
+    # C11: Tile Preview (400x400 px 1:1)
+    if is_manifest_only:
+        checks["C11"] = "[GAP] Manifest-only input (Tile preview assets unavailable)"
+    elif not tile_services:
+        checks["C11"] = "N/A: No ProtoLayout TileService (BIND_TILE_PROVIDER) declared"
+    else:
+        tile_issues: list[str] = []
+        for short, pm, _ in tile_slot_previews:
+            if pm is None:
+                tile_issues.append(f"{short}: missing androidx.wear.tiles.PREVIEW")
+            elif pm.is_xml_drawable:
+                tile_issues.append(f"{short}: XML drawable ({pm.archive_path})")
+            elif pm.width != 400 or pm.height != 400:
+                tile_issues.append(
+                    f"{short}: {pm.width}x{pm.height} px ({pm.archive_path})"
+                )
+        if not tile_issues:
+            checks["C11"] = (
+                f"PASS: All {len(tile_slot_previews)} Tile preview(s) are exact 400x400 px (1:1)"
+            )
+        else:
+            checks["C11"] = (
+                f"WARN: Non-400x400 Tile preview(s): {'; '.join(tile_issues)}"
+            )
+
+    # C12: SMALL Preview Aspect Ratio (~2.67:1, target 448x168)
+    if is_manifest_only:
+        checks["C12"] = "[GAP] Manifest-only input (SMALL preview assets unavailable)"
+    elif not small_previews:
+        checks["C12"] = "N/A: SMALL container not declared"
+    else:
+        bad_small: list[str] = []
+        ok_small: list[str] = []
+        for short, pm in small_previews:
+            if pm is None:
+                bad_small.append(f"{short}: unresolved preview")
+            elif pm.is_xml_drawable or pm.aspect_ratio is None:
+                bad_small.append(f"{short}: non-raster XML ({pm.archive_path})")
+            elif not (SMALL_RATIO_MIN <= pm.aspect_ratio <= SMALL_RATIO_MAX):
+                bad_small.append(
+                    f"{short}: {pm.width}x{pm.height} px ({pm.aspect_ratio:.2f}:1 != ~2.67:1)"
+                )
+            else:
+                ok_small.append(
+                    f"{short}: {pm.width}x{pm.height} ({pm.aspect_ratio:.2f}:1)"
+                )
+        if not bad_small:
+            checks["C12"] = (
+                f"PASS: SMALL preview aspect ratio matches ~2.67:1 ({'; '.join(ok_small)})"
+            )
+        else:
+            checks["C12"] = (
+                f"FAIL: Invalid SMALL preview aspect ratio: {'; '.join(bad_small)}"
+            )
+
+    # C13: LARGE Preview Aspect Ratio (~1.61:1, target 464x288)
+    if is_manifest_only:
+        checks["C13"] = "[GAP] Manifest-only input (LARGE preview assets unavailable)"
+    elif not large_previews:
+        checks["C13"] = "N/A: LARGE container not declared"
+    else:
+        bad_large: list[str] = []
+        ok_large: list[str] = []
+        for short, pm in large_previews:
+            if pm is None:
+                bad_large.append(f"{short}: unresolved preview")
+            elif pm.is_xml_drawable or pm.aspect_ratio is None:
+                bad_large.append(f"{short}: non-raster XML ({pm.archive_path})")
+            elif not (LARGE_RATIO_MIN <= pm.aspect_ratio <= LARGE_RATIO_MAX):
+                bad_large.append(
+                    f"{short}: {pm.width}x{pm.height} px ({pm.aspect_ratio:.2f}:1 != ~1.61:1)"
+                )
+            else:
+                ok_large.append(
+                    f"{short}: {pm.width}x{pm.height} ({pm.aspect_ratio:.2f}:1)"
+                )
+        if not bad_large:
+            checks["C13"] = (
+                f"PASS: LARGE preview aspect ratio matches ~1.61:1 ({'; '.join(ok_large)})"
+            )
+        else:
+            checks["C13"] = (
+                f"FAIL: Invalid LARGE preview aspect ratio: {'; '.join(bad_large)}"
+            )
+
+    # C14: Preview Asset Uniqueness (SHA-256 across SMALL / LARGE / Tile slots)
+    if is_manifest_only:
+        checks["C14"] = "[GAP] Manifest-only input (preview assets unavailable)"
+    else:
+        hash_to_slots: dict[str, list[str]] = {}
+        total_slots = 0
+        for short, pm in small_previews:
+            if pm:
+                total_slots += 1
+                hash_to_slots.setdefault(pm.sha256, []).append(f"{short}:SMALL")
+        for short, pm in large_previews:
+            if pm:
+                total_slots += 1
+                hash_to_slots.setdefault(pm.sha256, []).append(f"{short}:LARGE")
+        for short, pm, _ in tile_slot_previews:
+            if pm:
+                total_slots += 1
+                hash_to_slots.setdefault(pm.sha256, []).append(f"{short}:TILE")
+
+        dup_hashes = {h: sls for h, sls in hash_to_slots.items() if len(sls) > 1}
+        if total_slots == 0:
+            checks["C14"] = "N/A: No preview assets resolved"
+        elif not dup_hashes:
+            checks["C14"] = (
+                f"PASS: All {total_slots} declared surface preview slot(s) use distinct SHA-256 assets"
+            )
+        else:
+            dup_desc = "; ".join(
+                f"{h[:8]} shared by {', '.join(sls)}"
+                for h, sls in sorted(dup_hashes.items())
+            )
+            checks["C14"] = (
+                f"FAIL: Duplicate preview asset SHA-256 across slots ({dup_desc})"
+            )
+
+    # C15: Unmasked Full-Bleed Rectangular Previews (4-corner alpha & vector check)
+    if is_manifest_only:
+        checks["C15"] = "[GAP] Manifest-only input (preview pixel data unavailable)"
+    else:
+        widget_primary_previews = [
+            *((sh, "SMALL", pm) for sh, pm in small_previews),
+            *((sh, "LARGE", pm) for sh, pm in large_previews),
+        ]
+        if widget_primary_previews:
+            fail_c15: list[str] = []
+            warn_c15: list[str] = []
+            for short, slot, pm in widget_primary_previews:
+                label = f"{short}/{slot}"
+                if pm is None:
+                    fail_c15.append(f"{label}: unresolved preview")
+                elif pm.is_xml_drawable:
+                    fail_c15.append(f"{label}: vector/XML drawable ({pm.archive_path})")
+                elif pm.corners is None or pm.transparent_percent is None:
+                    fail_c15.append(f"{label}: undecodable image ({pm.archive_path})")
+                elif not pm.is_unmasked:
+                    trans_corners = sum(1 for c in pm.corners if c[3] < 250)
+                    if trans_corners == 4 or pm.transparent_percent >= 5.0:
+                        fail_c15.append(
+                            f"{label}: pre-masked ({trans_corners}/4 transparent corners, "
+                            f"{pm.transparent_percent:.1f}% transparent in {pm.archive_path})"
+                        )
+                    else:
+                        warn_c15.append(
+                            f"{label}: partial corner transparency ({trans_corners}/4 corners, "
+                            f"{pm.transparent_percent:.1f}% transparent in {pm.archive_path})"
+                        )
+            if fail_c15:
+                checks["C15"] = (
+                    f"FAIL: Masked or non-raster widget preview(s): {'; '.join(fail_c15)}"
+                )
+            elif warn_c15:
+                checks["C15"] = (
+                    f"WARN: Rounded/partially transparent preview corner(s): {'; '.join(warn_c15)}"
+                )
+            else:
+                checks["C15"] = (
+                    f"PASS: All {len(widget_primary_previews)} widget preview(s) are unmasked "
+                    "full-bleed rectangles with opaque corners"
+                )
+        elif tile_slot_previews:
+            masked_tiles = [
+                f"{short} ({pm.transparent_percent:.1f}% transparent)"
+                for short, pm, _ in tile_slot_previews
+                if pm and not pm.is_unmasked and pm.transparent_percent is not None
+            ]
+            if masked_tiles:
+                checks["C15"] = (
+                    f"WARN: Pre-masked circular Tile preview(s): {', '.join(masked_tiles)}"
+                )
+            else:
+                checks["C15"] = "PASS: Tile preview(s) have opaque full-bleed corners"
+        else:
+            checks["C15"] = "N/A: No preview assets declared"
+
+    # C16-C19: Runtime UI Quality Slots
+    pkg_overrides = _select_runtime_overrides(runtime_overrides, pkg_name)
+    for cid in ("C16", "C17", "C18", "C19"):
+        checks[cid] = str(pkg_overrides.get(cid, RUNTIME_GAP_DEFAULT))
+
+    # =========================================================================
+    # DESCRIPTIVE ARCHITECTURAL ATTRIBUTES D01-D13
+    # =========================================================================
+    attributes: dict[str, str] = {}
+    attributes["D01"] = f"{pkg_name} | {version_name} ({version_code})"
+    attributes["D02"] = sdk_tuple_str
+    if standalone_val is True:
+        attributes["D03"] = "true (Standalone watch app)"
+    elif standalone_val is False:
+        attributes["D03"] = "false (Requires paired phone companion)"
+    else:
+        attributes["D03"] = (
+            "unspecified (com.google.android.wearable.standalone not set)"
+        )
+
+    if packaging_kind == "manifest_only":
+        attributes["D04"] = (
+            "Manifest-only extract (AndroidManifest.xml without APK binary)"
+        )
+    elif packaging_kind == "monolithic_apk":
+        attributes["D04"] = f"Monolithic APK ({base_apk.name if base_apk else ''})"
+    else:
+        split_names = [a.name for a in all_apks if base_apk and a.name != base_apk.name]
+        attributes["D04"] = (
+            f"Modular split-APK bundle ({base_apk.name if base_apk else 'base.apk'} "
+            f"+ {len(split_names)} split(s): {', '.join(split_names)})"
+        )
+
+    attributes["D05"] = _format_d05_versions(jetpack_versions, is_manifest_only)
+    attributes["D06"] = _format_d06_versions(jetpack_versions, is_manifest_only)
+
+    if widget_services:
+        d07_lines: list[str] = []
+        for s in widget_services:
+            if s.provider_xml and s.provider_xml.containers:
+                pref = s.provider_xml.preferred_type
+                sz_parts = [
+                    f"{c.container_type} (default)"
+                    if c.container_type == pref
+                    else c.container_type
+                    for c in s.provider_xml.containers
+                ]
+                d07_lines.append(f"{s.name} (Supported sizes: {', '.join(sz_parts)}.)")
+            else:
+                d07_lines.append(
+                    f"{s.name} (Provider XML: {s.meta_data.get(META_WIDGET_PROVIDER, 'none')})"
+                )
+        attributes["D07"] = "\n".join(d07_lines)
+    else:
+        attributes["D07"] = "None declared"
+
+    if tile_services:
+        attributes["D08"] = "\n".join(
+            f"{s.name} (Supported sizes: FULLSCREEN (default).)" for s in tile_services
+        )
+    else:
+        attributes["D08"] = "None declared"
+
+    multi_svcs = [
+        s.name.rsplit(".", 1)[-1]
+        for s in services
+        if res_table.resolve_bool(s.meta_data.get(META_MULTI_INSTANCE)) is True
+    ]
+    attributes["D09"] = f"true ({', '.join(multi_svcs)})" if multi_svcs else "false"
+
+    attributes["D10"] = _format_d10_adaptive(
+        widget_services, res_table, dex_summary, is_manifest_only
+    )
+    attributes["D11"] = _format_d11_theme(
+        dex_summary, jetpack_versions, is_manifest_only
+    )
+    attributes["D12"] = _format_d12_locales(
+        res_table, all_preview_variants_by_slot, is_manifest_only
+    )
+    attributes["D13"] = str(
+        pkg_overrides.get(
+            "D13",
+            "Not captured in static APK audit (requires live DUMP_RC_DOC capture)",
+        )
+    )
+
+    summary_counts = {"pass": 0, "warn": 0, "fail": 0, "na": 0, "gap": 0}
+    for val in checks.values():
+        if val.startswith("PASS:"):
+            summary_counts["pass"] += 1
+        elif val.startswith("WARN:"):
+            summary_counts["warn"] += 1
+        elif val.startswith("FAIL:"):
+            summary_counts["fail"] += 1
+        elif val.startswith("N/A:"):
+            summary_counts["na"] += 1
+        elif val.startswith("[GAP]"):
+            summary_counts["gap"] += 1
+
+    return {
+        "header": {
+            "target": target_str,
+            "package_name": pkg_name,
+            "version_name": str(version_name),
+            "version_code": version_code,
+            "min_sdk": min_sdk,
+            "target_sdk": target_sdk,
+            "compile_sdk": compile_sdk,
+            "packaging": packaging_kind,
+            "apk_files": [a.name for a in all_apks],
+            "native_abis": native_abis,
+            "summary": summary_counts,
+        },
+        "checks": checks,
+        "attributes": attributes,
+        "c06_analysis": c06_details,
+        "jetpack_versions": {
+            k: v
+            for k, v in sorted(jetpack_versions.items())
+            if any(
+                tok in k
+                for tok in ("glance", "compose", "tiles", "protolayout", "wear")
+            )
+        },
+        "services": [_serialize_service(s) for s in services],
+    }
+
+
+def _select_runtime_overrides(
+    overrides: dict[str, Any] | None, pkg_name: str
+) -> dict[str, Any]:
+    if not overrides:
+        return {}
+    if pkg_name in overrides and isinstance(overrides[pkg_name], dict):
+        return overrides[pkg_name]
+    return overrides
+
+
+def _format_d05_versions(versions: dict[str, str], is_manifest_only: bool) -> str:
+    if is_manifest_only:
+        return "[GAP] Manifest-only input"
+    parts: list[str] = []
+    glance = versions.get("androidx.glance.wear_wear") or versions.get(
+        "androidx.glance.wear_wear-core"
+    )
+    if glance:
+        parts.append(f"Glance Wear {glance}")
+    rc = (
+        versions.get("androidx.compose.remote_remote-creation-compose")
+        or versions.get("androidx.compose.remote_remote-creation")
+        or versions.get("androidx.compose.remote_remote-core")
+    )
+    if rc:
+        parts.append(f"Remote Compose {rc}")
+    wm3 = versions.get("androidx.wear.compose_compose-material3")
+    if wm3:
+        parts.append(f"Wear M3 {wm3}")
+    cui = versions.get("androidx.compose.ui_ui")
+    if cui:
+        parts.append(f"Compose UI {cui}")
+    return " | ".join(parts) if parts else "Not present / stripped from META-INF"
+
+
+def _format_d06_versions(versions: dict[str, str], is_manifest_only: bool) -> str:
+    if is_manifest_only:
+        return "[GAP] Manifest-only input"
+    parts: list[str] = []
+    tiles = versions.get("androidx.wear.tiles_tiles")
+    if tiles:
+        parts.append(f"Tiles {tiles}")
+    proto = versions.get("androidx.wear.protolayout_protolayout")
+    if proto:
+        parts.append(f"ProtoLayout {proto}")
+    proto_m3 = versions.get("androidx.wear.protolayout_protolayout-material3")
+    if proto_m3:
+        parts.append(f"ProtoLayout M3 {proto_m3}")
+    return " | ".join(parts) if parts else "Not present / stripped from META-INF"
+
+
+def _format_d10_adaptive(
+    widget_services: list[ServiceRecord],
+    res_table: ResourceTable,
+    dex_summary: DexAuditSummary,
+    is_manifest_only: bool,
+) -> str:
+    if is_manifest_only:
+        return "[GAP] Manifest-only input"
+    if not widget_services:
+        return "Full-screen Tile layouts only (no Glance widget containers declared)"
+    multi = sum(
+        1
+        for s in widget_services
+        if s.provider_xml
+        and len({c.container_type for c in s.provider_xml.containers}) >= 2
+    )
+    signals: list[str] = []
+    if multi:
+        signals.append(
+            f"Container-size branching ({multi}/{len(widget_services)} service(s) declare SMALL+LARGE)"
+        )
+    else:
+        only_types = sorted(
+            {
+                c.container_type
+                for s in widget_services
+                if s.provider_xml
+                for c in s.provider_xml.containers
+            }
+        )
+        signals.append(
+            f"Single container size ({', '.join(only_types) or 'unspecified'})"
+        )
+    if dex_summary.has_wear_widget_params:
+        signals.append("WearWidgetParams width/height reads in DEX")
+    if res_table.width_qualifiers:
+        signals.append(
+            f"width qualifiers ({', '.join(sorted(res_table.width_qualifiers))})"
+        )
+    return "; ".join(signals)
+
+
+def _format_d11_theme(
+    dex_summary: DexAuditSummary,
+    versions: dict[str, str],
+    is_manifest_only: bool,
+) -> str:
+    if is_manifest_only:
+        return "[GAP] Manifest-only input"
+    has_rm3 = "androidx.wear.compose.remote_remote-material3" in versions
+    if dex_summary.has_dynamic_theme_tokens or has_rm3:
+        if dex_summary.has_static_color_tokens:
+            return "Hybrid / Dynamic system tokens (WearM3 / remoteColorScheme) + custom colors"
+        return "Dynamic system tokens (WearM3 / remoteColorScheme)"
+    if dex_summary.has_static_color_tokens:
+        return "Static / custom brand colors in DEX (no WearM3 dynamic token markers)"
+    return "Static / host default palette"
+
+
+def _format_d12_locales(
+    res_table: ResourceTable,
+    slot_variants: list[tuple[str, str, list[PreviewMetrics]]],
+    is_manifest_only: bool,
+) -> str:
+    if is_manifest_only:
+        return "[GAP] Manifest-only input"
+    str_count = len(res_table.string_locales)
+    preview_locales: set[str] = set()
+    for _svc, _slot, pvars in slot_variants:
+        for v in pvars:
+            loc = _extract_locale_from_qualifier(v.qualifier)
+            if loc:
+                preview_locales.add(loc)
+    str_desc = (
+        f"base + {str_count} string locale(s)" if str_count else "base strings only"
+    )
+    prev_desc = (
+        f"base + {len(preview_locales)} localized preview locale(s) ({', '.join(sorted(preview_locales))})"
+        if preview_locales
+        else "base static previews only (0 localized preview folders)"
+    )
+    return f"{str_desc}; {prev_desc}"
+
+
+def _serialize_preview(pm: PreviewMetrics | None) -> dict[str, Any] | None:
+    if pm is None:
+        return None
+    return {
+        "resource_ref": pm.res_ref,
+        "logical_name": pm.logical_name,
+        "apk_name": pm.apk_name,
+        "qualifier": pm.qualifier,
+        "archive_path": pm.archive_path,
+        "is_nodpi": pm.is_nodpi,
+        "is_xml_drawable": pm.is_xml_drawable,
+        "width": pm.width,
+        "height": pm.height,
+        "aspect_ratio": pm.aspect_ratio,
+        "corners_rgba": [list(c) for c in pm.corners] if pm.corners else None,
+        "transparent_percent": pm.transparent_percent,
+        "is_unmasked": pm.is_unmasked,
+        "sha256": pm.sha256,
+    }
+
+
+def _serialize_service(s: ServiceRecord) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "name": s.name,
+        "descriptor": s.descriptor,
+        "surface_types": [
+            *(["GLANCE_WIDGET"] if s.is_widget else []),
+            *(["TILE"] if s.is_tile else []),
+        ],
+        "exported": s.exported,
+        "enabled": s.enabled,
+        "permission": s.permission,
+        "label": s.label,
+        "actions": s.actions,
+        "meta_data": s.meta_data,
+    }
+    if s.provider_xml:
+        out["provider_xml"] = {
+            "resource_ref": s.provider_xml.res_ref,
+            "archive_path": s.provider_xml.archive_path,
+            "label": s.provider_xml.label,
+            "description": s.provider_xml.description,
+            "icon": s.provider_xml.icon,
+            "group": s.provider_xml.group,
+            "preferred_type": s.provider_xml.preferred_type,
+            "config_intent_action": s.provider_xml.config_intent_action,
+            "containers": [
+                {
+                    "type": c.container_type,
+                    "preview_ref": c.preview_ref,
+                    "preview": _serialize_preview(c.preview),
+                }
+                for c in s.provider_xml.containers
+            ],
+        }
+    if s.tile_preview:
+        out["tile_preview"] = _serialize_preview(s.tile_preview)
+    return out
+
+
+def format_summary_table(reports: list[dict[str, Any]]) -> str:
+    blocks: list[str] = []
+    for rep in reports:
+        hdr = rep["header"]
+        cnt = hdr["summary"]
+        lines = [
+            f"=== {hdr['package_name']} | v{hdr['version_name']} ({hdr['version_code']}) ===",
+            f"Target   : {hdr['target']}",
+            f"Summary  : PASS={cnt['pass']}  WARN={cnt['warn']}  FAIL={cnt['fail']}  N/A={cnt['na']}  GAP={cnt['gap']}",
+            "",
+            "ID    Result",
+            "----  ----------------------------------------------------------------------",
+        ]
+        for cid, val in rep["checks"].items():
+            lines.append(f"{cid:<4}  {val}")
+        lines.append("")
+        for did, val in rep["attributes"].items():
+            one_line = val.replace("\n", "; ")
+            lines.append(f"{did:<4}  {one_line}")
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks) + "\n"
+
+
+# =============================================================================
+# CLI ENTRYPOINT & SIGNAL HANDLING
+# =============================================================================
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog=PROG,
+        add_help=False,
+    )
+    parser.add_argument("targets", nargs="*", metavar="TARGET")
+    parser.add_argument("--pretty", action="store_true")
+    parser.add_argument("--compact", action="store_true")
+    parser.add_argument("--json", dest="emit_json", action="store_true")
+    parser.add_argument("--summary", action="store_true")
+    parser.add_argument("--array", action="store_true")
+    parser.add_argument("--runtime-json", metavar="FILE")
+    parser.add_argument("-o", "--output", metavar="FILE")
+    parser.add_argument("-h", "--help", action="store_true")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args_list = list(sys.argv[1:] if argv is None else argv)
+    if "-h" in args_list or "--help" in args_list:
+        sys.stdout.write(FULL_HELP)
+        return 0
+    if not args_list:
+        sys.stderr.write(SHORT_HELP)
+        return 1
+
+    parser = build_arg_parser()
+    try:
+        ns = parser.parse_args(args_list)
+    except SystemExit as exc:
+        return int(exc.code) if isinstance(exc.code, int) else 1
+
+    if not ns.targets:
+        sys.stderr.write(SHORT_HELP)
+        return 1
+
+    runtime_overrides: dict[str, Any] | None = None
+    if ns.runtime_json:
+        rt_path = Path(ns.runtime_json)
+        if not rt_path.is_file():
+            _err(f"runtime overrides file not found: {ns.runtime_json}")
+            return 1
+        try:
+            runtime_overrides = json.loads(rt_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            _err(f"invalid --runtime-json {ns.runtime_json}: {exc}")
+            return 1
+
+    reports: list[dict[str, Any]] = []
+    for t in ns.targets:
+        try:
+            reports.append(audit_target(t, runtime_overrides=runtime_overrides))
+        except FileNotFoundError as exc:
+            _err(str(exc))
+            return 1
+        except RuntimeError as exc:
+            msg = str(exc)
+            _err(msg)
+            if "not found on PATH" in msg or "required for binary" in msg:
+                return 127
+            return 1
+        except Exception as exc:
+            _err(f"failed to audit {t}: {exc}")
+            return 1
+
+    payload: Any = reports if (len(reports) > 1 or ns.array) else reports[0]
+    indent = None if ns.compact else 2
+    separators = (",", ":") if ns.compact else None
+
+    if ns.summary and not ns.emit_json:
+        rendered = format_summary_table(reports)
+    else:
+        if ns.summary and ns.emit_json:
+            sys.stderr.write(format_summary_table(reports))
+        rendered = json.dumps(payload, indent=indent, separators=separators) + "\n"
+
+    if ns.output:
+        out_path = Path(ns.output)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(rendered, encoding="utf-8")
+    else:
+        sys.stdout.write(rendered)
+        sys.stdout.flush()
+    return 0
+
+
+def _cleanup_children() -> None:
+    for proc in list(_ACTIVE_PROCS):
+        try:
+            proc.terminate()
+            proc.wait(timeout=2.0)
+        except subprocess.TimeoutExpired:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            proc.wait()
+        except Exception:
+            pass
+
+
+def _sigterm_handler(_signum: int, _frame: Any) -> None:
+    raise KeyboardInterrupt
+
+
+if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, _sigterm_handler)
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        _cleanup_children()
+        try:
+            sys.stderr.write("\n")
+            sys.stderr.flush()
+        except Exception:
+            pass
+        sys.exit(130)
+    except BrokenPipeError:
+        _cleanup_children()
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        sys.exit(141)
