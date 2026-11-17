@@ -272,8 +272,16 @@ def _parse_flow_metadata(fm: list[str], meta_idx: int) -> tuple[int, list[str]] 
     if top_kv is None:
         return None
     text = "\n".join([top_kv[1], *fm[meta_idx + 1 :]])
-    start = text.find("{")
-    if start == -1:
+    start = 0
+    while start < len(text):
+        if text[start] in (" ", "\t", "\r", "\n"):
+            start += 1
+        elif text[start] == "#":
+            nl = text.find("\n", start)
+            start = len(text) if nl == -1 else nl + 1
+        else:
+            break
+    if start >= len(text) or text[start] != "{":
         return None
     in_s = False
     in_d = False
@@ -413,23 +421,43 @@ def inject_copy_source(content: str, source: str) -> str:
         fm.extend(["metadata:", f"  source: {src_json}"])
     else:
         v_part = (_split_yaml_kv(fm[meta_idx]) or ("", ""))[1].strip()
+        v_clean = "" if v_part.startswith("#") else _unquote_scalar(v_part)
+        v_raw_nc = v_part
+        for ci, cch in enumerate(v_part):
+            if cch == "#" and (ci == 0 or v_part[ci - 1] in (" ", "\t")):
+                v_raw_nc = v_part[:ci].rstrip()
+                break
         block_end = meta_idx + 1
-        if v_part.startswith("{"):
+        while block_end < len(fm) and (
+            not fm[block_end].strip()
+            or fm[block_end].strip().startswith("#")
+            or fm[block_end].startswith((" ", "\t"))
+        ):
+            block_end += 1
+        while block_end > meta_idx + 1 and not fm[block_end - 1].strip():
+            block_end -= 1
+        first_child_s = next(
+            (
+                ln.strip()
+                for ln in fm[meta_idx + 1 : block_end]
+                if ln.strip() and not ln.strip().startswith("#")
+            ),
+            "",
+        )
+        if v_raw_nc.startswith("{") or (not v_raw_nc and first_child_s.startswith("{")):
             parsed = _parse_flow_metadata(fm, meta_idx)
             if parsed is not None:
-                block_end, kept = parsed
-                fm[meta_idx:block_end] = ["metadata:", *kept, f"  source: {src_json}"]
+                flow_end, kept = parsed
+                fm[meta_idx : max(flow_end, block_end)] = [
+                    "metadata:",
+                    *kept,
+                    f"  source: {src_json}",
+                ]
             else:
-                fm[meta_idx : meta_idx + 1] = ["metadata:", f"  source: {src_json}"]
+                fm[meta_idx:block_end] = ["metadata:", f"  source: {src_json}"]
+        elif v_clean or (first_child_s and _split_yaml_kv(first_child_s) is None):
+            fm[meta_idx:block_end] = ["metadata:", f"  source: {src_json}"]
         else:
-            while block_end < len(fm) and (
-                not fm[block_end].strip()
-                or fm[block_end].strip().startswith("#")
-                or fm[block_end].startswith((" ", "\t"))
-            ):
-                block_end += 1
-            while block_end > meta_idx + 1 and not fm[block_end - 1].strip():
-                block_end -= 1
             kept_block: list[str] = []
             child_indent: str | None = None
             b_i = meta_idx + 1
