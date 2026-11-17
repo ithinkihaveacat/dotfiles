@@ -385,11 +385,19 @@ def _upsert_flow_map_source(flow_text: str, source_json: str) -> str:
     return "{" + inner[:last_end] + f", source: {source_json}" + after + "}"
 
 
+def _read_legacy_stub_source(content: str) -> str | None:
+    for line in content.splitlines():
+        if line.startswith("<!-- skill-stub: ") and line.endswith(" -->"):
+            res = line[len("<!-- skill-stub: ") : -len(" -->")].strip()
+            return res or None
+    return None
+
+
 def read_copy_source_from_content(content: str) -> str | None:
-    """Return metadata.source from SKILL.md YAML frontmatter, or None."""
+    """Return metadata.source (or legacy skill-stub target) from SKILL.md, or None."""
     split = _split_frontmatter(content)
     if split is None:
-        return None
+        return _read_legacy_stub_source(content)
     fm_lines, _fence, _rest, _eol = split
 
     idx = 0
@@ -426,8 +434,8 @@ def read_copy_source_from_content(content: str) -> str | None:
             for k_name, val_raw, _vs, _ve in _parse_flow_map_entries(flow_str[1:-1]):
                 if k_name == "source":
                     res = _unquote_yaml_scalar(val_raw)
-                    return res or None
-            return None
+                    return res or _read_legacy_stub_source(content)
+            return _read_legacy_stub_source(content)
 
         # Block mapping under metadata:
         block_end = idx + 1
@@ -451,7 +459,7 @@ def read_copy_source_from_content(content: str) -> str | None:
                 child_indent = b_line[: len(b_line) - len(b_line.lstrip(" \t"))]
                 break
         if child_indent is None:
-            return None
+            return _read_legacy_stub_source(content)
 
         b_idx = idx + 1
         while b_idx < block_end:
@@ -481,12 +489,12 @@ def read_copy_source_from_content(content: str) -> str | None:
                                 cont.append(cs)
                             b_idx += 1
                         joined = " ".join(cont).strip()
-                        return joined or None
+                        return joined or _read_legacy_stub_source(content)
                     res = _unquote_yaml_scalar(cv_clean)
-                    return res or None
+                    return res or _read_legacy_stub_source(content)
             b_idx += 1
-        return None
-    return None
+        return _read_legacy_stub_source(content)
+    return _read_legacy_stub_source(content)
 
 
 def inject_copy_source(content: str, source: str) -> str:
@@ -688,7 +696,11 @@ def _copy_tree_filtered(
             sub_dst.mkdir(parents=True, exist_ok=True)
             _copy_tree_filtered(item, sub_dst, visited | {dev_ino})
         elif stat.S_ISREG(st.st_mode):
-            shutil.copy2(item, dst_dir / item.name, follow_symlinks=True)
+            dst_file = dst_dir / item.name
+            shutil.copy2(item, dst_file, follow_symlinks=True)
+            mode = stat.S_IMODE(st.st_mode)
+            if (mode & 0o600) != 0o600:
+                os.chmod(dst_file, mode | 0o600)
 
 
 def copy_skill_dir(dest_skill_dir: Path, src: Path) -> None:
@@ -2195,6 +2207,22 @@ def _expected_names_for_spec(spec: str) -> set[str]:
     return {n for n in names if n and "/" not in n and n not in (".", "..")}
 
 
+def _is_unavailable_optional_spec(spec: str) -> bool:
+    """True when SPEC matches only optional catalog skills whose backing paths are absent."""
+    if spec == "~" or spec.startswith(("/", "./", "../", "~/")):
+        return False
+    req_ns = spec.split(":", 1)[0].lower() if ":" in spec else None
+    short = spec.split(":", 1)[-1].lower()
+    matched = []
+    for key, entry in get_api().plugin_catalog.items():
+        ns, sname = key.split(":", 1) if ":" in key else ("local", key)
+        if req_ns and ns.lower() != req_ns:
+            continue
+        if sname.lower() == short:
+            matched.append(entry)
+    return bool(matched) and all(e.get("optional") for e in matched)
+
+
 def cmd_add(specs):
     quiet = any(a in ("-q", "--quiet") for a in specs)
     prune = any(a in ("-p", "--prune") for a in specs)
@@ -2231,8 +2259,14 @@ def cmd_add(specs):
             resolved_skills.append((src_path, name, spec))
             desired_link_names.add(src_path.name)
         except Exception as e:
-            print(f"skill: error: failed to resolve '{spec}': {e}", file=sys.stderr)
             desired_link_names |= _expected_names_for_spec(spec)
+            if prune and _is_unavailable_optional_spec(spec):
+                log(
+                    f"skipped optional skill '{spec}' (source is not available on this host)",
+                    file=sys.stderr,
+                )
+                continue
+            print(f"skill: error: failed to resolve '{spec}': {e}", file=sys.stderr)
             has_errors = True
             continue
 
