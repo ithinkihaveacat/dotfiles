@@ -291,6 +291,100 @@ def new_id() -> str:
     return f"ANDON-{stamp}-{secrets.token_hex(2)}"
 
 
+_META_KEY_RE = re.compile(r"""^(?:metadata|"metadata"|'metadata')\s*:(.*)$""")
+_FLOW_SRC_RE = re.compile(
+    r"""^\s*(?:#[^\n]*\n\s*)*\{\s*(?:source|"source"|'source')\s*:\s*"""
+    r"""("(?:\\.|[^"\\])*"|'(?:''|[^'])*'|[^,}\s#]+)"""
+)
+_BLOCK_SRC_RE = re.compile(r"""^(?:source|"source"|'source')\s*:\s*(.*)$""")
+
+
+def _unquote_scalar(raw: str) -> str:
+    val = raw.strip()
+    if len(val) >= 2 and val[0] == '"' and val[-1] == '"':
+        with contextlib.suppress(json.JSONDecodeError):
+            parsed = json.loads(val)
+            if isinstance(parsed, str):
+                return parsed
+        return val[1:-1]
+    if len(val) >= 2 and val[0] == "'" and val[-1] == "'":
+        return val[1:-1].replace("''", "'")
+    return val.split(" #", 1)[0].strip()
+
+
+def _extract_skill_copy_source(content: str) -> str | None:
+    """Reads block or flow metadata.source from a skill copy stamped by 'skill'."""
+    lines = content.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return None
+    end = next(
+        (
+            i
+            for i in range(1, len(lines))
+            if not lines[i].startswith((" ", "\t"))
+            and lines[i].strip() in ("---", "...")
+        ),
+        None,
+    )
+    if end is None:
+        return None
+    fm = lines[1:end]
+    for idx, line in enumerate(fm):
+        if line.startswith((" ", "\t")) or not (m := _META_KEY_RE.match(line)):
+            continue
+        if fm_match := _FLOW_SRC_RE.match("\n".join([m.group(1), *fm[idx + 1 :]])):
+            val = _unquote_scalar(fm_match.group(1))
+            return val if val.startswith(("/", "~/")) else None
+        c_ind: str | None = None
+        for b_line in fm[idx + 1 :]:
+            bs = b_line.strip()
+            if not bs or bs.startswith("#"):
+                continue
+            if not b_line.startswith((" ", "\t")):
+                break
+            ind = b_line[: len(b_line) - len(b_line.lstrip(" \t"))]
+            c_ind = ind if c_ind is None else c_ind
+            if ind == c_ind and (bm := _BLOCK_SRC_RE.match(bs)):
+                val = _unquote_scalar(bm.group(1))
+                if val.startswith(("/", "~/")):
+                    return val
+        break
+    return None
+
+
+def _resolve_copied_skill_path(real_path_str: str) -> str:
+    """Maps a path inside a metadata.source-stamped skill copy to its canonical source."""
+    real_p = Path(real_path_str)
+    home_real = Path(os.path.realpath(Path.home()))
+    anc = real_p if real_p.is_dir() else real_p.parent
+    for _ in range(6):
+        if anc == anc.parent or anc == home_real:
+            break
+        skill_md = anc / "SKILL.md"
+        if skill_md.is_file():
+            try:
+                with open(skill_md, encoding="utf-8", errors="replace") as f:
+                    copy_src = _extract_skill_copy_source(f.read(16384))
+            except OSError:
+                copy_src = None
+            if copy_src:
+                src_dir = Path(copy_src).expanduser()
+                src_base = (
+                    os.path.realpath(src_dir)
+                    if src_dir.exists() or src_dir.parent.exists()
+                    else os.path.normpath(src_dir)
+                )
+                rel = real_p.relative_to(anc)
+                mapped = Path(src_base) if rel == Path(".") else Path(src_base) / rel
+                return (
+                    os.path.realpath(mapped)
+                    if mapped.exists()
+                    else os.path.normpath(mapped)
+                )
+        anc = anc.parent
+    return real_path_str
+
+
 def normalize_source(source: str) -> str:
     """Spells a source the same way from every workspace and session."""
     source = re.sub(
@@ -301,12 +395,35 @@ def normalize_source(source: str) -> str:
     )
     while source.startswith("./"):
         source = source[2:]
-    if "/" in source or source.startswith("~"):
+    if (
+        not source.startswith("//")
+        and not re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", source)
+        and ("/" in source or source.startswith("~"))
+    ):
         expanded = Path(source).expanduser()
-        if expanded.exists() or (
-            expanded.parent != Path(".") and expanded.parent.exists()
-        ):
-            source = os.path.realpath(expanded)
+        home_p = Path.home()
+        if expanded.is_absolute():
+            cur = expanded
+            has_target = False
+            for _ in range(7):
+                if cur in (cur.parent, home_p):
+                    break
+                if cur.exists():
+                    has_target = True
+                    break
+                cur = cur.parent
+        else:
+            has_target = (
+                expanded.exists()
+                or (expanded.parent != Path(".") and expanded.parent.exists())
+                or any(
+                    p.is_symlink() or (p / "SKILL.md").is_file()
+                    for p in expanded.parents[:5]
+                    if p != Path(".")
+                )
+            )
+        if has_target:
+            source = _resolve_copied_skill_path(os.path.realpath(expanded))
         elif source.startswith("~"):
             source = str(expanded)
     for home in (os.path.realpath(Path.home()), str(Path.home())):

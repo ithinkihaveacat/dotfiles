@@ -73,7 +73,6 @@ skill_test_init() {
   export XDG_STATE_HOME="${TMPDIR}/.local/state"
   # Ensure p4 is not found by default during Git/Unmanaged tests.
   export PATH="$MOCK_BIN_DIR:$PATH"
-  unset AGENT_PREFLIGHT_SKIP _agent_preflight_skip
   # Run the same whether or not the suite itself runs inside an agent session
   # (Claude, Codex, Antigravity/Jetski) or with skill's own overrides set.
   unset AGENT_SESSION_DIR AGENT_SESSION_ID CLAUDE_CODE_SESSION_ID \

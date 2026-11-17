@@ -22,10 +22,12 @@ workflows, helper scripts, and local conventions.
   (Claude wrapper or Antigravity), or read
   `$(skill --offline resolve <NAME>)/SKILL.md` directly (OpenCode/Codex; never
   install workspace/user skills as a fallback).
-- **Skill symlinks and relative paths**: Installed skill directories are
-  symlinks, so cross-skill links (`../<sibling>/...`) must be resolved against
-  the symlink's `realpath` (or activated via `skill --scope session add`), and
-  repo-relative commands run from the target repository root.
+- **Skill provenance and relative paths**: User-scope default skills are
+  symlinks, whereas workspace and session skills are directory copies carrying
+  `metadata.source` in `SKILL.md` frontmatter. Resolve cross-skill links
+  (`../<sibling>/...`) or upstream skill edits against `metadata.source` /
+  `skill --offline resolve <NAME>` (or symlink `realpath`), and run
+  repo-relative commands from the target repository root.
 - **Common skill triggers**:
   - **Android & Wear OS devices**: Use the relevant device skill's exact `adb`
     commands and scripts (e.g., for screenshots or UI interaction).

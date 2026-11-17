@@ -22,12 +22,14 @@ compatibility: >-
 This skill sets up and governs the coding agents that work in a workspace: what
 they see, what they may do, and what they are told. It consists of:
 
-1. **`skill`**: The skill manager. Installs and tracks skills as untracked
-   symlinks, automatically adapting to the environment (Git, Perforce, session
-   artifact directories, or unmanaged directories; more via plugins). It is
-   fully deterministic and dependency-free: it also enumerates what is
-   installable (`skill catalog`) and manages remote plugin caching, but never
-   calls a model to decide what a workspace needs — see
+1. **`skill`**: The skill manager. Installs baseline defaults as symlinks in the
+   user scope (`--scope user`) and workspace/session skills as real directory
+   copies stamped with `metadata.source` in `SKILL.md` frontmatter, adapting to
+   each environment (Git, Perforce, session artifact directories, or unmanaged
+   directories; more via plugins). It is fully deterministic and
+   dependency-free: it also enumerates what is installable (`skill catalog`) and
+   manages remote plugin caching, but never calls a model to decide what a
+   workspace needs — see
    [Choosing Skills (Workspace vs. Session)](#choosing-skills-workspace-vs-session).
 1. **`permission`**: The permission manager. Maintains allow/deny/ask rules for
    every detected local agent (workspace-local for Claude Code and Codex,
@@ -40,10 +42,6 @@ they see, what they may do, and what they are told. It consists of:
 1. **`andon`**: The Andon cord. Records and triages defects agents report in
    their own instructions, skills, rules and tools, through harness plugins for
    Claude Code, OpenCode and local Codex (`plugins/andon`).
-
-The `claude`, `codex`, `opencode`, and `agy` launch wrappers run
-`skill prune --quiet` automatically when starting an agent to retire any legacy
-indirect default links and check workspace skill health before launch.
 
 ______________________________________________________________________
 
@@ -59,78 +57,82 @@ skill <command> [arguments]
 
 ### Supported Environments & Scopes
 
-- **User Scope (Baseline Defaults)**: `skill --scope user ...` links into
-  `~/.claude/skills`, `~/.agents/skills`, and `~/.gemini/config/skills` for
-  every session of the user, leaving Claude's own `~/.claude/skills/synced/`
-  alone. Baseline default skills are maintained here by `etc/skill/defaults.sh`
-  in the dotfiles and each overlay, which `install.sh` runs. Because
-  `~/.gemini/config/skills` is a global discovery directory, symlinks to
-  `~/.dotfiles` and `~/.corp` load natively in Antigravity and Jetski without
-  workspace symlink confinement or `skills.json` files.
-- **Session Scope (Per-Session / Ephemeral / Temporary / Scratch)**:
-  `skill --scope session add|remove|prune|list|doctor|clean` manages the skills
-  of the calling agent's own conversation, without touching the repository or
-  user scope:
-  - **Claude Code** (started through the `claude` fish wrapper): links under
+- **User Scope (Baseline Defaults — Symlinks)**: `skill --scope user ...` links
+  symlinks into `~/.claude/skills`, `~/.agents/skills`, and
+  `~/.gemini/config/skills` for every session of the user, leaving Claude's own
+  `~/.claude/skills/synced/` alone. Baseline default skills are declared in
+  `etc/skill/defaults` across `~/.dotfiles` and active overlays (plus optional
+  `${XDG_CONFIG_HOME:-~/.config}/skill/defaults`) and declaratively reconciled
+  by `install.sh`. Because `~/.gemini/config/skills` is a global discovery
+  directory, symlinks to `~/.dotfiles` and overlays load natively in Antigravity
+  and Jetski without workspace symlink confinement or `skills.json` files.
+- **Session Scope (Per-Session / Ephemeral / Temporary / Scratch — Copies)**:
+  `skill --scope session add|remove|list|doctor|clean|update` installs real
+  directory copies stamped with `metadata.source` in `SKILL.md` frontmatter into
+  the calling agent's own conversation directory, without touching the
+  repository or user scope:
+  - **Claude Code** (started through the `claude` fish wrapper): copies under
     `$AGENT_SESSION_DIR/.claude/skills`. The wrapper passes that directory to
     `claude --add-dir` and binds it to the session ID, so a nested agent
     (`claude -p`, `codex exec`) cannot write into it. Claude loads a newly added
     skill within the same turn.
   - **Antigravity & Jetski** (the session's `brain/<id>` directory, e.g.
     `~/.gemini/antigravity-cli/brain/<id>`, found from
-    `ANTIGRAVITY_CONVERSATION_ID` or from `-C <artifactDir>`): writes a
-    pointer-stub `SKILL.md` under `<artifactDir>/.agents/skills/<name>/SKILL.md`
-    referencing the canonical skill directory. Being a plain regular file inside
-    `brain/<id>`, it passes non-global symlink confinement without a
-    `skills.json` manifest, while directing all `scripts/`, `references/`, and
-    live in-session edits straight to the canonical skill directory. The harness
-    loads newly added stubs into `<skills>` on the next turn; to use one in the
-    current turn, read the canonical `<source>/SKILL.md` path printed by `add`.
-- **Git Repositories (Workspace-Scoped / Persistent)**: Links skills under
-  `.agents/skills/` and `.claude/skills/` for local CLI sessions operating in
-  the repository. A marker block in `.git/info/exclude` is dynamically generated
-  to keep `git status` clean without dirtying the shared `.gitignore`. If
-  another tool rewrites the exclude file, `skill doctor` detects the drift, and
-  `skill prune`, `skill add`, or `skill remove` rewrites the block.
-- **Unmanaged Directories**: Works in plain directories without VCS, symlinking
-  skills under local destination folders.
+    `ANTIGRAVITY_CONVERSATION_ID` or from `-C <artifactDir>`): copies the skill
+    directory under `<artifactDir>/.agents/skills/<name>/` with
+    `metadata.source` in `SKILL.md` frontmatter. Being real regular files inside
+    `brain/<id>`, every skill loads with 1-hop trajectory fidelity and passes
+    non-global symlink confinement without a `skills.json` manifest. The harness
+    loads newly added skills into `<skills>` on the next turn; to use one in the
+    current turn, read `<artifactDir>/.agents/skills/<name>/SKILL.md` printed by
+    `add`.
+- **Git Repositories (Workspace-Scoped / Persistent — Copies)**: Copies skills
+  under `.agents/skills/` and `.claude/skills/` with `metadata.source` in
+  `SKILL.md` frontmatter so non-global symlink confinement never drops external
+  skills in Antigravity or Jetski. A marker block in `.git/info/exclude` is
+  dynamically generated to keep `git status` clean without dirtying the shared
+  `.gitignore`. If another tool rewrites the exclude file, `skill doctor`
+  detects the drift, and `skill add`, `skill remove`, or `skill clean` rewrites
+  the block.
+- **Unmanaged Directories**: Works in plain directories without VCS, copying
+  skills under local destination folders with `metadata.source` in `SKILL.md`.
 - **Plugins**: Additional workspace types can be registered by dropping a Python
   file into `~/.config/skill/plugins/` that defines `register(api)` and calls
-  `api.register_workspace(cls)` with a subclass of `api.Workspace` (see also
-  `api.FileStateMixin`) implementing a `detect()` classmethod. Plugin detectors
-  run before the built-in ones, in sorted filename order.
+  `api.register_workspace(cls)` with a subclass of `api.Workspace` implementing
+  a `detect()` classmethod. Plugin detectors run before the built-in ones, in
+  sorted filename order.
 
 ### Global Options
 
 - **`-C, --directory DIR`**: Run as if started in `DIR` instead of the current
   working directory.
 - **`--scope SCOPE`**: Where to install: `user`, `workspace` *(default)*, or
-  `session` (see above). Only `add`, `remove`, `prune`, `list`, `doctor` and
-  `clean` take a scope other than `workspace`.
+  `session` (see above). Only `add`, `remove`, `list`, `doctor`, `clean`, and
+  `update` take a scope other than `workspace`.
 - **`--offline`**: Never fetch remote skills or metadata over the network (same
   as `AGENT_OFFLINE=1`).
 
 ### Commands
 
-- **`add [-q] SPEC...`**: Install a skill (a catalog entry from `skill catalog`,
-  as `NAME` or `NAMESPACE:NAME`, or a local skill directory path) into the
-  chosen scope (`-` reads skill names from `stdin`; `-q`/`--quiet` suppresses
-  informational output).
+- **`add [-q] [-p|--prune] SPEC...`**: Install a skill (a catalog entry from
+  `skill catalog`, as `NAME` or `NAMESPACE:NAME`, or a local skill directory
+  path) into the chosen scope (`-` reads skill names from `stdin`;
+  `-q`/`--quiet` suppresses informational output; `-p`/`--prune` removes
+  unlisted managed entries in the scope).
 - **`remove [-q] NAME...`** (alias: **`rm`**): Remove a skill's entries and
   exclude records.
-- **`prune [-q]`**: Retire legacy indirect `.../skill/defaults` links, re-sync
-  exclude records, and fail if `doctor` would report an error (run automatically
-  at CLI agent launch). A broken link added by name is kept with a warning,
-  since its source may only be unreachable for now.
 - **`list [--json]`**: List installed skills in the scope.
 - **`bundle [SPEC...]`**: Package skills into an archive (`.zip`, `.tar.gz`) or
-  directory without installing them (`-w`/`--workspace` for the skills linked in
-  the workspace).
-- **`update SPEC...`**: Re-fetch a plugin-provided catalog entry (`--all` for
+  directory without installing them (`-w`/`--workspace` for the skills installed
+  in the workspace).
+- **`update SPEC...`**: Refresh workspace/session copies from their
+  `metadata.source` and re-fetch plugin-provided catalog entries (`--all` for
   all, `--catalog` for the catalog index).
-- **`clean`**: Remove all skill links in the scope and clear tracking records.
-- **`doctor [--json]`**: Check the scope's links (broken links, unmanaged files,
-  exclude records) and the catalog (read-only).
+- **`clean`**: Remove all managed skill entries in the scope and clear tracking
+  records.
+- **`doctor [--json]`**: Check the scope's links and copies (broken links,
+  missing copy sources, unmanaged files, exclude records) and the catalog
+  (read-only).
 - **`catalog [--json]`**: List all plugin-provided skills and their sources.
   `--json` outputs NDJSON (one JSON object per line) with each skill's
   description and structural profile — the discovery primitive described in
@@ -216,12 +218,8 @@ expired remote `SKILL.md` frontmatter stubs over HTTPS.
 
 Variable names follow a two-tier rule: `AGENT_*` variables are **policy** a
 human sets (what agents should do in this workspace); `SKILL_*` variables are
-**plumbing** for this tool (how it finds and links things, rarely touched).
+**plumbing** for this tool (how it finds and installs things, rarely touched).
 
-- `AGENT_PREFLIGHT_SKIP`: When set, the `claude`, `codex`, `opencode`, and `agy`
-  wrappers launch without running `skill prune` or `hook apply` — e.g.
-  `AGENT_PREFLIGHT_SKIP=1 claude`. (The legacy spelling `_agent_preflight_skip`
-  is still honored.)
 - `SKILL_SOURCE_DIRS`: Optional colon-separated environment variable override
   searched for skills by name (by default, local skills are discovered
   automatically from standard workspace and configuration directories via the
@@ -515,11 +513,12 @@ skill add adb
 skill add /path/to/custom-skill
 ```
 
-The link persists across sessions until `skill remove`. For single-session or
-temporary requests, see
+The copy persists across sessions until `skill remove` (refresh after upstream
+edits with `skill update adb`). For single-session or temporary requests, see
 [Adding Per-Session Skills](#adding-per-session-skills-ephemeral--temporary--scratch).
 To make a skill a baseline default for every workspace and session, add it to
-the user scope (and to `etc/skill/defaults.sh`, so other machines get it too):
+the user scope (and to `etc/skill/defaults` or `~/.config/skill/defaults`, so
+`install.sh` preserves it):
 
 ```bash
 skill --scope user add workspace-tools
@@ -541,15 +540,16 @@ scope or the current directory's workspace already provides from the same
 source, so a list can be piped in whole without working out which skills are
 new.
 
-Under Claude, the skill is linked under `$AGENT_SESSION_DIR/.claude/skills/` and
+Under Claude, the skill is copied under `$AGENT_SESSION_DIR/.claude/skills/` and
 can be used in the same turn. Under Antigravity/Jetski (`<artifactDir>` is the
 session's `Artifact Directory Path`, e.g.
-`~/.gemini/antigravity-cli/brain/<id>`), a pointer-stub `SKILL.md` is written
-under `<artifactDir>/.agents/skills/<skill>/SKILL.md` pointing to the canonical
-skill directory; read the canonical `<source>/SKILL.md` printed by `add` to use
-it in the current turn, as the harness injects it into `<skills>` from the next
-turn onward. Either way the repository's `.git/info/exclude` is left untouched,
-and in-session skill edits happen directly in the canonical skill directory.
+`~/.gemini/antigravity-cli/brain/<id>`), the skill directory is copied under
+`<artifactDir>/.agents/skills/<skill>/` with `metadata.source` in `SKILL.md`
+frontmatter; read `<artifactDir>/.agents/skills/<skill>/SKILL.md` printed by
+`add` to use it in the current turn, as the harness injects it into `<skills>`
+from the next turn onward. Either way the repository's `.git/info/exclude` is
+left untouched; to edit the upstream skill itself, follow `metadata.source` in
+`SKILL.md` (or run `skill resolve <skill>`).
 
 OpenCode and Codex do not support this CLI's session scope. Reuse skills already
 provided by the harness and use its skill loader for missing ones. For a local
@@ -580,10 +580,9 @@ permission list                           # list commands and paths
 ### Health Checks
 
 ```bash
-skill doctor          # broken links and exclude drift (read-only)
+skill doctor          # broken links, missing copy sources, and exclude drift
 permission doctor     # missing pre-approvals (read-only)
 mcp doctor            # unparsable configs, missing commands, bad URLs
-skill prune           # retire legacy default links and re-sync records
 ```
 
 A `.envrc` that still has a legacy `skills` block is migrated by

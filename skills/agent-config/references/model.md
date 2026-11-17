@@ -5,77 +5,95 @@
 Maintainer reference for the `skill` tool: what it touches and why the pieces
 fit together. User-facing usage lives in `../SKILL.md`.
 
-## An installer, not a reconciler
+## One provenance model on disk
 
-`skill` installs skills where it is told to and keeps no expected set. The
-entries on disk are the whole state, and each symlink target or pointer stub
-records its canonical source directory directly.
+`skill` keeps no separate state file of its own. The entries on disk are the
+whole state:
+
+- **`--scope user`** installs **symlinks** whose targets record the canonical
+  skill directory directly.
+- **`--scope workspace`** and **`--scope session`** install **real directory
+  copies** whose `SKILL.md` YAML frontmatter records `metadata.source` pointing
+  to the canonical skill directory.
 
 ## Scopes
 
 `--scope` picks the directories a command acts on (`get_workspace()`):
 
-| Scope       | Directories                                                                                                    | Class                                         |
-| ----------- | -------------------------------------------------------------------------------------------------------------- | --------------------------------------------- |
-| `user`      | `~/.claude/skills`, `~/.agents/skills`, and `~/.gemini/config/skills` (leaving Claude's `synced/` alone)       | `UserWorkspace`                               |
-| `workspace` | `.claude/skills` and `.agents/skills` at the repository's skill anchor (overridable with `SKILL_DEST_DIRS`)    | `GitWorkspace`, plugins, `DefaultWorkspace`   |
-| `session`   | `$AGENT_SESSION_DIR/.claude/skills` (Claude), or `.agents/skills` pointer stubs in an Antigravity `brain/<id>` | `ClaudeSessionWorkspace`, `AgyBrainWorkspace` |
+| Scope       | Mechanism | Directories                                                                                                        | Class                                         |
+| ----------- | --------- | ------------------------------------------------------------------------------------------------------------------ | --------------------------------------------- |
+| `user`      | Symlinks  | `~/.claude/skills`, `~/.agents/skills`, and `~/.gemini/config/skills` (leaving Claude's `synced/` alone)           | `UserWorkspace`                               |
+| `workspace` | Copies    | `.claude/skills` and `.agents/skills` at the repository's skill anchor (overridable with `SKILL_DEST_DIRS`)        | `GitWorkspace`, plugins, `DefaultWorkspace`   |
+| `session`   | Copies    | `$AGENT_SESSION_DIR/.claude/skills` (Claude), or `brain/<id>/.agents/skills` in Antigravity / Jetski conversations | `ClaudeSessionWorkspace`, `AgyBrainWorkspace` |
 
 The workspace scope refuses to run in the home directory itself, whose skill
 folders are the user scope.
 
 ### User scope holds the baseline defaults
 
-`etc/skill/defaults.sh` in this repository and each overlay (`~/.private`,
-`~/.corp`), run by `install.sh`, links the curated baseline default skills
-straight into the user scope (`skill --scope user add --quiet ...`). Every
-harness (Claude Code, Codex, OpenCode, Antigravity, Jetski CLI and Web) reads
-its own standard global skill directory natively from Turn 0, with no
-per-workspace symlink farms, `.git/info/exclude` churn, or `skills.json`
-manifests.
+`etc/skill/defaults` in this repository and each active overlay (`~/.private`,
+`~/.corp`), plus optional `${XDG_CONFIG_HOME:-~/.config}/skill/defaults` for
+per-machine overrides, declare the curated baseline default skills (`-name`
+excludes an earlier entry). `install.sh` feeds the combined list to
+`skill --scope user add --prune --quiet -` and runs `skill --scope user doctor`:
 
-To retire a default skill, replace its `add` entry in `etc/skill/defaults.sh`
-with `skill --scope user remove --quiet NAME` so machines that already linked it
-drop it on their next `install.sh` run.
+1. Every harness (Claude Code, Codex, OpenCode, Antigravity, Jetski CLI and Web)
+   reads its own standard global skill directory natively from Turn 0, where
+   global customization discovery permits symlinks without confinement.
+1. Removing a name from `etc/skill/defaults` automatically prunes its user-scope
+   symlinks on the next `install.sh` run, leaving Claude's `synced/` and foreign
+   non-symlink directories intact, and warning rather than deleting broken
+   symlinks whose external source mount is temporarily unreachable.
+1. Keeping `--scope user` focused on core non-overlapping substrate skills lets
+   specialized or overlapping skills stay absent by default for clean
+   per-project and per-session evaluation.
 
-### Session pointer stubs in `brain/<id>`
+### Copies with `metadata.source` in workspace and session scopes
 
-Antigravity and Jetski confine non-global customization paths (`<workspace>` and
-`brain/<id>`), dropping symlinks whose resolved targets point outside those
-roots. Instead of symlinking or copying whole skill directories into
-`brain/<id>`, `AgyBrainWorkspace` writes a regular `SKILL.md` pointer stub at
-`brain/<id>/.agents/skills/<name>/SKILL.md` carrying the skill's YAML `name` and
-`description` plus a `<!-- skill-stub: <source> -->` marker and instructions
-pointing straight at the canonical `<source>` directory:
+Antigravity and Jetski confine non-global customization roots (`<workspace>` and
+`brain/<id>`), dropping symlinks whose targets live outside the workspace or
+immutable depot snapshot roots. Installing real directory copies in both
+`--scope workspace` and `--scope session` gives one uniform behavior across
+every agent:
 
-1. **No confinement or `skills.json` dependency**: It is a plain regular file at
-   the standard `.agents/skills/<name>/SKILL.md` path.
-1. **Live in-session editing**: When the agent activates the skill, it reads
-   `<source>/SKILL.md`, runs `<source>/scripts/`, and edits `<source>/`
-   directly, so fixes made mid-session land in the canonical repository rather
-   than a throwaway session copy.
+1. **No symlink confinement drops or 2-hop pointer stubs**: Every file in the
+   copied skill (`SKILL.md`, `scripts/`, `references/`) sits directly inside
+   `.agents/skills/<name>/` or `.claude/skills/<name>/` with 1-hop read
+   fidelity. Internal symlinks in generated skills are dereferenced on copy, and
+   transient caches (`.git`, `__pycache__`, `.ruff_cache`, `.pytest_cache`,
+   `.DS_Store`) are excluded.
+1. **Standard YAML provenance (`metadata.source`)**: `copy_skill_dir` merges
+   `source: "<canonical-path>"` under `metadata:` in `SKILL.md` frontmatter
+   using stdlib Python without duplicate YAML keys, conforming to the Agent
+   Skills `metadata: map[string, string]` schema.
+1. **Safe coexistence with tracked and hand-authored skills**: Every command
+   checks `ws.is_tracked()` before `read_copy_source()`, so committed repository
+   skills and hand-authored untracked skills without a local `metadata.source`
+   are never overwritten or deleted.
+1. **Missing-source visibility and refresh**: `skill doctor` flags copies whose
+   `metadata.source` is missing, and `skill update` refreshes managed copies in
+   place.
 
-A Claude session directory (`$AGENT_SESSION_DIR/.claude/skills`) has no symlink
-confinement, so `ClaudeSessionWorkspace` uses direct symlinks. It is honored
-only while `AGENT_SESSION_ID` matches `CLAUDE_CODE_SESSION_ID` and no foreign
-session variable (`CODEX_SESSION_ID`) is set, preventing nested agents from
-mutating their parent's session. Antigravity is checked first, because `agy`
-started from Claude inherits a matching Claude binding.
+A Claude session directory (`$AGENT_SESSION_DIR/.claude/skills`) is honored only
+while `AGENT_SESSION_ID` matches `CLAUDE_CODE_SESSION_ID` and no foreign session
+variable (`CODEX_SESSION_ID`) is set, preventing nested agents from mutating
+their parent's session. Antigravity is checked first, because `agy` started from
+Claude inherits a matching Claude binding.
 
-## Launch wrappers and preflight
+## Launch wrappers and commit hooks
 
-The `claude`, `codex`, `opencode`, and `agy` fish wrappers call
-`_agent_preflight`, which runs `skill prune --quiet` and (inside a Git
-repository other than `~`) `hook apply --quiet`:
+Agent launch wrappers avoid Python/skill preflight overhead on CLI startup:
 
-- `skill prune --quiet` retires any leftover legacy `.../skill/defaults` links
-  from older installations, re-syncs `.git/info/exclude` if needed, and fails
-  only on `ERROR`-level `doctor` findings (`AGENT_PREFLIGHT_SKIP=1` launches
-  anyway). Clean repositories without workspace skills are untouched.
-- Inside a Git repository, `hook apply --quiet` ensures `AGENT_REQUIRED_HOOKS`
-  are active before the session starts. As a safety net for sessions not started
-  by a wrapper, `etc/agents/hooks/ensure-commit-hooks` runs `hook apply --quiet`
-  before `git commit` tool calls.
+- **`claude.fish`** allocates a session-bound `TMPDIR` (`AGENT_SESSION_DIR`) and
+  passes `--add-dir` + `--session-id` to `claude`.
+- **`codex.fish`** configures local writable directories (`TMPDIR`,
+  `~/.cache/uv`) and runs the pure-Bash `hook apply --quiet` when launched
+  inside a Git repository other than `~`.
+- **`opencode.fish`** resolves `~/.opencode/bin/opencode` or `PATH`.
+- **PreToolUse commit-hook safety net**: `etc/agents/hooks/ensure-commit-hooks`
+  lazily applies `AGENT_REQUIRED_HOOKS` (`hook apply --quiet`) right before any
+  `git commit` tool call in Claude Code, Antigravity, Jetski, and OpenCode,
+  covering IDE, web, and CLI sessions alike.
 
 ## Launchers and per-session skills
 
@@ -85,10 +103,10 @@ it, and dynamic skill pickup:
 
 | Launcher                                                 | Session skills | Why                                                                                                                                                                     |
 | -------------------------------------------------------- | -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `claude` fish wrapper                                    | Yes            | A fresh directory per launch, passed with `--add-dir` and bound to `--session-id`. Picked up the same turn.                                                             |
+| `claude` fish wrapper                                    | Yes            | Copies in a fresh directory per launch, passed with `--add-dir` and bound to `--session-id`. Same turn.                                                                 |
 | `claude --continue`, or the `--resume` picker            | No             | The wrapper cannot know the session ID, so the directory stays unbound.                                                                                                 |
 | `claude remote-control` (a server for remote use)        | No             | It rejects `--add-dir`, and one server hosts many sessions.                                                                                                             |
-| Antigravity / Jetski (`brain/<id>`)                      | Yes            | `brain/<id>/.agents/skills/<name>/SKILL.md` pointer stubs, found from `ANTIGRAVITY_CONVERSATION_ID` or `-C`. Next turn.                                                 |
+| Antigravity / Jetski (`brain/<id>`)                      | Yes            | Copies in `brain/<id>/.agents/skills/<name>/`, found from `ANTIGRAVITY_CONVERSATION_ID` or `-C`. Next turn.                                                             |
 | Antigravity Remote Control daemon (`agy remote-control`) | Expected yes   | Runs ordinary `agy` conversations on the daemon's machine, so `brain/<id>` and `ANTIGRAVITY_CONVERSATION_ID` apply as for the app; unverified from a dashboard session. |
 | Codex                                                    | No             | No known per-session skill directory discoverable from `CODEX_SESSION_ID`.                                                                                              |
 | OpenCode                                                 | No             | Reads the shared `.agents/skills` workspace directory, with no per-session skill directory.                                                                             |
@@ -97,11 +115,11 @@ it, and dynamic skill pickup:
 ## Records and `doctor`
 
 - **`GitWorkspace`** keeps a marker block (`# >>> skills >>>` …
-  `# <<< skills <<<`) in `.git/info/exclude` listing every workspace link,
-  broken ones included, so `git status` stays clean without touching
-  `.gitignore`. Every `add`, `remove`, `prune`, and `clean` rewrites the block
-  from disk (`sync_records()`).
-- **`doctor`** is strictly read-only: it reports broken links or broken stubs,
-  unmanaged files in skill folders (only a warning in the user scope, whose
-  folders other installers share), and exclude records that do not match the
-  links on disk.
+  `# <<< skills <<<`) in `.git/info/exclude` listing every managed workspace
+  entry, broken ones included, so `git status` stays clean without touching
+  `.gitignore`. Every `add`, `remove`, and `clean` rewrites the block from disk
+  (`sync_records()`).
+- **`doctor`** is strictly read-only: it reports broken symlinks, copies whose
+  `metadata.source` is missing, unmanaged files in skill folders (only a warning
+  in the user scope, whose folders other installers share), and exclude records
+  that do not match the entries on disk.
