@@ -9,7 +9,7 @@ set -euo pipefail
 source "$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 skill_test_init
 
-echo "1..21"
+echo "1..22"
 
 # Test 1: doctor on a healthy workspace reports healthy JSON and renders the
 # canonical [PASS] tag style.
@@ -603,4 +603,97 @@ if [ ! -e "${RO_WS}/.agents/skills/bloat-skill" ] &&
   echo "ok 21 - [Lifecycle] ignores node_modules/.venv, preserves SKILL.md on RO parent, and updates user/session remotes"
 else
   echo "not ok 21 - [Lifecycle] ignore/RO-remove/user-or-session update check failed (ro_rm_rc=$ro_rm_rc)"
+fi
+
+# Test 22: Flow metadata preserves quoted keys/colons/spaces under PyYAML safe_load,
+# unclosed flow braces do not swallow subsequent frontmatter keys, and resolve: False
+# plugin paths skip realpath generically without colliding with snapshot-path entries.
+FLOW_TRICKY_SRC="${TMPDIR}/flow-tricky/tricky-skill"
+mkdir -p "$FLOW_TRICKY_SRC"
+cat <<'EOF' >"${FLOW_TRICKY_SRC}/SKILL.md"
+---
+name: tricky-skill
+metadata: {"app:id": "foo:bar", "@scope/pkg": "a  b", "k #1": "v", "true": "1", source: "/old"}
+description: keep-desc
+---
+Body.
+EOF
+FLOW_WS="${TMPDIR}/flow-tricky-ws"
+mkdir -p "$FLOW_WS"
+git -C "$FLOW_WS" init -q
+"${SCRIPT}" -C "$FLOW_WS" add "$FLOW_TRICKY_SRC" >/dev/null 2>&1
+
+UNCLOSED_SRC="${TMPDIR}/flow-unclosed/unclosed-skill"
+mkdir -p "$UNCLOSED_SRC"
+cat <<'EOF' >"${UNCLOSED_SRC}/SKILL.md"
+---
+name: unclosed-skill
+metadata: {broken: 1
+description: survived-unclosed
+---
+Body.
+EOF
+"${SCRIPT}" -C "$FLOW_WS" add "$UNCLOSED_SRC" >/dev/null 2>&1
+
+VFS_BASE="${TMPDIR}/vfs-generic"
+mkdir -p "${VFS_BASE}/snaps/s1/shared-vfs"
+ln -s "${VFS_BASE}/snaps/s1" "${VFS_BASE}/head"
+printf -- '---\nname: shared-vfs\n---\nvfs-v1\n' >"${VFS_BASE}/snaps/s1/shared-vfs/SKILL.md"
+cat <<EOF >"${XDG_CONFIG_HOME}/skill/plugins/96_vfs_noresolve.py"
+def register(api):
+    api.register_skill("vfs:shared-vfs", {"path": "${VFS_BASE}/head/shared-vfs", "resolve": False})
+    api.register_skill("snap:shared-vfs", {"path": "${VFS_BASE}/snaps/s1/shared-vfs"})
+EOF
+VFS_WS="${TMPDIR}/vfs-ws"
+mkdir -p "$VFS_WS"
+git -C "$VFS_WS" init -q
+"${SCRIPT}" -C "$VFS_WS" add vfs:shared-vfs >/dev/null 2>&1
+printf -- '---\nname: shared-vfs\n---\nvfs-v2\n' >"${VFS_BASE}/snaps/s1/shared-vfs/SKILL.md"
+"${SCRIPT}" -C "$VFS_WS" update snap:shared-vfs >/dev/null 2>&1
+vfs_kept_v1=0
+grep -q "^vfs-v1$" "${VFS_WS}/.agents/skills/shared-vfs/SKILL.md" && vfs_kept_v1=1
+"${SCRIPT}" -C "$VFS_WS" update vfs:shared-vfs >/dev/null 2>&1
+vfs_got_v2=0
+grep -q "^vfs-v2$" "${VFS_WS}/.agents/skills/shared-vfs/SKILL.md" && vfs_got_v2=1
+rm -f "${XDG_CONFIG_HOME}/skill/plugins/96_vfs_noresolve.py"
+
+yaml_ok=$(run_module "
+raw1 = open('${FLOW_WS}/.agents/skills/tricky-skill/SKILL.md').read()
+fm1 = raw1.split('---', 2)[1]
+raw2 = open('${FLOW_WS}/.agents/skills/unclosed-skill/SKILL.md').read()
+fm2 = raw2.split('---', 2)[1]
+lines1 = set(fm1.splitlines())
+ok = (
+    '  \"app:id\": \"foo:bar\"' in lines1
+    and '  \"@scope/pkg\": \"a  b\"' in lines1
+    and '  \"k #1\": \"v\"' in lines1
+    and '  \"true\": \"1\"' in lines1
+    and 'description: keep-desc' in lines1
+    and m.read_copy_source_from_content(raw1) == '${FLOW_TRICKY_SRC}'
+    and 'description: survived-unclosed' in set(fm2.splitlines())
+    and m.read_copy_source_from_content(raw2) == '${UNCLOSED_SRC}'
+)
+try:
+    import yaml
+    d1 = yaml.safe_load(fm1)
+    d2 = yaml.safe_load(fm2)
+    md = d1['metadata']
+    ok = ok and (
+        md.get('app:id') == 'foo:bar'
+        and md.get('@scope/pkg') == 'a  b'
+        and md.get('k #1') == 'v'
+        and md.get('true') == '1'
+        and 'true' in md and True not in md
+        and md.get('source') == '${FLOW_TRICKY_SRC}'
+        and d1.get('description') == 'keep-desc'
+        and d2.get('description') == 'survived-unclosed'
+    )
+except ImportError:
+    pass
+print(ok)
+")
+if [[ "$yaml_ok" == "True" ]] && [ "$vfs_kept_v1" -eq 1 ] && [ "$vfs_got_v2" -eq 1 ]; then
+  echo "ok 22 - [YAML/Update] preserves quoted flow keys/colons/spaces, isolates unclosed braces, and tracks resolve: False paths generically"
+else
+  echo "not ok 22 - [YAML/Update] flow metadata or generic resolve: False check failed (yaml_ok=$yaml_ok v1=$vfs_kept_v1 v2=$vfs_got_v2)"
 fi

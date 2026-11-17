@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -167,6 +168,55 @@ def _unquote_scalar(raw: str) -> str:
     return val
 
 
+_SAFE_PLAIN_YAML_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*$")
+_YAML_RESERVED_SCALARS = frozenset(
+    {"true", "false", "null", "yes", "no", "on", "off", "~"}
+)
+
+
+def _split_yaml_kv(s: str) -> tuple[str, str] | None:
+    """Split a YAML key/value entry on its first top-level unquoted colon."""
+    in_s = False
+    in_d = False
+    depth = 0
+    saw_quote = s.lstrip().startswith(("'", '"'))
+    i = 0
+    while i < len(s):
+        ch = s[i]
+        if in_s:
+            if ch == "'" and i + 1 < len(s) and s[i + 1] == "'":
+                i += 2
+                continue
+            if ch == "'":
+                in_s = False
+            i += 1
+            continue
+        if in_d:
+            if ch == "\\" and i + 1 < len(s):
+                i += 2
+                continue
+            if ch == '"':
+                in_d = False
+            i += 1
+            continue
+        if ch == "'":
+            in_s = True
+        elif ch == '"':
+            in_d = True
+        elif ch in ("{", "["):
+            depth += 1
+        elif ch in ("}", "]"):
+            depth = max(0, depth - 1)
+        elif (
+            ch == ":"
+            and depth == 0
+            and (saw_quote or i + 1 == len(s) or s[i + 1] in (" ", "\t", "\r", "\n"))
+        ):
+            return s[:i], s[i + 1 :]
+        i += 1
+    return None
+
+
 def read_copy_source_from_content(content: str) -> str | None:
     """Return metadata.source from a managed copy's SKILL.md frontmatter."""
     lines = content.splitlines()
@@ -193,7 +243,8 @@ def read_copy_source_from_content(content: str) -> str | None:
             or ":" not in line
         ):
             continue
-        if _unquote_scalar(line.split(":", 1)[0]) != "metadata":
+        top_kv = _split_yaml_kv(line)
+        if not top_kv or _unquote_scalar(top_kv[0]) != "metadata":
             continue
         child_indent: str | None = None
         for b in fm[i + 1 :]:
@@ -205,8 +256,8 @@ def read_copy_source_from_content(content: str) -> str | None:
             ind = b[: len(b) - len(b.lstrip(" \t"))]
             if child_indent is None:
                 child_indent = ind
-            if ind == child_indent and ":" in bs:
-                ck, cv = bs.split(":", 1)
+            if ind == child_indent and (kv := _split_yaml_kv(bs)) is not None:
+                ck, cv = kv
                 if _unquote_scalar(ck) == "source":
                     res = _unquote_scalar(cv)
                     if res and res not in (">", "|", ">-", "|-", ">+", "|+"):
@@ -215,13 +266,19 @@ def read_copy_source_from_content(content: str) -> str | None:
     return None
 
 
-def _parse_flow_metadata(fm: list[str], meta_idx: int) -> tuple[int, list[str]]:
+def _parse_flow_metadata(fm: list[str], meta_idx: int) -> tuple[int, list[str]] | None:
     """Scan a YAML flow map starting at fm[meta_idx] into indented '  key: val' lines."""
-    text = "\n".join([fm[meta_idx].split(":", 1)[1], *fm[meta_idx + 1 :]])
+    top_kv = _split_yaml_kv(fm[meta_idx])
+    if top_kv is None:
+        return None
+    text = "\n".join([top_kv[1], *fm[meta_idx + 1 :]])
     start = text.find("{")
+    if start == -1:
+        return None
     in_s = False
     in_d = False
     depth = 0
+    closed = False
     items: list[str] = []
     cur: list[str] = []
     end_pos = len(text)
@@ -266,6 +323,7 @@ def _parse_flow_metadata(fm: list[str], meta_idx: int) -> tuple[int, list[str]]:
             if ch == "}" and depth == 1:
                 items.append("".join(cur))
                 end_pos = i + 1
+                closed = True
                 break
             depth = max(1, depth - 1)
             cur.append(ch)
@@ -277,16 +335,45 @@ def _parse_flow_metadata(fm: list[str], meta_idx: int) -> tuple[int, list[str]]:
         else:
             cur.append(ch)
         i += 1
+    if not closed:
+        return None
     consumed_newlines = text[:end_pos].count("\n")
     kept: list[str] = []
     for raw_item in items:
         s = raw_item.strip()
-        if not s or ":" not in s:
+        if not s or (kv := _split_yaml_kv(s)) is None:
             continue
-        k, v = s.split(":", 1)
-        uk = _unquote_scalar(k)
-        if uk and uk != "source":
-            kept.append(f"  {uk}: {' '.join(v.split())}")
+        ks = kv[0].strip()
+        vs = kv[1].strip()
+        uk = _unquote_scalar(ks)
+        if not uk or uk == "source":
+            continue
+        k_out = (
+            uk
+            if not ks.startswith(("'", '"'))
+            and _SAFE_PLAIN_YAML_KEY.match(uk)
+            and uk.lower() not in _YAML_RESERVED_SCALARS
+            else json.dumps(uk, ensure_ascii=False)
+        )
+        if not vs:
+            kept.append(f"  {k_out}:")
+            continue
+        if (vs.startswith('"') and vs.endswith('"')) or (
+            vs.startswith("'") and vs.endswith("'")
+        ):
+            v_out = (
+                json.dumps(
+                    re.sub(r"[ \t]*\r?\n[ \t]*", " ", _unquote_scalar(vs)),
+                    ensure_ascii=False,
+                )
+                if ("\n" in vs or "\r" in vs)
+                else vs
+            )
+        elif vs.startswith(("{", "[")):
+            v_out = vs
+        else:
+            v_out = " ".join(vs.split())
+        kept.append(f"  {k_out}: {v_out}")
     return meta_idx + 1 + consumed_newlines, kept
 
 
@@ -317,19 +404,23 @@ def inject_copy_source(content: str, source: str) -> str:
             if ln.strip()
             and not ln.strip().startswith("#")
             and not ln.startswith((" ", "\t"))
-            and ":" in ln
-            and _unquote_scalar(ln.split(":", 1)[0]) == "metadata"
+            and (kv := _split_yaml_kv(ln)) is not None
+            and _unquote_scalar(kv[0]) == "metadata"
         ),
         None,
     )
     if meta_idx is None:
         fm.extend(["metadata:", f"  source: {src_json}"])
     else:
-        v_part = fm[meta_idx].split(":", 1)[1].strip()
+        v_part = (_split_yaml_kv(fm[meta_idx]) or ("", ""))[1].strip()
         block_end = meta_idx + 1
         if v_part.startswith("{"):
-            block_end, kept = _parse_flow_metadata(fm, meta_idx)
-            fm[meta_idx:block_end] = ["metadata:", *kept, f"  source: {src_json}"]
+            parsed = _parse_flow_metadata(fm, meta_idx)
+            if parsed is not None:
+                block_end, kept = parsed
+                fm[meta_idx:block_end] = ["metadata:", *kept, f"  source: {src_json}"]
+            else:
+                fm[meta_idx : meta_idx + 1] = ["metadata:", f"  source: {src_json}"]
         else:
             while block_end < len(fm) and (
                 not fm[block_end].strip()
@@ -351,8 +442,8 @@ def inject_copy_source(content: str, source: str) -> str:
                         child_indent = ind
                     if (
                         ind == child_indent
-                        and ":" in bs
-                        and _unquote_scalar(bs.split(":", 1)[0]) == "source"
+                        and (b_kv := _split_yaml_kv(bs)) is not None
+                        and _unquote_scalar(b_kv[0]) == "source"
                     ):
                         b_i += 1
                         while b_i < block_end and (
@@ -1297,6 +1388,8 @@ class SkillAPI:
         self.load_failures = []
         # normpath(path) -> scan_path, for probing existence cheaply
         self.scan_paths: dict[str, str] = {}
+        # normpath(path) registered with resolve=False (keep literal path, skip realpath)
+        self.no_resolve_paths: set[str] = set()
 
     def register_workspace(self, cls):
         self.workspace_classes.append(cls)
@@ -1324,6 +1417,8 @@ class SkillAPI:
                     f"Skill '{name}': 'path' cannot be mixed with GitHub parameters."
                 )
             spec["path"] = os.path.expanduser(spec["path"])
+            if spec.get("resolve") is False:
+                self.no_resolve_paths.add(os.path.normpath(spec["path"]))
             if spec.get("scan_path"):
                 spec["scan_path"] = os.path.expanduser(spec["scan_path"])
                 self.scan_paths[os.path.normpath(spec["path"])] = spec["scan_path"]
@@ -2413,7 +2508,11 @@ def cmd_update(names):
 
     def norm_variants(p: Path, allow_realpath: bool = True) -> set[str]:
         n = os.path.normpath(p)
-        if not allow_realpath or n.startswith("/google/"):
+        if (
+            not allow_realpath
+            or n in api.no_resolve_paths
+            or any(n.startswith(nr + os.sep) for nr in api.no_resolve_paths)
+        ):
             return {n}
         return {n, os.path.realpath(p)}
 
