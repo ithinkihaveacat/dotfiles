@@ -21,28 +21,35 @@ Usage: skill [-C DIR] [--scope SCOPE] <command> [skill...]
 
 Manage agent skills in the directories each installed agent reads for the
 chosen scope:
-  user       ~/.claude/skills (Claude), ~/.agents/skills (Codex, OpenCode) and
-             ~/.gemini/config/skills (Antigravity, Jetski) -- holds default skills
-  workspace  .claude/skills and .agents/skills at the repository's skill
-             anchor, plus a block in .git/info/exclude (the default)
-  session    the calling agent's own session: $AGENT_SESSION_DIR/.claude/skills
-             (Claude) or brain/<id>/.agents/skills pointer stubs (Antigravity,
-             Jetski); only launchers that give a session its own directory
-             support it (see the agent-config skill, references/model.md)
+  user       symlinks in ~/.claude/skills (Claude), ~/.agents/skills (Codex,
+             OpenCode) and ~/.gemini/config/skills (Antigravity, Jetski) --
+             holds baseline default skills reconciled by install.sh
+  workspace  copies (with metadata.source in SKILL.md) in .claude/skills and
+             .agents/skills at the repository's skill anchor, plus a block in
+             .git/info/exclude (the default)
+  session    copies (with metadata.source in SKILL.md) in the calling agent's
+             own session: $AGENT_SESSION_DIR/.claude/skills (Claude) or
+             brain/<id>/.agents/skills (Antigravity, Jetski); only launchers
+             that give a session its own directory support it (see the
+             agent-config skill, references/model.md)
 
 Commands:
-  add [-q] SPEC...     Install a skill from 'skill catalog' (NAME or
-                       NAMESPACE:NAME) or a local skill directory path
-  add -                Read skill names from stdin
+  add [-q] [-p|--prune] SPEC...
+                       Install a skill from 'skill catalog' (NAME or
+                       NAMESPACE:NAME) or a local skill directory path;
+                       --prune removes unlisted managed entries in the scope
+  add [-q] [-p|--prune] -
+                       Read skill names from stdin
   remove [-q] NAME...  Remove a skill's entries and exclude records (alias: rm)
   prune [-q]           Retire legacy indirect default links, sync records, and
-                       fail if 'doctor' finds errors (used at agent launch)
+                       fail if 'doctor' finds errors
   list [--json]        List installed skills in the scope
   clean                Remove all managed skill entries in the scope
-  doctor [--json]      Check the scope's links and the catalog (read-only)
+  doctor [--json]      Check the scope's links, copies and catalog (read-only)
   bundle [SPEC...]     Package skills into an archive or directory
-  update SPEC...       Re-fetch a plugin-provided catalog entry; --all for every
-                       entry, --catalog to refresh the whole metadata index
+  update SPEC...       Refresh workspace/session copies from their source and
+                       re-fetch plugin-provided catalog entries; --all for all,
+                       --catalog to refresh the whole metadata index
   catalog [--json]     List plugin-provided skills and sources; --json outputs
                        NDJSON (one JSON object per line) with description and
                        structural profile (scripts/, references/, tests/ counts)
@@ -54,8 +61,8 @@ Commands:
 Options:
   -C, --directory DIR  Run as if started in DIR instead of the current directory
   --scope SCOPE        'user', 'workspace' (default) or 'session'; only add,
-                       remove, prune, list, doctor and clean take a scope other
-                       than 'workspace'
+                       remove, prune, list, doctor, clean and update take a
+                       scope other than 'workspace'
   --offline            Never fetch remote skills or metadata over the network
                        (same as AGENT_OFFLINE=1)
   --help, -h           Display this help message and exit

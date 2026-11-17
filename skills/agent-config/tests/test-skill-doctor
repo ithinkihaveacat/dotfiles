@@ -1,12 +1,7 @@
 #!/usr/bin/env bash
 #
-# `skill doctor` diagnostics and remediation output.
-#
-# doctor checks link health only: broken links, unmanaged files, and that the
-# exclude block matches the links. There is no expected skill set to compare
-# against. Detection assertions read the structured `skill doctor --json`
-# surface; the remediation hints are a user-facing formatting contract, so they
-# are checked against the human-readable report on purpose.
+# `skill doctor` diagnostics, copy drift/missing-source checks, and YAML
+# metadata.source frontmatter round-tripping.
 
 set -euo pipefail
 
@@ -14,10 +9,10 @@ set -euo pipefail
 source "$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 skill_test_init
 
-echo "1..14"
+echo "1..17"
 
 # Test 1: doctor on a healthy workspace reports healthy JSON and renders the
-# canonical [PASS] tag style (the tag format is a user-facing contract).
+# canonical [PASS] tag style.
 UI_DIR="${TMPDIR}/ui"
 mkdir -p "$UI_DIR"
 cd "$UI_DIR"
@@ -26,10 +21,11 @@ git init -q
 healthy_json=$(doctor_json)
 if [ "$(json_get "$healthy_json" 'd["healthy"]')" = "true" ] &&
   [ "$(check_status "$healthy_json" "Installed Skills")" = "OK" ] &&
+  [ "$(check_status "$healthy_json" "Copy Health")" = "OK" ] &&
   [ "$(json_get "$healthy_json" '[l["origin"] for l in d["links"]]')" = "added added" ] &&
   human=$("${SCRIPT}" doctor 2>&1) &&
   [[ "$human" == *"[PASS] Workspace:"* ]] &&
-  [[ "$human" == *"[PASS] Installed Skills: 1 skill(s) linked"* ]]; then
+  [[ "$human" == *"[PASS] Installed Skills: 1 skill(s) installed"* ]]; then
   echo "ok 1 - [Doctor] healthy workspace is healthy in JSON and renders [PASS] tags"
 else
   echo "not ok 1 - [Doctor] healthy report wrong: $healthy_json"
@@ -54,8 +50,7 @@ cd "$TMPDIR"
 
 # Test 3: doctor flags broken links and does not remove them (doctor is
 # read-only). A broken legacy default link is an error whose fix is 'skill
-# prune'; one added by name is a warning whose fix is 'skill remove', as
-# its source may only be unreachable for now.
+# prune'; one added by name is a warning whose fix is 'skill remove'.
 DANGLING_DIR="${TMPDIR}/dangling"
 mkdir -p "$DANGLING_DIR"
 cd "$DANGLING_DIR"
@@ -124,9 +119,7 @@ else
 fi
 cd "$TMPDIR"
 
-# Test 7: doctor flags orphaned skill directories (a local skills folder whose
-# agent config directory does not exist). The count and reason wording is a
-# formatting contract, checked against the human report.
+# Test 7: doctor flags orphaned skill directories.
 ORPHANED_DIR="${TMPDIR}/orphaned-test"
 mkdir -p "$ORPHANED_DIR"
 cd "$ORPHANED_DIR"
@@ -145,8 +138,7 @@ else
 fi
 cd "$TMPDIR"
 
-# Test 8: doctor separates a VCS-tracked broken link (never removed by 'skill')
-# from a stray one, and tells the user to fix the tracked one in the repository.
+# Test 8: doctor separates a VCS-tracked broken link from a stray one.
 MIXED_DANGLING_DIR="${TMPDIR}/mixed-dangling"
 mkdir -p "$MIXED_DANGLING_DIR"
 cd "$MIXED_DANGLING_DIR"
@@ -266,8 +258,8 @@ fi
 rm -f "${XDG_CONFIG_HOME}/skill/plugins/99_test_catalog.py"
 cd "$TMPDIR"
 
-# Test 13: a virtual resolve: False skill is linked to its literal path and is
-# healthy (the link is never realpath'd).
+# Test 13: a virtual resolve: False skill keeps its literal path in both user
+# symlinks and workspace copies (metadata.source) and is healthy.
 VIRT_SNAP_DIR="${TMPDIR}/virt-snap-test"
 mkdir -p "${VIRT_SNAP_DIR}/vfs/real/virt-skill"
 ln -s "${VIRT_SNAP_DIR}/vfs/real" "${VIRT_SNAP_DIR}/vfs/head"
@@ -284,14 +276,17 @@ EOF
 
 cd "$VIRT_SNAP_DIR"
 git init -q
+"${SCRIPT}" --scope user add virt-skill >/dev/null 2>&1
 "${SCRIPT}" add virt-skill >/dev/null 2>&1
 vj=$(doctor_json)
-if [ "$(readlink .claude/skills/virt-skill)" = "${VIRT_SNAP_DIR}/vfs/head/virt-skill" ] &&
+if [ "$(readlink "${HOME}/.claude/skills/virt-skill")" = "${VIRT_SNAP_DIR}/vfs/head/virt-skill" ] &&
+  grep -q "source: \"${VIRT_SNAP_DIR}/vfs/head/virt-skill\"" .claude/skills/virt-skill/SKILL.md &&
   [ "$(json_get "$vj" 'd["healthy"]')" = "true" ]; then
-  echo "ok 13 - [Plugins] a resolve: False skill keeps its literal path and is healthy"
+  echo "ok 13 - [Plugins] a resolve: False skill keeps its literal path in links and copies"
 else
   echo "not ok 13 - [Plugins] virtual target mishandled: $vj"
 fi
+"${SCRIPT}" --scope user clean >/dev/null 2>&1 || true
 rm -f "${XDG_CONFIG_HOME}/skill/plugins/99_test_virt_snap.py"
 cd "$TMPDIR"
 
@@ -311,3 +306,87 @@ else
   echo "not ok 14 - [Doctor UI] failure report wrong: $fout"
 fi
 cd "$TMPDIR"
+
+# Test 15: Copy Health flags a copy whose source directory has vanished, leaving
+# the copy intact (read-only) and naming 'skill remove'.
+GONE_SRC="${TMPDIR}/ephemeral-src/temp-skill"
+GONE_WS="${TMPDIR}/copy-missing-src"
+mkdir -p "$GONE_SRC" "$GONE_WS"
+printf -- '---\nname: temp-skill\n---\nbody\n' >"${GONE_SRC}/SKILL.md"
+cd "$GONE_WS"
+git init -q
+"${SCRIPT}" add "$GONE_SRC" >/dev/null 2>&1
+rm -rf "${TMPDIR}/ephemeral-src"
+gj=$(doctor_json)
+gh=$("${SCRIPT}" doctor 2>&1) || true
+if [ "$(check_status "$gj" "Copy Health")" = "WARNING" ] &&
+  [ "$(json_get "$gj" 'd["healthy"]')" = "false" ] &&
+  [ "$(json_get "$gj" 'all(l["broken"] for l in d["links"])')" = "true" ] &&
+  [[ "$gh" == *"skill remove temp-skill"* ]] &&
+  [ -f .agents/skills/temp-skill/SKILL.md ]; then
+  echo "ok 15 - [Copy Health] doctor flags copies with missing metadata.source and keeps them"
+else
+  echo "not ok 15 - [Copy Health] missing source check failed: $gh / $gj"
+fi
+cd "$TMPDIR"
+
+# Test 16: Copy Health ignores __pycache__/.ruff_cache in copies, flags content
+# drift on local or upstream edits, and clears once 'skill update' refreshes it.
+DRIFT_COPY_WS="${TMPDIR}/copy-drift-ws"
+mkdir -p "$DRIFT_COPY_WS"
+cd "$DRIFT_COPY_WS"
+git init -q
+"${SCRIPT}" add emumanager >/dev/null 2>&1
+mkdir -p .agents/skills/emumanager/__pycache__ .agents/skills/emumanager/.ruff_cache
+printf 'pyc' >.agents/skills/emumanager/__pycache__/x.pyc
+clean_cache_json=$(doctor_json)
+printf '\nlocal tweak\n' >>.agents/skills/emumanager/SKILL.md
+drifted_json=$(doctor_json)
+drifted_h=$("${SCRIPT}" doctor 2>&1) || true
+"${SCRIPT}" update emumanager >/dev/null 2>&1
+refreshed_json=$(doctor_json)
+if [ "$(json_get "$clean_cache_json" 'd["healthy"]')" = "true" ] &&
+  [ "$(check_status "$drifted_json" "Copy Health")" = "WARNING" ] &&
+  [ "$(json_get "$drifted_json" 'any(l["drifted"] for l in d["links"])')" = "true" ] &&
+  [[ "$drifted_h" == *"skill update emumanager"* ]] &&
+  [ "$(json_get "$refreshed_json" 'd["healthy"]')" = "true" ]; then
+  echo "ok 16 - [Copy Health] doctor ignores bytecode caches, flags content drift, and clears on update"
+else
+  echo "not ok 16 - [Copy Health] copy drift lifecycle failed: $drifted_h"
+fi
+cd "$TMPDIR"
+
+# Test 17: inject_copy_source and read_copy_source_from_content handle missing
+# frontmatter, missing metadata, block metadata, flow metadata, existing source,
+# and ignore metadata in the Markdown body without creating duplicate keys.
+if yaml_out=$(run_module '
+src = "/tmp/my:skill #1/dir"
+cases = [
+    "# Plain body\n",
+    "---\nname: a\ndescription: >-\n  hello\n---\nbody\n",
+    "---\nname: b\nmetadata:\n  version: \"1\"\n  author: me\ncompatibility: py\n---\nbody\n",
+    "---\nname: c\nmetadata:\n  source: \"/old\"\n  version: \"2\"\n---\nbody\n",
+    "---\nname: d\nmetadata: {version: '\''1'\'', author: \"x\"}\n---\nbody\n",
+    "---\nname: e\nmetadata: {}\n---\nbody\n",
+    "---\nname: f\nmetadata: {source: \"/old\", version: \"3\"}\n---\nbody\n",
+    "---\nname: g\nmetadata: {\n  version: \"4\"\n}\n---\nbody\n",
+]
+for idx, raw in enumerate(cases):
+    out = m.inject_copy_source(raw, src)
+    got = m.read_copy_source_from_content(out)
+    assert got == src, f"case {idx} got {got!r} from:\n{out}"
+    fm = out.split("---", 2)[1]
+    meta_keys = [
+        l for l in fm.splitlines()
+        if not l.startswith((" ", "\t")) and l.lstrip().startswith("metadata:")
+    ]
+    assert len(meta_keys) == 1, f"case {idx} duplicate metadata keys:\n{out}"
+
+body_trap = "---\nname: trap\n---\nmetadata:\n  source: \"/should/ignore\"\n"
+assert m.read_copy_source_from_content(body_trap) is None
+print("OK")
+' 2>&1) && [ "$yaml_out" = "OK" ]; then
+  echo "ok 17 - [YAML] metadata.source round-trips cleanly across block and flow mappings without duplicates"
+else
+  echo "not ok 17 - [YAML] metadata.source helper failed: ${yaml_out:-}"
+fi

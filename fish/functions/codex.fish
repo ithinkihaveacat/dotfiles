@@ -1,6 +1,10 @@
 # Wrapper for codex that keeps a few local write/network allowances readable.
 function codex --description 'Run codex with local writable dirs and sandbox defaults'
-    _agent_preflight codex; or return
+    if test (pwd -P) != (realpath $HOME 2>/dev/null; or echo $HOME)
+        and command git rev-parse --git-dir >/dev/null 2>&1
+        and type -q hook
+        hook apply --quiet; or return
+    end
     set -lx TMPDIR (mktemp -d /tmp/codex.XXXXXXXXXX)
 
     set -l codex_writable_dirs \

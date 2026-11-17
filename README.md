@@ -69,14 +69,14 @@ and [`travel`](skills/travel/).
 ### Installing skills
 
 Only a curated baseline of default skills is linked into the user scope
-(`~/.claude/skills/`, `~/.agents/skills/`, `~/.gemini/config/skills/`), set by
-`etc/skill/defaults.sh` in each layer when `install.sh` runs. Specialized skills
-stay out of global prompts and are added per session or per workspace with the
-bundled `skill` command:
+(`~/.claude/skills/`, `~/.agents/skills/`, `~/.gemini/config/skills/`),
+reconciled from `etc/skill/defaults` across each layer when `install.sh` runs.
+Specialized skills stay out of global prompts and are copied per session or per
+workspace (`metadata.source` in `SKILL.md`) with the bundled `skill` command:
 
 ```sh
-skill --scope session add jetpack # add a skill for this conversation only
-skill add jetpack                 # or link into the workspace (.git/info/exclude)
+skill --scope session add jetpack # copy a skill for this conversation only
+skill add jetpack                 # or copy into the workspace (.git/info/exclude)
 skill --scope user list           # list global default skills
 ```
 
@@ -144,7 +144,7 @@ the last overlay to provide a given filename wins.
 | `etc/code/`                                          | `link_overlay_files`                | VS Code `settings.json`, `keybindings.json`, etc.                                                     |
 | `etc/macos/KeyBindings`                              | `overlay_path`                      | rsync'd (not symlinked) due to macOS bug                                                              |
 | `etc/macos/Solarized.clr`                            | `overlay_path`                      | Copied to `~/Library/Colors/`                                                                         |
-| `etc/skill/defaults.sh`                              | run by `install.sh`                 | Adds or removes baseline default skills in the user scope (`skill --scope user`)                      |
+| `etc/skill/defaults`                                 | reconciled by `install.sh`          | Declarative list of baseline default skills in the user scope (`skill --scope user`)                  |
 | `skills/*/`                                          | `skill` catalog source              | Specialized skills added per session or workspace via `skill add` (see [Agent skills](#agent-skills)) |
 
 ### Per-overlay `update` hooks

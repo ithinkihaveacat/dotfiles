@@ -2189,8 +2189,47 @@ function feature_ruby {
   x env PREFIX="$HOME/.local" "$ruby_build_src/install.sh"
 }
 
+# Print the union of baseline default skill names across ~/.dotfiles, active
+# overlays, and optional $XDG_CONFIG_HOME/skill/defaults (one per line). Blank
+# lines and '#' comments are ignored; '-name' drops an earlier entry.
+function collect_skill_defaults {
+  local files=() src f line tok drop item kept=() next=()
+  for src in "${SRCDIRS[@]}"; do
+    [ -f "$src/etc/skill/defaults" ] && files+=("$src/etc/skill/defaults")
+  done
+  if [ -f "$XDG_CONFIG_HOME/skill/defaults" ]; then
+    files+=("$XDG_CONFIG_HOME/skill/defaults")
+  fi
+  [ "${#files[@]}" -gt 0 ] || return 0
+  for f in "${files[@]}"; do
+    while IFS= read -r line || [ -n "$line" ]; do
+      line=${line%%#*}
+      for tok in $line; do
+        case "$tok" in
+          -?*)
+            drop=${tok#-}
+            next=()
+            if [ "${#kept[@]}" -gt 0 ]; then
+              for item in "${kept[@]}"; do
+                [ "$item" = "$drop" ] || next+=("$item")
+              done
+            fi
+            kept=("${next[@]+"${next[@]}"}")
+            ;;
+          *)
+            kept+=("$tok")
+            ;;
+        esac
+      done
+    done <"$f"
+  done
+  if [ "${#kept[@]}" -gt 0 ]; then
+    printf '%s\n' "${kept[@]}"
+  fi
+}
+
 function feature_skills {
-  local src
+  local defaults_list skill_bin="$SRCDIR/bin/skill" skill_rc=0
 
   heading "skill plugins"
 
@@ -2207,9 +2246,8 @@ function feature_skills {
 
   heading "skill defaults"
 
-  # Ensure global skill config roots exist before etc/skill/defaults.sh runs
-  # 'skill --scope user add', including in cloud containers before agent CLIs
-  # have been launched.
+  # Ensure global skill config roots exist before reconciling --scope user,
+  # including in cloud containers before agent CLIs have been launched.
   if exists claude; then
     xmkdir "$HOME/.claude"
   fi
@@ -2225,7 +2263,7 @@ function feature_skills {
   if [ ! -d "$HOME/.claude" ] && [ ! -d "$HOME/.codex" ] &&
     [ ! -d "$XDG_CONFIG_HOME/opencode" ] && [ ! -d "$HOME/.opencode" ] &&
     [ ! -d "$HOME/.gemini/config" ]; then
-    xmkdir "$HOME/.claude" "$HOME/.agents/skills"
+    xmkdir "$HOME/.claude" "$HOME/.codex"
   fi
 
   # Remove retired ~/.local/state/skill/defaults directory and any legacy
@@ -2233,14 +2271,23 @@ function feature_skills {
   x rm -rf "$XDG_STATE_HOME/skill/defaults"
   cleanup_legacy_gemini_skills_json
 
-  # Each repo's etc/skill/defaults.sh adds and removes default skills in the
-  # user scope (`skill --scope user`), so overlay skill names stay out of this
-  # repo and agents load defaults globally without per-workspace seeding.
-  for src in "${SRCDIRS[@]}"; do
-    [ -f "$src/etc/skill/defaults.sh" ] || continue
-    x env PATH="$SRCDIR/bin:$PATH" sh "$src/etc/skill/defaults.sh" ||
-      echo "warning: $src/etc/skill/defaults.sh failed" >&2
-  done
+  # Declaratively reconcile --scope user against the union of etc/skill/defaults
+  # across ~/.dotfiles, active overlays, and optional $XDG_CONFIG_HOME/skill/defaults,
+  # pruning unlisted managed symlinks and checking user-scope health.
+  if [ -x "$skill_bin" ]; then
+    defaults_list=$(collect_skill_defaults)
+    printf '%s\n' "$defaults_list" |
+      x "$skill_bin" --scope user add --prune --quiet - || {
+      echo "warning: reconciling user default skills failed" >&2
+      skill_rc=1
+    }
+    if ! is_offline; then
+      "$skill_bin" catalog >/dev/null 2>&1 || true
+    fi
+    x "$skill_bin" --scope user doctor ||
+      echo "warning: 'skill --scope user doctor' reported issues" >&2
+  fi
+  return "$skill_rc"
 }
 
 # Remove any legacy ~/.local/state/skill/defaults entry from

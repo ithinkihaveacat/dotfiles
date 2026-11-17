@@ -154,7 +154,8 @@ fi
 rm -f "${XDG_CONFIG_HOME}/skill/plugins/mock_generated.py"
 
 # Test 10: a plugin skill registered with resolve: False is not realpath'd --
-# resolve returns the symlink path and add keeps the symlink target stable.
+# resolve returns the symlink path, user scope keeps the symlink target, and
+# workspace copies record the literal path in metadata.source.
 RESOLVE_DIR="${TMPDIR}/resolve-test"
 mkdir -p "${RESOLVE_DIR}/real-target"
 printf -- '---\nname: noresolve-skill\n---\n' >"${RESOLVE_DIR}/real-target/SKILL.md"
@@ -173,11 +174,14 @@ if [ "$resolved_out" = "${RESOLVE_DIR}/sym-link" ]; then
   cd "$APPLY_RESOLVE_DIR"
   git init -q
   mkdir -p .claude/skills .agents/skills
-  if "${SCRIPT}" add test:noresolve-skill >/dev/null 2>&1 &&
-    [ "$(readlink .agents/skills/sym-link)" = "${RESOLVE_DIR}/sym-link" ] &&
+  if "${SCRIPT}" --scope user add test:noresolve-skill >/dev/null 2>&1 &&
+    [ "$(readlink "${HOME}/.claude/skills/sym-link")" = "${RESOLVE_DIR}/sym-link" ] &&
+    "${SCRIPT}" add test:noresolve-skill >/dev/null 2>&1 &&
+    grep -q "source: \"${RESOLVE_DIR}/sym-link\"" .agents/skills/sym-link/SKILL.md &&
     [ "$(json_get "$(doctor_json)" 'd["healthy"]')" = "true" ]; then
     noresolve_ok=1
   fi
+  "${SCRIPT}" --scope user clean >/dev/null 2>&1 || true
   cd "$TMPDIR"
 fi
 if [ "$noresolve_ok" -eq 1 ]; then
@@ -341,15 +345,18 @@ WS_DIR="${TMPDIR}/virt-ws"
 mkdir -p "$WS_DIR/.claude/skills" "$WS_DIR/.agents/skills"
 cd "$WS_DIR"
 git init -q
+"${SCRIPT}" --scope user add my-virt-skill >/dev/null 2>&1
 "${SCRIPT}" add my-virt-skill >/dev/null 2>&1
 
 dj=$(doctor_json)
-if [ "$(readlink .claude/skills/my-virt-skill)" = "${VIRT_DIR}/head/my-virt-skill" ] &&
+if [ "$(readlink "${HOME}/.claude/skills/my-virt-skill")" = "${VIRT_DIR}/head/my-virt-skill" ] &&
+  grep -q "source: \"${VIRT_DIR}/head/my-virt-skill\"" .claude/skills/my-virt-skill/SKILL.md &&
   [ "$(json_get "$dj" 'd["healthy"]')" = "true" ]; then
   echo "ok 19 - [Plugins] resolve: False preserves literal path and converges"
 else
   echo "not ok 19 - [Plugins] resolve: False failed: $dj"
 fi
+"${SCRIPT}" --scope user clean >/dev/null 2>&1 || true
 rm -f "${XDG_CONFIG_HOME}/skill/plugins/mock_virt.py"
 cd "$TMPDIR"
 
@@ -522,36 +529,40 @@ else
 fi
 
 # Test 27: a scan_path that changes between runs (a snapshot rolling forward)
-# never reaches link targets, so add and doctor agree and do not fight; the catalog stub keeps pointing at 'path', and a stub pointing
-# elsewhere is rewritten rather than left stale.
+# never reaches user link targets or workspace metadata.source; user doctor stays
+# healthy while workspace update refreshes the copy to the new snapshot.
 WS_SCAN="${TMPDIR}/scan-ws"
 mkdir -p "$WS_SCAN/.claude/skills" "$WS_SCAN/.agents/skills"
 cd "$WS_SCAN"
 git init -q
+SCAN_SNAP=snapA "${SCRIPT}" --scope user add scan-skill >/dev/null 2>&1
 SCAN_SNAP=snapA "${SCRIPT}" add scan-skill >/dev/null 2>&1
-dj=$(SCAN_SNAP=snapB doctor_json)
+udj=$(SCAN_SNAP=snapB "${SCRIPT}" --scope user doctor --json 2>/dev/null || true)
 pre_rc=0
 pre_out=$(SCAN_SNAP=snapB "${SCRIPT}" prune --quiet 2>&1) || pre_rc=$?
 pre_out=$(own_output "$pre_out")
 SCAN_SNAP=snapB "${SCRIPT}" add scan-skill >/dev/null 2>&1
+dj=$(SCAN_SNAP=snapB doctor_json)
 STUB_LINK="${XDG_CACHE_HOME}/skill/catalog/scan:scan-skill/SKILL.md"
 ln -sfn "${SCAN_DIR}/snapA/scan-skill/SKILL.md" "$STUB_LINK"
 SCAN_SNAP=snapB AGENT_OFFLINE=1 "${SCRIPT}" catalog >/dev/null 2>&1
-if [ "$(json_get "$dj" 'd["healthy"]')" = "true" ] &&
+if [ "$(json_get "$udj" 'd["healthy"]')" = "true" ] &&
+  [ "$(json_get "$dj" 'd["healthy"]')" = "true" ] &&
   [ "$pre_rc" -eq 0 ] && [ -z "$pre_out" ] &&
-  [ "$(readlink .claude/skills/scan-skill)" = "${SCAN_DIR}/head/scan-skill" ] &&
-  [ "$(readlink .agents/skills/scan-skill)" = "${SCAN_DIR}/head/scan-skill" ] &&
+  [ "$(readlink "${HOME}/.claude/skills/scan-skill")" = "${SCAN_DIR}/head/scan-skill" ] &&
+  grep -q "source: \"${SCAN_DIR}/head/scan-skill\"" .claude/skills/scan-skill/SKILL.md &&
+  grep -q "source: \"${SCAN_DIR}/head/scan-skill\"" .agents/skills/scan-skill/SKILL.md &&
   [ "$(readlink "$STUB_LINK")" = "${SCAN_DIR}/head/scan-skill/SKILL.md" ]; then
-  echo "ok 27 - [Plugins] changing scan_path leaves links, doctor, and seeding stable"
+  echo "ok 27 - [Plugins] changing scan_path leaves user links, metadata.source, and catalog stubs on path"
 else
-  echo "not ok 27 - [Plugins] scan_path leaked into link state (rc=$pre_rc): $pre_out / $dj"
+  echo "not ok 27 - [Plugins] scan_path leaked into link/copy state (rc=$pre_rc): $pre_out / $dj"
 fi
 rm -f "${XDG_CONFIG_HOME}/skill/plugins/mock_scan.py"
 cd "$TMPDIR"
 
-# Test 28: existence checks (resolution and link liveness) go through scan_path
-# rather than following 'path' -- proven by hiding the head directory while the
-# scan view remains -- yet resolution still answers with 'path'.
+# Test 28: existence checks (resolution, user link liveness, and copy checks) go
+# through scan_path rather than following 'path' -- proven by hiding the head
+# directory while the scan view remains -- yet resolution still answers with 'path'.
 cat <<EOF >"${XDG_CONFIG_HOME}/skill/plugins/mock_scan.py"
 def register(api):
     api.register_skill(
@@ -566,10 +577,13 @@ EOF
 mv "${SCAN_DIR}/head" "${SCAN_DIR}/head.hidden"
 cd "$WS_SCAN"
 res_out=$("${SCRIPT}" resolve scan:scan-skill 2>&1) || true
+udj28=$("${SCRIPT}" --scope user doctor --json 2>/dev/null || true)
 dj=$(doctor_json)
 mv "${SCAN_DIR}/head.hidden" "${SCAN_DIR}/head"
+"${SCRIPT}" --scope user clean >/dev/null 2>&1 || true
 if [[ "$res_out" == *"${SCAN_DIR}/head/scan-skill"* ]] &&
-  [ "$(check_status "$dj" "Symlink Health")" = "OK" ] &&
+  [ "$(check_status "$udj28" "Symlink Health")" = "OK" ] &&
+  [ "$(check_status "$dj" "Copy Health")" = "OK" ] &&
   [ "$(check_status "$dj" "Plugin Local Paths")" != "ERROR" ] &&
   [ "$(json_get "$dj" '[l["name"] for l in d["links"] if not l["broken"]]')" = "scan-skill scan-skill" ]; then
   echo "ok 28 - [Plugins] existence checks use scan_path; resolution returns path"
@@ -629,7 +643,9 @@ git -C "$PATH_SPEC_WS" init -q
 if res31=$("${SCRIPT}" --offline resolve "${TMPDIR}/sources/test-skill" 2>/dev/null) &&
   [ "$res31" = "${TMPDIR}/sources/test-skill" ] &&
   "${SCRIPT}" -C "$PATH_SPEC_WS" add "${TMPDIR}/sources/test-skill" >/dev/null 2>&1 &&
-  [ -L "$PATH_SPEC_WS/.agents/skills/test-skill" ]; then
+  [ -d "$PATH_SPEC_WS/.agents/skills/test-skill" ] &&
+  [ ! -L "$PATH_SPEC_WS/.agents/skills/test-skill" ] &&
+  grep -q "source: \"${TMPDIR}/sources/test-skill\"" "$PATH_SPEC_WS/.agents/skills/test-skill/SKILL.md"; then
   echo "ok 31 - [Path spec] resolve and add accept filesystem skill directory paths"
 else
   echo "not ok 31 - [Path spec] filesystem skill path failed: ${res31:-}"

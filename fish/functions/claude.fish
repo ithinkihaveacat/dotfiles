@@ -56,10 +56,5 @@ function claude --description 'Run claude with a per-session directory for scrat
         set AGENT_SESSION_ID $session_id
     end
 
-    if not _agent_preflight claude
-        rm -rf $TMPDIR
-        return 1
-    end
-
     command claude --add-dir $TMPDIR $session_args $argv
 end

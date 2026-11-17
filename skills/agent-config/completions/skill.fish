@@ -32,17 +32,17 @@ function __fish_skill_managed_skills
 end
 
 # Complete subcommands
-complete -f -c skill -n __fish_use_subcommand -a add -d 'Link a skill (path or catalog name)'
-complete -f -c skill -n __fish_use_subcommand -a remove -d 'Remove a skill\'s links'
-complete -f -c skill -n __fish_use_subcommand -a rm -d 'Remove a skill\'s links (alias of remove)'
+complete -f -c skill -n __fish_use_subcommand -a add -d 'Install a skill (path or catalog name)'
+complete -f -c skill -n __fish_use_subcommand -a remove -d 'Remove a skill\'s entries'
+complete -f -c skill -n __fish_use_subcommand -a rm -d 'Remove a skill\'s entries (alias of remove)'
 complete -f -c skill -n __fish_use_subcommand -a prune -d 'Retire legacy default links, sync records, and fail on errors'
-complete -f -c skill -n __fish_use_subcommand -a list -d 'List linked skills in the chosen scope'
-complete -f -c skill -n __fish_use_subcommand -a update -d 'Re-fetch plugin-provided catalog entries'
+complete -f -c skill -n __fish_use_subcommand -a list -d 'List installed skills in the chosen scope'
+complete -f -c skill -n __fish_use_subcommand -a update -d 'Refresh skill copies and plugin-provided catalog entries'
 complete -f -c skill -n __fish_use_subcommand -a clean -d 'Remove all managed skills'
 complete -f -c skill -n __fish_use_subcommand -a catalog -d 'List plugin-provided skills and sources'
 complete -f -c skill -n __fish_use_subcommand -a resolve -d 'Print source path for a name'
 complete -f -c skill -n __fish_use_subcommand -a bundle -d 'Package skills into an archive or directory'
-complete -f -c skill -n __fish_use_subcommand -a doctor -d 'Check skill links and the catalog'
+complete -f -c skill -n __fish_use_subcommand -a doctor -d 'Check skill links, copies, and the catalog'
 complete -f -c skill -n __fish_use_subcommand -a show -d 'Show details and metadata of a skill (alias: info)'
 complete -f -c skill -n __fish_use_subcommand -a info -d 'Show details and metadata of a skill'
 complete -f -c skill -n __fish_use_subcommand -a mcp -d 'Serve skills over MCP'
@@ -77,6 +77,7 @@ complete -f -c skill -n '__fish_seen_subcommand_from show info' -a '(__fish_skil
 # add
 complete -c skill -n '__fish_seen_subcommand_from add' -a '(__fish_skill_catalog)'
 complete -c skill -n '__fish_seen_subcommand_from add' -a '(__fish_skill_source_skills)' -d Skill
+complete -c skill -f -n '__fish_seen_subcommand_from add' -s p -l prune -d 'Remove unlisted managed entries in the scope'
 
 # remove (and rm)
 complete -c skill -f -n '__fish_seen_subcommand_from remove rm' -a '(__fish_skill_managed_skills)' -d 'Managed skill'
