@@ -9,7 +9,7 @@ set -euo pipefail
 source "$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 skill_test_init
 
-echo "1..17"
+echo "1..19"
 
 # Test 1: doctor on a healthy workspace reports healthy JSON and renders the
 # canonical [PASS] tag style.
@@ -370,6 +370,8 @@ cases = [
     "---\nname: e\nmetadata: {}\n---\nbody\n",
     "---\nname: f\nmetadata: {source: \"/old\", version: \"3\"}\n---\nbody\n",
     "---\nname: g\nmetadata: {\n  version: \"4\"\n}\n---\nbody\n",
+    "---\nname: h\nmetadata: {\n  # leading comment\n  version: \"5\" # trailing comment\n}\n---\nbody\n",
+    "---\nname: i\nmetadata: {\n  source: \"/old\" # trailing comment\n}\n---\nbody\n",
 ]
 for idx, raw in enumerate(cases):
     out = m.inject_copy_source(raw, src)
@@ -390,3 +392,70 @@ print("OK")
 else
   echo "not ok 17 - [YAML] metadata.source helper failed: ${yaml_out:-}"
 fi
+
+# Test 18: a VCS-tracked skill in .claude/skills/<name> (even with metadata.source)
+# sharing a name with an untracked copy in .agents/skills/<name> is never flagged
+# or overwritten by doctor / update.
+MIXED_WS="${TMPDIR}/mixed-tracked-ws"
+mkdir -p "${MIXED_WS}/.claude/skills/emumanager"
+git -C "$MIXED_WS" init -q
+git -C "$MIXED_WS" config user.email "t@e.st"
+git -C "$MIXED_WS" config user.name "Test"
+printf -- '---\nname: emumanager\nmetadata:\n  source: "/committed/origin"\n---\ncommitted body\n' \
+  >"${MIXED_WS}/.claude/skills/emumanager/SKILL.md"
+git -C "$MIXED_WS" add .claude/skills/emumanager/SKILL.md
+git -C "$MIXED_WS" commit -q -m "commit claude skill"
+mkdir -p "${MIXED_WS}/.agents/skills"
+"${SCRIPT}" -C "$MIXED_WS" update --all >/dev/null 2>&1 || true
+cp -r "${SKILL_SOURCE_DIRS}/emumanager" "${MIXED_WS}/.agents/skills/emumanager"
+printf -- '---\nname: emumanager\nmetadata:\n  source: "%s"\n---\ndrifted\n' \
+  "${SKILL_SOURCE_DIRS}/emumanager" >"${MIXED_WS}/.agents/skills/emumanager/SKILL.md"
+"${SCRIPT}" -C "$MIXED_WS" update emumanager >/dev/null 2>&1
+"${SCRIPT}" -C "$MIXED_WS" prune --quiet >/dev/null 2>&1
+mixed_doc=$("${SCRIPT}" -C "$MIXED_WS" doctor --json 2>/dev/null || true)
+if grep -q "committed body" "${MIXED_WS}/.claude/skills/emumanager/SKILL.md" &&
+  [ "$(json_get "$mixed_doc" 'd["healthy"]')" = "true" ]; then
+  echo "ok 18 - [Tracked] sibling VCS-tracked skill is preserved during doctor and update"
+else
+  echo "not ok 18 - [Tracked] sibling VCS-tracked skill was clobbered or flagged: $mixed_doc"
+fi
+
+# Test 19: subpath-aliased remote skills refresh upstream on folder-name update
+# and on 'skill --scope user update --all'.
+ALIAS_UPSTREAM="${TMPDIR}/alias-upstream"
+mkdir -p "${ALIAS_UPSTREAM}/skills/aliased-folder"
+git -C "$ALIAS_UPSTREAM" init -q -b main
+git -C "$ALIAS_UPSTREAM" config user.email "t@e.st"
+git -C "$ALIAS_UPSTREAM" config user.name "Test"
+printf -- '---\nname: aliased-folder\ndescription: v1\n---\nv1\n' \
+  >"${ALIAS_UPSTREAM}/skills/aliased-folder/SKILL.md"
+git -C "$ALIAS_UPSTREAM" add .
+git -C "$ALIAS_UPSTREAM" commit -q -m "v1"
+mkdir -p "${XDG_CONFIG_HOME}/skill/plugins" "${HOME}/.claude"
+cat <<'EOF' >"${XDG_CONFIG_HOME}/skill/plugins/98_alias_remote.py"
+def register(api):
+    api.register_skill(
+        "remote:pkg-key-name",
+        {"repo": "owner/repo", "ref": "main", "subpath": "skills/aliased-folder"},
+    )
+EOF
+ALIAS_WS="${TMPDIR}/alias-ws"
+mkdir -p "$ALIAS_WS"
+git -C "$ALIAS_WS" init -q
+_SKILL_TEST_REMOTE="$ALIAS_UPSTREAM" "${SCRIPT}" -C "$ALIAS_WS" add remote:pkg-key-name >/dev/null 2>&1
+_SKILL_TEST_REMOTE="$ALIAS_UPSTREAM" "${SCRIPT}" --scope user add remote:pkg-key-name >/dev/null 2>&1
+printf -- '---\nname: aliased-folder\ndescription: v2\n---\nv2\n' \
+  >"${ALIAS_UPSTREAM}/skills/aliased-folder/SKILL.md"
+git -C "$ALIAS_UPSTREAM" commit -q -am "v2"
+_SKILL_TEST_REMOTE="$ALIAS_UPSTREAM" "${SCRIPT}" -C "$ALIAS_WS" update aliased-folder >/dev/null 2>&1
+printf -- '---\nname: aliased-folder\ndescription: v3\n---\nv3\n' \
+  >"${ALIAS_UPSTREAM}/skills/aliased-folder/SKILL.md"
+git -C "$ALIAS_UPSTREAM" commit -q -am "v3"
+_SKILL_TEST_REMOTE="$ALIAS_UPSTREAM" "${SCRIPT}" --scope user update --all >/dev/null 2>&1
+if grep -q "^v2$" "${ALIAS_WS}/.agents/skills/aliased-folder/SKILL.md" &&
+  grep -q "^v3$" "${HOME}/.claude/skills/aliased-folder/SKILL.md"; then
+  echo "ok 19 - [Update] subpath-aliased skills refresh by folder name and in --scope user update --all"
+else
+  echo "not ok 19 - [Update] subpath-aliased or user --all update failed"
+fi
+rm -f "${XDG_CONFIG_HOME}/skill/plugins/98_alias_remote.py"

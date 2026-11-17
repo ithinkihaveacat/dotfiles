@@ -264,22 +264,24 @@ def _parse_flow_map_entries(inner: str) -> list[tuple[str, str, int, int]]:
 
     Returns [(key_name, raw_value, val_start_offset, val_end_offset)].
     """
-    spans: list[tuple[int, int]] = []
-    depth = 0
+    tokens: list[tuple[str, int]] = []
     in_single = False
     in_double = False
-    seg_start = 0
     i = 0
     while i < len(inner):
         ch = inner[i]
         if in_double:
+            tokens.append((ch, i))
             if ch == "\\" and i + 1 < len(inner):
+                tokens.append((inner[i + 1], i + 1))
                 i += 2
                 continue
             if ch == '"':
                 in_double = False
         elif in_single:
+            tokens.append((ch, i))
             if ch == "'" and i + 1 < len(inner) and inner[i + 1] == "'":
+                tokens.append((inner[i + 1], i + 1))
                 i += 2
                 continue
             if ch == "'":
@@ -287,39 +289,78 @@ def _parse_flow_map_entries(inner: str) -> list[tuple[str, str, int, int]]:
         else:
             if ch == '"':
                 in_double = True
+                tokens.append((ch, i))
             elif ch == "'":
                 in_single = True
-            elif ch == "#" and (i == 0 or inner[i - 1] in (" ", "\t", "\n", ",")):
+                tokens.append((ch, i))
+            elif ch == "#" and (
+                i == 0 or inner[i - 1] in (" ", "\t", "\n", "\r", ",", "{", "[")
+            ):
                 nl = inner.find("\n", i)
                 if nl == -1:
-                    spans.append((seg_start, i))
-                    seg_start = len(inner)
                     break
-                i = nl + 1
+                i = nl
                 continue
+            else:
+                tokens.append((ch, i))
+        i += 1
+
+    segments: list[list[tuple[str, int]]] = []
+    cur_seg: list[tuple[str, int]] = []
+    depth = 0
+    in_s = False
+    in_d = False
+    t_idx = 0
+    while t_idx < len(tokens):
+        ch, orig = tokens[t_idx]
+        if in_d:
+            cur_seg.append((ch, orig))
+            if ch == "\\" and t_idx + 1 < len(tokens):
+                cur_seg.append(tokens[t_idx + 1])
+                t_idx += 2
+                continue
+            if ch == '"':
+                in_d = False
+        elif in_s:
+            cur_seg.append((ch, orig))
+            if ch == "'" and t_idx + 1 < len(tokens) and tokens[t_idx + 1][0] == "'":
+                cur_seg.append(tokens[t_idx + 1])
+                t_idx += 2
+                continue
+            if ch == "'":
+                in_s = False
+        else:
+            if ch == '"':
+                in_d = True
+                cur_seg.append((ch, orig))
+            elif ch == "'":
+                in_s = True
+                cur_seg.append((ch, orig))
             elif ch in ("{", "["):
                 depth += 1
+                cur_seg.append((ch, orig))
             elif ch in ("}", "]"):
                 depth = max(0, depth - 1)
+                cur_seg.append((ch, orig))
             elif ch == "," and depth == 0:
-                spans.append((seg_start, i))
-                seg_start = i + 1
-        i += 1
-    if seg_start <= len(inner):
-        spans.append((seg_start, len(inner)))
+                segments.append(cur_seg)
+                cur_seg = []
+            else:
+                cur_seg.append((ch, orig))
+        t_idx += 1
+    if cur_seg:
+        segments.append(cur_seg)
 
     entries: list[tuple[str, str, int, int]] = []
-    for s_off, e_off in spans:
-        seg = inner[s_off:e_off]
-        if not seg.strip():
+    for seg in segments:
+        if not any(not c.isspace() for c, _ in seg):
             continue
-        # Find top-level ':' outside quotes.
         in_s = False
         in_d = False
         colon_pos = -1
         j = 0
         while j < len(seg):
-            c = seg[j]
+            c = seg[j][0]
             if in_d:
                 if c == "\\" and j + 1 < len(seg):
                     j += 2
@@ -327,7 +368,7 @@ def _parse_flow_map_entries(inner: str) -> list[tuple[str, str, int, int]]:
                 if c == '"':
                     in_d = False
             elif in_s:
-                if c == "'" and j + 1 < len(seg) and seg[j + 1] == "'":
+                if c == "'" and j + 1 < len(seg) and seg[j + 1][0] == "'":
                     j += 2
                     continue
                 if c == "'":
@@ -343,19 +384,20 @@ def _parse_flow_map_entries(inner: str) -> list[tuple[str, str, int, int]]:
             j += 1
         if colon_pos == -1:
             continue
-        k_name = _unquote_yaml_scalar(seg[:colon_pos])
-        val_rel = seg[colon_pos + 1 :]
-        l_trim = len(val_rel) - len(val_rel.lstrip())
-        r_trim = len(val_rel.rstrip())
-        if r_trim < l_trim:
-            v_start = s_off + colon_pos + 1 + l_trim
-            v_end = v_start
-            v_raw = ""
+        k_name = _unquote_yaml_scalar("".join(c for c, _ in seg[:colon_pos]))
+        val_toks = seg[colon_pos + 1 :]
+        while val_toks and val_toks[0][0].isspace():
+            val_toks.pop(0)
+        while val_toks and val_toks[-1][0].isspace():
+            val_toks.pop()
+        if not val_toks:
+            v_pos = seg[colon_pos][1] + 1
+            entries.append((k_name, "", v_pos, v_pos))
         else:
-            v_start = s_off + colon_pos + 1 + l_trim
-            v_end = s_off + colon_pos + 1 + r_trim
-            v_raw = inner[v_start:v_end]
-        entries.append((k_name, v_raw, v_start, v_end))
+            v_start = val_toks[0][1]
+            v_end = val_toks[-1][1] + 1
+            v_raw = "".join(c for c, _ in val_toks)
+            entries.append((k_name, v_raw, v_start, v_end))
     return entries
 
 
@@ -2151,10 +2193,10 @@ def scan_links(ws) -> tuple[list[DiskEntry], list[Path]]:
     """Every managed skill entry in the scope's destination directories, plus
     any untracked unmanaged items found there.
 
-    Whether a link is VCS-tracked is only worked out for broken links, the
-    only ones that need it (tracked entries were already skipped by
-    get_actual_skills for non-symlinks, and tracked broken links are never
-    pruned): asking git about every live entry would spawn a process per entry.
+    Whether a symlink is VCS-tracked is only worked out for broken links; live
+    non-symlink directories are checked per destination path so a VCS-tracked
+    skill sharing a name with an untracked copy in a sibling destination is
+    never treated as a managed copy.
     """
     live, unmanaged, dangling = ws.get_actual_skills()
     try:
@@ -2165,7 +2207,9 @@ def scan_links(ws) -> tuple[list[DiskEntry], list[Path]]:
     for name in sorted(live):
         for d in dest_dirs:
             p = d / name
-            if p in dangling:
+            if p in dangling or (not p.exists() and not p.is_symlink()):
+                continue
+            if not p.is_symlink() and ws.is_tracked(p):
                 continue
             target = _entry_target(p, ws.uses_copies)
             if target is None and not p.is_symlink():
@@ -2939,15 +2983,58 @@ def cmd_update(names):
                     file=sys.stderr,
                 )
 
-    def find_catalog_matches(spec: str) -> list[tuple[str, dict]]:
+    def _catalog_entry_meta(key: str, entry: dict) -> tuple[set[str], set[str]]:
+        short = key.split(":", 1)[-1] if ":" in key else key
+        folder_names = {short.lower()}
+        source_norms: set[str] = set()
+        if "path" in entry:
+            p = Path(entry["path"]).expanduser()
+            folder_names.add(p.name.lower())
+            source_norms.add(os.path.normpath(p))
+            if entry.get("resolve", True) and p.exists():
+                source_norms.add(os.path.normpath(os.path.realpath(p)))
+        elif "repo" in entry and "ref" in entry:
+            rc = remote_cache_dir(entry["repo"], entry["ref"], entry.get("subpath"))
+            source_norms.add(os.path.normpath(rc))
+            if rc.exists():
+                source_norms.add(os.path.normpath(os.path.realpath(rc)))
+            folder_names.add(rc.name.lower())
+            if entry.get("subpath"):
+                folder_names.add(Path(entry["subpath"]).name.lower())
+        return folder_names, source_norms
+
+    def find_catalog_matches(
+        spec: str, source_path: Path | None = None
+    ) -> list[tuple[str, dict]]:
+        if source_path is not None:
+            sp_norms = {os.path.normpath(source_path)}
+            if source_path.exists():
+                sp_norms.add(os.path.normpath(os.path.realpath(source_path)))
+            by_source = [
+                (key, entry)
+                for key, entry in api.plugin_catalog.items()
+                if _catalog_entry_meta(key, entry)[1] & sp_norms
+            ]
+            if by_source:
+                return by_source
         if spec in api.plugin_catalog:
             return [(spec, api.plugin_catalog[spec])]
         if ":" in spec:
-            return []
-        matches = [
+            return [
+                (key, entry)
+                for key, entry in api.plugin_catalog.items()
+                if key.lower() == spec.lower()
+            ]
+        spec_low = spec.lower()
+        exact = [
             (key, entry)
             for key, entry in api.plugin_catalog.items()
-            if (key.split(":", 1)[-1] if ":" in key else key).lower() == spec.lower()
+            if (key.split(":", 1)[-1] if ":" in key else key).lower() == spec_low
+        ]
+        matches = exact or [
+            (key, entry)
+            for key, entry in api.plugin_catalog.items()
+            if spec_low in _catalog_entry_meta(key, entry)[0]
         ]
         if len(matches) > 1:
             non_remote = [m for m in matches if "repo" not in m[1]]
@@ -2955,7 +3042,7 @@ def cmd_update(names):
                 return non_remote
         return matches
 
-    def active_copy_workspace() -> Workspace | None:
+    def active_scope_workspace() -> Workspace | None:
         if _SCOPE == "workspace":
             if is_home_workspace() or AgyBrainWorkspace.detect():
                 return None
@@ -2964,9 +3051,8 @@ def cmd_update(names):
                 (ws_cand.root / sd).is_dir() for sd in anchor_subdirs()
             ):
                 return None
-            return ws_cand if ws_cand.uses_copies else None
-        ws_cand = get_workspace()
-        return ws_cand if ws_cand.uses_copies else None
+            return ws_cand
+        return get_workspace()
 
     def refresh_copies(entries_to_refresh: list[DiskEntry]) -> None:
         reported: set[str] = set()
@@ -2993,7 +3079,7 @@ def cmd_update(names):
         print("catalog: metadata index updated", file=sys.stderr)
         return
 
-    ws = active_copy_workspace()
+    ws = active_scope_workspace()
 
     if len(names) == 1 and names[0] == "--all":
         if _SCOPE == "workspace":
@@ -3001,42 +3087,85 @@ def cmd_update(names):
                 update_catalog_entry(name, entry)
         if ws is not None:
             entries, _ = scan_links(ws)
-            copies = [
-                e
-                for e in entries
-                if not e.path.is_symlink() and not e.tracked and e.source is not None
-            ]
-            if _SCOPE != "workspace":
-                for e in copies:
-                    for cat_name, cat_entry in find_catalog_matches(e.link_name):
-                        if "repo" in cat_entry or cat_entry.get("generated"):
+            if ws.uses_copies:
+                copies = [
+                    e
+                    for e in entries
+                    if not e.path.is_symlink()
+                    and not e.tracked
+                    and e.source is not None
+                ]
+                if _SCOPE != "workspace":
+                    updated_cat: set[str] = set()
+                    for e in copies:
+                        for cat_name, cat_entry in find_catalog_matches(
+                            e.link_name, e.source
+                        ):
+                            if cat_name not in updated_cat and (
+                                "repo" in cat_entry or cat_entry.get("generated")
+                            ):
+                                updated_cat.add(cat_name)
+                                update_catalog_entry(
+                                    cat_name, cat_entry, quiet_local=True
+                                )
+                refresh_copies(copies)
+            else:
+                updated_cat = set()
+                for e in entries:
+                    if e.tracked:
+                        continue
+                    for cat_name, cat_entry in find_catalog_matches(
+                        e.link_name, e.source
+                    ):
+                        if cat_name not in updated_cat and (
+                            "repo" in cat_entry or cat_entry.get("generated")
+                        ):
+                            updated_cat.add(cat_name)
                             update_catalog_entry(cat_name, cat_entry, quiet_local=True)
-            refresh_copies(copies)
         return
 
     ws_entries = scan_links(ws)[0] if ws is not None else []
 
     # Update specific skill names
     for name in names:
-        cat_matches = find_catalog_matches(name)
         candidates = {
             name,
             name.split(":", 1)[-1],
             os.path.basename(name.rstrip("/")),
         } | _expected_names_for_spec(name)
-        copy_matches = [
+        entry_matches = [
             e
             for e in ws_entries
-            if not e.path.is_symlink()
-            and not e.tracked
-            and e.source is not None
-            and e.link_name in candidates
+            if not e.tracked and e.source is not None and e.link_name in candidates
         ]
+        copy_matches = [
+            e
+            for e in entry_matches
+            if ws is not None and ws.uses_copies and not e.path.is_symlink()
+        ]
+        hint_source = entry_matches[0].source if entry_matches else None
+        cat_matches = find_catalog_matches(name, hint_source)
+        for cat_name, _cat_entry in cat_matches:
+            candidates |= _expected_names_for_spec(cat_name)
+        if ws is not None and ws.uses_copies and not copy_matches:
+            copy_matches = [
+                e
+                for e in ws_entries
+                if not e.path.is_symlink()
+                and not e.tracked
+                and e.source is not None
+                and e.link_name in candidates
+            ]
         if not cat_matches and not copy_matches:
             print(f"skill update: unknown skill '{name}'", file=sys.stderr)
             continue
+        updated_cat_single: set[str] = set()
         for cat_name, cat_entry in cat_matches:
-            update_catalog_entry(cat_name, cat_entry, quiet_local=bool(copy_matches))
+            if cat_name not in updated_cat_single:
+                updated_cat_single.add(cat_name)
+                update_catalog_entry(
+                    cat_name, cat_entry, quiet_local=bool(copy_matches)
+                )
         refresh_copies(copy_matches)
 
 
