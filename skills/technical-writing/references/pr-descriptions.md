@@ -12,8 +12,8 @@ ephemeral document aimed at the maintainer or reviewer _right now_.
 
 - **Goal:** Justify the change, provide broad context, and convince the
   maintainer that the approach is sound and necessary.
-- **Detail:** High. Include extensive motivation, background on the use case,
-  and narrative explanations of the problem space.
+- **Detail:** Proportional to complexity. Keep obvious fixes brief; include
+  extensive motivation and context when non-trivial.
 - **Tone:** Persuasive but professional. You are explaining why the project
   needs this change.
 
