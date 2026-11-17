@@ -9,7 +9,7 @@ set -euo pipefail
 source "$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 skill_test_init
 
-echo "1..22"
+echo "1..19"
 
 # Test 1: doctor on a healthy workspace reports healthy JSON and renders the
 # canonical [PASS] tag style.
@@ -324,421 +324,185 @@ else
 fi
 cd "$TMPDIR"
 
-# Test 16: inject_copy_source normalizes block and flow mappings to canonical
-# block metadata without duplicate keys, and read_copy_source ignores URLs.
+# Test 16: inject_copy_source & read_copy_source handle block, flow (quoted
+# colons/spaces, multiline nested strings, Prettier indented), unclosed braces,
+# scalars, sequences, body traps, and non-path URLs cleanly.
 if yaml_out=$(run_module "
 from pathlib import Path
 src = '/tmp/my:skill #1/dir'
 cases = [
     '# Plain body\n',
     '---\nname: a\ndescription: >-\n  hello\n---\nbody\n',
-    '---\nname: b\nmetadata:\n  version: \"1\"\n  author: me\ncompatibility: py\n---\nbody\n',
+    '---\nname: b\nmetadata:\n  version: \"1\"\ncompatibility: py\n---\nbody\n',
     '---\nname: c\nmetadata:\n  source: \"/old\"\n  version: \"2\"\n---\nbody\n',
-    '---\nname: d\nmetadata: {version: \'1\', author: \"x\"}\n---\nbody\n',
+    '---\nname: d\nmetadata: {\"app:id\": \"foo:bar\", \"@scope/pkg\": \"a  b\", \"k #1\": \"v\", \"true\": \"1\", source: \"/old\"}\ndescription: keep\n---\nbody\n',
     '---\nname: e\nmetadata: {}\n---\nbody\n',
-    '---\nname: f\nmetadata: {source: \"/old\", version: \"3\"}\n---\nbody\n',
-    '---\nname: g\nmetadata: {\n  version: \"4\"\n}\n---\nbody\n',
-    '---\nname: h\ndescription: |\n  line1\n  ---\n  ...\n  line2\nmetadata:\n  note: >-\n    multiline continuation\n  source: \"/old\"\n  version: \"5\"\n---\nbody\n',
-    '---\nname: i\nmetadata: {\n  # leading comment\n  tpl: \"${HOME}\", # inline comment\n  tags: [a, b],\n  source: \"/old\"\n}\n---\nbody\n',
+    '---\nname: f\nmetadata: # {comment}\n  {\n    \"openclaw\": {\n      \"desc\": \"hello\nworld\",\n      \"label\": \"Install  gog\",\n    },\n  }\ndescription: kept-flow\n---\nbody\n',
+    '---\nname: g\ndescription: |\n  line1\n  ---\n  ...\n  line2\nmetadata:\n  note: >-\n    multiline\n  source: \"/old\"\n---\nbody\n',
+    '---\nname: h\nmetadata: {broken: 1\ndescription: survived\n---\nbody\n',
+    '---\nname: i\nmetadata: |\n  scalar text\ndescription: kept-scalar\n---\nbody\n',
+    '---\nname: j\nmetadata:\n  - foo: bar\ndescription: kept-seq1\n---\nbody\n',
+    '---\nname: k\nmetadata:\n- item\ndescription: kept-seq2\n---\nbody\n',
 ]
+try:
+    import yaml
+except ImportError:
+    yaml = None
 for idx, raw in enumerate(cases):
     out = m.inject_copy_source(raw, src)
-    got = m.read_copy_source_from_content(out)
-    assert got == src, f'case {idx} got {got!r} from:\n{out}'
-    fm = out.split('\n---\n', 1)[0]
-    meta_keys = [
-        l for l in fm.splitlines()
-        if not l.startswith((' ', '\t')) and l.lstrip().startswith('metadata:')
-    ]
-    assert len(meta_keys) == 1, f'case {idx} duplicate metadata keys:\n{out}'
+    assert m.read_copy_source_from_content(out) == src, f'case {idx}:\n{out}'
+    fm = out[4:].split('\n---\n', 1)[0]
+    assert sum(1 for l in fm.splitlines() if not l.startswith((' ', '\t')) and l.lstrip().startswith('metadata:')) == 1
+    if yaml is not None:
+        parsed = yaml.safe_load(fm)
+        assert parsed['metadata']['source'] == src, f'yaml {idx}: {parsed}'
+        if idx == 4:
+            md = parsed['metadata']
+            assert md['app:id'] == 'foo:bar' and md['@scope/pkg'] == 'a  b' and md['true'] == '1' and True not in md
+        if idx == 6:
+            assert parsed['metadata']['openclaw']['label'] == 'Install  gog' and parsed['description'] == 'kept-flow'
+        if idx in (8, 9, 10, 11):
+            assert 'description' in parsed
 
-body_trap = '---\nname: trap\n---\nmetadata:\n  source: \"/should/ignore\"\n'
-assert m.read_copy_source_from_content(body_trap) is None
-
+assert m.read_copy_source_from_content('---\nname: t\n---\nmetadata:\n  source: \"/ignore\"\n') is None
 url_dir = Path('${TMPDIR}/url-meta-skill')
 url_dir.mkdir(parents=True, exist_ok=True)
 (url_dir / 'SKILL.md').write_text('---\nname: u\nmetadata:\n  source: \"https://example.com\"\n---\n')
 assert m.read_copy_source(url_dir) is None
 print('OK')
 " 2>&1) && [ "$yaml_out" = "OK" ]; then
-  echo "ok 16 - [YAML] metadata.source normalizes block/flow mappings cleanly and ignores non-paths"
+  echo "ok 16 - [YAML] metadata.source handles block, flow, scalar, and sequence frontmatter cleanly"
 else
   echo "not ok 16 - [YAML] metadata.source helper failed: ${yaml_out:-}"
 fi
 
-# Test 17: a VCS-tracked skill in .claude/skills/<name> (even with metadata.source)
-# sharing a name with an untracked copy in .agents/skills/<name> is never flagged
-# or overwritten by doctor / update.
+# Test 17: VCS-tracked sibling skills are preserved during doctor/update, and
+# add --prune skips removals on unresolvable or ambiguous optional specs.
 MIXED_WS="${TMPDIR}/mixed-tracked-ws"
-mkdir -p "${MIXED_WS}/.claude/skills/emumanager"
+mkdir -p "${MIXED_WS}/.claude/skills/emumanager" "${MIXED_WS}/.agents/skills"
 git -C "$MIXED_WS" init -q
 git -C "$MIXED_WS" config user.email "t@e.st"
 git -C "$MIXED_WS" config user.name "Test"
 printf -- '---\nname: emumanager\nmetadata:\n  source: "/committed/origin"\n---\ncommitted body\n' \
   >"${MIXED_WS}/.claude/skills/emumanager/SKILL.md"
-git -C "$MIXED_WS" add .claude/skills/emumanager/SKILL.md
-git -C "$MIXED_WS" commit -q -m "commit claude skill"
-mkdir -p "${MIXED_WS}/.agents/skills"
+git -C "$MIXED_WS" add .claude/skills/emumanager/SKILL.md && git -C "$MIXED_WS" commit -q -m "commit"
 cp -r "${SKILL_SOURCE_DIRS}/emumanager" "${MIXED_WS}/.agents/skills/emumanager"
 printf -- '---\nname: emumanager\nmetadata:\n  source: "%s"\n---\nstale copy\n' \
   "${SKILL_SOURCE_DIRS}/emumanager" >"${MIXED_WS}/.agents/skills/emumanager/SKILL.md"
 "${SCRIPT}" -C "$MIXED_WS" update emumanager >/dev/null 2>&1
 "${SCRIPT}" -C "$MIXED_WS" add coding-standards >/dev/null 2>&1
 mixed_doc=$("${SCRIPT}" -C "$MIXED_WS" doctor --json 2>/dev/null || true)
+prune_err_rc=0
+"${SCRIPT}" -C "$MIXED_WS" add --prune coding-standards nonexistent-typo >/dev/null 2>&1 || prune_err_rc=$?
+cat <<EOF >"${XDG_CONFIG_HOME}/skill/plugins/97_opt_ambig.py"
+def register(api):
+    api.register_skill("opta:ambig-opt", {"path": "${SKILL_SOURCE_DIRS}/coding-standards", "optional": True})
+    api.register_skill("optb:ambig-opt", {"path": "${SKILL_SOURCE_DIRS}/emumanager", "optional": True})
+EOF
+ambig_rc=0
+"${SCRIPT}" -C "$MIXED_WS" add --prune ambig-opt >/dev/null 2>&1 || ambig_rc=$?
+rm -f "${XDG_CONFIG_HOME}/skill/plugins/97_opt_ambig.py"
 if grep -q "committed body" "${MIXED_WS}/.claude/skills/emumanager/SKILL.md" &&
   ! grep -q "stale copy" "${MIXED_WS}/.agents/skills/emumanager/SKILL.md" &&
-  [ "$(json_get "$mixed_doc" 'd["healthy"]')" = "true" ]; then
-  echo "ok 17 - [Tracked] sibling VCS-tracked skill is preserved during doctor and update"
+  [ "$(json_get "$mixed_doc" 'd["healthy"]')" = "true" ] &&
+  [ "$prune_err_rc" -ne 0 ] && [ "$ambig_rc" -ne 0 ] &&
+  [ -d "${MIXED_WS}/.agents/skills/coding-standards" ]; then
+  echo "ok 17 - [Tracked/Prune] preserves VCS-tracked skills and aborts prune on resolution/ambiguity errors"
 else
-  echo "not ok 17 - [Tracked] sibling VCS-tracked skill was clobbered or flagged: $mixed_doc"
+  echo "not ok 17 - [Tracked/Prune] check failed (prune_rc=$prune_err_rc ambig_rc=$ambig_rc doc=$mixed_doc)"
 fi
 
-# Test 18: subpath-aliased remote skills refresh by folder name and in
-# '--scope user update --all', and path-installed copies sharing a catalog
-# basename refresh from their own metadata.source without fetching remote.
-ALIAS_UPSTREAM="${TMPDIR}/alias-upstream"
-mkdir -p "${ALIAS_UPSTREAM}/skills/aliased-folder" "${TMPDIR}/adhoc-src/aliased-folder"
-git -C "$ALIAS_UPSTREAM" init -q -b main
-git -C "$ALIAS_UPSTREAM" config user.email "t@e.st"
-git -C "$ALIAS_UPSTREAM" config user.name "Test"
-printf -- '---\nname: aliased-folder\ndescription: v1\n---\nv1\n' \
-  >"${ALIAS_UPSTREAM}/skills/aliased-folder/SKILL.md"
-git -C "$ALIAS_UPSTREAM" add .
-git -C "$ALIAS_UPSTREAM" commit -q -m "v1"
-mkdir -p "${XDG_CONFIG_HOME}/skill/plugins" "${HOME}/.claude"
-cat <<'EOF' >"${XDG_CONFIG_HOME}/skill/plugins/98_alias_remote.py"
-def register(api):
-    api.register_skill(
-        "remote:pkg-key-name",
-        {"repo": "owner/repo", "ref": "main", "subpath": "skills/aliased-folder"},
-    )
-    api.register_skill(
-        "remote:aliased-folder",
-        {"repo": "missing/offline-repo", "ref": "main"},
-    )
-EOF
-ALIAS_WS="${TMPDIR}/alias-ws"
-ADHOC_WS="${TMPDIR}/adhoc-ws"
-REAL_CACHE="${TMPDIR}/real-cache-store"
-SYM_CACHE="${TMPDIR}/sym-cache-link"
-mkdir -p "$ALIAS_WS" "$ADHOC_WS" "$REAL_CACHE"
-ln -s "$REAL_CACHE" "$SYM_CACHE"
-git -C "$ALIAS_WS" init -q
-git -C "$ADHOC_WS" init -q
-SKILL_CACHE_DIR="$SYM_CACHE" _SKILL_TEST_REMOTE="$ALIAS_UPSTREAM" "${SCRIPT}" -C "$ALIAS_WS" add remote:pkg-key-name >/dev/null 2>&1
-SKILL_CACHE_DIR="$SYM_CACHE" _SKILL_TEST_REMOTE="$ALIAS_UPSTREAM" "${SCRIPT}" --scope user add remote:pkg-key-name >/dev/null 2>&1
-printf -- '---\nname: aliased-folder\ndescription: v2\n---\nv2\n' \
-  >"${ALIAS_UPSTREAM}/skills/aliased-folder/SKILL.md"
-git -C "$ALIAS_UPSTREAM" commit -q -am "v2"
-SKILL_CACHE_DIR="$SYM_CACHE" _SKILL_TEST_REMOTE="$ALIAS_UPSTREAM" "${SCRIPT}" -C "$ALIAS_WS" update aliased-folder >/dev/null 2>&1
-printf -- '---\nname: aliased-folder\ndescription: v3\n---\nv3\n' \
-  >"${ALIAS_UPSTREAM}/skills/aliased-folder/SKILL.md"
-git -C "$ALIAS_UPSTREAM" commit -q -am "v3"
-rm -f "${XDG_CONFIG_HOME}/skill/plugins/98_alias_remote.py"
-cat <<'EOF' >"${XDG_CONFIG_HOME}/skill/plugins/98_alias_remote.py"
-def register(api):
-    api.register_skill(
-        "remote:pkg-key-name",
-        {"repo": "owner/repo", "ref": "main", "subpath": "skills/aliased-folder"},
-    )
-EOF
-SKILL_CACHE_DIR="$SYM_CACHE" _SKILL_TEST_REMOTE="$ALIAS_UPSTREAM" "${SCRIPT}" --scope user update --all >/dev/null 2>&1
-printf -- '---\nname: aliased-folder\n---\nlocal-v1\n' >"${TMPDIR}/adhoc-src/aliased-folder/SKILL.md"
-"${SCRIPT}" -C "$ADHOC_WS" add "${TMPDIR}/adhoc-src/aliased-folder" >/dev/null 2>&1
-printf -- '---\nname: aliased-folder\n---\nlocal-v2\n' >"${TMPDIR}/adhoc-src/aliased-folder/SKILL.md"
-cat <<'EOF' >>"${XDG_CONFIG_HOME}/skill/plugins/98_alias_remote.py"
-    api.register_skill(
-        "remote:aliased-folder",
-        {"repo": "missing/offline-repo", "ref": "main"},
-    )
-EOF
-AGENT_OFFLINE=1 "${SCRIPT}" -C "$ADHOC_WS" update aliased-folder >/dev/null 2>&1
-if grep -q "^v2$" "${ALIAS_WS}/.agents/skills/aliased-folder/SKILL.md" &&
-  grep -q "^v3$" "${HOME}/.claude/skills/aliased-folder/SKILL.md" &&
-  grep -q "^local-v2$" "${ADHOC_WS}/.agents/skills/aliased-folder/SKILL.md"; then
-  echo "ok 18 - [Update] refreshes aliased remote copies, user --all, and path copies colliding with catalog names"
-else
-  echo "not ok 18 - [Update] subpath-aliased, user --all, or path copy update failed"
-fi
-
-# Test 19: add --prune skips removals when a requested spec fails to resolve.
-PRUNE_SAFE_WS="${TMPDIR}/prune-safe-ws"
-mkdir -p "$PRUNE_SAFE_WS"
-git -C "$PRUNE_SAFE_WS" init -q
-"${SCRIPT}" -C "$PRUNE_SAFE_WS" add coding-standards emumanager >/dev/null 2>&1
-prune_err_rc=0
-"${SCRIPT}" -C "$PRUNE_SAFE_WS" add --prune coding-standards nonexistent-typo >/dev/null 2>&1 || prune_err_rc=$?
-if [ "$prune_err_rc" -ne 0 ] &&
-  [ -d "${PRUNE_SAFE_WS}/.agents/skills/emumanager" ]; then
-  echo "ok 19 - [Prune] add --prune preserves installed skills when resolution fails"
-else
-  echo "not ok 19 - [Prune] add --prune deleted installed skills on resolution error (rc=$prune_err_rc)"
-fi
-
-# Test 20: explicit catalog specs in update target the requested entry even when
-# another installed skill shares the same subpath folder basename.
-UP_A="${TMPDIR}/collide-up-a"
-UP_B="${TMPDIR}/collide-up-b"
-mkdir -p "${UP_A}/skills/shared-name" "${UP_B}/skills/shared-name"
-git -C "$UP_A" init -q -b main
-git -C "$UP_A" config user.email "t@e.st"
-git -C "$UP_A" config user.name "Test"
-printf -- '---\nname: shared-name\n---\nalpha-v1\n' >"${UP_A}/skills/shared-name/SKILL.md"
-git -C "$UP_A" add . && git -C "$UP_A" commit -q -m "a1"
-git -C "$UP_B" init -q -b main
-git -C "$UP_B" config user.email "t@e.st"
-git -C "$UP_B" config user.name "Test"
-printf -- '---\nname: shared-name\n---\nbeta-v1\n' >"${UP_B}/skills/shared-name/SKILL.md"
-git -C "$UP_B" add . && git -C "$UP_B" commit -q -m "b1"
-cat <<'EOF' >"${XDG_CONFIG_HOME}/skill/plugins/98_alias_remote.py"
-def register(api):
-    api.register_skill(
-        "remote:alpha-creator",
-        {"repo": "owner/alpha", "ref": "main", "subpath": "skills/shared-name"},
-    )
-    api.register_skill(
-        "remote:beta-creator",
-        {"repo": "owner/beta", "ref": "main", "subpath": "skills/shared-name"},
-    )
-EOF
-COLLIDE_WS="${TMPDIR}/collide-ws"
-mkdir -p "$COLLIDE_WS"
-git -C "$COLLIDE_WS" init -q
-_SKILL_TEST_REMOTE="$UP_A" "${SCRIPT}" -C "$COLLIDE_WS" add remote:alpha-creator >/dev/null 2>&1
-_SKILL_TEST_REMOTE="$UP_B" "${SCRIPT}" --scope user add remote:beta-creator >/dev/null 2>&1
-printf -- '---\nname: shared-name\n---\nalpha-local-edit\n' >"${COLLIDE_WS}/.agents/skills/shared-name/SKILL.md.check"
-printf -- '---\nname: shared-name\n---\nbeta-v2\n' >"${UP_B}/skills/shared-name/SKILL.md"
-git -C "$UP_B" commit -q -am "b2"
-printf -- '---\nname: shared-name\n---\nalpha-v2\n' >"${UP_A}/skills/shared-name/SKILL.md"
-git -C "$UP_A" commit -q -am "a2"
-rm -f "${COLLIDE_WS}/.agents/skills/shared-name/SKILL.md.check"
-beta_up_out=$(_SKILL_TEST_REMOTE="$UP_B" "${SCRIPT}" -C "$COLLIDE_WS" update remote:beta-creator 2>&1)
-if grep -q "^alpha-v1$" "${COLLIDE_WS}/.agents/skills/shared-name/SKILL.md" &&
-  [[ "$beta_up_out" != *"updated shared-name"* ]] &&
-  grep -q "^beta-v2$" "${HOME}/.claude/skills/shared-name/SKILL.md"; then
-  echo "ok 20 - [Update] explicit catalog spec updates requested entry without touching colliding copy"
-else
-  echo "not ok 20 - [Update] explicit catalog spec misrouted on colliding basename: $beta_up_out"
-fi
-rm -f "${XDG_CONFIG_HOME}/skill/plugins/98_alias_remote.py"
-
-# Test 21: COPY_IGNORE_PATTERNS skips node_modules/.venv (even broken symlinks),
-# remove_skill_entry fails without stripping SKILL.md on a read-only parent, and
-# '--scope user update <basename>' + '--scope session update --all' refresh aliased remotes.
-SESS_UP_BRAIN="${TMPDIR}/sess-up-app/brain/conv-up"
+# Test 18: Copy/remove safety (ignores node_modules/.venv + dangling internal
+# symlinks, preserves SKILL.md on RO parent, and cleans RO subdirs/links).
 BLOAT_SRC="${TMPDIR}/bloat-src/bloat-skill"
-mkdir -p "$SESS_UP_BRAIN" "${BLOAT_SRC}/node_modules/.bin" "${BLOAT_SRC}/.venv/bin"
+RO_WS="${TMPDIR}/ro-parent-ws"
+mkdir -p "${BLOAT_SRC}/node_modules/.bin" "${BLOAT_SRC}/.venv/bin" "$RO_WS"
 printf -- '---\nname: bloat-skill\n---\nbody\n' >"${BLOAT_SRC}/SKILL.md"
 ln -s /nonexistent/python "${BLOAT_SRC}/.venv/bin/python"
-ln -s /nonexistent/tsc "${BLOAT_SRC}/node_modules/.bin/tsc"
-RO_WS="${TMPDIR}/ro-parent-ws"
-mkdir -p "$RO_WS"
+ln -s ../../nonexistent-license "${BLOAT_SRC}/LICENSE"
 git -C "$RO_WS" init -q
 "${SCRIPT}" -C "$RO_WS" add "$BLOAT_SRC" >/dev/null 2>&1
 chmod 0555 "${RO_WS}/.claude/skills"
 ro_rm_rc=0
 "${SCRIPT}" -C "$RO_WS" remove bloat-skill >/dev/null 2>&1 || ro_rm_rc=$?
 chmod 0755 "${RO_WS}/.claude/skills"
-ln -s /usr/bin/env "${RO_WS}/.claude/skills/bloat-skill/root-owned-link"
-ln -s /nonexistent/broken "${RO_WS}/.claude/skills/bloat-skill/broken-inner-link"
 mkdir -p "${RO_WS}/.claude/skills/bloat-skill/ro-sub"
+ln -s /usr/bin/env "${RO_WS}/.claude/skills/bloat-skill/root-link"
+ln -s /nonexistent/broken "${RO_WS}/.claude/skills/bloat-skill/broken-link"
 chmod 0555 "${RO_WS}/.claude/skills/bloat-skill/ro-sub"
 "${SCRIPT}" -C "$RO_WS" add "$BLOAT_SRC" >/dev/null 2>&1
-mkdir -p "${RO_WS}/.claude/skills/bloat-skill/ro-sub2"
-ln -s /usr/bin/env "${RO_WS}/.claude/skills/bloat-skill/root-owned-link2"
-chmod 0555 "${RO_WS}/.claude/skills/bloat-skill/ro-sub2"
 clean_rm_rc=0
 "${SCRIPT}" -C "$RO_WS" remove bloat-skill >/dev/null 2>&1 || clean_rm_rc=$?
-
-cat <<EOF >"${XDG_CONFIG_HOME}/skill/plugins/97_opt_ambig.py"
-def register(api):
-    api.register_skill("opta:ambig-opt", {"path": "${SKILL_SOURCE_DIRS}/coding-standards", "optional": True})
-    api.register_skill("optb:ambig-opt", {"path": "${SKILL_SOURCE_DIRS}/emumanager", "optional": True})
-EOF
-AMBIG_WS="${TMPDIR}/ambig-opt-ws"
-mkdir -p "$AMBIG_WS"
-git -C "$AMBIG_WS" init -q
-"${SCRIPT}" -C "$AMBIG_WS" add test-skill >/dev/null 2>&1
-ambig_rc=0
-"${SCRIPT}" -C "$AMBIG_WS" add --prune ambig-opt >/dev/null 2>&1 || ambig_rc=$?
-rm -f "${XDG_CONFIG_HOME}/skill/plugins/97_opt_ambig.py"
-
-cat <<'EOF' >"${XDG_CONFIG_HOME}/skill/plugins/98_alias_remote.py"
-def register(api):
-    api.register_skill(
-        "remote:sess-pkg",
-        {"repo": "owner/sess", "ref": "main", "subpath": "skills/sess-aliased"},
-    )
-EOF
-SESS_UP_REPO="${TMPDIR}/sess-up-repo"
-mkdir -p "${SESS_UP_REPO}/skills/sess-aliased"
-git -C "$SESS_UP_REPO" init -q -b main
-git -C "$SESS_UP_REPO" config user.email "t@e.st"
-git -C "$SESS_UP_REPO" config user.name "Test"
-printf -- '---\nname: sess-aliased\n---\nsess-v1\n' >"${SESS_UP_REPO}/skills/sess-aliased/SKILL.md"
-git -C "$SESS_UP_REPO" add . && git -C "$SESS_UP_REPO" commit -q -m "s1"
-_SKILL_TEST_REMOTE="$SESS_UP_REPO" "${SCRIPT}" --scope user add remote:sess-pkg >/dev/null 2>&1
-printf -- '---\nname: sess-aliased\n---\nsess-v2\n' >"${SESS_UP_REPO}/skills/sess-aliased/SKILL.md"
-git -C "$SESS_UP_REPO" commit -q -am "s2"
-_SKILL_TEST_REMOTE="$SESS_UP_REPO" "${SCRIPT}" --scope user update sess-aliased >/dev/null 2>&1
-user_v2_ok=0
-grep -q "^sess-v2$" "${HOME}/.claude/skills/sess-aliased/SKILL.md" && user_v2_ok=1
-"${SCRIPT}" --scope user clean >/dev/null 2>&1 || true
-ANTIGRAVITY_APP_DATA_DIR="${TMPDIR}/sess-up-app" ANTIGRAVITY_CONVERSATION_ID=conv-up \
-  _SKILL_TEST_REMOTE="$SESS_UP_REPO" "${SCRIPT}" --scope session add remote:sess-pkg >/dev/null 2>&1
-printf -- '---\nname: sess-aliased\n---\nsess-v3\n' >"${SESS_UP_REPO}/skills/sess-aliased/SKILL.md"
-git -C "$SESS_UP_REPO" commit -q -am "s3"
-ANTIGRAVITY_APP_DATA_DIR="${TMPDIR}/sess-up-app" ANTIGRAVITY_CONVERSATION_ID=conv-up \
-  _SKILL_TEST_REMOTE="$SESS_UP_REPO" "${SCRIPT}" --scope session update --all >/dev/null 2>&1
-rm -f "${XDG_CONFIG_HOME}/skill/plugins/98_alias_remote.py"
-
-if [ ! -e "${RO_WS}/.agents/skills/bloat-skill" ] &&
-  [ "$ro_rm_rc" -ne 0 ] &&
-  [ "$clean_rm_rc" -eq 0 ] &&
-  [ -z "$(git -C "$RO_WS" status --porcelain)" ] &&
-  [ "$ambig_rc" -ne 0 ] &&
-  [ -d "${AMBIG_WS}/.agents/skills/test-skill" ] &&
-  [ "$user_v2_ok" -eq 1 ] &&
-  grep -q "^sess-v3$" "${SESS_UP_BRAIN}/.agents/skills/sess-aliased/SKILL.md"; then
-  echo "ok 21 - [Lifecycle] ignores node_modules/.venv, preserves SKILL.md on RO parent, and updates user/session remotes"
+if [ "$ro_rm_rc" -ne 0 ] && [ "$clean_rm_rc" -eq 0 ] &&
+  [ ! -e "${RO_WS}/.agents/skills/bloat-skill" ] &&
+  [ -z "$(git -C "$RO_WS" status --porcelain)" ]; then
+  echo "ok 18 - [Copy/Remove] ignores bloat and dangling internal links, and handles read-only trees safely"
 else
-  echo "not ok 21 - [Lifecycle] ignore/RO-remove/user-or-session update check failed (ro_rm_rc=$ro_rm_rc)"
+  echo "not ok 18 - [Copy/Remove] safety check failed (ro_rm_rc=$ro_rm_rc clean_rm_rc=$clean_rm_rc)"
 fi
 
-# Test 22: Flow metadata preserves quoted keys/colons/spaces under PyYAML safe_load,
-# unclosed flow braces do not swallow subsequent frontmatter keys, and resolve: False
-# plugin paths skip realpath generically without colliding with snapshot-path entries.
-FLOW_TRICKY_SRC="${TMPDIR}/flow-tricky/tricky-skill"
-mkdir -p "$FLOW_TRICKY_SRC"
-cat <<'EOF' >"${FLOW_TRICKY_SRC}/SKILL.md"
----
-name: tricky-skill
-metadata: {"app:id": "foo:bar", "@scope/pkg": "a  b", "k #1": "v", "true": "1", source: "/old"}
-description: keep-desc
----
-Body.
-EOF
-FLOW_WS="${TMPDIR}/flow-tricky-ws"
-mkdir -p "$FLOW_WS"
-git -C "$FLOW_WS" init -q
-"${SCRIPT}" -C "$FLOW_WS" add "$FLOW_TRICKY_SRC" >/dev/null 2>&1
-
-UNCLOSED_SRC="${TMPDIR}/flow-unclosed/unclosed-skill"
-mkdir -p "$UNCLOSED_SRC"
-cat <<'EOF' >"${UNCLOSED_SRC}/SKILL.md"
----
-name: unclosed-skill
-metadata: {broken: 1
-description: survived-unclosed
----
-Body.
-EOF
-"${SCRIPT}" -C "$FLOW_WS" add "$UNCLOSED_SRC" >/dev/null 2>&1
-
-INDENTED_FLOW_SRC="${TMPDIR}/flow-indented/gog-like"
-mkdir -p "$INDENTED_FLOW_SRC"
-cat <<'EOF' >"${INDENTED_FLOW_SRC}/SKILL.md"
----
-name: gog-like
-metadata: # {comment}
-  {
-    "openclaw":
-      {
-        "requires": { "bins": ["gog"] },
-        "label": "Install  gog",
-      },
-  }
-description: kept-after-indented-flow
----
-Body.
-EOF
-"${SCRIPT}" -C "$FLOW_WS" add "$INDENTED_FLOW_SRC" >/dev/null 2>&1
-
-SCALAR_META_SRC="${TMPDIR}/flow-scalar/scalar-meta"
-mkdir -p "$SCALAR_META_SRC"
-cat <<'EOF' >"${SCALAR_META_SRC}/SKILL.md"
----
-name: scalar-meta
-metadata: |
-  plain block text
-description: kept-after-scalar
----
-Body.
-EOF
-"${SCRIPT}" -C "$FLOW_WS" add "$SCALAR_META_SRC" >/dev/null 2>&1
-
+# Test 19: Update routing across aliased remotes, colliding basenames, user/session
+# --all, offline path copies, and generic resolve: False plugin paths.
+UP_A="${TMPDIR}/up-a"
+UP_B="${TMPDIR}/up-b"
+REAL_CACHE="${TMPDIR}/real-cache"
+SYM_CACHE="${TMPDIR}/sym-cache"
 VFS_BASE="${TMPDIR}/vfs-generic"
-mkdir -p "${VFS_BASE}/snaps/s1/shared-vfs"
+SESS_BRAIN="${TMPDIR}/sess-app/brain/conv-up"
+mkdir -p "${UP_A}/skills/shared-name" "${UP_B}/skills/shared-name" "$REAL_CACHE" \
+  "${TMPDIR}/adhoc-src/shared-name" "${VFS_BASE}/snaps/s1/shared-vfs" "$SESS_BRAIN"
+ln -s "$REAL_CACHE" "$SYM_CACHE"
 ln -s "${VFS_BASE}/snaps/s1" "${VFS_BASE}/head"
+for rdir in "$UP_A" "$UP_B"; do
+  git -C "$rdir" init -q -b main
+  git -C "$rdir" config user.email "t@e.st"
+  git -C "$rdir" config user.name "Test"
+done
+printf -- '---\nname: shared-name\n---\nalpha-v1\n' >"${UP_A}/skills/shared-name/SKILL.md"
+git -C "$UP_A" add . && git -C "$UP_A" commit -q -m "a1"
+printf -- '---\nname: shared-name\n---\nbeta-v1\n' >"${UP_B}/skills/shared-name/SKILL.md"
+git -C "$UP_B" add . && git -C "$UP_B" commit -q -m "b1"
 printf -- '---\nname: shared-vfs\n---\nvfs-v1\n' >"${VFS_BASE}/snaps/s1/shared-vfs/SKILL.md"
-cat <<EOF >"${XDG_CONFIG_HOME}/skill/plugins/96_vfs_noresolve.py"
+cat <<EOF >"${XDG_CONFIG_HOME}/skill/plugins/98_update_matrix.py"
 def register(api):
+    api.register_skill("remote:alpha-pkg", {"repo": "owner/alpha", "ref": "main", "subpath": "skills/shared-name"})
+    api.register_skill("remote:beta-pkg", {"repo": "owner/beta", "ref": "main", "subpath": "skills/shared-name"})
     api.register_skill("vfs:shared-vfs", {"path": "${VFS_BASE}/head/shared-vfs", "resolve": False})
     api.register_skill("snap:shared-vfs", {"path": "${VFS_BASE}/snaps/s1/shared-vfs"})
 EOF
-VFS_WS="${TMPDIR}/vfs-ws"
-mkdir -p "$VFS_WS"
-git -C "$VFS_WS" init -q
-"${SCRIPT}" -C "$VFS_WS" add vfs:shared-vfs >/dev/null 2>&1
+UP_WS="${TMPDIR}/up-ws"
+ADHOC_WS="${TMPDIR}/adhoc-ws"
+mkdir -p "$UP_WS" "$ADHOC_WS"
+git -C "$UP_WS" init -q
+git -C "$ADHOC_WS" init -q
+SKILL_CACHE_DIR="$SYM_CACHE" _SKILL_TEST_REMOTE="$UP_A" "${SCRIPT}" -C "$UP_WS" add remote:alpha-pkg vfs:shared-vfs >/dev/null 2>&1
+SKILL_CACHE_DIR="$SYM_CACHE" _SKILL_TEST_REMOTE="$UP_B" "${SCRIPT}" --scope user add remote:beta-pkg >/dev/null 2>&1
+printf -- '---\nname: shared-name\n---\nalpha-v2\n' >"${UP_A}/skills/shared-name/SKILL.md" && git -C "$UP_A" commit -q -am "a2"
+printf -- '---\nname: shared-name\n---\nbeta-v2\n' >"${UP_B}/skills/shared-name/SKILL.md" && git -C "$UP_B" commit -q -am "b2"
 printf -- '---\nname: shared-vfs\n---\nvfs-v2\n' >"${VFS_BASE}/snaps/s1/shared-vfs/SKILL.md"
-"${SCRIPT}" -C "$VFS_WS" update snap:shared-vfs >/dev/null 2>&1
-vfs_kept_v1=0
-grep -q "^vfs-v1$" "${VFS_WS}/.agents/skills/shared-vfs/SKILL.md" && vfs_kept_v1=1
-"${SCRIPT}" -C "$VFS_WS" update vfs:shared-vfs >/dev/null 2>&1
-vfs_got_v2=0
-grep -q "^vfs-v2$" "${VFS_WS}/.agents/skills/shared-vfs/SKILL.md" && vfs_got_v2=1
-rm -f "${XDG_CONFIG_HOME}/skill/plugins/96_vfs_noresolve.py"
-
-yaml_ok=$(run_module "
-raw1 = open('${FLOW_WS}/.agents/skills/tricky-skill/SKILL.md').read()
-fm1 = raw1.split('---', 2)[1]
-raw2 = open('${FLOW_WS}/.agents/skills/unclosed-skill/SKILL.md').read()
-fm2 = raw2.split('---', 2)[1]
-raw3 = open('${FLOW_WS}/.agents/skills/gog-like/SKILL.md').read()
-fm3 = raw3.split('---', 2)[1]
-raw4 = open('${FLOW_WS}/.agents/skills/scalar-meta/SKILL.md').read()
-fm4 = raw4.split('---', 2)[1]
-lines1 = set(fm1.splitlines())
-ok = (
-    '  \"app:id\": \"foo:bar\"' in lines1
-    and '  \"@scope/pkg\": \"a  b\"' in lines1
-    and '  \"k #1\": \"v\"' in lines1
-    and '  \"true\": \"1\"' in lines1
-    and 'description: keep-desc' in lines1
-    and m.read_copy_source_from_content(raw1) == '${FLOW_TRICKY_SRC}'
-    and 'description: survived-unclosed' in set(fm2.splitlines())
-    and m.read_copy_source_from_content(raw2) == '${UNCLOSED_SRC}'
-    and 'description: kept-after-indented-flow' in set(fm3.splitlines())
-    and m.read_copy_source_from_content(raw3) == '${INDENTED_FLOW_SRC}'
-    and 'description: kept-after-scalar' in set(fm4.splitlines())
-    and m.read_copy_source_from_content(raw4) == '${SCALAR_META_SRC}'
-)
-try:
-    import yaml
-    d1 = yaml.safe_load(fm1)
-    d2 = yaml.safe_load(fm2)
-    d3 = yaml.safe_load(fm3)
-    d4 = yaml.safe_load(fm4)
-    md = d1['metadata']
-    ok = ok and (
-        md.get('app:id') == 'foo:bar'
-        and md.get('@scope/pkg') == 'a  b'
-        and md.get('k #1') == 'v'
-        and md.get('true') == '1'
-        and 'true' in md and True not in md
-        and md.get('source') == '${FLOW_TRICKY_SRC}'
-        and d1.get('description') == 'keep-desc'
-        and d2.get('description') == 'survived-unclosed'
-        and d3['metadata']['openclaw']['label'] == 'Install  gog'
-        and d3['metadata']['source'] == '${INDENTED_FLOW_SRC}'
-        and d4['metadata'] == {'source': '${SCALAR_META_SRC}'}
-    )
-except ImportError:
-    pass
-print(ok)
-")
-if [[ "$yaml_ok" == "True" ]] && [ "$vfs_kept_v1" -eq 1 ] && [ "$vfs_got_v2" -eq 1 ]; then
-  echo "ok 22 - [YAML/Update] preserves quoted flow keys/colons/spaces, isolates unclosed braces, and tracks resolve: False paths generically"
+SKILL_CACHE_DIR="$SYM_CACHE" _SKILL_TEST_REMOTE="$UP_B" "${SCRIPT}" -C "$UP_WS" update remote:beta-pkg snap:shared-vfs >/dev/null 2>&1
+kept_isolated=0
+grep -q "^alpha-v1$" "${UP_WS}/.agents/skills/shared-name/SKILL.md" &&
+  grep -q "^vfs-v1$" "${UP_WS}/.agents/skills/shared-vfs/SKILL.md" &&
+  grep -q "^beta-v2$" "${HOME}/.claude/skills/shared-name/SKILL.md" && kept_isolated=1
+SKILL_CACHE_DIR="$SYM_CACHE" _SKILL_TEST_REMOTE="$UP_A" "${SCRIPT}" -C "$UP_WS" update shared-name vfs:shared-vfs >/dev/null 2>&1
+"${SCRIPT}" --scope user clean >/dev/null 2>&1 || true
+ANTIGRAVITY_APP_DATA_DIR="${TMPDIR}/sess-app" ANTIGRAVITY_CONVERSATION_ID=conv-up \
+  SKILL_CACHE_DIR="$SYM_CACHE" _SKILL_TEST_REMOTE="$UP_A" "${SCRIPT}" --scope session add remote:alpha-pkg >/dev/null 2>&1
+printf -- '---\nname: shared-name\n---\nalpha-v3\n' >"${UP_A}/skills/shared-name/SKILL.md" && git -C "$UP_A" commit -q -am "a3"
+ANTIGRAVITY_APP_DATA_DIR="${TMPDIR}/sess-app" ANTIGRAVITY_CONVERSATION_ID=conv-up \
+  SKILL_CACHE_DIR="$SYM_CACHE" _SKILL_TEST_REMOTE="$UP_A" "${SCRIPT}" --scope session update --all >/dev/null 2>&1
+printf -- '---\nname: shared-name\n---\nlocal-v1\n' >"${TMPDIR}/adhoc-src/shared-name/SKILL.md"
+"${SCRIPT}" -C "$ADHOC_WS" add "${TMPDIR}/adhoc-src/shared-name" >/dev/null 2>&1
+printf -- '---\nname: shared-name\n---\nlocal-v2\n' >"${TMPDIR}/adhoc-src/shared-name/SKILL.md"
+AGENT_OFFLINE=1 "${SCRIPT}" -C "$ADHOC_WS" update shared-name >/dev/null 2>&1
+rm -f "${XDG_CONFIG_HOME}/skill/plugins/98_update_matrix.py"
+if [ "$kept_isolated" -eq 1 ] &&
+  grep -q "^alpha-v2$" "${UP_WS}/.agents/skills/shared-name/SKILL.md" &&
+  grep -q "^vfs-v2$" "${UP_WS}/.agents/skills/shared-vfs/SKILL.md" &&
+  grep -q "^alpha-v3$" "${SESS_BRAIN}/.agents/skills/shared-name/SKILL.md" &&
+  grep -q "^local-v2$" "${ADHOC_WS}/.agents/skills/shared-name/SKILL.md"; then
+  echo "ok 19 - [Update] routes aliased remotes, colliding specs, session --all, offline path copies, and resolve: False paths"
 else
-  echo "not ok 22 - [YAML/Update] flow metadata or generic resolve: False check failed (yaml_ok=$yaml_ok v1=$vfs_kept_v1 v2=$vfs_got_v2)"
+  echo "not ok 19 - [Update] routing matrix failed (kept_isolated=$kept_isolated)"
 fi

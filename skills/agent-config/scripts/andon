@@ -291,8 +291,29 @@ def new_id() -> str:
     return f"ANDON-{stamp}-{secrets.token_hex(2)}"
 
 
+_META_KEY_RE = re.compile(r"""^(?:metadata|"metadata"|'metadata')\s*:(.*)$""")
+_FLOW_SRC_RE = re.compile(
+    r"""^\s*(?:#[^\n]*\n\s*)*\{\s*(?:source|"source"|'source')\s*:\s*"""
+    r"""("(?:\\.|[^"\\])*"|'(?:''|[^'])*'|[^,}\s#]+)"""
+)
+_BLOCK_SRC_RE = re.compile(r"""^(?:source|"source"|'source')\s*:\s*(.*)$""")
+
+
+def _unquote_scalar(raw: str) -> str:
+    val = raw.strip()
+    if len(val) >= 2 and val[0] == '"' and val[-1] == '"':
+        with contextlib.suppress(json.JSONDecodeError):
+            parsed = json.loads(val)
+            if isinstance(parsed, str):
+                return parsed
+        return val[1:-1]
+    if len(val) >= 2 and val[0] == "'" and val[-1] == "'":
+        return val[1:-1].replace("''", "'")
+    return val.split(" #", 1)[0].strip()
+
+
 def _extract_skill_copy_source(content: str) -> str | None:
-    """Reads block metadata.source from a skill copy stamped by 'skill'."""
+    """Reads block or flow metadata.source from a skill copy stamped by 'skill'."""
     lines = content.splitlines()
     if not lines or lines[0].strip() != "---":
         return None
@@ -309,17 +330,12 @@ def _extract_skill_copy_source(content: str) -> str | None:
         return None
     fm = lines[1:end]
     for idx, line in enumerate(fm):
-        s = line.strip()
-        if (
-            not s
-            or s.startswith("#")
-            or line.startswith((" ", "\t"))
-            or ":" not in line
-        ):
+        if line.startswith((" ", "\t")) or not (m := _META_KEY_RE.match(line)):
             continue
-        if line.split(":", 1)[0].strip().strip("'\"") != "metadata":
-            continue
-        child_indent: str | None = None
+        if fm_match := _FLOW_SRC_RE.match("\n".join([m.group(1), *fm[idx + 1 :]])):
+            val = _unquote_scalar(fm_match.group(1))
+            return val if val.startswith(("/", "~/")) else None
+        c_ind: str | None = None
         for b_line in fm[idx + 1 :]:
             bs = b_line.strip()
             if not bs or bs.startswith("#"):
@@ -327,25 +343,11 @@ def _extract_skill_copy_source(content: str) -> str | None:
             if not b_line.startswith((" ", "\t")):
                 break
             ind = b_line[: len(b_line) - len(b_line.lstrip(" \t"))]
-            if child_indent is None:
-                child_indent = ind
-            if ind == child_indent and ":" in bs:
-                ck, cv = bs.split(":", 1)
-                if ck.strip().strip("'\"") == "source":
-                    raw = cv.strip()
-                    if len(raw) >= 2 and raw[0] == '"' and raw[-1] == '"':
-                        with contextlib.suppress(json.JSONDecodeError):
-                            val = json.loads(raw)
-                            if isinstance(val, str) and val.startswith(("/", "~/")):
-                                return val
-                    elif len(raw) >= 2 and raw[0] == "'" and raw[-1] == "'":
-                        val = raw[1:-1].replace("''", "'")
-                        if val.startswith(("/", "~/")):
-                            return val
-                    else:
-                        val = raw.split(" #", 1)[0].strip()
-                        if val.startswith(("/", "~/")):
-                            return val
+            c_ind = ind if c_ind is None else c_ind
+            if ind == c_ind and (bm := _BLOCK_SRC_RE.match(bs)):
+                val = _unquote_scalar(bm.group(1))
+                if val.startswith(("/", "~/")):
+                    return val
         break
     return None
 
@@ -369,10 +371,7 @@ def _resolve_copied_skill_path(real_path_str: str) -> str:
                 src_dir = Path(copy_src).expanduser()
                 src_base = (
                     os.path.realpath(src_dir)
-                    if (
-                        src_dir.exists()
-                        or (src_dir.parent != Path(".") and src_dir.parent.exists())
-                    )
+                    if src_dir.exists() or src_dir.parent.exists()
                     else os.path.normpath(src_dir)
                 )
                 rel = real_p.relative_to(anc)
@@ -398,8 +397,9 @@ def normalize_source(source: str) -> str:
         source = source[2:]
     if "/" in source or source.startswith("~"):
         expanded = Path(source).expanduser()
-        if expanded.exists() or (
-            expanded.parent != Path(".") and expanded.parent.exists()
+        home_p = Path.home()
+        if expanded.exists() or any(
+            p.exists() for p in expanded.parents[:6] if p not in (Path("/"), home_p)
         ):
             source = _resolve_copied_skill_path(os.path.realpath(expanded))
         elif source.startswith("~"):

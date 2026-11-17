@@ -151,6 +151,14 @@ COPY_IGNORE_PATTERNS = (
 )
 
 
+_META_KEY_RE = re.compile(r"""^(?:metadata|"metadata"|'metadata')\s*:(.*)$""")
+_FLOW_SRC_RE = re.compile(
+    r"""^\s*(?:#[^\n]*\n\s*)*\{\s*(?:source|"source"|'source')\s*:\s*"""
+    r"""("(?:\\.|[^"\\])*"|'(?:''|[^'])*'|[^,}\s#]+)"""
+)
+_BLOCK_SRC_RE = re.compile(r"""^(?:source|"source"|'source')\s*:\s*(.*)$""")
+
+
 def _unquote_scalar(raw: str) -> str:
     val = raw.strip()
     if len(val) >= 2 and val[0] == '"' and val[-1] == '"':
@@ -166,55 +174,6 @@ def _unquote_scalar(raw: str) -> str:
         if ch == "#" and (i == 0 or val[i - 1] in (" ", "\t")):
             return val[:i].rstrip()
     return val
-
-
-_SAFE_PLAIN_YAML_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*$")
-_YAML_RESERVED_SCALARS = frozenset(
-    {"true", "false", "null", "yes", "no", "on", "off", "~"}
-)
-
-
-def _split_yaml_kv(s: str) -> tuple[str, str] | None:
-    """Split a YAML key/value entry on its first top-level unquoted colon."""
-    in_s = False
-    in_d = False
-    depth = 0
-    saw_quote = s.lstrip().startswith(("'", '"'))
-    i = 0
-    while i < len(s):
-        ch = s[i]
-        if in_s:
-            if ch == "'" and i + 1 < len(s) and s[i + 1] == "'":
-                i += 2
-                continue
-            if ch == "'":
-                in_s = False
-            i += 1
-            continue
-        if in_d:
-            if ch == "\\" and i + 1 < len(s):
-                i += 2
-                continue
-            if ch == '"':
-                in_d = False
-            i += 1
-            continue
-        if ch == "'":
-            in_s = True
-        elif ch == '"':
-            in_d = True
-        elif ch in ("{", "["):
-            depth += 1
-        elif ch in ("}", "]"):
-            depth = max(0, depth - 1)
-        elif (
-            ch == ":"
-            and depth == 0
-            and (saw_quote or i + 1 == len(s) or s[i + 1] in (" ", "\t", "\r", "\n"))
-        ):
-            return s[:i], s[i + 1 :]
-        i += 1
-    return None
 
 
 def read_copy_source_from_content(content: str) -> str | None:
@@ -235,17 +194,10 @@ def read_copy_source_from_content(content: str) -> str | None:
         return None
     fm = lines[1:end]
     for i, line in enumerate(fm):
-        s = line.strip()
-        if (
-            not s
-            or s.startswith("#")
-            or line.startswith((" ", "\t"))
-            or ":" not in line
-        ):
+        if line.startswith((" ", "\t")) or not (m := _META_KEY_RE.match(line)):
             continue
-        top_kv = _split_yaml_kv(line)
-        if not top_kv or _unquote_scalar(top_kv[0]) != "metadata":
-            continue
+        if fm_match := _FLOW_SRC_RE.match("\n".join([m.group(1), *fm[i + 1 :]])):
+            return _unquote_scalar(fm_match.group(1)) or None
         child_indent: str | None = None
         for b in fm[i + 1 :]:
             bs = b.strip()
@@ -254,149 +206,95 @@ def read_copy_source_from_content(content: str) -> str | None:
             if not b.startswith((" ", "\t")):
                 break
             ind = b[: len(b) - len(b.lstrip(" \t"))]
-            if child_indent is None:
-                child_indent = ind
-            if ind == child_indent and (kv := _split_yaml_kv(bs)) is not None:
-                ck, cv = kv
-                if _unquote_scalar(ck) == "source":
-                    res = _unquote_scalar(cv)
-                    if res and res not in (">", "|", ">-", "|-", ">+", "|+"):
-                        return res
+            child_indent = ind if child_indent is None else child_indent
+            if ind == child_indent and (bm := _BLOCK_SRC_RE.match(bs)):
+                res = _unquote_scalar(bm.group(1))
+                if res and res not in (">", "|", ">-", "|-", ">+", "|+"):
+                    return res
         return None
     return None
 
 
-def _parse_flow_metadata(fm: list[str], meta_idx: int) -> tuple[int, list[str]] | None:
-    """Scan a YAML flow map starting at fm[meta_idx] into indented '  key: val' lines."""
-    top_kv = _split_yaml_kv(fm[meta_idx])
-    if top_kv is None:
+def _stamp_flow_metadata(
+    fm: list[str], meta_idx: int, src_json: str
+) -> tuple[int, list[str]] | None:
+    """Splice "source": src_json at the front of a flow map, keeping existing items verbatim."""
+    m = _META_KEY_RE.match(fm[meta_idx])
+    text = "\n".join([m.group(1) if m else "", *fm[meta_idx + 1 :]])
+    i = 0
+    while i < len(text) and (text[i] in " \t\r\n" or text[i] == "#"):
+        nl = text.find("\n", i)
+        i = (len(text) if nl == -1 else nl + 1) if text[i] == "#" else i + 1
+    if i >= len(text) or text[i] != "{":
         return None
-    text = "\n".join([top_kv[1], *fm[meta_idx + 1 :]])
-    start = 0
-    while start < len(text):
-        if text[start] in (" ", "\t", "\r", "\n"):
-            start += 1
-        elif text[start] == "#":
-            nl = text.find("\n", start)
-            start = len(text) if nl == -1 else nl + 1
-        else:
-            break
-    if start >= len(text) or text[start] != "{":
-        return None
-    in_s = False
-    in_d = False
+    in_s = in_d = False
     depth = 0
-    closed = False
     items: list[str] = []
     cur: list[str] = []
-    end_pos = len(text)
-    i = start
     while i < len(text):
         ch = text[i]
-        if in_s:
+        if in_s or in_d:
             cur.append(ch)
-            if ch == "'" and i + 1 < len(text) and text[i + 1] == "'":
+            if in_s and ch == "'" and i + 1 < len(text) and text[i + 1] == "'":
                 cur.append("'")
                 i += 2
                 continue
-            if ch == "'":
-                in_s = False
-            i += 1
-            continue
-        if in_d:
-            cur.append(ch)
-            if ch == "\\" and i + 1 < len(text):
+            if in_d and ch == "\\" and i + 1 < len(text):
                 cur.append(text[i + 1])
                 i += 2
                 continue
-            if ch == '"':
-                in_d = False
-            i += 1
-            continue
-        if ch == "#" and (i == 0 or text[i - 1] in (" ", "\t", "\n", "{", ",")):
+            if (in_s and ch == "'") or (in_d and ch == '"'):
+                in_s = in_d = False
+        elif ch == "#" and (i == 0 or text[i - 1] in " \t\n{,"):
             nl = text.find("\n", i)
             i = len(text) if nl == -1 else nl + 1
             continue
-        if ch == "'":
-            in_s = True
+        elif ch in ("'", '"'):
+            in_s, in_d = (ch == "'"), (ch == '"')
             cur.append(ch)
-        elif ch == '"':
-            in_d = True
-            cur.append(ch)
-        elif ch in ("{", "["):
+        elif ch in "{[":
             depth += 1
             if not (ch == "{" and depth == 1):
                 cur.append(ch)
-        elif ch in ("}", "]"):
+        elif ch in "}]":
             if ch == "}" and depth == 1:
                 items.append("".join(cur))
-                end_pos = i + 1
-                closed = True
-                break
+                kept = [
+                    re.sub(r"\r?\n", "\n  ", s)
+                    for raw in items
+                    if (s := raw.strip()) and not _BLOCK_SRC_RE.match(s)
+                ]
+                inner = ", ".join([f'"source": {src_json}', *kept])
+                return meta_idx + 1 + text[: i + 1].count("\n"), (
+                    f"metadata: {{{inner}}}".splitlines()
+                )
             depth = max(1, depth - 1)
             cur.append(ch)
         elif ch == "," and depth == 1:
             items.append("".join(cur))
             cur.clear()
-        elif ch in ("\r", "\n"):
-            cur.append(" ")
         else:
             cur.append(ch)
         i += 1
-    if not closed:
-        return None
-    consumed_newlines = text[:end_pos].count("\n")
-    kept: list[str] = []
-    for raw_item in items:
-        s = raw_item.strip()
-        if not s or (kv := _split_yaml_kv(s)) is None:
-            continue
-        ks = kv[0].strip()
-        vs = kv[1].strip()
-        uk = _unquote_scalar(ks)
-        if not uk or uk == "source":
-            continue
-        k_out = (
-            uk
-            if not ks.startswith(("'", '"'))
-            and _SAFE_PLAIN_YAML_KEY.match(uk)
-            and uk.lower() not in _YAML_RESERVED_SCALARS
-            else json.dumps(uk, ensure_ascii=False)
-        )
-        if not vs:
-            kept.append(f"  {k_out}:")
-            continue
-        if (vs.startswith('"') and vs.endswith('"')) or (
-            vs.startswith("'") and vs.endswith("'")
-        ):
-            v_out = (
-                json.dumps(
-                    re.sub(r"[ \t]*\r?\n[ \t]*", " ", _unquote_scalar(vs)),
-                    ensure_ascii=False,
-                )
-                if ("\n" in vs or "\r" in vs)
-                else vs
-            )
-        elif vs.startswith(("{", "[")):
-            v_out = vs
-        else:
-            v_out = " ".join(vs.split())
-        kept.append(f"  {k_out}: {v_out}")
-    return meta_idx + 1 + consumed_newlines, kept
+    return None
 
 
 def inject_copy_source(content: str, source: str) -> str:
-    """Stamp metadata.source into SKILL.md frontmatter in canonical block form."""
+    """Stamp metadata.source into SKILL.md frontmatter."""
     src_json = json.dumps(source, ensure_ascii=False)
     eol = "\r\n" if content.startswith("---\r\n") else "\n"
     raw_lines = content.splitlines(keepends=True)
     end = None
     if raw_lines and raw_lines[0].rstrip("\r\n").strip() == "---":
-        for i in range(1, len(raw_lines)):
-            ln = raw_lines[i].rstrip("\r\n")
-            if not ln.startswith((" ", "\t")) and ln.strip() in ("---", "..."):
-                end = i
-                break
+        end = next(
+            (
+                i
+                for i in range(1, len(raw_lines))
+                if not raw_lines[i].startswith((" ", "\t"))
+                and raw_lines[i].rstrip("\r\n").strip() in ("---", "...")
+            ),
+            None,
+        )
     if end is None:
         body = content.lstrip("\r\n") if not content.strip() else content
         return f"---\nmetadata:\n  source: {src_json}\n---\n" + body
@@ -404,90 +302,70 @@ def inject_copy_source(content: str, source: str) -> str:
     fm = [ln.rstrip("\r\n") for ln in raw_lines[1:end]]
     fence = raw_lines[end].rstrip("\r\n").strip()
     rest = "".join(raw_lines[end + 1 :])
-
     meta_idx = next(
         (
             i
             for i, ln in enumerate(fm)
-            if ln.strip()
-            and not ln.strip().startswith("#")
-            and not ln.startswith((" ", "\t"))
-            and (kv := _split_yaml_kv(ln)) is not None
-            and _unquote_scalar(kv[0]) == "metadata"
+            if not ln.startswith((" ", "\t")) and _META_KEY_RE.match(ln)
         ),
         None,
     )
     if meta_idx is None:
         fm.extend(["metadata:", f"  source: {src_json}"])
     else:
-        v_part = (_split_yaml_kv(fm[meta_idx]) or ("", ""))[1].strip()
-        v_clean = "" if v_part.startswith("#") else _unquote_scalar(v_part)
-        v_raw_nc = v_part
-        for ci, cch in enumerate(v_part):
-            if cch == "#" and (ci == 0 or v_part[ci - 1] in (" ", "\t")):
-                v_raw_nc = v_part[:ci].rstrip()
-                break
+        v_part = (_META_KEY_RE.match(fm[meta_idx]).group(1) or "").strip()  # type: ignore[union-attr]
+        v_nc = _unquote_scalar(v_part) if not v_part.startswith("#") else ""
+        v_raw = re.sub(r"(?:^|[ \t])#.*$", "", v_part).strip()
         block_end = meta_idx + 1
         while block_end < len(fm) and (
-            not fm[block_end].strip()
-            or fm[block_end].strip().startswith("#")
-            or fm[block_end].startswith((" ", "\t"))
+            not (bs_end := fm[block_end].strip())
+            or bs_end.startswith("#")
+            or fm[block_end].startswith((" ", "\t", "- "))
+            or bs_end == "-"
         ):
             block_end += 1
         while block_end > meta_idx + 1 and not fm[block_end - 1].strip():
             block_end -= 1
-        first_child_s = next(
+        first_s = next(
             (
-                ln.strip()
+                s
                 for ln in fm[meta_idx + 1 : block_end]
-                if ln.strip() and not ln.strip().startswith("#")
+                if (s := ln.strip()) and not s.startswith("#")
             ),
             "",
         )
-        if v_raw_nc.startswith("{") or (not v_raw_nc and first_child_s.startswith("{")):
-            parsed = _parse_flow_metadata(fm, meta_idx)
-            if parsed is not None:
-                flow_end, kept = parsed
-                fm[meta_idx : max(flow_end, block_end)] = [
-                    "metadata:",
-                    *kept,
-                    f"  source: {src_json}",
-                ]
-            else:
-                fm[meta_idx:block_end] = ["metadata:", f"  source: {src_json}"]
-        elif v_clean or (first_child_s and _split_yaml_kv(first_child_s) is None):
+        if v_raw.startswith("{") or (not v_raw and first_s.startswith("{")):
+            stamped = _stamp_flow_metadata(fm, meta_idx, src_json)
+            fm[meta_idx : max(stamped[0], block_end) if stamped else block_end] = (
+                stamped[1] if stamped else ["metadata:", f"  source: {src_json}"]
+            )
+        elif v_nc or (first_s and (first_s.startswith("-") or ":" not in first_s)):
             fm[meta_idx:block_end] = ["metadata:", f"  source: {src_json}"]
         else:
-            kept_block: list[str] = []
-            child_indent: str | None = None
+            kept_b: list[str] = []
+            c_ind: str | None = None
             b_i = meta_idx + 1
             while b_i < block_end:
                 bl = fm[b_i]
                 bs = bl.strip()
                 if bs and not bs.startswith("#"):
                     ind = bl[: len(bl) - len(bl.lstrip(" \t"))]
-                    if child_indent is None:
-                        child_indent = ind
-                    if (
-                        ind == child_indent
-                        and (b_kv := _split_yaml_kv(bs)) is not None
-                        and _unquote_scalar(b_kv[0]) == "source"
-                    ):
+                    c_ind = ind if c_ind is None else c_ind
+                    if ind == c_ind and _BLOCK_SRC_RE.match(bs):
                         b_i += 1
                         while b_i < block_end and (
                             not fm[b_i].strip()
-                            or len(fm[b_i]) - len(fm[b_i].lstrip(" \t"))
-                            > len(child_indent)
+                            or len(fm[b_i]) - len(fm[b_i].lstrip(" \t")) > len(c_ind)
                         ):
                             b_i += 1
                         continue
-                kept_block.append(bl)
+                kept_b.append(bl)
                 b_i += 1
-            eff_indent = child_indent if child_indent is not None else "  "
+            eff_ind = c_ind if c_ind is not None else "  "
             fm[meta_idx:block_end] = [
                 "metadata:",
-                *kept_block,
-                f"{eff_indent}source: {src_json}",
+                f"{eff_ind}source: {src_json}",
+                *kept_b,
             ]
     return eol.join(["---", *fm, fence]) + eol + rest
 
@@ -547,6 +425,7 @@ def copy_skill_dir(dest_skill_dir: Path, src: Path) -> None:
             read_dir,
             tmp_dir,
             symlinks=False,
+            ignore_dangling_symlinks=True,
             ignore=shutil.ignore_patterns(*COPY_IGNORE_PATTERNS),
         )
         for root_s, _dirs, files in os.walk(tmp_dir):
@@ -2534,24 +2413,22 @@ def cmd_update(names):
         ):
             ws = ws_cand
 
-    def norm_variants(p: Path, allow_realpath: bool = True) -> set[str]:
+    def is_no_resolve(p: Path) -> bool:
         n = os.path.normpath(p)
-        if (
-            not allow_realpath
-            or n in api.no_resolve_paths
-            or any(n.startswith(nr + os.sep) for nr in api.no_resolve_paths)
-        ):
-            return {n}
-        return {n, os.path.realpath(p)}
+        return n in api.no_resolve_paths or any(
+            n.startswith(nr + os.sep) for nr in api.no_resolve_paths
+        )
 
-    def entry_source_norms(v: dict) -> set[str]:
+    def same_source(src: Path, v: dict) -> bool:
         if "path" in v:
-            p = Path(v["path"]).expanduser()
-            return norm_variants(p, allow_realpath=(v.get("resolve") is not False))
-        if "repo" in v and "ref" in v:
+            cp = Path(v["path"]).expanduser()
+            if v.get("resolve") is False or is_no_resolve(src):
+                return os.path.normpath(src) == os.path.normpath(cp)
+            return os.path.realpath(src) == os.path.realpath(cp)
+        if "repo" in v and "ref" in v and not is_no_resolve(src):
             rc = remote_cache_dir(v["repo"], v["ref"], v.get("subpath"))
-            return norm_variants(rc, allow_realpath=True)
-        return set()
+            return os.path.realpath(src) == os.path.realpath(rc)
+        return False
 
     def entry_target(e: DiskEntry) -> Path | None:
         if e.path.is_symlink():
@@ -2560,98 +2437,68 @@ def cmd_update(names):
             except OSError:
                 return None
             return Path(raw) if os.path.isabs(raw) else (e.path.parent / raw)
-        if not e.tracked and e.source is not None:
-            return e.source
-        return None
-
-    if len(names) == 1 and names[0] == "--all":
-        if _SCOPE != "session":
-            for cname, centry in api.plugin_catalog.items():
-                update_catalog_entry(cname, centry, quiet_local=(_SCOPE == "user"))
-            if ws is not None and ws.uses_copies:
-                refresh_copies(scan_links(ws)[0])
-        elif ws is not None:
-            sess_entries = scan_links(ws)[0]
-            sess_norms = {
-                s
-                for e in sess_entries
-                if e.source and not e.path.is_symlink()
-                for s in norm_variants(e.source)
-            }
-            for cname, centry in api.plugin_catalog.items():
-                if entry_source_norms(centry) & sess_norms:
-                    update_catalog_entry(cname, centry, quiet_local=True)
-            if ws.uses_copies:
-                refresh_copies(sess_entries)
-        return
+        return e.source if not e.tracked else None
 
     ws_entries = scan_links(ws)[0] if ws is not None else []
+    if len(names) == 1 and names[0] == "--all":
+        for cname, centry in api.plugin_catalog.items():
+            if _SCOPE != "session" or any(
+                e.source and not e.path.is_symlink() and same_source(e.source, centry)
+                for e in ws_entries
+            ):
+                update_catalog_entry(
+                    cname, centry, quiet_local=(_SCOPE in ("user", "session"))
+                )
+        if ws is not None and ws.uses_copies:
+            refresh_copies(scan_links(ws)[0])
+        return
+
     for name in names:
-        cat_matches = (
-            [(name, api.plugin_catalog[name])]
-            if name in api.plugin_catalog
-            else (
-                [
-                    (k, v)
-                    for k, v in api.plugin_catalog.items()
-                    if k.lower() == name.lower()
-                ]
-                if ":" in name
-                else [
-                    (k, v)
-                    for k, v in api.plugin_catalog.items()
-                    if (k.split(":", 1)[-1] if ":" in k else k).lower() == name.lower()
-                ]
-            )
-        )
-        if len(cat_matches) > 1:
-            local_only = [m for m in cat_matches if "repo" not in m[1]]
-            if local_only:
-                cat_matches = local_only
-        copy_names = {name, name.split(":", 1)[-1]} | _expected_names_for_spec(name)
         installed = [
             e
             for e in ws_entries
-            if entry_target(e) is not None and e.link_name in copy_names
+            if entry_target(e) is not None
+            and e.link_name
+            in ({name, name.split(":", 1)[-1]} | _expected_names_for_spec(name))
         ]
         copies = [e for e in installed if not e.path.is_symlink()]
-        # An installed entry named directly by basename refreshes from its own
-        # recorded source/target even if another catalog skill shares that name.
-        if (
-            installed
-            and ":" not in name
-            and any(e.link_name == name for e in installed)
-        ):
-            inst_norms = {
-                s
-                for e in installed
-                if (tgt := entry_target(e)) is not None
-                for s in norm_variants(tgt)
-            }
+        if ":" not in name and any(e.link_name == name for e in installed):
             cat_matches = [
                 (k, v)
                 for k, v in api.plugin_catalog.items()
-                if entry_source_norms(v) & inst_norms
-            ]
-        if not cat_matches and not copies:
-            if installed:
-                print(
-                    f"skill update: '{name}' is a local skill; nothing to update",
-                    file=sys.stderr,
+                if any(
+                    same_source(t, v)
+                    for e in installed
+                    if (t := entry_target(e)) is not None
                 )
-            else:
-                print(f"skill update: unknown skill '{name}'", file=sys.stderr)
+            ]
+        elif name in api.plugin_catalog:
+            cat_matches = [(name, api.plugin_catalog[name])]
+        else:
+            nl = name.lower()
+            cat_matches = [
+                (k, v)
+                for k, v in api.plugin_catalog.items()
+                if (k if ":" in name else k.split(":", 1)[-1]).lower() == nl
+            ]
+            local_only = [m for m in cat_matches if "repo" not in m[1]]
+            if len(cat_matches) > 1 and local_only:
+                cat_matches = local_only
+        if not cat_matches and not copies:
+            msg = (
+                f"'{name}' is a local skill; nothing to update"
+                if installed
+                else f"unknown skill '{name}'"
+            )
+            print(f"skill update: {msg}", file=sys.stderr)
             continue
         for cname, centry in cat_matches:
             update_catalog_entry(cname, centry, quiet_local=bool(copies))
         if cat_matches:
-            matched_norms = {
-                s for _, centry in cat_matches for s in entry_source_norms(centry)
-            }
             copies = [
                 e
                 for e in copies
-                if e.source and (norm_variants(e.source) & matched_norms)
+                if e.source and any(same_source(e.source, v) for _, v in cat_matches)
             ]
         refresh_copies(copies)
 
