@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -216,6 +215,81 @@ def read_copy_source_from_content(content: str) -> str | None:
     return None
 
 
+def _parse_flow_metadata(fm: list[str], meta_idx: int) -> tuple[int, list[str]]:
+    """Scan a YAML flow map starting at fm[meta_idx] into indented '  key: val' lines."""
+    text = "\n".join([fm[meta_idx].split(":", 1)[1], *fm[meta_idx + 1 :]])
+    start = text.find("{")
+    in_s = False
+    in_d = False
+    depth = 0
+    items: list[str] = []
+    cur: list[str] = []
+    end_pos = len(text)
+    i = start
+    while i < len(text):
+        ch = text[i]
+        if in_s:
+            cur.append(ch)
+            if ch == "'" and i + 1 < len(text) and text[i + 1] == "'":
+                cur.append("'")
+                i += 2
+                continue
+            if ch == "'":
+                in_s = False
+            i += 1
+            continue
+        if in_d:
+            cur.append(ch)
+            if ch == "\\" and i + 1 < len(text):
+                cur.append(text[i + 1])
+                i += 2
+                continue
+            if ch == '"':
+                in_d = False
+            i += 1
+            continue
+        if ch == "#" and (i == 0 or text[i - 1] in (" ", "\t", "\n", "{", ",")):
+            nl = text.find("\n", i)
+            i = len(text) if nl == -1 else nl + 1
+            continue
+        if ch == "'":
+            in_s = True
+            cur.append(ch)
+        elif ch == '"':
+            in_d = True
+            cur.append(ch)
+        elif ch in ("{", "["):
+            depth += 1
+            if not (ch == "{" and depth == 1):
+                cur.append(ch)
+        elif ch in ("}", "]"):
+            if ch == "}" and depth == 1:
+                items.append("".join(cur))
+                end_pos = i + 1
+                break
+            depth = max(1, depth - 1)
+            cur.append(ch)
+        elif ch == "," and depth == 1:
+            items.append("".join(cur))
+            cur.clear()
+        elif ch in ("\r", "\n"):
+            cur.append(" ")
+        else:
+            cur.append(ch)
+        i += 1
+    consumed_newlines = text[:end_pos].count("\n")
+    kept: list[str] = []
+    for raw_item in items:
+        s = raw_item.strip()
+        if not s or ":" not in s:
+            continue
+        k, v = s.split(":", 1)
+        uk = _unquote_scalar(k)
+        if uk and uk != "source":
+            kept.append(f"  {uk}: {' '.join(v.split())}")
+    return meta_idx + 1 + consumed_newlines, kept
+
+
 def inject_copy_source(content: str, source: str) -> str:
     """Stamp metadata.source into SKILL.md frontmatter in canonical block form."""
     src_json = json.dumps(source, ensure_ascii=False)
@@ -254,20 +328,7 @@ def inject_copy_source(content: str, source: str) -> str:
         v_part = fm[meta_idx].split(":", 1)[1].strip()
         block_end = meta_idx + 1
         if v_part.startswith("{"):
-            while block_end < len(fm) and "}" not in fm[block_end - 1]:
-                block_end += 1
-            flow_raw = " ".join(
-                [v_part, *(ln.strip() for ln in fm[meta_idx + 1 : block_end])]
-            )
-            inner = flow_raw[flow_raw.find("{") + 1 : flow_raw.rfind("}")]
-            kept = [
-                f"  {_unquote_scalar(m.group(1))}: {m.group(2).strip()}"
-                for m in re.finditer(
-                    r"""(?:^|,)\s*(['"]?[\w.-]+['"]?)\s*:\s*("(?:\\.|[^"])*"|'(?:''|[^'])*'|[^,#}]+)""",
-                    inner,
-                )
-                if _unquote_scalar(m.group(1)) != "source"
-            ]
+            block_end, kept = _parse_flow_metadata(fm, meta_idx)
             fm[meta_idx:block_end] = ["metadata:", *kept, f"  source: {src_json}"]
         else:
             while block_end < len(fm) and (
@@ -339,6 +400,20 @@ def copy_source_exists(target: Path) -> bool:
         return False
 
 
+def _rmtree_force(path: Path, ignore_errors: bool = False) -> None:
+    """Remove a directory tree after granting user rwx on non-symlink directories."""
+    if not path.exists() and not path.is_symlink():
+        return
+    try:
+        for root_s, _dirs, _files in os.walk(path):
+            if not os.path.islink(root_s):
+                os.chmod(root_s, os.stat(root_s).st_mode | 0o700)
+        shutil.rmtree(path, ignore_errors=ignore_errors)
+    except Exception:
+        if not ignore_errors:
+            raise
+
+
 def copy_skill_dir(dest_skill_dir: Path, src: Path) -> None:
     """Atomically copy skill directory src to dest_skill_dir with metadata.source."""
     read_dir = Path(get_api().scan_paths.get(os.path.normpath(src)) or src)
@@ -346,7 +421,7 @@ def copy_skill_dir(dest_skill_dir: Path, src: Path) -> None:
         raise FileNotFoundError(f"skill source directory does not exist: {src}")
     dest_skill_dir.parent.mkdir(parents=True, exist_ok=True)
     tmp_dir = dest_skill_dir.with_name(f".{dest_skill_dir.name}.tmp-{os.getpid()}")
-    shutil.rmtree(tmp_dir, ignore_errors=True)
+    _rmtree_force(tmp_dir, ignore_errors=True)
     old_dir: Path | None = None
     try:
         shutil.copytree(
@@ -356,10 +431,12 @@ def copy_skill_dir(dest_skill_dir: Path, src: Path) -> None:
             ignore=shutil.ignore_patterns(*COPY_IGNORE_PATTERNS),
         )
         for root_s, _dirs, files in os.walk(tmp_dir):
-            os.chmod(root_s, os.stat(root_s).st_mode | 0o200)
+            if not os.path.islink(root_s):
+                os.chmod(root_s, os.stat(root_s).st_mode | 0o200)
             for fn in files:
                 fp = os.path.join(root_s, fn)
-                os.chmod(fp, os.stat(fp).st_mode | 0o600)
+                if not os.path.islink(fp):
+                    os.chmod(fp, os.stat(fp).st_mode | 0o600)
         src_md = tmp_dir / "SKILL.md"
         if src_md.is_file():
             raw_md = src_md.read_text(encoding="utf-8", errors="replace")
@@ -377,14 +454,14 @@ def copy_skill_dir(dest_skill_dir: Path, src: Path) -> None:
             old_dir = dest_skill_dir.with_name(
                 f".{dest_skill_dir.name}.old-{os.getpid()}"
             )
-            shutil.rmtree(old_dir, ignore_errors=True)
+            _rmtree_force(old_dir, ignore_errors=True)
             os.replace(dest_skill_dir, old_dir)
             os.replace(tmp_dir, dest_skill_dir)
-            shutil.rmtree(old_dir, ignore_errors=True)
+            _rmtree_force(old_dir, ignore_errors=True)
         else:
             os.replace(tmp_dir, dest_skill_dir)
     except Exception:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
+        _rmtree_force(tmp_dir, ignore_errors=True)
         if old_dir is not None and old_dir.exists() and not dest_skill_dir.exists():
             os.replace(old_dir, dest_skill_dir)
         raise
@@ -397,12 +474,7 @@ def remove_skill_entry(path: Path, uses_copies: bool = True) -> None:
     elif uses_copies and read_copy_source(path) is not None:
         if not os.access(path.parent, os.W_OK | os.X_OK):
             raise PermissionError(f"permission denied: {path}")
-        for root_s, _dirs, files in os.walk(path):
-            os.chmod(root_s, os.stat(root_s).st_mode | 0o700)
-            for fn in files:
-                fp = os.path.join(root_s, fn)
-                os.chmod(fp, os.stat(fp).st_mode | 0o600)
-        shutil.rmtree(path)
+        _rmtree_force(path, ignore_errors=False)
 
 
 class Workspace:
@@ -1678,7 +1750,12 @@ def _is_unavailable_optional_spec(spec: str) -> bool:
             continue
         if sname.lower() == short:
             matched.append(entry)
-    return bool(matched) and all(e.get("optional") for e in matched)
+    return bool(matched) and all(
+        e.get("optional")
+        and "path" in e
+        and not Path(e.get("scan_path") or e["path"]).expanduser().is_dir()
+        for e in matched
+    )
 
 
 def cmd_add(specs):
