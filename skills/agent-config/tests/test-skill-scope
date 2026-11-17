@@ -127,50 +127,70 @@ cd "$TMPDIR"
 BRAIN_DIR="${HOME}/.gemini/antigravity/brain/test-conv-123"
 mkdir -p "${BRAIN_DIR}/.system_generated" "${BRAIN_DIR}/scratch"
 
-# Test 10: --scope session -C <artifactDir> links scratch/skills and writes skills.json
+# Test 10: --scope session -C <artifactDir> writes pointer stubs in
+# .agents/skills/<name>/SKILL.md (no symlinks, no skills.json) and passes doctor
 add_hint=$("${SCRIPT}" --scope session -C "$BRAIN_DIR" add coding-standards 2>&1)
-if grep -q "to use it now, read .*/scratch/skills/coding-standards/SKILL.md" <<<"$add_hint" &&
+if grep -q "to use it now, read .*/sources/coding-standards/SKILL.md" <<<"$add_hint" &&
   "${SCRIPT}" --scope session -C "$BRAIN_DIR" add emumanager >/dev/null 2>&1 &&
-  [ -L "${BRAIN_DIR}/scratch/skills/coding-standards" ] &&
-  [ -L "${BRAIN_DIR}/scratch/skills/emumanager" ] &&
+  [ -f "${BRAIN_DIR}/.agents/skills/coding-standards/SKILL.md" ] &&
+  [ ! -L "${BRAIN_DIR}/.agents/skills/coding-standards" ] &&
+  [ ! -L "${BRAIN_DIR}/.agents/skills/coding-standards/SKILL.md" ] &&
+  grep -q "skill-stub: ${SKILL_SOURCE_DIRS}/coding-standards" "${BRAIN_DIR}/.agents/skills/coding-standards/SKILL.md" &&
+  grep -q "Rules for coding standards" "${BRAIN_DIR}/.agents/skills/coding-standards/SKILL.md" &&
+  [ -f "${BRAIN_DIR}/.agents/skills/emumanager/SKILL.md" ] &&
   [ ! -d "${BRAIN_DIR}/.claude" ] &&
-  grep -q '"path": "scratch/skills"' "${BRAIN_DIR}/.agents/skills.json" &&
-  grep -q '"userFacing": false' "${BRAIN_DIR}/.agents/skills.json.metadata.json" &&
+  [ ! -f "${BRAIN_DIR}/.agents/skills.json" ] &&
   bdj=$("${SCRIPT}" --scope session -C "$BRAIN_DIR" doctor --json 2>/dev/null) &&
   [ "$(json_get "$bdj" 'd["healthy"]')" = "true" ]; then
-  echo "ok 10 - [Agy] --scope session -C <artifactDir> links scratch/skills, writes skills.json, and passes doctor"
+  echo "ok 10 - [Agy] --scope session -C <artifactDir> writes .agents/skills stubs without skills.json and passes doctor"
 else
-  echo "not ok 10 - [Agy] --scope session -C <artifactDir> setup or doctor failed"
+  echo "not ok 10 - [Agy] --scope session -C <artifactDir> setup or doctor failed: ${add_hint:-}"
 fi
 
-# Test 11: doctor flags skills.json drift; remove re-syncs it
+# Test 11: doctor flags legacy skills.json/scratch drift; prune migrates live
+# non-default scratch/skills symlinks into pointer stubs; remove drops legacy links
+mkdir -p "${BRAIN_DIR}/scratch/skills"
+ln -s "${SKILL_SOURCE_DIRS}/test-skill" "${BRAIN_DIR}/scratch/skills/test-skill"
 printf '{"entries": []}\n' >"${BRAIN_DIR}/.agents/skills.json"
 drift_json=$("${SCRIPT}" --scope session -C "$BRAIN_DIR" doctor --json 2>/dev/null) || true
 if [ "$(check_status "$drift_json" "Workspace Exclusions")" = "ERROR" ] &&
-  "${SCRIPT}" --scope session -C "$BRAIN_DIR" remove emumanager >/dev/null 2>&1 &&
-  [ ! -e "${BRAIN_DIR}/scratch/skills/emumanager" ] &&
+  "${SCRIPT}" --scope session -C "$BRAIN_DIR" prune --quiet &&
+  [ -f "${BRAIN_DIR}/.agents/skills/test-skill/SKILL.md" ] &&
+  [ ! -e "${BRAIN_DIR}/scratch/skills" ] &&
+  [ ! -f "${BRAIN_DIR}/.agents/skills.json" ] &&
+  mkdir -p "${BRAIN_DIR}/scratch/skills" &&
+  ln -s "${SKILL_SOURCE_DIRS}/emumanager" "${BRAIN_DIR}/scratch/skills/emumanager" &&
+  "${SCRIPT}" --scope session -C "$BRAIN_DIR" remove emumanager test-skill >/dev/null 2>&1 &&
+  [ ! -e "${BRAIN_DIR}/.agents/skills/emumanager" ] &&
+  [ ! -e "${BRAIN_DIR}/.agents/skills/test-skill" ] &&
+  [ ! -e "${BRAIN_DIR}/scratch/skills" ] &&
   repaired_json=$("${SCRIPT}" --scope session -C "$BRAIN_DIR" doctor --json 2>/dev/null) &&
   [ "$(json_get "$repaired_json" 'd["healthy"]')" = "true" ]; then
-  echo "ok 11 - [Agy] doctor flags skills.json drift; remove re-syncs it"
+  echo "ok 11 - [Agy] doctor flags legacy drift; prune migrates scratch links to stubs; remove cleans up"
 else
-  echo "not ok 11 - [Agy] drift detection or remove repair failed"
+  echo "not ok 11 - [Agy] legacy drift detection, prune migration, or remove cleanup failed"
 fi
 
-# Test 12: the conversation ID finds brain/<id>; clean empties it and keeps scratch/
+# Test 12: ANTIGRAVITY_CONVERSATION_ID finds brain/<id>, reports canonical path,
+# bundles full source content, and clean empties .agents while keeping scratch/
+SESSION_BUNDLE="${TMPDIR}/session-bundle-out"
 if out=$(ANTIGRAVITY_CONVERSATION_ID=test-conv-123 "${SCRIPT}" --scope session list --json 2>/dev/null) &&
   [ "$(json_get "$out" '[s["name"] for s in d]')" = "coding-standards" ] &&
+  [ "$(json_get "$out" '[s["path"] for s in d]')" = "${SKILL_SOURCE_DIRS}/coding-standards" ] &&
+  "${SCRIPT}" -C "$BRAIN_DIR" --scope session list >/dev/null 2>&1 &&
+  (cd "$BRAIN_DIR" && _SCOPE_TEST=1 "${SCRIPT}" --scope session list >/dev/null 2>&1) &&
   ANTIGRAVITY_CONVERSATION_ID=test-conv-123 "${SCRIPT}" --scope session clean >/dev/null 2>&1 &&
-  [ ! -d "${BRAIN_DIR}/scratch/skills" ] && [ -d "${BRAIN_DIR}/scratch" ] &&
-  [ ! -f "${BRAIN_DIR}/.agents/skills.json" ]; then
-  echo "ok 12 - [Agy] ANTIGRAVITY_CONVERSATION_ID finds brain/<id>; clean empties it and keeps scratch/"
+  [ ! -e "${BRAIN_DIR}/.agents" ] && [ -d "${BRAIN_DIR}/scratch" ]; then
+  echo "ok 12 - [Agy] ANTIGRAVITY_CONVERSATION_ID finds brain/<id>, reports canonical path, and clean empties .agents"
 else
   echo "not ok 12 - [Agy] conversation-ID lookup or clean failed: ${out:-}"
 fi
+rm -rf "$SESSION_BUNDLE"
 
 # Test 13: workspace scope refuses an Antigravity session directory
 agy_ws_rc=0
 "${SCRIPT}" -C "$BRAIN_DIR" add coding-standards >/dev/null 2>&1 || agy_ws_rc=$?
-if [ "$agy_ws_rc" -eq 1 ] && [ ! -e "${BRAIN_DIR}/.claude" ] && [ ! -e "${BRAIN_DIR}/scratch/skills" ]; then
+if [ "$agy_ws_rc" -eq 1 ] && [ ! -e "${BRAIN_DIR}/.claude" ] && [ ! -e "${BRAIN_DIR}/.agents" ]; then
   echo "ok 13 - [Agy] workspace scope refuses an Antigravity session directory"
 else
   echo "not ok 13 - [Agy] workspace scope wrote into an Antigravity session directory (rc=$agy_ws_rc)"
@@ -181,7 +201,8 @@ APP_DATA="${TMPDIR}/agy-app-data"
 mkdir -p "${APP_DATA}/brain/conv-app"
 if ANTIGRAVITY_APP_DATA_DIR="$APP_DATA" ANTIGRAVITY_CONVERSATION_ID=conv-app \
   "${SCRIPT}" --scope session add emumanager >/dev/null 2>&1 &&
-  [ -L "${APP_DATA}/brain/conv-app/scratch/skills/emumanager" ]; then
+  [ -f "${APP_DATA}/brain/conv-app/.agents/skills/emumanager/SKILL.md" ] &&
+  [ ! -L "${APP_DATA}/brain/conv-app/.agents/skills/emumanager" ]; then
   echo "ok 14 - [Agy] ANTIGRAVITY_APP_DATA_DIR locates brain/<id>"
 else
   echo "not ok 14 - [Agy] ANTIGRAVITY_APP_DATA_DIR was not used"
@@ -194,7 +215,7 @@ if AGENT_SESSION_DIR="${TMPDIR}/outer-claude" AGENT_SESSION_ID=outer \
   CLAUDE_CODE_SESSION_ID=outer ANTIGRAVITY_APP_DATA_DIR="$APP_DATA" \
   ANTIGRAVITY_CONVERSATION_ID=conv-app \
   "${SCRIPT}" --scope session add coding-standards >/dev/null 2>&1 &&
-  [ -L "${APP_DATA}/brain/conv-app/scratch/skills/coding-standards" ] &&
+  [ -f "${APP_DATA}/brain/conv-app/.agents/skills/coding-standards/SKILL.md" ] &&
   [ ! -e "${TMPDIR}/outer-claude/.claude" ]; then
   echo "ok 15 - [Agy] agy nested in a wrapped Claude uses its own session"
 else
@@ -205,44 +226,52 @@ fi
 # User scope
 # ==============================================================================
 
-# Test 16: user scope links into ~/.claude/skills and ~/.agents/skills, and
-# leaves Claude's own ~/.claude/skills/synced alone
-mkdir -p "${HOME}/.claude/skills/synced"
+# Test 16: user scope links into ~/.claude/skills, ~/.agents/skills, and
+# ~/.gemini/config/skills (when ~/.gemini/config exists), leaving synced/ and
+# ~/.gemini/config intact on clean
+mkdir -p "${HOME}/.claude/skills/synced" "${HOME}/.codex" "${HOME}/.gemini/config"
 if "${SCRIPT}" --scope user add coding-standards >/dev/null 2>&1 &&
   [ -L "${HOME}/.claude/skills/coding-standards" ] &&
   [ -L "${HOME}/.agents/skills/coding-standards" ] &&
+  [ -L "${HOME}/.gemini/config/skills/coding-standards" ] &&
   udj=$("${SCRIPT}" --scope user doctor --json 2>/dev/null) &&
   [ "$(check_status "$udj" "Directory Cleanliness")" = "OK" ] &&
   "${SCRIPT}" --scope user clean >/dev/null 2>&1 &&
   [ ! -e "${HOME}/.claude/skills/coding-standards" ] &&
+  [ ! -e "${HOME}/.gemini/config/skills" ] &&
+  [ -d "${HOME}/.gemini/config" ] &&
   [ -d "${HOME}/.claude/skills/synced" ]; then
-  echo "ok 16 - [User] user scope links into ~/.claude and ~/.agents and ignores synced/"
+  echo "ok 16 - [User] user scope links ~/.claude, ~/.agents, and ~/.gemini/config/skills and ignores synced/"
 else
   echo "not ok 16 - [User] user scope add, doctor or clean failed"
 fi
 
 # ==============================================================================
-# Session add against the workspace
+# Session add against user and workspace scopes
 # ==============================================================================
 
-# Test 17: a session add skips a skill the workspace already links, and says
-# so, so a project's whole skill list can be piped in without a diff
+# Test 17: a session add skips skills already active in user scope or workspace
+# scope, and says so, so a project's whole skill list can be piped in
 SKIP_REPO="${TMPDIR}/skip-repo"
 mkdir -p "$SKIP_REPO"
 git -C "$SKIP_REPO" init -q
 cd "$SKIP_REPO"
 export AGENT_SESSION_DIR="$SESSION_DIR" AGENT_SESSION_ID=sess-1 \
   CLAUDE_CODE_SESSION_ID=sess-1
-if "${SCRIPT}" add test-skill >/dev/null 2>&1 &&
-  skip_err=$(printf 'test-skill\nemumanager\n' | "${SCRIPT}" --scope session add - 2>&1) &&
+if "${SCRIPT}" --scope user add coding-standards >/dev/null 2>&1 &&
+  "${SCRIPT}" add test-skill >/dev/null 2>&1 &&
+  skip_err=$(printf 'coding-standards\ntest-skill\nemumanager\n' | "${SCRIPT}" --scope session add - 2>&1) &&
+  grep -q "already active coding-standards" <<<"$skip_err" &&
   grep -q "already active test-skill" <<<"$skip_err" &&
+  [ ! -e "${SESSION_DIR}/.claude/skills/coding-standards" ] &&
   [ ! -e "${SESSION_DIR}/.claude/skills/test-skill" ] &&
   [ -L "${SESSION_DIR}/.claude/skills/emumanager" ]; then
-  echo "ok 17 - [Session] add skips skills the workspace already links"
+  echo "ok 17 - [Session] add skips skills already active in user or workspace scope"
 else
-  echo "not ok 17 - [Session] add did not skip a workspace-linked skill: ${skip_err:-}"
+  echo "not ok 17 - [Session] add did not skip user/workspace-linked skill: ${skip_err:-}"
 fi
 "${SCRIPT}" --scope session clean >/dev/null 2>&1 || true
+"${SCRIPT}" --scope user clean >/dev/null 2>&1 || true
 "${SCRIPT}" clean >/dev/null 2>&1 || true
 
 # Test 18: in the user scope, a skill directory that something else installed
@@ -262,8 +291,9 @@ fi
 rm -rf "${HOME}/.claude/skills/platform-skill"
 
 # Test 19: under AgyBrainWorkspace, a workspace .agents/skills link whose
-# resolved target escapes the workspace root is NOT skipped as 'already active',
-# whereas an in-workspace skill confined under the workspace root IS skipped.
+# resolved target escapes the workspace root is NOT skipped as 'already active'
+# (unless active in ~/.gemini/config/skills), whereas an in-workspace skill
+# confined under the workspace root IS skipped.
 AGY_CONF_REPO="${TMPDIR}/agy-conf-repo"
 AGY_CONF_BRAIN="${TMPDIR}/agy-conf-app/brain/conv-conf"
 mkdir -p "${AGY_CONF_REPO}/skills/in-repo-skill" "${AGY_CONF_REPO}/.agents/skills" "${AGY_CONF_BRAIN}"
@@ -277,9 +307,10 @@ if agy_conf_out=$(
       "${SCRIPT}" --scope session add "${AGY_CONF_REPO}/skills/in-repo-skill" coding-standards 2>&1
 ) &&
   grep -q "already active in-repo-skill" <<<"$agy_conf_out" &&
-  [ ! -e "${AGY_CONF_BRAIN}/scratch/skills/in-repo-skill" ] &&
-  [ -L "${AGY_CONF_BRAIN}/scratch/skills/coding-standards" ]; then
-  echo "ok 19 - [Agy] session add stages workspace links that escape workspace confinement"
+  [ ! -e "${AGY_CONF_BRAIN}/.agents/skills/in-repo-skill" ] &&
+  [ -f "${AGY_CONF_BRAIN}/.agents/skills/coding-standards/SKILL.md" ] &&
+  [ ! -L "${AGY_CONF_BRAIN}/.agents/skills/coding-standards" ]; then
+  echo "ok 19 - [Agy] session add stages workspace links that escape workspace confinement as stubs"
 else
   echo "not ok 19 - [Agy] external workspace link skipped or confined link re-staged: ${agy_conf_out:-}"
 fi

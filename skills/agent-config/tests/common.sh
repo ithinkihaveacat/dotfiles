@@ -71,7 +71,6 @@ skill_test_init() {
     "${XDG_CONFIG_HOME}/skill/plugins/05_local.py"
   export XDG_CACHE_HOME="${TMPDIR}/.cache"
   export XDG_STATE_HOME="${TMPDIR}/.local/state"
-  unset SKILL_DEFAULTS_DIR
   # Ensure p4 is not found by default during Git/Unmanaged tests.
   export PATH="$MOCK_BIN_DIR:$PATH"
   unset AGENT_PREFLIGHT_SKIP _agent_preflight_skip
