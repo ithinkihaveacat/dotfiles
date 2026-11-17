@@ -9,7 +9,7 @@ set -euo pipefail
 source "$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 skill_test_init
 
-echo "1..20"
+echo "1..21"
 
 # Test 1: doctor on a healthy workspace reports healthy JSON and renders the
 # canonical [PASS] tag style.
@@ -520,3 +520,61 @@ else
   echo "not ok 20 - [Update] explicit catalog spec misrouted on colliding basename: $beta_up_out"
 fi
 rm -f "${XDG_CONFIG_HOME}/skill/plugins/98_alias_remote.py"
+
+# Test 21: COPY_IGNORE_PATTERNS skips node_modules/.venv (even broken symlinks),
+# remove_skill_entry fails without stripping SKILL.md on a read-only parent, and
+# '--scope user update <basename>' + '--scope session update --all' refresh aliased remotes.
+SESS_UP_BRAIN="${TMPDIR}/sess-up-app/brain/conv-up"
+BLOAT_SRC="${TMPDIR}/bloat-src/bloat-skill"
+mkdir -p "$SESS_UP_BRAIN" "${BLOAT_SRC}/node_modules/.bin" "${BLOAT_SRC}/.venv/bin"
+printf -- '---\nname: bloat-skill\n---\nbody\n' >"${BLOAT_SRC}/SKILL.md"
+ln -s /nonexistent/python "${BLOAT_SRC}/.venv/bin/python"
+ln -s /nonexistent/tsc "${BLOAT_SRC}/node_modules/.bin/tsc"
+RO_WS="${TMPDIR}/ro-parent-ws"
+mkdir -p "$RO_WS"
+git -C "$RO_WS" init -q
+"${SCRIPT}" -C "$RO_WS" add "$BLOAT_SRC" >/dev/null 2>&1
+chmod 0555 "${RO_WS}/.claude/skills"
+ro_rm_rc=0
+"${SCRIPT}" -C "$RO_WS" remove bloat-skill >/dev/null 2>&1 || ro_rm_rc=$?
+chmod 0755 "${RO_WS}/.claude/skills"
+
+cat <<'EOF' >"${XDG_CONFIG_HOME}/skill/plugins/98_alias_remote.py"
+def register(api):
+    api.register_skill(
+        "remote:sess-pkg",
+        {"repo": "owner/sess", "ref": "main", "subpath": "skills/sess-aliased"},
+    )
+EOF
+SESS_UP_REPO="${TMPDIR}/sess-up-repo"
+mkdir -p "${SESS_UP_REPO}/skills/sess-aliased"
+git -C "$SESS_UP_REPO" init -q -b main
+git -C "$SESS_UP_REPO" config user.email "t@e.st"
+git -C "$SESS_UP_REPO" config user.name "Test"
+printf -- '---\nname: sess-aliased\n---\nsess-v1\n' >"${SESS_UP_REPO}/skills/sess-aliased/SKILL.md"
+git -C "$SESS_UP_REPO" add . && git -C "$SESS_UP_REPO" commit -q -m "s1"
+_SKILL_TEST_REMOTE="$SESS_UP_REPO" "${SCRIPT}" --scope user add remote:sess-pkg >/dev/null 2>&1
+printf -- '---\nname: sess-aliased\n---\nsess-v2\n' >"${SESS_UP_REPO}/skills/sess-aliased/SKILL.md"
+git -C "$SESS_UP_REPO" commit -q -am "s2"
+_SKILL_TEST_REMOTE="$SESS_UP_REPO" "${SCRIPT}" --scope user update sess-aliased >/dev/null 2>&1
+user_v2_ok=0
+grep -q "^sess-v2$" "${HOME}/.claude/skills/sess-aliased/SKILL.md" && user_v2_ok=1
+"${SCRIPT}" --scope user clean >/dev/null 2>&1 || true
+ANTIGRAVITY_APP_DATA_DIR="${TMPDIR}/sess-up-app" ANTIGRAVITY_CONVERSATION_ID=conv-up \
+  _SKILL_TEST_REMOTE="$SESS_UP_REPO" "${SCRIPT}" --scope session add remote:sess-pkg >/dev/null 2>&1
+printf -- '---\nname: sess-aliased\n---\nsess-v3\n' >"${SESS_UP_REPO}/skills/sess-aliased/SKILL.md"
+git -C "$SESS_UP_REPO" commit -q -am "s3"
+ANTIGRAVITY_APP_DATA_DIR="${TMPDIR}/sess-up-app" ANTIGRAVITY_CONVERSATION_ID=conv-up \
+  _SKILL_TEST_REMOTE="$SESS_UP_REPO" "${SCRIPT}" --scope session update --all >/dev/null 2>&1
+rm -f "${XDG_CONFIG_HOME}/skill/plugins/98_alias_remote.py"
+
+if [ ! -e "${RO_WS}/.agents/skills/bloat-skill/node_modules" ] &&
+  [ ! -e "${RO_WS}/.agents/skills/bloat-skill/.venv" ] &&
+  [ "$ro_rm_rc" -ne 0 ] &&
+  [ -f "${RO_WS}/.claude/skills/bloat-skill/SKILL.md" ] &&
+  [ "$user_v2_ok" -eq 1 ] &&
+  grep -q "^sess-v3$" "${SESS_UP_BRAIN}/.agents/skills/sess-aliased/SKILL.md"; then
+  echo "ok 21 - [Lifecycle] ignores node_modules/.venv, preserves SKILL.md on RO parent, and updates user/session remotes"
+else
+  echo "not ok 21 - [Lifecycle] ignore/RO-remove/user-or-session update check failed (ro_rm_rc=$ro_rm_rc)"
+fi

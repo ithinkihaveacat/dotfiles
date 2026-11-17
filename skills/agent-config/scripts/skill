@@ -144,6 +144,8 @@ COPY_IGNORE_PATTERNS = (
     "__pycache__",
     ".ruff_cache",
     ".pytest_cache",
+    ".venv",
+    "node_modules",
     ".DS_Store",
     ".SKILL.md.tmp-*",
 )
@@ -393,7 +395,14 @@ def remove_skill_entry(path: Path, uses_copies: bool = True) -> None:
     if path.is_symlink():
         path.unlink(missing_ok=True)
     elif uses_copies and read_copy_source(path) is not None:
-        shutil.rmtree(path, ignore_errors=True)
+        if not os.access(path.parent, os.W_OK | os.X_OK):
+            raise PermissionError(f"permission denied: {path}")
+        for root_s, _dirs, files in os.walk(path):
+            os.chmod(root_s, os.stat(root_s).st_mode | 0o700)
+            for fn in files:
+                fp = os.path.join(root_s, fn)
+                os.chmod(fp, os.stat(fp).st_mode | 0o600)
+        shutil.rmtree(path)
 
 
 class Workspace:
@@ -2325,24 +2334,54 @@ def cmd_update(names):
         ):
             ws = ws_cand
 
-    if len(names) == 1 and names[0] == "--all":
-        if _SCOPE != "session":
-            for cname, centry in api.plugin_catalog.items():
-                update_catalog_entry(cname, centry, quiet_local=(_SCOPE == "user"))
-        if ws is not None and ws.uses_copies:
-            refresh_copies(scan_links(ws)[0])
-        return
+    def norm_variants(p: Path, allow_realpath: bool = True) -> set[str]:
+        n = os.path.normpath(p)
+        if not allow_realpath or n.startswith("/google/"):
+            return {n}
+        return {n, os.path.realpath(p)}
 
     def entry_source_norms(v: dict) -> set[str]:
         if "path" in v:
             p = Path(v["path"]).expanduser()
-            return {os.path.normpath(p), os.path.realpath(p)}
+            return norm_variants(p, allow_realpath=(v.get("resolve") is not False))
         if "repo" in v and "ref" in v:
             rc = remote_cache_dir(v["repo"], v["ref"], v.get("subpath"))
-            return {os.path.normpath(rc), os.path.realpath(rc)}
+            return norm_variants(rc, allow_realpath=True)
         return set()
 
-    ws_entries = scan_links(ws)[0] if (ws is not None and ws.uses_copies) else []
+    def entry_target(e: DiskEntry) -> Path | None:
+        if e.path.is_symlink():
+            try:
+                raw = os.readlink(e.path)
+            except OSError:
+                return None
+            return Path(raw) if os.path.isabs(raw) else (e.path.parent / raw)
+        if not e.tracked and e.source is not None:
+            return e.source
+        return None
+
+    if len(names) == 1 and names[0] == "--all":
+        if _SCOPE != "session":
+            for cname, centry in api.plugin_catalog.items():
+                update_catalog_entry(cname, centry, quiet_local=(_SCOPE == "user"))
+            if ws is not None and ws.uses_copies:
+                refresh_copies(scan_links(ws)[0])
+        elif ws is not None:
+            sess_entries = scan_links(ws)[0]
+            sess_norms = {
+                s
+                for e in sess_entries
+                if e.source and not e.path.is_symlink()
+                for s in norm_variants(e.source)
+            }
+            for cname, centry in api.plugin_catalog.items():
+                if entry_source_norms(centry) & sess_norms:
+                    update_catalog_entry(cname, centry, quiet_local=True)
+            if ws.uses_copies:
+                refresh_copies(sess_entries)
+        return
+
+    ws_entries = scan_links(ws)[0] if ws is not None else []
     for name in names:
         cat_matches = (
             [(name, api.plugin_catalog[name])]
@@ -2366,30 +2405,38 @@ def cmd_update(names):
             if local_only:
                 cat_matches = local_only
         copy_names = {name, name.split(":", 1)[-1]} | _expected_names_for_spec(name)
-        copies = [
+        installed = [
             e
             for e in ws_entries
-            if not e.path.is_symlink()
-            and not e.tracked
-            and e.source is not None
-            and e.link_name in copy_names
+            if entry_target(e) is not None and e.link_name in copy_names
         ]
-        # An installed copy named directly by basename refreshes from its own
-        # metadata.source even if a remote catalog skill shares that name.
-        if copies and ":" not in name and any(e.link_name == name for e in copies):
-            copy_src_norms = {
+        copies = [e for e in installed if not e.path.is_symlink()]
+        # An installed entry named directly by basename refreshes from its own
+        # recorded source/target even if another catalog skill shares that name.
+        if (
+            installed
+            and ":" not in name
+            and any(e.link_name == name for e in installed)
+        ):
+            inst_norms = {
                 s
-                for e in copies
-                if e.source
-                for s in (os.path.normpath(e.source), os.path.realpath(e.source))
+                for e in installed
+                if (tgt := entry_target(e)) is not None
+                for s in norm_variants(tgt)
             }
             cat_matches = [
                 (k, v)
                 for k, v in api.plugin_catalog.items()
-                if entry_source_norms(v) & copy_src_norms
+                if entry_source_norms(v) & inst_norms
             ]
         if not cat_matches and not copies:
-            print(f"skill update: unknown skill '{name}'", file=sys.stderr)
+            if installed:
+                print(
+                    f"skill update: '{name}' is a local skill; nothing to update",
+                    file=sys.stderr,
+                )
+            else:
+                print(f"skill update: unknown skill '{name}'", file=sys.stderr)
             continue
         for cname, centry in cat_matches:
             update_catalog_entry(cname, centry, quiet_local=bool(copies))
@@ -2400,9 +2447,7 @@ def cmd_update(names):
             copies = [
                 e
                 for e in copies
-                if e.source
-                and {os.path.normpath(e.source), os.path.realpath(e.source)}
-                & matched_norms
+                if e.source and (norm_variants(e.source) & matched_norms)
             ]
         refresh_copies(copies)
 
