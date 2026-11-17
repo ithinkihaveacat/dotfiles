@@ -102,25 +102,25 @@ these:
 1. **A known pickup time**: same turn (Claude), next turn (Antigravity), or only
    at the next launch.
 
-| Launcher                                          | Session skills | Why                                                                                                                                                                         |
-| ------------------------------------------------- | -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `claude` fish wrapper                             | Yes            | A fresh directory per launch, passed with `--add-dir` and bound to the `--session-id` it passes. Picked up the same turn.                                                   |
-| `claude --continue`, or the `--resume` picker     | No             | The wrapper cannot know the session ID, so the directory stays unbound. It is still seeded with the defaults.                                                               |
-| `claude remote-control` (a server for remote use) | No             | It rejects `--add-dir`, and one server hosts many sessions, so no directory belongs to one of them. The launcher seeds the workspace instead, which all its sessions share. |
-| Antigravity (`agy`, the app)                      | Yes            | `brain/<id>` is the session's own directory, found from `ANTIGRAVITY_CONVERSATION_ID` or `-C`. Picked up the next turn.                                                     |
-| Codex                                             | No             | `skill` has no Codex session directory: none is known that Codex reads skills from and that `skill` could find from `CODEX_SESSION_ID`.                                     |
-| OpenCode                                          | No             | It reads the shared `.agents/skills` workspace source, and has no per-session directory that `skill` could target.                                                          |
-| A nested agent (e.g. `codex exec` inside Claude)  | No             | It inherits its parent's binding, which `skill` refuses so the child cannot write into the parent's session.                                                                |
+| Launcher                                          | Session skills | Why                                                                                                                                                                                                                                  |
+| ------------------------------------------------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `claude` fish wrapper                             | Yes            | A fresh directory per launch, passed with `--add-dir` and bound to the `--session-id` it passes. Picked up the same turn.                                                                                                            |
+| `claude --continue`, or the `--resume` picker     | No             | The wrapper cannot know the session ID, so the directory stays unbound. It is still seeded with the defaults.                                                                                                                        |
+| `claude remote-control` (a server for remote use) | No             | It rejects `--add-dir`, and one server hosts many sessions, so no directory belongs to one of them. The launcher seeds the workspace instead, which all its sessions share.                                                          |
+| Antigravity (`agy`, the app)                      | Yes            | `brain/<id>` is the session's own directory, found from `ANTIGRAVITY_CONVERSATION_ID` or `-C`. Picked up the next turn.                                                                                                              |
+| Antigravity Remote Control daemon                 | Expected yes   | `agy remote-control` runs ordinary `agy` conversations on the daemon's machine, so `brain/<id>` and `ANTIGRAVITY_CONVERSATION_ID` should apply as for the app, with next-turn pickup. Unverified from a dashboard session (2026-11). |
+| Codex                                             | No             | `skill` has no Codex session directory: none is known that Codex reads skills from and that `skill` could find from `CODEX_SESSION_ID`.                                                                                              |
+| OpenCode                                          | No             | It reads the shared `.agents/skills` workspace source, and has no per-session directory that `skill` could target.                                                                                                                   |
+| A nested agent (e.g. `codex exec` inside Claude)  | No             | It inherits its parent's binding, which `skill` refuses so the child cannot write into the parent's session.                                                                                                                         |
 
 Where session skills are unavailable, `skill --scope session` fails naming
 `AGENT_SESSION_DIR`. The only alternative is the workspace scope, which shares
 the skill with every session in the workspace and keeps it until it is removed.
-A new launcher (for example a remote server for Antigravity or Codex) should be
-checked against the three requirements above and added to this table. One
-untested route for launchers that start many sessions: a `SessionStart` hook
-that creates a directory per session ID, if the agent loads skills from a
-directory added after it starts (for Claude, through
-`permissions.additionalDirectories`).
+A new launcher (for example a remote server for Codex) should be checked against
+the three requirements above and added to this table. One untested route for
+launchers that start many sessions: a `SessionStart` hook that creates a
+directory per session ID, if the agent loads skills from a directory added after
+it starts (for Claude, through `permissions.additionalDirectories`).
 
 ## Records
 
