@@ -82,7 +82,7 @@ FEATURES=(
   'macos|workstation|Key bindings, system defaults, colors, git keychain (macOS)'
   'fish-completions|workstation|Regenerate fish completions'
   'base|workstation|Core command-line packages, and fish from its own repository'
-  'cli-extras|workstation|gh, git-lfs, fzf, yazi, and other interactive tools'
+  'cli-extras|workstation|gh (from its own repository), git-lfs, fzf, yazi, and other interactive tools'
   'services|-|Hetzner Cloud and gog CLIs'
   'media|-|ImageMagick, FFmpeg, yt-dlp, ExifTool'
   'android|-|Android SDK tools, Android CLI, compose-preview, JDKs, gradle settings'
@@ -718,6 +718,38 @@ function configure_fish_apt_repo {
       return 1
     fi
   else
+    return 1
+  fi
+}
+
+# Point apt at GitHub CLI's own repository, since Debian and Ubuntu package an
+# out-of-date gh (trixie ships 2.46.0, which queries retired Projects Classic
+# GraphQL fields on `gh pr edit`). Returns success only if the repository was
+# just configured, in which case the caller must refresh the package lists and
+# reinstall gh.
+function configure_gh_apt_repo {
+  local url="https://cli.github.com/packages"
+  local key=/usr/share/keyrings/githubcli-archive-keyring.gpg
+  local list=/etc/apt/sources.list.d/github-cli.list
+  local arch line
+  arch=$(dpkg --print-architecture 2>/dev/null) || return 1
+  [ -n "$arch" ] || return 1
+  line="deb [arch=$arch signed-by=$key] $url stable main"
+  if [ -f "$key" ] && [ "$(cat "$list" 2>/dev/null)" = "$line" ]; then
+    return 1
+  fi
+  if [ ! -e "$list" ] && grep -rqs 'cli\.github\.com/packages' /etc/apt/sources.list.d 2>/dev/null; then
+    return 1
+  fi
+  echo "Configuring the GitHub CLI apt repository ($url)..."
+  local tmp_key status=0
+  tmp_key=$(mktemp)
+  { curl "${CURL_OPTS[@]}" -fsSL -o "$tmp_key" "$url/githubcli-archive-keyring.gpg" &&
+    x sudo install -m 644 "$tmp_key" "$key" &&
+    echo "$line" | x sudo tee "$list" >/dev/null; } || status=$?
+  rm -f "$tmp_key"
+  if [ "$status" -ne 0 ]; then
+    echo "warning: failed to configure the GitHub CLI apt repository from $url" >&2
     return 1
   fi
 }
@@ -1517,6 +1549,13 @@ function packages_apt {
   if [[ " $features " == *" base "* ]] && configure_fish_apt_repo; then
     { x sudo apt-get update && x sudo apt-get -y install fish; } ||
       echo "warning: fish installation from its apt repository failed" >&2
+  fi
+
+  # gh is in cli-extras, so on a fresh machine it first arrives from the
+  # distribution; switching repositories then upgrades it in place.
+  if [[ " $features " == *" cli-extras "* ]] && configure_gh_apt_repo; then
+    { x sudo apt-get update && x sudo apt-get -y install gh; } ||
+      echo "warning: gh installation from its apt repository failed" >&2
   fi
 
   # Retired packages: ones this script used to install and no longer does.
