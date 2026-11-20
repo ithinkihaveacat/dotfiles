@@ -58,10 +58,12 @@ test("a failed level read does not lock the fallback level", async () => {
 
 test("chat prompts do not mutate the trigger level", async () => {
   const h = await harness();
-  await h.emit("session:prompt", {
+  assert.equal(h.hookNames().includes("session:prompt"), false);
+  const reply = (await h.rpc("command", {
     sessionID: "one",
-    prompt: { text: "andon level 5 please" }
-  });
+    text: "andon level 5 please"
+  })) as { text: string };
+  assert.match(reply.text, /^Usage:/);
   assert.match((await h.context()).system[0].text, /Active trigger level: 3/);
 });
 
@@ -157,11 +159,13 @@ test("disconnected UI cannot turn a saved pull into a failure", async () => {
 });
 
 test("cancellation propagates rather than returning ordinary failure guidance", async () => {
-  const h = await harness();
+  const calls: string[][] = [];
   const controller = new AbortController();
   controller.abort();
   const broken = await harness({
-    cli: async (_args, _input, signal) => {
+    cli: async (args, _input, signal) => {
+      calls.push(args);
+      if (args[0] === "stats") return '{"level":3}';
       signal?.throwIfAborted();
       return '{"level":3}';
     }
@@ -169,7 +173,7 @@ test("cancellation propagates rather than returning ordinary failure guidance", 
   await assert.rejects(broken.pull(input, "one", controller.signal), {
     name: "AbortError"
   });
-  assert.equal(h.calls.filter((call) => call.args[0] === "pull").length, 0);
+  assert.equal(calls.filter((args) => args[0] === "pull").length, 1);
 });
 
 test("commands inspect, update, and reset the shared default level", async () => {

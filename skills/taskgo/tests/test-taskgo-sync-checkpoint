@@ -8,16 +8,8 @@ taskgo_test_init
 echo "1..24"
 
 REPO="$TEST_ROOT/repo"
+create_taskgo_repo "$REPO"
 mkdir -p "$REPO/example/tasks"
-git -C "$REPO" init -q
-
-printf '%s\n' \
-  '# Agent instructions' \
-  '' \
-  'This repository follows taskgo:' \
-  '<https://github.com/ithinkihaveacat/dotfiles/tree/main/skills/taskgo>.' \
-  >"$REPO/AGENTS.md"
-printf '# Inbox\n' >"$REPO/INBOX.md"
 printf '# Example project\n' >"$REPO/example/PROJECT.md"
 printf '# Plan\n' >"$REPO/example/PLAN.md"
 printf '%s\n' \
@@ -29,72 +21,110 @@ printf '%s\n' \
   '# Confirm generated status formatting' \
   >"$REPO/example/tasks/TASK-A1B2C-confirm-status.md"
 
-if ("$BIN" --root "$REPO" sync example) &&
-  "$MARKDOWN_FORMAT" --check "$REPO/example/STATUS.md" >/dev/null; then
+if (tg --root "$REPO" sync example) &&
+  mdfmt --check "$REPO/example/STATUS.md" >/dev/null; then
   echo 'ok 1 - sync emits canonical Markdown'
 else
   echo 'not ok 1 - sync output needs Markdown formatting'
 fi
 
-if (tg --root "$REPO" doctor example) >/dev/null 2>&1; then
-  echo 'ok 2 - doctor accepts canonical generated status'
-else
-  echo 'not ok 2 - doctor rejects canonical generated status'
-fi
+"$TASKGO_PY" - "$BIN" "$REPO" <<'PY'
+import contextlib
+import importlib.machinery
+import importlib.util
+import io
+from pathlib import Path
+import re
+import sys
 
-sed -i.bak '/taskgo/d' "$REPO/AGENTS.md"
-if ! declaration_out=$(tg --root "$REPO" doctor example 2>&1) &&
-  grep -q '^\[WARN\]  AGENTS.md: must state' <<<"$declaration_out"; then
-  echo 'ok 3 - doctor requires a taskgo declaration'
-else
-  echo 'not ok 3 - doctor accepts a missing taskgo declaration'
-fi
+loader = importlib.machinery.SourceFileLoader("taskgo_under_test", sys.argv[1])
+tg = importlib.util.module_from_spec(
+    importlib.util.spec_from_loader(loader.name, loader)
+)
+loader.exec_module(tg)
+repo = Path(sys.argv[2])
 
-printf '%s\n' \
-  '# Agent instructions' \
-  '' \
-  'This repository follows taskgo.' \
-  >"$REPO/AGENTS.md"
-if ! url_out=$(tg --root "$REPO" doctor example 2>&1) &&
-  grep -q '^\[WARN\]  AGENTS.md: missing canonical taskgo URL:' <<<"$url_out"; then
-  echo 'ok 4 - doctor requires the canonical taskgo URL'
-else
-  echo 'not ok 4 - doctor accepts a missing canonical taskgo URL'
-fi
 
-printf '%s\n' \
-  '# Agent instructions' \
-  '' \
-  'This repository follows taskgo:' \
-  '<https://github.com/ithinkihaveacat/dotfiles/tree/main/skills/taskgo>.' \
-  >"$REPO/AGENTS.md"
-sed -i.bak 's/status: todo/status: in-progress/' \
-  "$REPO/example/tasks/TASK-A1B2C-confirm-status.md"
-("$BIN" --root "$REPO" sync example) >/dev/null
-awk '
-  { print }
-  $0 == "## Summary" {
-    print ""
-    print "There is no task currently in progress."
-  }
-' "$REPO/example/STATUS.md" >"$REPO/example/STATUS.md.tmp"
-mv "$REPO/example/STATUS.md.tmp" "$REPO/example/STATUS.md"
-if ! contradiction_out=$(tg --root "$REPO" doctor example 2>&1) &&
-  grep -q '^\[WARN\]  example: STATUS prose says no task is in progress' <<<"$contradiction_out"; then
-  echo 'ok 5 - doctor detects contradictory STATUS prose'
-else
-  echo 'not ok 5 - doctor accepts contradictory STATUS prose'
-fi
+def run_tg(*argv: str) -> tuple[int, str, str]:
+    tg._REPO_ROOT_CACHE = None
+    tg._EXPLICIT_ROOT = None
+    tg._ACTIVE_COMMAND = None
+    tg._OFFLINE_FLAG = False
+    out, err = io.StringIO(), io.StringIO()
+    rc = 0
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        try:
+            tg.main(list(argv))
+        except SystemExit as exc:
+            rc = exc.code if isinstance(exc.code, int) else (1 if exc.code else 0)
+    return rc, out.getvalue(), err.getvalue()
 
-sed -i.bak '/There is no task currently in progress\./d' \
-  "$REPO/example/STATUS.md"
-sed -i.bak 's/status: in-progress/status: done/' \
-  "$REPO/example/tasks/TASK-A1B2C-confirm-status.md"
-if ! (tg --root "$REPO" doctor example) >/dev/null 2>&1; then
-  echo 'ok 6 - doctor still detects task snapshot drift'
-else
-  echo 'not ok 6 - doctor missed task snapshot drift'
-fi
+
+def report(num: int, desc: str, ok: bool, detail: str = "") -> None:
+    print(f"{'ok' if ok else 'not ok'} {num} - {desc}", flush=True)
+    if not ok and detail:
+        for line in detail.splitlines():
+            print(f"# {line}", flush=True)
+
+
+rc2, out2, err2 = run_tg("--root", str(repo), "doctor", "example")
+report(2, "doctor accepts canonical generated status", rc2 == 0, out2 + err2)
+
+agents_p = repo / "AGENTS.md"
+agents_p.write_text(
+    "\n".join(line for line in agents_p.read_text().splitlines() if "taskgo" not in line) + "\n"
+)
+rc3, out3, err3 = run_tg("--root", str(repo), "doctor", "example")
+report(
+    3,
+    "doctor requires a taskgo declaration",
+    rc3 != 0 and bool(re.search(r"^\[WARN\]  AGENTS\.md: must state", out3 + err3, re.M)),
+    out3 + err3,
+)
+
+agents_p.write_text("# Agent instructions\n\nThis repository follows taskgo.\n")
+rc4, out4, err4 = run_tg("--root", str(repo), "doctor", "example")
+report(
+    4,
+    "doctor requires the canonical taskgo URL",
+    rc4 != 0
+    and bool(re.search(r"^\[WARN\]  AGENTS\.md: missing canonical taskgo URL:", out4 + err4, re.M)),
+    out4 + err4,
+)
+
+agents_p.write_text(
+    "# Agent instructions\n\nThis repository follows taskgo:\n"
+    "<https://github.com/ithinkihaveacat/dotfiles/tree/main/skills/taskgo>.\n"
+)
+task_p = repo / "example/tasks/TASK-A1B2C-confirm-status.md"
+task_p.write_text(task_p.read_text().replace("status: todo", "status: in-progress"))
+run_tg("--root", str(repo), "sync", "example")
+status_p = repo / "example/STATUS.md"
+status_p.write_text(
+    status_p.read_text().replace(
+        "## Summary\n", "## Summary\n\nThere is no task currently in progress.\n", 1
+    )
+)
+rc5, out5, err5 = run_tg("--root", str(repo), "doctor", "example")
+report(
+    5,
+    "doctor detects contradictory STATUS prose",
+    rc5 != 0
+    and bool(
+        re.search(
+            r"^\[WARN\]  example: STATUS prose says no task is in progress",
+            out5 + err5,
+            re.M,
+        )
+    ),
+    out5 + err5,
+)
+
+status_p.write_text(status_p.read_text().replace("There is no task currently in progress.\n", ""))
+task_p.write_text(task_p.read_text().replace("status: in-progress", "status: done"))
+rc6, _, _ = run_tg("--root", str(repo), "doctor", "example")
+report(6, "doctor still detects task snapshot drift", rc6 != 0)
+PY
 
 CHECKPOINT_REPO="$TEST_ROOT/checkpoint-repo"
 mkdir -p "$CHECKPOINT_REPO/example/tasks"
@@ -286,7 +316,7 @@ else
   printf '# err=%s\n' "$CONFLICT_ERR"
 fi
 git -C "$SYNC_LOCAL" checkout -q -- example/PLAN.md
-(tg --root "$SYNC_LOCAL" status example) >/dev/null
+git -C "$SYNC_LOCAL" pull -q --rebase origin main
 
 # 17: Phase 1 commit rebase conflict aborts rebase cleanly and restores HEAD
 printf '# Plan\n\nLocal committed conflict.\n' >"$SYNC_LOCAL/example/PLAN.md"
@@ -361,7 +391,7 @@ else
 fi
 rm -f "$SYNC_LOCAL/example/untracked-collision.md"
 git -C "$SYNC_LOCAL" checkout -q -- example/PLAN.md
-(tg --root "$SYNC_LOCAL" status example) >/dev/null
+git -C "$SYNC_LOCAL" pull -q --rebase origin main
 
 # 21: Unstaged STATUS.md generated block from local update reconciles cleanly with peer task commit in same project
 (tg --root "$SYNC_LOCAL" update TASK-A1B2C --status todo --offline) >/dev/null
@@ -405,7 +435,7 @@ else
 fi
 
 # 24: checkpoint and commit succeed when another task in the project is overdue
-tg --root "$SYNC_LOCAL" --offline create example 'Overdue sibling task' --slug overdue-sibling --due 2020-01-01 >/dev/null
+tg --root "$SYNC_LOCAL" --offline create example 'Overdue sibling task' --slug overdue-sibling --due 2020-01-01 --no-commit >/dev/null
 TASKGO_TODAY=2026-11-03 tg --root "$SYNC_LOCAL" --offline update TASK-A1B2C --status in-progress >/dev/null
 if TASKGO_TODAY=2026-11-03 tg --root "$SYNC_LOCAL" --offline checkpoint TASK-A1B2C 'example: checkpoint despite overdue sibling' --all >/dev/null 2>&1 &&
   ! TASKGO_TODAY=2026-11-03 tg --root "$SYNC_LOCAL" --offline doctor example >/dev/null 2>&1; then

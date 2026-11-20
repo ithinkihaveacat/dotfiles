@@ -196,6 +196,7 @@ export async function harness(
     cleanup,
     synthetic,
     commands,
+    hookNames: () => [...hooks.keys()],
     notifications: () => notifications,
     breakSession: () => {
       getSessionFails = true;

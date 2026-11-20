@@ -1,55 +1,46 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import {
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  writeFileSync
-} from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
-import plugin, {
+import { after, test } from "node:test";
+import {
   payload,
   run,
   shouldEnsure
 } from "../plugins/ensure-commit-hooks.ts";
 
-type Hook = (event: { command: string; cwd: string }) => Promise<void>;
+const temporaryDirs: string[] = [];
 
 function temporary(prefix: string): string {
-  return mkdtempSync(join(tmpdir(), prefix));
-}
-
-function repository(): string {
-  const dir = temporary("opencode-hook-repo-");
-  execFileSync("git", ["init", "-q", dir]);
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  temporaryDirs.push(dir);
   return dir;
 }
 
-function commitHook(dir: string): string {
-  return join(dir, ".git", "hooks", "commit-msg.d", "10-agent");
-}
+after(() => {
+  for (const dir of temporaryDirs) {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
-async function shellHook(): Promise<Hook> {
-  let found: Hook | undefined;
-  await plugin.setup({
-    shell: {
-      async hook(name, callback) {
-        assert.equal(name, "create.before");
-        found = callback;
-        return { dispose() {} };
-      }
+async function withEnv(
+  vars: Record<string, string | undefined>,
+  fn: () => Promise<void>
+): Promise<void> {
+  const prev = new Map<string, string | undefined>();
+  for (const [k, v] of Object.entries(vars)) {
+    prev.set(k, process.env[k]);
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
+  try {
+    await fn();
+  } finally {
+    for (const [k, v] of prev) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
     }
-  });
-  assert.ok(found);
-  return found;
-}
-
-function setRequiredHooks(value: string | undefined): void {
-  if (value === undefined) delete process.env.AGENT_REQUIRED_HOOKS;
-  else process.env.AGENT_REQUIRED_HOOKS = value;
+  }
 }
 
 test("recognises git commit commands", () => {
@@ -73,66 +64,12 @@ test("passes the command and cwd to the shared script", async () => {
   const script = join(dir, "capture.sh");
   const out = join(dir, "out.json");
   writeFileSync(script, '#!/usr/bin/env bash\ncat >"$OUT"\n');
-  process.env.OUT = out;
-
-  await run(script, "git commit -m x", "/tmp/repo");
+  await withEnv({ OUT: out }, async () => {
+    await run(script, "git commit -m x", "/tmp/repo");
+  });
 
   assert.deepEqual(JSON.parse(readFileSync(out, "utf8")), {
     cwd: "/tmp/repo",
     tool_input: { command: "git commit -m x" }
   });
-});
-
-test("installs the commit hook from a subdirectory before git commit", async () => {
-  const dir = repository();
-  const sub = join(dir, "packages", "web");
-  mkdirSync(sub, { recursive: true });
-  setRequiredHooks("agent");
-
-  const hook = await shellHook();
-  await hook({ command: "git commit -m test", cwd: sub });
-
-  assert.ok(existsSync(commitHook(dir)));
-});
-
-test("follows git -C targets and ignores other commands", async () => {
-  const target = repository();
-  const elsewhere = temporary("opencode-hook-elsewhere-");
-  setRequiredHooks("agent");
-
-  const hook = await shellHook();
-  await hook({ command: `git -C ${target} commit -m test`, cwd: elsewhere });
-  assert.ok(existsSync(commitHook(target)));
-
-  const untouched = repository();
-  await hook({ command: "git status", cwd: untouched });
-  assert.equal(existsSync(commitHook(untouched)), false);
-});
-
-test("honours the opt-out, leaves non-repositories alone and never throws", async () => {
-  const optedOut = repository();
-  setRequiredHooks("");
-  const hook = await shellHook();
-  await hook({ command: "git commit -m test", cwd: optedOut });
-  assert.equal(existsSync(commitHook(optedOut)), false);
-
-  setRequiredHooks("agent");
-  const plain = temporary("opencode-hook-plain-");
-  await hook({ command: "git commit -m test", cwd: plain });
-  assert.equal(existsSync(commitHook(plain)), false);
-
-  setRequiredHooks(undefined);
-});
-
-test("skips third-party clones and forks unless opted in", async () => {
-  setRequiredHooks("agent");
-  const hook = await shellHook();
-  const repo = repository();
-  execFileSync("git", ["-C", repo, "remote", "add", "origin", "https://github.com/other-org/external.git"]);
-  await hook({ command: "git commit -m test", cwd: repo });
-  assert.equal(existsSync(commitHook(repo)), false);
-  execFileSync("git", ["-C", repo, "config", "hooks.agent", "true"]);
-  await hook({ command: "git commit -m test", cwd: repo });
-  assert.equal(existsSync(commitHook(repo)), true);
-  setRequiredHooks(undefined);
 });

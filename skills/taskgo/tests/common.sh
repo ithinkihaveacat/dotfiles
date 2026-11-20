@@ -35,6 +35,7 @@ taskgo_test_init() {
   export GIT_AUTHOR_EMAIL="taskgo@example.com"
   export GIT_COMMITTER_NAME="Taskgo Test"
   export GIT_COMMITTER_EMAIL="taskgo@example.com"
+  export AGENT_OFFLINE="${AGENT_OFFLINE:-1}"
 
   TEST_ROOT="$(mktemp -d)"
   trap 'rm -rf -- "$TEST_ROOT"' EXIT
@@ -45,12 +46,42 @@ taskgo_test_init() {
   if [[ -z "${TASKGO_PY:-}" ]]; then
     TASKGO_PY=$(uv sync -q --script "$BIN" </dev/null && uv python find --script "$BIN")
   fi
+  export TASKGO_PY
+  # scripts/taskgo shares exact mdformat + ruamel.yaml pins with markdown-format.
+  # shellcheck disable=SC2034
+  export MDFMT_PY="${MDFMT_PY:-$TASKGO_PY}"
 }
 
 # Run taskgo directly with its pre-synced script Python to skip per-call
 # `uv run --script` startup overhead in repetitive test setups and checks.
 tg() {
   "$TASKGO_PY" "$BIN" "$@"
+}
+
+# Run markdown-format directly with its pre-synced Python to skip cold `uv` runs.
+mdfmt() {
+  "$MDFMT_PY" "$MARKDOWN_FORMAT" "$@"
+}
+
+# Initialize a minimal git-backed taskgo repository at TARGET with AGENTS.md,
+# INBOX.md, and `<project>/{README.md,tasks}` for each optional PROJECT arg.
+create_taskgo_repo() {
+  local target="$1"
+  shift
+  mkdir -p "$target"
+  git -C "$target" init -q -b main
+  printf '%s\n' \
+    '# Agent instructions' \
+    '' \
+    'This repository follows taskgo:' \
+    '<https://github.com/ithinkihaveacat/dotfiles/tree/main/skills/taskgo>.' \
+    >"$target/AGENTS.md"
+  printf '# Inbox\n' >"$target/INBOX.md"
+  local proj
+  for proj in "$@"; do
+    mkdir -p "$target/$proj/tasks"
+    printf '# %s\n' "$proj" >"$target/$proj/README.md"
+  done
 }
 
 init_base_repo() {

@@ -11,187 +11,252 @@ echo "1..21"
 COST_REPO="$TEST_ROOT/cost-repo"
 mkdir -p "$COST_REPO"
 git -C "$COST_REPO" init -q
-COST_TASK="$COST_REPO/example/tasks/"
-if ("$BIN" --root "$COST_REPO" create example 'Record consequences' \
-  --slug consequences --problem 'Requests are slow' \
-  --cost 'Users wait for every request' --goal 'Reduce latency' --no-commit) >/dev/null 2>&1 &&
-  COST_CONTENT=$(cat "$COST_TASK"*consequences.md) &&
-  [[ "$COST_CONTENT" == *'**Problem:** Requests are slow'*'**Cost:** Users wait for every request'*'**Goal:** Reduce latency'* ]]; then
-  echo 'ok 1 - create writes Cost between Problem and Goal'
-else
-  echo 'not ok 1 - create writes Cost between Problem and Goal'
-fi
 
-if (tg --root "$COST_REPO" create example 'Keep cost optional' \
-  --slug optional --problem 'Background only' --no-commit) >/dev/null 2>&1 &&
-  COST_OPTIONAL_CONTENT=$(cat "$COST_TASK"*optional.md) &&
-  [[ "$COST_OPTIONAL_CONTENT" != *'**Cost:**'* ]] &&
-  (tg --root "$COST_REPO" update example/tasks/"$(basename "$COST_TASK"*optional.md)" \
-    --goal 'Preserve optional fields') >/dev/null 2>&1 &&
-  [[ $(cat "$COST_TASK"*optional.md) != *'**Cost:**'* ]]; then
-  echo 'ok 2 - create and update accept Problem without Cost'
-else
-  echo 'not ok 2 - create and update accept Problem without Cost'
-fi
-
-COST_OPTIONAL_PATH="example/tasks/$(basename "$COST_TASK"*optional.md)"
-if (tg --root "$COST_REPO" update "$COST_OPTIONAL_PATH" \
-  --cost 'Maintenance burden') >/dev/null 2>&1 &&
-  COST_INSERTED=$(cat "$COST_TASK"*optional.md) &&
-  [[ "$COST_INSERTED" == *'**Cost:** Maintenance burden'* ]] &&
-  [[ "$COST_INSERTED" == *'**Goal:** Preserve optional fields'* ]]; then
-  echo 'ok 3 - update adds a previously absent Cost'
-else
-  echo 'not ok 3 - update adds a previously absent Cost'
-fi
-
-if (tg --root "$COST_REPO" update "$COST_OPTIONAL_PATH" \
-  --cost $'Users wait.\n\nRetries add load.') >/dev/null 2>&1 &&
-  COST_REPLACED=$(cat "$COST_TASK"*optional.md) &&
-  [[ "$COST_REPLACED" == *'Users wait.'*'Retries add load.'* ]] &&
-  [[ "$COST_REPLACED" != *'Maintenance burden'* ]] &&
-  [[ "$COST_REPLACED" == *'**Problem:** Background only'* ]] &&
-  [[ "$COST_REPLACED" == *'**Goal:** Preserve optional fields'* ]] &&
-  [ "$(awk '/\*\*Cost:\*\*/ { n++ } END { print n+0 }' "$COST_TASK"*optional.md)" -eq 1 ]; then
-  echo 'ok 4 - update replaces Cost with multiline text and preserves other fields'
-else
-  echo 'not ok 4 - update replaces Cost with multiline text and preserves other fields'
-fi
-
-# ===========================================================================
 # wait_for, due, and stale_after frontmatter fields
-# ===========================================================================
-
 WF_REPO="$TEST_ROOT/wf-repo"
-mkdir -p "$WF_REPO/proj/tasks"
-git -C "$WF_REPO" init -q
-git -C "$WF_REPO" config user.name 'Taskgo Test'
-git -C "$WF_REPO" config user.email 'taskgo@example.invalid'
-
-printf '%s\n' \
-  '# Agent instructions' \
-  '' \
-  'This repository follows taskgo:' \
-  '<https://github.com/ithinkihaveacat/dotfiles/tree/main/skills/taskgo>.' \
-  >"$WF_REPO/AGENTS.md"
-printf '# Inbox\n' >"$WF_REPO/INBOX.md"
-printf '# Project\n' >"$WF_REPO/proj/README.md"
+create_taskgo_repo "$WF_REPO" proj
 git -C "$WF_REPO" add -A >/dev/null 2>&1
 git -C "$WF_REPO" commit -qm 'chore: init wf-repo'
 
-# Test 131: create and update support --wait-for, --due, and --stale-after and expose them in list --json
-WF_CREATED=$(tg --root "$WF_REPO" create proj 'Wait on issue and deadline' \
-  --slug wait-issue \
-  --wait-for issue/123456 --wait-for '@reviewer' \
-  --due 2026-10-15 \
-  --stale-after 2026-11-01 \
-  --no-commit)
-WF_ID="${WF_CREATED%%$'\t'*}"
-WF_JSON=$(TASKGO_TODAY=2026-10-06 tg --root "$WF_REPO" list proj --json)
-if [[ "$WF_JSON" == *'"wait_for": ['* ]] &&
-  [[ "$WF_JSON" == *'"issue/123456"'* ]] &&
-  [[ "$WF_JSON" == *'"@reviewer"'* ]] &&
-  [[ "$WF_JSON" == *'"due": "2026-10-15"'* ]] &&
-  [[ "$WF_JSON" == *'"stale_after": "2026-11-01"'* ]] &&
-  (tg --root "$WF_REPO" update "$WF_ID" --due 2026-10-20 --wait-for pr/654321) >/dev/null 2>&1 &&
-  [[ $(TASKGO_TODAY=2026-10-06 tg --root "$WF_REPO" list proj --json) == *'"due": "2026-10-20"'* ]] &&
-  [[ $(TASKGO_TODAY=2026-10-06 tg --root "$WF_REPO" list proj --json) == *'"pr/654321"'* ]]; then
-  echo 'ok 5 - create and update support --wait-for, --due, and --stale-after'
-else
-  echo 'not ok 5 - create and update support --wait-for, --due, and --stale-after'
-fi
+# 1-11: Cost field and wait_for/due/stale_after update/doctor/list checks
+"$TASKGO_PY" - "$BIN" "$COST_REPO" "$WF_REPO" "$TEST_ROOT/wf_fut_id" <<'PY'
+import contextlib
+import importlib.machinery
+import importlib.util
+import io
+import os
+from pathlib import Path
+import sys
 
-# Test 132: doctor allows status: blocked with unresolved wait_for, and warns when all wait_for dates elapsed
-(tg --root "$WF_REPO" update "$WF_ID" --status blocked --wait-for issue/123456) >/dev/null 2>&1
-(TASKGO_TODAY=2026-10-06 tg --root "$WF_REPO" sync proj) >/dev/null
-if TASKGO_TODAY=2026-10-06 tg --root "$WF_REPO" doctor proj >/dev/null 2>&1 &&
-  (tg --root "$WF_REPO" update "$WF_ID" --wait-for 2026-10-01) >/dev/null 2>&1 &&
-  (TASKGO_TODAY=2026-10-06 tg --root "$WF_REPO" sync proj) >/dev/null &&
-  ! WF_ELAPSED_DR=$(TASKGO_TODAY=2026-10-06 tg --root "$WF_REPO" doctor proj 2>&1) &&
-  [[ "$WF_ELAPSED_DR" == *"status is blocked but all wait_for gates elapsed"* ]]; then
-  echo 'ok 6 - doctor allows blocked status with unresolved wait_for and warns when elapsed'
-else
-  echo 'not ok 6 - doctor allows blocked status with unresolved wait_for and warns when elapsed'
-fi
+loader = importlib.machinery.SourceFileLoader("taskgo_under_test", sys.argv[1])
+tg = importlib.util.module_from_spec(
+    importlib.util.spec_from_loader(loader.name, loader)
+)
+loader.exec_module(tg)
+cost_repo = Path(sys.argv[2])
+wf_repo = Path(sys.argv[3])
+fut_id_file = Path(sys.argv[4])
 
-# Reset WF_ID back to clean blocked on issue/123456 with non-urgent due date
-(tg --root "$WF_REPO" update "$WF_ID" --status blocked --wait-for issue/123456 --due 2026-10-20) >/dev/null 2>&1
 
-# Test 133: doctor emits [FAIL] when open task has due < today and [INFO] when due within 48h
-DUE_OVERDUE_OUT=$(tg --root "$WF_REPO" create proj 'Overdue task' --slug overdue --due 2026-10-05 --no-commit)
-DUE_OVERDUE_ID="${DUE_OVERDUE_OUT%%$'\t'*}"
-DUE_SOON_OUT=$(tg --root "$WF_REPO" create proj 'Soon task' --slug soon --due 2026-10-08 --no-commit)
-DUE_SOON_ID="${DUE_SOON_OUT%%$'\t'*}"
-(TASKGO_TODAY=2026-10-06 tg --root "$WF_REPO" sync proj) >/dev/null
-set +e
-DUE_DR=$(TASKGO_TODAY=2026-10-06 tg --root "$WF_REPO" doctor proj 2>&1)
-DUE_DR_EXIT=$?
-set -e
-if [ "$DUE_DR_EXIT" -ne 0 ] &&
-  [[ "$DUE_DR" == *"[FAIL]  proj/tasks/${DUE_OVERDUE_ID}-overdue.md: overdue (due 2026-10-05"* ]] &&
-  [[ "$DUE_DR" == *"[INFO]  proj/tasks/${DUE_SOON_ID}-soon.md: due soon (due 2026-10-08"* ]]; then
-  echo 'ok 7 - doctor emits [FAIL] on overdue due date and [INFO] within 48h'
-else
-  echo 'not ok 7 - doctor emits [FAIL] on overdue due date and [INFO] within 48h'
-fi
+def run_tg(*argv: str, today: str | None = None) -> tuple[int, str, str]:
+    tg._REPO_ROOT_CACHE = None
+    tg._EXPLICIT_ROOT = None
+    tg._ACTIVE_COMMAND = None
+    tg._OFFLINE_FLAG = False
+    prev = os.environ.get("TASKGO_TODAY")
+    if today is not None:
+        os.environ["TASKGO_TODAY"] = today
+    out, err = io.StringIO(), io.StringIO()
+    rc = 0
+    try:
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                tg.main(list(argv))
+            except SystemExit as exc:
+                rc = exc.code if isinstance(exc.code, int) else (1 if exc.code else 0)
+    finally:
+        if today is not None:
+            if prev is None:
+                os.environ.pop("TASKGO_TODAY", None)
+            else:
+                os.environ["TASKGO_TODAY"] = prev
+    return rc, out.getvalue(), err.getvalue()
 
-# Test 134: doctor emits [WARN] on open task with stale_after < today without auto-deleting on fix
-(tg --root "$WF_REPO" update "$DUE_OVERDUE_ID" --status 'done' --outcome 'Done.') >/dev/null 2>&1
-(tg --root "$WF_REPO" update "$DUE_SOON_ID" --due 2026-10-25 --stale-after 2026-10-01) >/dev/null 2>&1
-(TASKGO_TODAY=2026-10-06 tg --root "$WF_REPO" sync proj) >/dev/null
-set +e
-STALE_DR=$(TASKGO_TODAY=2026-10-06 tg --root "$WF_REPO" doctor proj 2>&1)
-STALE_DR_EXIT=$?
-set -e
-(TASKGO_TODAY=2026-10-06 tg --root "$WF_REPO" fix proj --no-commit) >/dev/null 2>&1 || true
-if [ "$STALE_DR_EXIT" -ne 0 ] &&
-  [[ "$STALE_DR" == *"[WARN]  proj/tasks/${DUE_SOON_ID}-soon.md: stale task (stale_after 2026-10-01)"* ]] &&
-  [ -f "$WF_REPO/proj/tasks/${DUE_SOON_ID}-soon.md" ]; then
-  echo 'ok 8 - doctor warns on stale_after < today without deleting task'
-else
-  echo 'not ok 8 - doctor warns on stale_after < today without deleting task'
-fi
 
-# Clean up stale_after on DUE_SOON_ID
-(tg --root "$WF_REPO" update "$DUE_SOON_ID" --stale-after "") >/dev/null 2>&1
+def report(num: int, desc: str, ok: bool, detail: str = "") -> None:
+    print(f"{'ok' if ok else 'not ok'} {num} - {desc}", flush=True)
+    if not ok and detail:
+        for line in detail.splitlines():
+            print(f"# {line}", flush=True)
 
-# Test 135: list --state ready excludes todo tasks with unresolved wait_for gates and includes elapsed dates
-WF_FUT_OUT=$(tg --root "$WF_REPO" create proj 'Future cooldown' --slug fut-wait --wait-for 2026-10-13 --no-commit)
-WF_FUT_ID="${WF_FUT_OUT%%$'\t'*}"
-WF_PAST_OUT=$(tg --root "$WF_REPO" create proj 'Elapsed cooldown' --slug past-wait --wait-for 2026-10-06 --no-commit)
-WF_PAST_ID="${WF_PAST_OUT%%$'\t'*}"
-WF_EXT_OUT=$(tg --root "$WF_REPO" create proj 'External handle gate' --slug ext-wait --wait-for '@reviewer' --no-commit)
-WF_EXT_ID="${WF_EXT_OUT%%$'\t'*}"
-READY_OUT=$(TASKGO_TODAY=2026-10-06 tg --root "$WF_REPO" list proj --state ready)
-if [[ "$READY_OUT" != *"$WF_FUT_ID"* ]] &&
-  [[ "$READY_OUT" != *"$WF_EXT_ID"* ]] &&
-  [[ "$READY_OUT" == *"$WF_PAST_ID"* ]]; then
-  echo 'ok 9 - list --state ready excludes unresolved wait_for gates and includes elapsed dates'
-else
-  echo 'not ok 9 - list --state ready excludes unresolved wait_for gates and includes elapsed dates'
-fi
 
-# Test 136: list --state ready sorts approaching due dates first
-(tg --root "$WF_REPO" update "$DUE_SOON_ID" --due 2026-10-12) >/dev/null 2>&1
-(tg --root "$WF_REPO" update "$WF_PAST_ID" --due 2026-10-09) >/dev/null 2>&1
-READY_IDS=$(TASKGO_TODAY=2026-10-06 tg --root "$WF_REPO" list proj --state ready | awk 'NR>1 {print $2}' | tr '\n' ' ')
-if [ "$READY_IDS" = "$WF_PAST_ID $DUE_SOON_ID " ]; then
-  echo 'ok 10 - list --state ready sorts approaching due dates first'
-else
-  echo 'not ok 10 - list --state ready sorts approaching due dates first'
-  echo "# READY_IDS=$READY_IDS (expected '$WF_PAST_ID $DUE_SOON_ID ')"
-fi
+# 1-4: Cost field
+rc, _, err = run_tg(
+    "--root", str(cost_repo), "create", "example", "Record consequences",
+    "--slug", "consequences", "--problem", "Requests are slow",
+    "--cost", "Users wait for every request", "--goal", "Reduce latency", "--no-commit",
+)
+c1 = next((cost_repo / "example/tasks").glob("*consequences.md")).read_text()
+ok1 = (
+    rc == 0
+    and "**Problem:** Requests are slow" in c1
+    and "**Cost:** Users wait for every request" in c1
+    and "**Goal:** Reduce latency" in c1
+    and c1.index("**Problem:**") < c1.index("**Cost:**") < c1.index("**Goal:**")
+)
+report(1, "create writes Cost between Problem and Goal", ok1, err)
 
-# Test 137: sync projects wait_for and approaching due annotations into STATUS.md
-(TASKGO_TODAY=2026-10-06 tg --root "$WF_REPO" sync proj) >/dev/null
-STATUS_TXT=$(cat "$WF_REPO/proj/STATUS.md")
-if [[ "$STATUS_TXT" == *"$WF_ID"*"waiting for \`issue/123456\`"* ]] &&
-  [[ "$STATUS_TXT" == *"$WF_FUT_ID"*"waiting for \`2026-10-13\`"* ]] &&
-  [[ "$STATUS_TXT" == *"$WF_PAST_ID"*"due \`2026-10-09\`"* ]]; then
-  echo 'ok 11 - sync projects wait_for and approaching due annotations into STATUS.md'
-else
-  echo 'not ok 11 - sync projects wait_for and approaching due annotations into STATUS.md'
-fi
+rc1, _, _ = run_tg(
+    "--root", str(cost_repo), "create", "example", "Keep cost optional",
+    "--slug", "optional", "--problem", "Background only", "--no-commit",
+)
+opt_file = next((cost_repo / "example/tasks").glob("*optional.md"))
+opt_rel = opt_file.relative_to(cost_repo).as_posix()
+rc2, _, _ = run_tg(
+    "--root", str(cost_repo), "update", opt_rel, "--goal", "Preserve optional fields"
+)
+c2 = opt_file.read_text()
+report(
+    2,
+    "create and update accept Problem without Cost",
+    rc1 == 0 and rc2 == 0 and "**Cost:**" not in c2,
+)
+
+rc3, _, _ = run_tg(
+    "--root", str(cost_repo), "update", opt_rel, "--cost", "Maintenance burden"
+)
+c3 = opt_file.read_text()
+report(
+    3,
+    "update adds a previously absent Cost",
+    rc3 == 0 and "**Cost:** Maintenance burden" in c3 and "**Goal:** Preserve optional fields" in c3,
+)
+
+rc4, _, _ = run_tg(
+    "--root", str(cost_repo), "update", opt_rel, "--cost", "Users wait.\n\nRetries add load."
+)
+c4 = opt_file.read_text()
+report(
+    4,
+    "update replaces Cost with multiline text and preserves other fields",
+    rc4 == 0
+    and "Users wait." in c4
+    and "Retries add load." in c4
+    and "Maintenance burden" not in c4
+    and "**Problem:** Background only" in c4
+    and "**Goal:** Preserve optional fields" in c4
+    and c4.count("**Cost:**") == 1,
+)
+
+# 5-11: wait_for, due, stale_after
+rc, out, err = run_tg(
+    "--root", str(wf_repo), "create", "proj", "Wait on issue and deadline",
+    "--slug", "wait-issue", "--wait-for", "issue/123456", "--wait-for", "@reviewer",
+    "--due", "2026-10-15", "--stale-after", "2026-11-01", "--no-commit",
+)
+wf_id = out.strip().split("\t")[0]
+_, wf_json, _ = run_tg("--root", str(wf_repo), "list", "proj", "--json", today="2026-10-06")
+rc_u, _, _ = run_tg(
+    "--root", str(wf_repo), "update", wf_id, "--due", "2026-10-20", "--wait-for", "pr/654321"
+)
+_, wf_json2, _ = run_tg("--root", str(wf_repo), "list", "proj", "--json", today="2026-10-06")
+report(
+    5,
+    "create and update support --wait-for, --due, and --stale-after",
+    rc == 0
+    and '"wait_for": [' in wf_json
+    and '"issue/123456"' in wf_json
+    and '"@reviewer"' in wf_json
+    and '"due": "2026-10-15"' in wf_json
+    and '"stale_after": "2026-11-01"' in wf_json
+    and rc_u == 0
+    and '"due": "2026-10-20"' in wf_json2
+    and '"pr/654321"' in wf_json2,
+    err,
+)
+
+run_tg("--root", str(wf_repo), "update", wf_id, "--status", "blocked", "--wait-for", "issue/123456")
+run_tg("--root", str(wf_repo), "sync", "proj", today="2026-10-06")
+rc_ok, _, _ = run_tg("--root", str(wf_repo), "doctor", "proj", today="2026-10-06")
+run_tg("--root", str(wf_repo), "update", wf_id, "--wait-for", "2026-10-01")
+run_tg("--root", str(wf_repo), "sync", "proj", today="2026-10-06")
+rc_el, out_el, err_el = run_tg("--root", str(wf_repo), "doctor", "proj", today="2026-10-06")
+report(
+    6,
+    "doctor allows blocked status with unresolved wait_for and warns when elapsed",
+    rc_ok == 0 and rc_el != 0 and "status is blocked but all wait_for gates elapsed" in (out_el + err_el),
+)
+
+run_tg(
+    "--root", str(wf_repo), "update", wf_id,
+    "--status", "blocked", "--wait-for", "issue/123456", "--due", "2026-10-20",
+)
+
+_, out_ov, _ = run_tg(
+    "--root", str(wf_repo), "create", "proj", "Overdue task",
+    "--slug", "overdue", "--due", "2026-10-05", "--no-commit",
+)
+due_overdue_id = out_ov.strip().split("\t")[0]
+_, out_sn, _ = run_tg(
+    "--root", str(wf_repo), "create", "proj", "Soon task",
+    "--slug", "soon", "--due", "2026-10-08", "--no-commit",
+)
+due_soon_id = out_sn.strip().split("\t")[0]
+run_tg("--root", str(wf_repo), "sync", "proj", today="2026-10-06")
+rc_due, out_due, err_due = run_tg("--root", str(wf_repo), "doctor", "proj", today="2026-10-06")
+dr_due = out_due + err_due
+report(
+    7,
+    "doctor emits [FAIL] on overdue due date and [INFO] within 48h",
+    rc_due != 0
+    and f"[FAIL]  proj/tasks/{due_overdue_id}-overdue.md: overdue (due 2026-10-05" in dr_due
+    and f"[INFO]  proj/tasks/{due_soon_id}-soon.md: due soon (due 2026-10-08" in dr_due,
+)
+
+run_tg("--root", str(wf_repo), "update", due_overdue_id, "--status", "done", "--outcome", "Done.")
+run_tg("--root", str(wf_repo), "update", due_soon_id, "--due", "2026-10-25", "--stale-after", "2026-10-01")
+run_tg("--root", str(wf_repo), "sync", "proj", today="2026-10-06")
+rc_st, out_st, err_st = run_tg("--root", str(wf_repo), "doctor", "proj", today="2026-10-06")
+run_tg("--root", str(wf_repo), "fix", "proj", "--no-commit", today="2026-10-06")
+report(
+    8,
+    "doctor warns on stale_after < today without deleting task",
+    rc_st != 0
+    and f"[WARN]  proj/tasks/{due_soon_id}-soon.md: stale task (stale_after 2026-10-01)" in (out_st + err_st)
+    and (wf_repo / f"proj/tasks/{due_soon_id}-soon.md").is_file(),
+)
+
+run_tg("--root", str(wf_repo), "update", due_soon_id, "--stale-after", "")
+_, out_f, _ = run_tg(
+    "--root", str(wf_repo), "create", "proj", "Future cooldown",
+    "--slug", "fut-wait", "--wait-for", "2026-10-13", "--no-commit",
+)
+wf_fut_id = out_f.strip().split("\t")[0]
+_, out_p, _ = run_tg(
+    "--root", str(wf_repo), "create", "proj", "Elapsed cooldown",
+    "--slug", "past-wait", "--wait-for", "2026-10-06", "--no-commit",
+)
+wf_past_id = out_p.strip().split("\t")[0]
+_, out_e, _ = run_tg(
+    "--root", str(wf_repo), "create", "proj", "External handle gate",
+    "--slug", "ext-wait", "--wait-for", "@reviewer", "--no-commit",
+)
+wf_ext_id = out_e.strip().split("\t")[0]
+_, ready_out, _ = run_tg(
+    "--root", str(wf_repo), "list", "proj", "--state", "ready", today="2026-10-06"
+)
+report(
+    9,
+    "list --state ready excludes unresolved wait_for gates and includes elapsed dates",
+    wf_fut_id not in ready_out and wf_ext_id not in ready_out and wf_past_id in ready_out,
+)
+
+run_tg("--root", str(wf_repo), "update", due_soon_id, "--due", "2026-10-12")
+run_tg("--root", str(wf_repo), "update", wf_past_id, "--due", "2026-10-09")
+_, ready_s, _ = run_tg(
+    "--root", str(wf_repo), "list", "proj", "--state", "ready", today="2026-10-06"
+)
+ready_ids = [line.split("\t")[1] for line in ready_s.splitlines()[1:] if line.strip()]
+report(
+    10,
+    "list --state ready sorts approaching due dates first",
+    ready_ids == [wf_past_id, due_soon_id],
+    f"got {ready_ids}",
+)
+
+run_tg("--root", str(wf_repo), "sync", "proj", today="2026-10-06")
+status_txt = (wf_repo / "proj/STATUS.md").read_text()
+report(
+    11,
+    "sync projects wait_for and approaching due annotations into STATUS.md",
+    (f"{wf_id}" in status_txt and "waiting for `issue/123456`" in status_txt)
+    and (f"{wf_fut_id}" in status_txt and "waiting for `2026-10-13`" in status_txt)
+    and (f"{wf_past_id}" in status_txt and "due `2026-10-09`" in status_txt),
+)
+
+fut_id_file.write_text(wf_fut_id)
+PY
+WF_FUT_ID=$(<"$TEST_ROOT/wf_fut_id")
 
 # Test 138: handoff warns when handing off a task with unresolved wait_for gates
 git -C "$WF_REPO" add -A >/dev/null 2>&1
@@ -210,31 +275,30 @@ fi
 # ===========================================================================
 
 CHK_REPO="$TEST_ROOT/chk-repo"
-mkdir -p "$CHK_REPO/alpha/tasks" "$CHK_REPO/beta/tasks"
-git -C "$CHK_REPO" init -q
-git -C "$CHK_REPO" config user.name 'Taskgo Test'
-git -C "$CHK_REPO" config user.email 'taskgo@example.invalid'
-
-printf '%s\n' \
-  '# Agent instructions' \
-  '' \
-  'This repository follows taskgo:' \
-  '<https://github.com/ithinkihaveacat/dotfiles/tree/main/skills/taskgo>.' \
-  >"$CHK_REPO/AGENTS.md"
-printf '# Inbox\n' >"$CHK_REPO/INBOX.md"
-printf '# Alpha\n' >"$CHK_REPO/alpha/README.md"
-printf '# Beta\n' >"$CHK_REPO/beta/README.md"
+create_taskgo_repo "$CHK_REPO" alpha beta
 git -C "$CHK_REPO" add -A >/dev/null 2>&1
 git -C "$CHK_REPO" commit -qm 'chore: init chk-repo'
 
-# Seed future-dated task that should NOT trigger on 2026-10-06
-CHK_QUIET_OUT=$(tg --root "$CHK_REPO" create alpha 'Future gate task' \
-  --slug future-gate \
-  --wait-for 2026-10-20 \
-  --due 2026-10-25 \
-  --stale-after 2026-11-01 \
-  --no-commit)
-CHK_QUIET_ID="${CHK_QUIET_OUT%%$'\t'*}"
+# Seed future-dated task and T14-T16 fixtures in one Python invocation, keeping all `tg check` tests on CLI.
+eval "$(
+  "$TASKGO_PY" - "$BIN" "$CHK_REPO" <<'PY'
+import contextlib, importlib.machinery, importlib.util, io, shlex, sys
+loader = importlib.machinery.SourceFileLoader("tg", sys.argv[1])
+tg = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+loader.exec_module(tg)
+repo = sys.argv[2]
+
+def create(*args):
+    tg._REPO_ROOT_CACHE = tg._EXPLICIT_ROOT = tg._ACTIVE_COMMAND = None
+    tg._OFFLINE_FLAG = False
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+        tg.main(["--root", repo, "create", *args, "--no-commit"])
+    return out.getvalue().strip().split("\t")[0]
+
+print(f"CHK_QUIET_ID={shlex.quote(create('alpha', 'Future gate task', '--slug', 'future-gate', '--wait-for', '2026-10-20', '--due', '2026-10-25', '--stale-after', '2026-11-01'))}")
+PY
+)"
 git -C "$CHK_REPO" add -A >/dev/null 2>&1
 GIT_COMMITTER_DATE="2026-10-05T10:00:00Z" git -C "$CHK_REPO" commit -qm "chore(alpha): create $CHK_QUIET_ID
 
@@ -249,19 +313,32 @@ else
   echo 'not ok 13 - check exits 0 with empty stdout when no tasks have triggered'
 fi
 
+# Seed T14-T16 tasks in one Python call, then exercise `tg check` CLI on each project.
+eval "$(
+  "$TASKGO_PY" - "$BIN" "$CHK_REPO" <<'PY'
+import contextlib, importlib.machinery, importlib.util, io, shlex, sys
+loader = importlib.machinery.SourceFileLoader("tg", sys.argv[1])
+tg = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+loader.exec_module(tg)
+repo = sys.argv[2]
+
+def create(*args):
+    tg._REPO_ROOT_CACHE = tg._EXPLICIT_ROOT = tg._ACTIVE_COMMAND = None
+    tg._OFFLINE_FLAG = False
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+        tg.main(["--root", repo, "create", *args, "--no-commit"])
+    return out.getvalue().strip().split("\t")[0]
+
+print(f"CHK_DATE_ID={shlex.quote(create('alpha', 'Elapsed cooldown task', '--slug', 'elapsed-date', '--wait-for', '2026-10-06'))}")
+print(f"CHK_DONE_ID={shlex.quote(create('alpha', 'Already done task', '--slug', 'done-date', '--status', 'done', '--outcome', 'Done.', '--wait-for', '2026-10-01'))}")
+print(f"CHK_OVER_ID={shlex.quote(create('beta', 'Overdue deliverable', '--slug', 'overdue-deliv', '--due', '2026-10-04'))}")
+print(f"CHK_SOON_ID={shlex.quote(create('beta', 'Approaching deliverable', '--slug', 'soon-deliv', '--due', '2026-10-08'))}")
+print(f"CHK_STALE_ID={shlex.quote(create('beta', 'Stale experiment', '--slug', 'stale-exp', '--stale-after', '2026-10-01'))}")
+PY
+)"
+
 # Test 140: check flags elapsed wait_for dates (today >= date) and ignores resolved tasks
-CHK_DATE_OUT=$(tg --root "$CHK_REPO" create alpha 'Elapsed cooldown task' \
-  --slug elapsed-date \
-  --wait-for 2026-10-06 \
-  --no-commit)
-CHK_DATE_ID="${CHK_DATE_OUT%%$'\t'*}"
-CHK_DONE_OUT=$(tg --root "$CHK_REPO" create alpha 'Already done task' \
-  --slug done-date \
-  --status 'done' \
-  --outcome 'Done.' \
-  --wait-for 2026-10-01 \
-  --no-commit)
-CHK_DONE_ID="${CHK_DONE_OUT%%$'\t'*}"
 CHK_T146_TXT=$(AGENT_OFFLINE=1 TASKGO_TODAY=2026-10-06 tg --root "$CHK_REPO" check alpha)
 CHK_T146_JSON=$(AGENT_OFFLINE=1 TASKGO_TODAY=2026-10-06 tg --root "$CHK_REPO" check alpha --json)
 if [[ "$CHK_T146_TXT" == *"$CHK_DATE_ID"*"wait_for date 2026-10-06 elapsed"* ]] &&
@@ -273,17 +350,7 @@ else
   echo 'not ok 14 - check flags elapsed wait_for dates and skips resolved tasks'
 fi
 
-# Test 141: check flags overdue (today > due) and approaching (within 48h) deadlines
-CHK_OVER_OUT=$(tg --root "$CHK_REPO" create beta 'Overdue deliverable' \
-  --slug overdue-deliv \
-  --due 2026-10-04 \
-  --no-commit)
-CHK_OVER_ID="${CHK_OVER_OUT%%$'\t'*}"
-CHK_SOON_OUT=$(tg --root "$CHK_REPO" create beta 'Approaching deliverable' \
-  --slug soon-deliv \
-  --due 2026-10-08 \
-  --no-commit)
-CHK_SOON_ID="${CHK_SOON_OUT%%$'\t'*}"
+# Test 141 & 142: check flags overdue/approaching due deadlines and stale_after cutoffs
 CHK_T147_JSON=$(AGENT_OFFLINE=1 TASKGO_TODAY=2026-10-06 tg --root "$CHK_REPO" check beta --json)
 if [[ "$CHK_T147_JSON" == *"$CHK_OVER_ID"*'"kind": "due_overdue"'* ]] &&
   [[ "$CHK_T147_JSON" == *"$CHK_SOON_ID"*'"kind": "due_soon"'* ]]; then
@@ -292,24 +359,25 @@ else
   echo 'not ok 15 - check flags overdue and approaching due deadlines'
 fi
 
-# Test 142: check flags open tasks past stale_after (today > stale_after)
-CHK_STALE_OUT=$(tg --root "$CHK_REPO" create beta 'Stale experiment' \
-  --slug stale-exp \
-  --stale-after 2026-10-01 \
-  --no-commit)
-CHK_STALE_ID="${CHK_STALE_OUT%%$'\t'*}"
-CHK_T148_JSON=$(AGENT_OFFLINE=1 TASKGO_TODAY=2026-10-06 tg --root "$CHK_REPO" check beta --json)
-if [[ "$CHK_T148_JSON" == *"$CHK_STALE_ID"*'"kind": "stale"'* ]]; then
+if [[ "$CHK_T147_JSON" == *"$CHK_STALE_ID"*'"kind": "stale"'* ]]; then
   echo 'ok 16 - check flags open tasks past stale_after cutoff'
 else
   echo 'not ok 16 - check flags open tasks past stale_after cutoff'
 fi
 
-# Clean up temporal test tasks in alpha/beta before URI polling tests
-(tg --root "$CHK_REPO" update "$CHK_DATE_ID" --status 'done' --outcome 'Done.') >/dev/null 2>&1
-(tg --root "$CHK_REPO" update "$CHK_OVER_ID" --status 'done' --outcome 'Done.') >/dev/null 2>&1
-(tg --root "$CHK_REPO" update "$CHK_SOON_ID" --status 'done' --outcome 'Done.') >/dev/null 2>&1
-(tg --root "$CHK_REPO" update "$CHK_STALE_ID" --status 'done' --outcome 'Done.') >/dev/null 2>&1
+# Clean up temporal test tasks in alpha/beta in one Python call before URI polling tests.
+"$TASKGO_PY" - "$BIN" "$CHK_REPO" "$CHK_DATE_ID" "$CHK_OVER_ID" "$CHK_SOON_ID" "$CHK_STALE_ID" <<'PY'
+import contextlib, importlib.machinery, importlib.util, io, sys
+loader = importlib.machinery.SourceFileLoader("tg", sys.argv[1])
+tg = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+loader.exec_module(tg)
+repo = sys.argv[2]
+for tid in sys.argv[3:]:
+    tg._REPO_ROOT_CACHE = tg._EXPLICIT_ROOT = tg._ACTIVE_COMMAND = None
+    tg._OFFLINE_FLAG = False
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        tg.main(["--root", repo, "update", tid, "--status", "done", "--outcome", "Done."])
+PY
 
 # Set up a mock gh for gh:... polling. These cases explicitly enable polling
 # even when CI exports AGENT_OFFLINE=1; the mock is a local fixture and never

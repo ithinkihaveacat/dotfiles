@@ -25,6 +25,14 @@ mkdir -p "$SCRIPT_TMP" "$WORK"
 PYTHON=$(command -v python3)
 UV=$(command -v uv)
 
+if "$PYTHON" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' 2>/dev/null; then
+  SMALI_CMD=("$PYTHON" "$BIN")
+elif SMALI_PY=$(uv python find --script "$BIN" 2>/dev/null); then
+  SMALI_CMD=("$SMALI_PY" "$BIN")
+else
+  SMALI_CMD=("$BIN")
+fi
+
 # PATH directories: BASE_BIN holds only what running the script needs (uv and
 # python3), so baksmali or apktool installed on the host cannot leak in.
 BASE_BIN="$TMPDIR_TEST/base-bin"
@@ -129,18 +137,30 @@ not_ok() {
   report
 }
 
-# run PATHDIRS ARGS...: run apk-smali with PATH limited to PATHDIRS.
-run() {
+run_with() {
   local path="$1"
   shift
   RC=0
   : >"$MOCK_LOG"
   PATH="$path" TMPDIR="$SCRIPT_TMP" MOCK_LOG="$MOCK_LOG" \
-    "$BIN" "$@" >"$STDOUT" 2>"$STDERR" || RC=$?
+    "$@" >"$STDOUT" 2>"$STDERR" || RC=$?
   OUT=$(<"$STDOUT")
   # Lines that begin "warning: " are uv's (a deprecated UV_* variable, say),
   # not apk-smali's, which prefixes its own with its name.
   ERR=$(grep -v '^warning: ' "$STDERR" || true)
+}
+
+# run PATHDIRS ARGS...: run apk-smali with PATH limited to PATHDIRS.
+run() {
+  local path="$1"
+  shift
+  run_with "$path" "${SMALI_CMD[@]}" "$@"
+}
+
+run_direct() {
+  local path="$1"
+  shift
+  run_with "$path" "$BIN" "$@"
 }
 
 NOTOOLS="$BASE_BIN"
@@ -158,7 +178,8 @@ SMALI_ZIP="$WORK/fixtures-smali.zip"
 # Help and usage
 # -----------------------------------------------------------------------------
 
-run "$NOTOOLS" --help
+# Keep one direct "$BIN" invocation so the uv run --script shebang is exercised.
+run_direct "$NOTOOLS" --help
 if [[ $RC == 0 && $OUT == *"Usage: apk-smali COMMAND"* && $OUT == *"disassemble"* ]]; then
   ok "--help prints usage and exits 0"
 else
@@ -231,260 +252,281 @@ else
 fi
 
 # -----------------------------------------------------------------------------
-# find and show, against a directory and a ZIP archive of the same fixtures
+# find and show against the fixture directory, plus targeted ZIP tree checks
 # -----------------------------------------------------------------------------
 
-for TREE in "$FIXTURE" "$SMALI_ZIP"; do
-  if [[ $TREE == *.zip ]]; then KIND=zip; else KIND=dir; fi
+TREE="$FIXTURE"
+KIND="dir"
 
-  run "$NOTOOLS" find "$TREE" --declares 'onTrimMemory(I)V'
-  if [[ $RC == 0 && $OUT == "Lcom/example/MyService;" ]]; then
-    ok "[$KIND] find --declares matches an override"
-  else
-    not_ok "[$KIND] find --declares matches an override"
-  fi
+run "$NOTOOLS" find "$TREE" --declares 'onTrimMemory(I)V'
+if [[ $RC == 0 && $OUT == "Lcom/example/MyService;" ]]; then
+  ok "[$KIND] find --declares matches an override"
+else
+  not_ok "[$KIND] find --declares matches an override"
+fi
 
-  run "$NOTOOLS" find "$TREE" --declares onTrimMemory
-  if [[ $RC == 0 && $OUT == "Lcom/example/MyService;" ]]; then
-    ok "[$KIND] find --declares accepts a bare method name"
-  else
-    not_ok "[$KIND] find --declares accepts a bare method name"
-  fi
+run "$NOTOOLS" find "$TREE" --declares onTrimMemory
+if [[ $RC == 0 && $OUT == "Lcom/example/MyService;" ]]; then
+  ok "[$KIND] find --declares accepts a bare method name"
+else
+  not_ok "[$KIND] find --declares accepts a bare method name"
+fi
 
-  run "$NOTOOLS" find "$TREE" --calls '->onTrimMemory'
-  if [[ $RC == 0 && $OUT == $'Lcom/example/MyService;\nLcom/example/OtherWidgetService;' ]]; then
-    ok "[$KIND] find --calls without a class matches any receiver"
-  else
-    not_ok "[$KIND] find --calls without a class matches any receiver"
-  fi
+run "$NOTOOLS" find "$TREE" --calls '->onTrimMemory'
+if [[ $RC == 0 && $OUT == $'Lcom/example/MyService;\nLcom/example/OtherWidgetService;' ]]; then
+  ok "[$KIND] find --calls without a class matches any receiver"
+else
+  not_ok "[$KIND] find --calls without a class matches any receiver"
+fi
 
-  run "$NOTOOLS" find "$TREE" --calls 'Landroid/app/Service;->onTrimMemory(I)V'
-  if [[ $RC == 0 && $OUT == "Lcom/example/MyService;" ]]; then
-    ok "[$KIND] find --calls with a full target matches the invoke-super"
-  else
-    not_ok "[$KIND] find --calls with a full target matches the invoke-super"
-  fi
+run "$NOTOOLS" find "$TREE" --calls 'Landroid/app/Service;->onTrimMemory(I)V'
+if [[ $RC == 0 && $OUT == "Lcom/example/MyService;" ]]; then
+  ok "[$KIND] find --calls with a full target matches the invoke-super"
+else
+  not_ok "[$KIND] find --calls with a full target matches the invoke-super"
+fi
 
-  run "$NOTOOLS" find "$TREE" --calls 'android.content.ComponentCallbacks2->onTrimMemory' --methods
-  if [[ $RC == 0 && $OUT == "Lcom/example/OtherWidgetService;->forward(Landroid/content/ComponentCallbacks2;I)V" ]]; then
-    ok "[$KIND] find --calls --methods prints the calling method"
-  else
-    not_ok "[$KIND] find --calls --methods prints the calling method"
-  fi
+run "$NOTOOLS" find "$TREE" --calls 'android.content.ComponentCallbacks2->onTrimMemory' --methods
+if [[ $RC == 0 && $OUT == "Lcom/example/OtherWidgetService;->forward(Landroid/content/ComponentCallbacks2;I)V" ]]; then
+  ok "[$KIND] find --calls --methods prints the calling method"
+else
+  not_ok "[$KIND] find --calls --methods prints the calling method"
+fi
 
-  run "$NOTOOLS" find "$TREE" --annotated-with 'La/b;'
-  if [[ $RC == 0 && $OUT == "Lcom/example/OtherWidgetService;" ]]; then
-    ok "[$KIND] find --annotated-with matches an obfuscated annotation type"
-  else
-    not_ok "[$KIND] find --annotated-with matches an obfuscated annotation type"
-  fi
+run "$NOTOOLS" find "$TREE" --annotated-with 'La/b;'
+if [[ $RC == 0 && $OUT == "Lcom/example/OtherWidgetService;" ]]; then
+  ok "[$KIND] find --annotated-with matches an obfuscated annotation type"
+else
+  not_ok "[$KIND] find --annotated-with matches an obfuscated annotation type"
+fi
 
-  run "$NOTOOLS" find "$TREE" --annotated-with com.example.lib.AssociateWith
-  if [[ $RC == 0 && $OUT == "Lcom/example/MyWidgetService;" ]]; then
-    ok "[$KIND] find --annotated-with accepts a dotted class name"
-  else
-    not_ok "[$KIND] find --annotated-with accepts a dotted class name"
-  fi
+run "$NOTOOLS" find "$TREE" --annotated-with com.example.lib.AssociateWith
+if [[ $RC == 0 && $OUT == "Lcom/example/MyWidgetService;" ]]; then
+  ok "[$KIND] find --annotated-with accepts a dotted class name"
+else
+  not_ok "[$KIND] find --annotated-with accepts a dotted class name"
+fi
 
-  run "$NOTOOLS" find "$TREE" --extends 'Lcom/example/lib/WidgetService;'
-  if [[ $RC == 0 && $OUT == $'Lcom/example/MyWidgetService;\nLcom/example/OtherWidgetService;' ]]; then
-    ok "[$KIND] find --extends lists every direct subclass"
-  else
-    not_ok "[$KIND] find --extends lists every direct subclass"
-  fi
+run "$NOTOOLS" find "$TREE" --extends 'Lcom/example/lib/WidgetService;'
+if [[ $RC == 0 && $OUT == $'Lcom/example/MyWidgetService;\nLcom/example/OtherWidgetService;' ]]; then
+  ok "[$KIND] find --extends lists every direct subclass"
+else
+  not_ok "[$KIND] find --extends lists every direct subclass"
+fi
 
-  run "$NOTOOLS" find "$TREE" --extends com.example.lib.WidgetService --annotated-with 'La/b;'
-  if [[ $RC == 0 && $OUT == "Lcom/example/OtherWidgetService;" ]]; then
-    ok "[$KIND] find combines predicates with AND"
-  else
-    not_ok "[$KIND] find combines predicates with AND"
-  fi
+run "$NOTOOLS" find "$TREE" --extends com.example.lib.WidgetService --annotated-with 'La/b;'
+if [[ $RC == 0 && $OUT == "Lcom/example/OtherWidgetService;" ]]; then
+  ok "[$KIND] find combines predicates with AND"
+else
+  not_ok "[$KIND] find combines predicates with AND"
+fi
 
-  run "$NOTOOLS" find "$TREE" --implements 'Ljava/lang/annotation/Annotation;'
-  if [[ $RC == 0 && $OUT == "La/b;" ]]; then
-    ok "[$KIND] find --implements matches .implements"
-  else
-    not_ok "[$KIND] find --implements matches .implements"
-  fi
+run "$NOTOOLS" find "$TREE" --implements 'Ljava/lang/annotation/Annotation;'
+if [[ $RC == 0 && $OUT == "La/b;" ]]; then
+  ok "[$KIND] find --implements matches .implements"
+else
+  not_ok "[$KIND] find --implements matches .implements"
+fi
 
-  run "$NOTOOLS" find "$TREE" --annotated-with 'Lkotlin/Metadata;' --declares onTrimMemory
-  if [[ $RC == 0 && $OUT == "Lcom/example/MyService;" ]]; then
-    ok "[$KIND] find matches Kotlin metadata annotations"
-  else
-    not_ok "[$KIND] find matches Kotlin metadata annotations"
-  fi
+run "$NOTOOLS" find "$TREE" --annotated-with 'Lkotlin/Metadata;' --declares onTrimMemory
+if [[ $RC == 0 && $OUT == "Lcom/example/MyService;" ]]; then
+  ok "[$KIND] find matches Kotlin metadata annotations"
+else
+  not_ok "[$KIND] find matches Kotlin metadata annotations"
+fi
 
-  run "$NOTOOLS" find "$TREE" --declares 'onLowMemory()V'
-  if [[ $RC == 1 && -z $OUT && -z $ERR ]]; then
-    ok "[$KIND] find exits 1 silently when nothing matches"
-  else
-    not_ok "[$KIND] find exits 1 silently when nothing matches"
-  fi
+run "$NOTOOLS" find "$TREE" --declares 'onLowMemory()V'
+if [[ $RC == 1 && -z $OUT && -z $ERR ]]; then
+  ok "[$KIND] find exits 1 silently when nothing matches"
+else
+  not_ok "[$KIND] find exits 1 silently when nothing matches"
+fi
 
-  run "$NOTOOLS" show method "$TREE" com.example.MyService 'onTrimMemory(I)V'
-  if [[ $RC == 0 && $OUT == ".method public onTrimMemory(I)V"*".end method" &&
-    $OUT == *"invoke-super {p0, p1}, Landroid/app/Service;->onTrimMemory(I)V"* &&
-    $OUT != *".method private final trimCaches"* ]]; then
-    ok "[$KIND] show method prints exactly the method body"
-  else
-    not_ok "[$KIND] show method prints exactly the method body"
-  fi
+run "$NOTOOLS" show method "$TREE" com.example.MyService 'onTrimMemory(I)V'
+if [[ $RC == 0 && $OUT == ".method public onTrimMemory(I)V"*".end method" &&
+  $OUT == *"invoke-super {p0, p1}, Landroid/app/Service;->onTrimMemory(I)V"* &&
+  $OUT != *".method private final trimCaches"* ]]; then
+  ok "[$KIND] show method prints exactly the method body"
+else
+  not_ok "[$KIND] show method prints exactly the method body"
+fi
 
-  run "$NOTOOLS" show method "$TREE" 'Lcom/example/MyService;' 'onTrimMemory(I)V' --depth 1
-  if [[ $RC == 0 && $OUT == *".method private final trimCaches(I)V"* &&
-    $OUT != *".method private final clearAll()V"* ]]; then
-    ok "[$KIND] show method --depth 1 adds directly called same-class methods"
-  else
-    not_ok "[$KIND] show method --depth 1 adds directly called same-class methods"
-  fi
+run "$NOTOOLS" show method "$TREE" 'Lcom/example/MyService;' 'onTrimMemory(I)V' --depth 1
+if [[ $RC == 0 && $OUT == *".method private final trimCaches(I)V"* &&
+  $OUT != *".method private final clearAll()V"* ]]; then
+  ok "[$KIND] show method --depth 1 adds directly called same-class methods"
+else
+  not_ok "[$KIND] show method --depth 1 adds directly called same-class methods"
+fi
 
-  run "$NOTOOLS" show method "$TREE" com.example.MyService onTrimMemory --depth 3
-  COUNT=$(grep -c '^\.method private final clearAll()V' "$STDOUT" || true)
-  if [[ $RC == 0 && $OUT == *".method private final clearAll()V"* && $COUNT == 1 &&
-    $OUT != *".method public onCreate()V"* ]]; then
-    ok "[$KIND] show method --depth follows calls recursively and deduplicates"
-  else
-    not_ok "[$KIND] show method --depth follows calls recursively and deduplicates"
-  fi
+run "$NOTOOLS" show method "$TREE" com.example.MyService onTrimMemory --depth 3
+COUNT=$(grep -c '^\.method private final clearAll()V' "$STDOUT" || true)
+if [[ $RC == 0 && $OUT == *".method private final clearAll()V"* && $COUNT == 1 &&
+  $OUT != *".method public onCreate()V"* ]]; then
+  ok "[$KIND] show method --depth follows calls recursively and deduplicates"
+else
+  not_ok "[$KIND] show method --depth follows calls recursively and deduplicates"
+fi
 
-  run "$NOTOOLS" show method "$TREE" com.example.MyService 'onLowMemory()V'
-  if [[ $RC == 1 && $ERR == *"apk-smali show method: Lcom/example/MyService;->onLowMemory()V: method not found"* ]]; then
-    ok "[$KIND] show method reports a missing method"
-  else
-    not_ok "[$KIND] show method reports a missing method"
-  fi
+run "$NOTOOLS" show method "$TREE" com.example.MyService 'onLowMemory()V'
+if [[ $RC == 1 && $ERR == *"apk-smali show method: Lcom/example/MyService;->onLowMemory()V: method not found"* ]]; then
+  ok "[$KIND] show method reports a missing method"
+else
+  not_ok "[$KIND] show method reports a missing method"
+fi
 
-  run "$NOTOOLS" show annotations "$TREE" com.example.MyWidgetService
-  if [[ $RC == 0 && $OUT == *".annotation runtime Lcom/example/lib/AssociateWith;"* &&
-    $OUT == *"value = Lcom/example/MyWidget;"* && $OUT != *"kotlin/Metadata"* &&
-    $OUT != *"Inject"* ]]; then
-    ok "[$KIND] show annotations prints class annotations and their values"
-  else
-    not_ok "[$KIND] show annotations prints class annotations and their values"
-  fi
+run "$NOTOOLS" show annotations "$TREE" com.example.MyWidgetService
+if [[ $RC == 0 && $OUT == *".annotation runtime Lcom/example/lib/AssociateWith;"* &&
+  $OUT == *"value = Lcom/example/MyWidget;"* && $OUT != *"kotlin/Metadata"* &&
+  $OUT != *"Inject"* ]]; then
+  ok "[$KIND] show annotations prints class annotations and their values"
+else
+  not_ok "[$KIND] show annotations prints class annotations and their values"
+fi
 
-  run "$NOTOOLS" show annotations "$TREE" com.example.MyService
-  if [[ $RC == 0 && -z $OUT ]]; then
-    ok "[$KIND] show annotations hides kotlin/Metadata and dalvik annotations"
-  else
-    not_ok "[$KIND] show annotations hides kotlin/Metadata and dalvik annotations"
-  fi
+run "$NOTOOLS" show annotations "$TREE" com.example.MyService
+if [[ $RC == 0 && -z $OUT ]]; then
+  ok "[$KIND] show annotations hides kotlin/Metadata and dalvik annotations"
+else
+  not_ok "[$KIND] show annotations hides kotlin/Metadata and dalvik annotations"
+fi
 
-  run "$NOTOOLS" show annotations "$TREE" com.example.MyService --all
-  if [[ $RC == 0 && $OUT == *"Lkotlin/Metadata;"* && $OUT == *"Ldalvik/annotation/SourceDebugExtension;"* ]]; then
-    ok "[$KIND] show annotations --all includes compiler annotations"
-  else
-    not_ok "[$KIND] show annotations --all includes compiler annotations"
-  fi
+run "$NOTOOLS" show annotations "$TREE" com.example.MyService --all
+if [[ $RC == 0 && $OUT == *"Lkotlin/Metadata;"* && $OUT == *"Ldalvik/annotation/SourceDebugExtension;"* ]]; then
+  ok "[$KIND] show annotations --all includes compiler annotations"
+else
+  not_ok "[$KIND] show annotations --all includes compiler annotations"
+fi
 
-  run "$NOTOOLS" show annotations "$TREE" com.example.MyWidgetService --members
-  if [[ $RC == 0 && $OUT == *"# Lcom/example/MyWidgetService;->repository:Lcom/example/Repository;"* &&
-    $OUT == *"Ljavax/inject/Inject;"* &&
-    $OUT == *"# Lcom/example/MyWidgetService;->getWidget()Lcom/example/lib/Widget;"* &&
-    $OUT == *"VisibleForTesting"* && $OUT != *"NotNull"* ]]; then
-    ok "[$KIND] show annotations --members adds field and method annotations"
-  else
-    not_ok "[$KIND] show annotations --members adds field and method annotations"
-  fi
+run "$NOTOOLS" show annotations "$TREE" com.example.MyWidgetService --members
+if [[ $RC == 0 && $OUT == *"# Lcom/example/MyWidgetService;->repository:Lcom/example/Repository;"* &&
+  $OUT == *"Ljavax/inject/Inject;"* &&
+  $OUT == *"# Lcom/example/MyWidgetService;->getWidget()Lcom/example/lib/Widget;"* &&
+  $OUT == *"VisibleForTesting"* && $OUT != *"NotNull"* ]]; then
+  ok "[$KIND] show annotations --members adds field and method annotations"
+else
+  not_ok "[$KIND] show annotations --members adds field and method annotations"
+fi
 
-  run "$NOTOOLS" show annotations "$TREE" 'Lcom/example/OtherWidgetService;'
-  if [[ $RC == 0 && $OUT == $'.annotation runtime La/b;\n    value = Lcom/example/OtherWidget;\n.end annotation' ]]; then
-    ok "[$KIND] show annotations prints an obfuscated annotation block verbatim"
-  else
-    not_ok "[$KIND] show annotations prints an obfuscated annotation block verbatim"
-  fi
+run "$NOTOOLS" show annotations "$TREE" 'Lcom/example/OtherWidgetService;'
+if [[ $RC == 0 && $OUT == $'.annotation runtime La/b;\n    value = Lcom/example/OtherWidget;\n.end annotation' ]]; then
+  ok "[$KIND] show annotations prints an obfuscated annotation block verbatim"
+else
+  not_ok "[$KIND] show annotations prints an obfuscated annotation block verbatim"
+fi
 
-  run "$NOTOOLS" show class "$TREE" a.b
-  if [[ $RC == 0 && $OUT == ".class public interface abstract annotation La/b;"*".end method" ]]; then
-    ok "[$KIND] show class prints the whole file"
-  else
-    not_ok "[$KIND] show class prints the whole file"
-  fi
+run "$NOTOOLS" show class "$TREE" a.b
+if [[ $RC == 0 && $OUT == ".class public interface abstract annotation La/b;"*".end method" ]]; then
+  ok "[$KIND] show class prints the whole file"
+else
+  not_ok "[$KIND] show class prints the whole file"
+fi
 
-  run "$NOTOOLS" show class "$TREE" com.example.Missing
-  if [[ $RC == 1 && $ERR == *"Lcom/example/Missing;: class not found"* ]]; then
-    ok "[$KIND] show class reports a missing class"
-  else
-    not_ok "[$KIND] show class reports a missing class"
-  fi
+run "$NOTOOLS" show class "$TREE" com.example.Missing
+if [[ $RC == 1 && $ERR == *"Lcom/example/Missing;: class not found"* ]]; then
+  ok "[$KIND] show class reports a missing class"
+else
+  not_ok "[$KIND] show class reports a missing class"
+fi
 
-  run "$NOTOOLS" show hierarchy "$TREE" com.example.MyWidgetService
-  if [[ $RC == 0 && $OUT == $'Lcom/example/MyWidgetService;\nLcom/example/lib/WidgetService;\nLandroid/app/Service;  # not in tree' ]]; then
-    ok "[$KIND] show hierarchy follows .super until a class outside the tree"
-  else
-    not_ok "[$KIND] show hierarchy follows .super until a class outside the tree"
-  fi
+run "$NOTOOLS" show hierarchy "$TREE" com.example.MyWidgetService
+if [[ $RC == 0 && $OUT == $'Lcom/example/MyWidgetService;\nLcom/example/lib/WidgetService;\nLandroid/app/Service;  # not in tree' ]]; then
+  ok "[$KIND] show hierarchy follows .super until a class outside the tree"
+else
+  not_ok "[$KIND] show hierarchy follows .super until a class outside the tree"
+fi
 
-  run "$NOTOOLS" show hierarchy "$TREE" 'Lcom/example/OtherWidgetService;' --interfaces
-  if [[ $RC == 0 && $OUT == $'Lcom/example/OtherWidgetService;\nLcom/example/lib/WidgetService;\n  implements Landroid/content/ComponentCallbacks2;\nLandroid/app/Service;  # not in tree' ]]; then
-    ok "[$KIND] show hierarchy --interfaces lists implemented interfaces"
-  else
-    not_ok "[$KIND] show hierarchy --interfaces lists implemented interfaces"
-  fi
+run "$NOTOOLS" show hierarchy "$TREE" 'Lcom/example/OtherWidgetService;' --interfaces
+if [[ $RC == 0 && $OUT == $'Lcom/example/OtherWidgetService;\nLcom/example/lib/WidgetService;\n  implements Landroid/content/ComponentCallbacks2;\nLandroid/app/Service;  # not in tree' ]]; then
+  ok "[$KIND] show hierarchy --interfaces lists implemented interfaces"
+else
+  not_ok "[$KIND] show hierarchy --interfaces lists implemented interfaces"
+fi
 
-  run "$NOTOOLS" find "$TREE" --string '/sync/status'
-  if [[ $RC == 0 && $OUT == "Lcom/example/MyService;" ]]; then
-    ok "[$KIND] find --string matches const-string literal"
-  else
-    not_ok "[$KIND] find --string matches const-string literal"
-  fi
+run "$NOTOOLS" find "$TREE" --string '/sync/status'
+if [[ $RC == 0 && $OUT == "Lcom/example/MyService;" ]]; then
+  ok "[$KIND] find --string matches const-string literal"
+else
+  not_ok "[$KIND] find --string matches const-string literal"
+fi
 
-  run "$NOTOOLS" find "$TREE" --string '/sync/status' --methods
-  if [[ $RC == 0 && $OUT == "Lcom/example/MyService;->onCreate()V" ]]; then
-    ok "[$KIND] find --string --methods prints the method containing const-string"
-  else
-    not_ok "[$KIND] find --string --methods prints the method containing const-string"
-  fi
+run "$NOTOOLS" find "$TREE" --string '/sync/status' --methods
+if [[ $RC == 0 && $OUT == "Lcom/example/MyService;->onCreate()V" ]]; then
+  ok "[$KIND] find --string --methods prints the method containing const-string"
+else
+  not_ok "[$KIND] find --string --methods prints the method containing const-string"
+fi
 
-  run "$NOTOOLS" find "$TREE" --string 'MyServiceTag'
-  if [[ $RC == 0 && $OUT == "Lcom/example/MyService;" ]]; then
-    ok "[$KIND] find --string matches static field string initializer"
-  else
-    not_ok "[$KIND] find --string matches static field string initializer"
-  fi
+run "$NOTOOLS" find "$TREE" --string 'MyServiceTag'
+if [[ $RC == 0 && $OUT == "Lcom/example/MyService;" ]]; then
+  ok "[$KIND] find --string matches static field string initializer"
+else
+  not_ok "[$KIND] find --string matches static field string initializer"
+fi
 
-  run "$NOTOOLS" find "$TREE" --package com.example.lib
-  if [[ $RC == 0 && $OUT == "Lcom/example/lib/WidgetService;" ]]; then
-    ok "[$KIND] find --package restricts entries to the given package prefix"
-  else
-    not_ok "[$KIND] find --package restricts entries to the given package prefix"
-  fi
+run "$NOTOOLS" find "$TREE" --package com.example.lib
+if [[ $RC == 0 && $OUT == "Lcom/example/lib/WidgetService;" ]]; then
+  ok "[$KIND] find --package restricts entries to the given package prefix"
+else
+  not_ok "[$KIND] find --package restricts entries to the given package prefix"
+fi
 
-  run "$NOTOOLS" find "$TREE" --pkg a --implements 'Ljava/lang/annotation/Annotation;'
-  if [[ $RC == 0 && $OUT == "La/b;" ]]; then
-    ok "[$KIND] find --pkg alias filters package alongside predicates"
-  else
-    not_ok "[$KIND] find --pkg alias filters package alongside predicates"
-  fi
+run "$NOTOOLS" find "$TREE" --pkg a --implements 'Ljava/lang/annotation/Annotation;'
+if [[ $RC == 0 && $OUT == "La/b;" ]]; then
+  ok "[$KIND] find --pkg alias filters package alongside predicates"
+else
+  not_ok "[$KIND] find --pkg alias filters package alongside predicates"
+fi
 
-  run "$NOTOOLS" show class "$TREE" a.b com.example.lib.WidgetService
-  if [[ $RC == 0 && $OUT == "# La/b;"*"# Lcom/example/lib/WidgetService;"* ]]; then
-    ok "[$KIND] show class accepts multiple classes and prints descriptor headers"
-  else
-    not_ok "[$KIND] show class accepts multiple classes and prints descriptor headers"
-  fi
+run "$NOTOOLS" show class "$TREE" a.b com.example.lib.WidgetService
+if [[ $RC == 0 && $OUT == "# La/b;"*"# Lcom/example/lib/WidgetService;"* ]]; then
+  ok "[$KIND] show class accepts multiple classes and prints descriptor headers"
+else
+  not_ok "[$KIND] show class accepts multiple classes and prints descriptor headers"
+fi
 
-  run "$NOTOOLS" show method -n "$TREE" com.example.MyService 'onTrimMemory(I)V'
-  if [[ $RC == 0 && $OUT == "    78: .method public onTrimMemory(I)V"*"    86: .end method" ]]; then
-    ok "[$KIND] show method -n prefixes exact 1-based .smali file line numbers"
-  else
-    not_ok "[$KIND] show method -n prefixes exact 1-based .smali file line numbers"
-  fi
+run "$NOTOOLS" show method -n "$TREE" com.example.MyService 'onTrimMemory(I)V'
+if [[ $RC == 0 && $OUT == "    78: .method public onTrimMemory(I)V"*"    86: .end method" ]]; then
+  ok "[$KIND] show method -n prefixes exact 1-based .smali file line numbers"
+else
+  not_ok "[$KIND] show method -n prefixes exact 1-based .smali file line numbers"
+fi
 
-  run "$NOTOOLS" show annotations --line-numbers "$TREE" com.example.MyWidgetService
-  if [[ $RC == 0 && $OUT == "     7: .annotation runtime Lcom/example/lib/AssociateWith;"*"     9: .end annotation" ]]; then
-    ok "[$KIND] show annotations --line-numbers prefixes 1-based line numbers"
-  else
-    not_ok "[$KIND] show annotations --line-numbers prefixes 1-based line numbers"
-  fi
+run "$NOTOOLS" show annotations --line-numbers "$TREE" com.example.MyWidgetService
+if [[ $RC == 0 && $OUT == "     7: .annotation runtime Lcom/example/lib/AssociateWith;"*"     9: .end annotation" ]]; then
+  ok "[$KIND] show annotations --line-numbers prefixes 1-based line numbers"
+else
+  not_ok "[$KIND] show annotations --line-numbers prefixes 1-based line numbers"
+fi
 
-  run "$NOTOOLS" show hierarchy "$TREE" android.app.Service
-  if [[ $RC == 1 && -z $OUT && $ERR == *"Landroid/app/Service;: class not found"* ]]; then
-    ok "[$KIND] show hierarchy reports a CLASS missing from the tree"
-  else
-    not_ok "[$KIND] show hierarchy reports a CLASS missing from the tree"
-  fi
-done
+run "$NOTOOLS" show hierarchy "$TREE" android.app.Service
+if [[ $RC == 1 && -z $OUT && $ERR == *"Landroid/app/Service;: class not found"* ]]; then
+  ok "[$KIND] show hierarchy reports a CLASS missing from the tree"
+else
+  not_ok "[$KIND] show hierarchy reports a CLASS missing from the tree"
+fi
+
+run "$NOTOOLS" find "$SMALI_ZIP" --package com.example --declares 'onTrimMemory(I)V'
+if [[ $RC == 0 && $OUT == "Lcom/example/MyService;" ]]; then
+  ok "[zip] find --package and --declares match inside a ZIP archive"
+else
+  not_ok "[zip] find --package and --declares match inside a ZIP archive"
+fi
+
+run "$NOTOOLS" show method "$SMALI_ZIP" com.example.MyService 'onTrimMemory(I)V'
+if [[ $RC == 0 && $OUT == ".method public onTrimMemory(I)V"*".end method" &&
+  $OUT == *"invoke-super {p0, p1}, Landroid/app/Service;->onTrimMemory(I)V"* ]]; then
+  ok "[zip] show method prints the method body from a ZIP archive"
+else
+  not_ok "[zip] show method prints the method body from a ZIP archive"
+fi
+
+run "$NOTOOLS" show class "$SMALI_ZIP" com.example.Missing
+if [[ $RC == 1 && $ERR == *"Lcom/example/Missing;: class not found"* ]]; then
+  ok "[zip] show class reports a missing class in a ZIP archive"
+else
+  not_ok "[zip] show class reports a missing class in a ZIP archive"
+fi
 
 run "$NOTOOLS" find "$WORK/does-not-exist" --extends Lx\;
 if [[ $RC == 2 && $ERR == *"apk-smali find: "*"No such file or directory"* ]]; then

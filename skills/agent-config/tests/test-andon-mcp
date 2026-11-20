@@ -19,6 +19,7 @@ import json
 import os
 import re
 import selectors
+import shutil
 import signal
 import subprocess
 import sys
@@ -26,6 +27,7 @@ import tempfile
 import traceback
 import unittest
 from pathlib import Path
+from typing import Any
 
 from mcp.client.session import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
@@ -33,6 +35,14 @@ from mcp.shared.exceptions import MCPError
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "andon"
 SERVER = Path(__file__).resolve().parents[1] / "scripts" / "andon-mcp"
+subprocess.run(["uv", "sync", "--quiet", "--script", str(SERVER)], check=True)
+ANDON_MCP_PY = subprocess.check_output(
+    ["uv", "python", "find", "--script", str(SERVER)], text=True
+).strip()
+NO_SERVER_TESTS = frozenset(
+    {"test_standard_library_cli_and_missing_sdk", "test_stdio_eof_and_signals"}
+)
+ISOLATED_SERVER_TESTS = frozenset({"test_request_log"})
 REPORT = {
     "color": "yellow",
     "kind": "stale_instruction",
@@ -62,7 +72,87 @@ def log_format() -> tuple[set[str], set[str]]:
 
 
 class AndonMcpTests(unittest.TestCase):
+    _shared_stack: contextlib.AsyncExitStack | None = None
+    _shared_state: Path | None = None
+    _shared_env: dict[str, str] | None = None
+    _shared_client: ClientSession | None = None
+    _shared_init: Any = None
+
+    @contextlib.contextmanager
+    def subTest(self, msg: Any = "", **params: Any):  # noqa: N802
+        try:
+            yield
+        except BaseException as exc:
+            exc.add_note(f"subTest({params})")
+            raise
+
+    @classmethod
+    async def ensure_shared_client(cls) -> None:
+        if cls._shared_client is not None:
+            return
+        stack = contextlib.AsyncExitStack()
+        root = stack.enter_context(tempfile.TemporaryDirectory())
+        state = Path(root) / "state"
+        env = {
+            **os.environ,
+            "ANDON_STATE_DIR": str(state),
+            "ANDON_MCP_LOG": str(Path(root) / "mcp.jsonl"),
+            "ANDON_LEVEL": "4",
+        }
+        stderr = stack.enter_context(tempfile.TemporaryFile(mode="w+"))  # noqa: SIM115 -- ExitStack owns cleanup
+        streams = await stack.enter_async_context(
+            stdio_client(
+                StdioServerParameters(
+                    command=ANDON_MCP_PY,
+                    args=[str(SERVER), "--stdio"],
+                    env=env,
+                ),
+                errlog=stderr,
+            )
+        )
+        client = await stack.enter_async_context(
+            ClientSession(*streams, read_timeout_seconds=10)
+        )
+        init = await client.initialize()
+        cls._shared_stack = stack
+        cls._shared_state = state
+        cls._shared_env = env
+        cls._shared_client = client
+        cls._shared_init = init
+
+    @classmethod
+    async def cleanup_shared(cls) -> None:
+        if cls._shared_stack is not None:
+            await cls._shared_stack.aclose()
+            cls._shared_stack = None
+            cls._shared_client = None
+
     async def run_test(self, method):
+        name = method.__name__
+        if name not in NO_SERVER_TESTS and name not in ISOLATED_SERVER_TESTS:
+            await self.ensure_shared_client()
+            assert self._shared_state is not None
+            assert self._shared_env is not None
+            self.state = self._shared_state
+            self.env = self._shared_env
+            self.client = self._shared_client
+            self.initialized = self._shared_init
+            if self.state.exists():
+                if self.state.is_dir():
+                    shutil.rmtree(self.state)
+                else:
+                    self.state.unlink()
+            try:
+                result = method()
+                if inspect.isawaitable(result):
+                    await result
+            finally:
+                if self.state.exists():
+                    if self.state.is_dir():
+                        shutil.rmtree(self.state, ignore_errors=True)
+                    else:
+                        self.state.unlink(missing_ok=True)
+            return
         async with contextlib.AsyncExitStack() as self.stack:
             root = self.stack.enter_context(tempfile.TemporaryDirectory())
             self.state = Path(root) / "state"
@@ -72,24 +162,27 @@ class AndonMcpTests(unittest.TestCase):
                 "ANDON_MCP_LOG": str(Path(root) / "mcp.jsonl"),
                 "ANDON_LEVEL": "4",
             }
-            self.stderr = self.stack.enter_context(tempfile.TemporaryFile(mode="w+"))  # noqa: SIM115 -- ExitStack owns cleanup
-            streams = await self.stack.enter_async_context(
-                stdio_client(
-                    StdioServerParameters(
-                        command=sys.executable,
-                        args=[str(SCRIPT), "mcp", "--stdio"],
-                        env=self.env,
-                    ),
-                    errlog=self.stderr,
+            if name not in NO_SERVER_TESTS:
+                self.stderr = self.stack.enter_context(
+                    tempfile.TemporaryFile(mode="w+")  # noqa: SIM115 -- ExitStack owns cleanup
                 )
-            )
-            self.client = await self.stack.enter_async_context(
-                ClientSession(
-                    *streams,
-                    read_timeout_seconds=10,
+                streams = await self.stack.enter_async_context(
+                    stdio_client(
+                        StdioServerParameters(
+                            command=ANDON_MCP_PY,
+                            args=[str(SERVER), "--stdio"],
+                            env=self.env,
+                        ),
+                        errlog=self.stderr,
+                    )
                 )
-            )
-            self.initialized = await self.client.initialize()
+                self.client = await self.stack.enter_async_context(
+                    ClientSession(
+                        *streams,
+                        read_timeout_seconds=10,
+                    )
+                )
+                self.initialized = await self.client.initialize()
 
             result = method()
             if inspect.isawaitable(result):
@@ -478,10 +571,16 @@ class AndonMcpTests(unittest.TestCase):
 
     def test_stdio_eof_and_signals(self):
         for sig in (None, signal.SIGINT, signal.SIGTERM):
+            # Keep one real 'andon mcp' launcher check on EOF; invoke andon-mcp directly for signals.
+            cmd = (
+                [sys.executable, str(SCRIPT), "mcp"]
+                if sig is None
+                else [ANDON_MCP_PY, str(SERVER)]
+            )
             with (
                 self.subTest(signal=sig),
                 subprocess.Popen(
-                    [sys.executable, str(SCRIPT), "mcp"],
+                    cmd,
                     env=self.env,
                     stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
@@ -528,19 +627,26 @@ class AndonMcpTests(unittest.TestCase):
                         process.wait()
 
 
-if __name__ == "__main__":
+async def run_all() -> int:
     names = sorted(name for name in dir(AndonMcpTests) if name.startswith("test_"))
     print(f"1..{len(names)}", flush=True)
     failures = 0
-    for number, name in enumerate(names, 1):
-        case = AndonMcpTests()
-        try:
-            asyncio.run(case.run_test(getattr(case, name)))
-        except Exception:
-            failures += 1
-            print(f"not ok {number} - {name}", flush=True)
-            for line in traceback.format_exc().splitlines():
-                print(f"# {line}")
-        else:
-            print(f"ok {number} - {name}", flush=True)
-    sys.exit(1 if failures else 0)
+    try:
+        for number, name in enumerate(names, 1):
+            case = AndonMcpTests()
+            try:
+                await case.run_test(getattr(case, name))
+            except Exception:
+                failures += 1
+                print(f"not ok {number} - {name}", flush=True)
+                for line in traceback.format_exc().splitlines():
+                    print(f"# {line}")
+            else:
+                print(f"ok {number} - {name}", flush=True)
+    finally:
+        await AndonMcpTests.cleanup_shared()
+    return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    sys.exit(asyncio.run(run_all()))

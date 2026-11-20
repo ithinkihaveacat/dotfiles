@@ -1,12 +1,10 @@
-#!/usr/bin/env -S uv run --script
-# /// script
-# requires-python = ">=3.11"
-# dependencies = []
-# ///
+#!/usr/bin/env python3
 """Replay documented Codex wire events against the real shared Andon store."""
 # ruff: noqa: PT009
 
 import concurrent.futures
+import importlib.machinery
+import importlib.util
 import json
 import os
 import selectors
@@ -21,6 +19,19 @@ ROOT = Path(__file__).resolve().parents[1]
 HOOK = ROOT / "plugins/andon/chatgpt/hooks/codex-hook"
 CLI = ROOT / "scripts/andon"
 BIN = ROOT.parents[1] / "bin"
+
+
+def _load_module(name: str, path: Path):
+    loader = importlib.machinery.SourceFileLoader(name, str(path))
+    spec = importlib.util.spec_from_loader(name, loader)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+BACKEND_MOD = _load_module("andon_cli_under_test", CLI)
+HOOK_MOD = _load_module("andon_codex_hook_under_test", HOOK)
 REPORT = {
     "color": "yellow",
     "kind": "stale_instruction",
@@ -42,6 +53,17 @@ class CodexTests(unittest.TestCase):
             "ANDON_LEVEL": "3",
             "PATH": str(BIN) + os.pathsep + os.environ.get("PATH", ""),
         }
+        saved_env = os.environ.copy()
+        self.addCleanup(self._restore_env, saved_env)
+
+    @staticmethod
+    def _restore_env(saved_env: dict[str, str]) -> None:
+        os.environ.clear()
+        os.environ.update(saved_env)
+
+    def _sync_env(self) -> None:
+        os.environ.clear()
+        os.environ.update(self.env)
 
     def run_script(self, script, *args, value=None, env=None):
         return subprocess.run(
@@ -54,18 +76,29 @@ class CodexTests(unittest.TestCase):
             check=False,
         )
 
-    def hook(self, name="SessionStart", session="host-session", **fields):
-        result = self.run_script(
-            HOOK,
-            value={
-                "hook_event_name": name,
-                "session_id": session,
-                "cwd": "/example",
-                **fields,
-            },
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        output = json.loads(result.stdout)
+    def hook(
+        self,
+        name="SessionStart",
+        session="host-session",
+        *,
+        via_subprocess=False,
+        sync_env=True,
+        **fields,
+    ):
+        event = {
+            "hook_event_name": name,
+            "session_id": session,
+            "cwd": "/example",
+            **fields,
+        }
+        if via_subprocess:
+            result = self.run_script(HOOK, value=event)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            output = json.loads(result.stdout)
+        else:
+            if sync_env:
+                self._sync_env()
+            output = HOOK_MOD.handle(event, BACKEND_MOD)
         if output:
             self.assertEqual(output["hookSpecificOutput"]["hookEventName"], name)
             self.assertEqual(set(output), {"hookSpecificOutput"})
@@ -86,14 +119,16 @@ class CodexTests(unittest.TestCase):
         )
 
     def test_rule_restored_on_each_lifecycle_event(self):
-        for name, fields in (
-            ("SessionStart", {"source": "startup"}),
-            ("UserPromptSubmit", {"prompt": "Continue the work"}),
-            ("SessionStart", {"source": "compact"}),
-            ("SessionStart", {"source": "resume"}),
-            ("SubagentStart", {"agent_id": "worker"}),
+        for index, (name, fields) in enumerate(
+            (
+                ("SessionStart", {"source": "startup"}),
+                ("UserPromptSubmit", {"prompt": "Continue the work"}),
+                ("SessionStart", {"source": "compact"}),
+                ("SessionStart", {"source": "resume"}),
+                ("SubagentStart", {"agent_id": "worker"}),
+            )
         ):
-            rule = self.hook(name, **fields)
+            rule = self.hook(name, via_subprocess=(index == 0), **fields)
             self.assertIn("# Andon Cord (`pull`)", rule)
             self.assertIn("Active trigger level: 3 (standard).", rule)
             self.assertIn("stop on the blocked path", rule)
@@ -278,10 +313,14 @@ class CodexTests(unittest.TestCase):
             self.assertLessEqual(len(json.loads(text).get("failures", {})), 64)
 
     def test_parallel_events_leave_valid_session_state(self):
+        self._sync_env()
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
             results = list(
                 pool.map(
-                    lambda _: self.hook("UserPromptSubmit", prompt="Continue"), range(8)
+                    lambda _: self.hook(
+                        "UserPromptSubmit", prompt="Continue", sync_env=False
+                    ),
+                    range(8),
                 )
             )
         self.assertTrue(all("Andon Cord" in result for result in results))

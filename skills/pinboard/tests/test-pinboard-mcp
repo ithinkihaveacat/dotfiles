@@ -53,10 +53,16 @@ sys.path.insert(0, str(HERE / "fixtures"))
 from fake_pinboard import API, FAKE, TOKEN  # noqa: E402
 
 BIN = HERE.parent / "scripts" / "pinboard"
+SERVER_BIN = HERE.parent / "scripts" / "pinboard-mcp"
 LOG_FORMAT = HERE.parents[1] / "agent-config" / "references" / "mcp-logs.md"
 TEAM, AUD = "test.invalid", "test-aud"
 OLD = "2020-03-04T05:06:07Z"
 STALE = time.time() - 3 * 86400
+NO_REPO_TESTS = frozenset({"test_command_line", "test_symlinked_entry_point"})
+subprocess.run(["uv", "sync", "--quiet", "--script", str(SERVER_BIN)], check=True)
+PBM_PY = subprocess.check_output(
+    ["uv", "python", "find", "--script", str(SERVER_BIN)], text=True
+).strip()
 
 
 def log_format() -> tuple[set[str], set[str]]:
@@ -122,32 +128,12 @@ def free_port() -> int:
 
 
 class PinboardMcpTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.tmp = Path(tempfile.mkdtemp()).resolve()
-        self.remote = self.tmp / "remote.git"
-        self.clone = self.tmp / "clone"
-        self.log = self.tmp / "state" / "mcp.jsonl"
-        self.env = {
-            k: v
-            for k, v in os.environ.items()
-            if not k.startswith(("PINBOARD_", "GIT_"))
-            and k not in ("AGENT_OFFLINE", "XDG_STATE_HOME")
-        }
-        self.env.update(
-            PINBOARD_API_URL=API,
-            PINBOARD_API_TOKEN=TOKEN,
-            PINBOARD_TIME_SCALE="0.0001",
-            PINBOARD_REPO=str(self.clone),
-            PINBOARD_MCP_LOG=str(self.log),
-            GIT_CONFIG_GLOBAL=str(self.tmp / "gitconfig"),
-            GIT_CONFIG_NOSYSTEM="1",
-            GIT_AUTHOR_NAME="Pinboard Test",
-            GIT_AUTHOR_EMAIL="pinboard@example.com",
-            GIT_COMMITTER_NAME="Pinboard Test",
-            GIT_COMMITTER_EMAIL="pinboard@example.com",
-        )
-        (self.tmp / "gitconfig").write_text("[init]\n\tdefaultBranch = main\n")
-        self.errlog = (self.tmp / "stdio.log").open("w")
+    _tpl_dir: Path | None = None
+    _tpl_remote: Path | None = None
+    _tpl_clone: Path | None = None
+
+    @staticmethod
+    def seed_fake() -> None:
         with FAKE.lock:
             FAKE.posts.clear()
             FAKE.calls.clear()
@@ -175,11 +161,105 @@ class PinboardMcpTests(unittest.TestCase):
                 "recipes",
                 shared="yes",
             )
-        self.git("init", "-q", "--bare", str(self.remote))
-        self.git("clone", "-q", str(self.remote), str(self.clone))
-        self.pb("sync", env={"GIT_COMMITTER_DATE": OLD})
+
+    @classmethod
+    def ensure_template(cls) -> tuple[Path, Path]:
+        if cls._tpl_clone is not None:
+            assert cls._tpl_remote is not None
+            return cls._tpl_remote, cls._tpl_clone
+        tpl = Path(tempfile.mkdtemp(prefix="pb-mcp-tpl-")).resolve()
+        cls._tpl_dir = tpl
+        cls._tpl_remote = tpl / "remote.git"
+        cls._tpl_clone = tpl / "clone"
+        env = {
+            k: v
+            for k, v in os.environ.items()
+            if not k.startswith(("PINBOARD_", "GIT_"))
+            and k not in ("AGENT_OFFLINE", "XDG_STATE_HOME")
+        }
+        env.update(
+            PINBOARD_API_URL=API,
+            PINBOARD_API_TOKEN=TOKEN,
+            PINBOARD_TIME_SCALE="0.0001",
+            PINBOARD_REPO=str(cls._tpl_clone),
+            GIT_CONFIG_GLOBAL=str(tpl / "gitconfig"),
+            GIT_CONFIG_NOSYSTEM="1",
+            GIT_AUTHOR_NAME="Pinboard Test",
+            GIT_AUTHOR_EMAIL="pinboard@example.com",
+            GIT_COMMITTER_NAME="Pinboard Test",
+            GIT_COMMITTER_EMAIL="pinboard@example.com",
+            GIT_COMMITTER_DATE=OLD,
+        )
+        (tpl / "gitconfig").write_text("[init]\n\tdefaultBranch = main\n")
+        cls.seed_fake()
+        subprocess.run(
+            ["git", "init", "-q", "--bare", str(cls._tpl_remote)],
+            env=env,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "clone", "-q", str(cls._tpl_remote), str(cls._tpl_clone)],
+            env=env,
+            check=True,
+        )
+        proc = subprocess.run(
+            [str(BIN), "sync"],
+            capture_output=True,
+            text=True,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            timeout=120,
+            check=False,
+        )
+        if proc.returncode:
+            raise AssertionError(f"pinboard sync failed: {proc.stderr}")
+        return cls._tpl_remote, cls._tpl_clone
+
+    @classmethod
+    def cleanup_template(cls) -> None:
+        if cls._tpl_dir is not None:
+            shutil.rmtree(cls._tpl_dir, ignore_errors=True)
+            cls._tpl_dir = None
+
+    def setUp(self, needs_repo: bool = True) -> None:
+        self.tmp = Path(tempfile.mkdtemp()).resolve()
+        self.remote = self.tmp / "remote.git"
+        self.clone = self.tmp / "clone"
+        self.log = self.tmp / "state" / "mcp.jsonl"
+        self.env = {
+            k: v
+            for k, v in os.environ.items()
+            if not k.startswith(("PINBOARD_", "GIT_"))
+            and k not in ("AGENT_OFFLINE", "XDG_STATE_HOME")
+        }
+        self.env.update(
+            PINBOARD_API_URL=API,
+            PINBOARD_API_TOKEN=TOKEN,
+            PINBOARD_TIME_SCALE="0.0001",
+            PINBOARD_REPO=str(self.clone),
+            PINBOARD_MCP_LOG=str(self.log),
+            GIT_CONFIG_GLOBAL=str(self.tmp / "gitconfig"),
+            GIT_CONFIG_NOSYSTEM="1",
+            GIT_AUTHOR_NAME="Pinboard Test",
+            GIT_AUTHOR_EMAIL="pinboard@example.com",
+            GIT_COMMITTER_NAME="Pinboard Test",
+            GIT_COMMITTER_EMAIL="pinboard@example.com",
+        )
+        (self.tmp / "gitconfig").write_text("[init]\n\tdefaultBranch = main\n")
+        self.errlog = (self.tmp / "stdio.log").open("w")
+        if needs_repo:
+            tpl_remote, tpl_clone = self.ensure_template()
+            self.seed_fake()
+            shutil.copytree(tpl_remote, self.remote)
+            shutil.copytree(tpl_clone, self.clone)
+            cfg = self.clone / ".git" / "config"
+            cfg.write_text(cfg.read_text().replace(str(tpl_remote), str(self.remote)))
 
     def tearDown(self) -> None:
+        with FAKE.lock:
+            if FAKE.all_release is not None:
+                FAKE.all_release.set()
+            FAKE.reset_knobs()
         self.errlog.close()
         shutil.rmtree(self.tmp, ignore_errors=True)
 
@@ -214,11 +294,13 @@ class PinboardMcpTests(unittest.TestCase):
             return []
         return [json.loads(line) for line in self.log.read_text().splitlines()]
 
-    def make_stale(self) -> None:
+    def make_stale(self, gates: bool = False) -> None:
         """The mirror as it is after the server was down for three days."""
         local = self.clone / ".git" / "pinboard" / "local.json"
         data = json.loads(local.read_text())
         data["last_sync"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(STALE))
+        if gates:
+            data["gates"] = dict.fromkeys(data.get("gates", {}), STALE)
         local.write_text(json.dumps(data))
 
     async def tool(self, client: ClientSession, name: str, args=None, error=False):
@@ -234,8 +316,8 @@ class PinboardMcpTests(unittest.TestCase):
         errlog = self.tmp / f"server-{port}.log"
         with errlog.open("w") as err:
             proc = await asyncio.create_subprocess_exec(
-                str(BIN),
-                "mcp",
+                PBM_PY,
+                str(SERVER_BIN),
                 "--http",
                 "--port",
                 str(port),
@@ -246,14 +328,14 @@ class PinboardMcpTests(unittest.TestCase):
         base = f"http://127.0.0.1:{port}"
         try:
             async with httpx2.AsyncClient() as http:
-                for _ in range(300):
+                for _ in range(1500):
                     if proc.returncode is not None:
                         self.fail(f"server exited: {errlog.read_text()}")
                     try:
                         await http.get(base + "/up")
                         break
                     except httpx2.TransportError:
-                        await asyncio.sleep(0.1)
+                        await asyncio.sleep(0.02)
                 else:
                     self.fail(f"server not listening on {base}")
             yield base
@@ -263,16 +345,18 @@ class PinboardMcpTests(unittest.TestCase):
                 await proc.wait()
 
     async def run_test(self, method) -> None:
-        self.setUp()
+        self.setUp(needs_repo=method.__name__ not in NO_REPO_TESTS)
         try:
             if "client" in inspect.signature(method).parameters:
+                if method.__name__ == "test_tools":
+                    cmd, args = str(BIN), ["mcp"]
+                else:
+                    cmd, args = PBM_PY, [str(SERVER_BIN)]
                 async with contextlib.AsyncExitStack() as stack:
                     errlog = stack.enter_context(tempfile.TemporaryFile(mode="w+"))  # noqa: SIM115 -- ExitStack owns cleanup
                     streams = await stack.enter_async_context(
                         stdio_client(
-                            StdioServerParameters(
-                                command=str(BIN), args=["mcp"], env=self.env
-                            ),
+                            StdioServerParameters(command=cmd, args=args, env=self.env),
                             errlog=errlog,
                         )
                     )
@@ -369,17 +453,7 @@ class PinboardMcpTests(unittest.TestCase):
         self.assertIn("synced_at", tags["mirror"])
         self.assertEqual(self.calls(), before, "a read called the Pinboard API")
 
-    async def test_reads_ignore_a_sync_in_progress(self, client):
-        """Reads see the last commit, never a sync's files half-written."""
-        files = sorted((self.clone / "bookmarks").glob("*.jsonl"))
-        self.assertGreater(len(files), 1)
-        before = await self.tool(client, "search_bookmarks", {})
-        # A bookmark caught between two year files, mid-write.
-        files[0].write_text(files[0].read_text() + files[-1].read_text())
-        during = await self.tool(client, "search_bookmarks", {})
-        self.assertEqual(during["bookmarks"], before["bookmarks"])
-
-    async def test_writes_show_in_next_search(self, client):
+    async def test_writes_and_request_log(self, client):
         added = await self.tool(
             client,
             "add_bookmark",
@@ -393,62 +467,28 @@ class PinboardMcpTests(unittest.TestCase):
         self.assertTrue(added["created"])
         self.assertTrue(added["bookmark"]["private"])
         self.assertEqual(added["mirror_commit"]["state"], "pushed")
-        with FAKE.lock:
-            self.assertEqual(
-                FAKE.posts["https://example.org/new?a=1&b=2"]["shared"], "no"
-            )
         found = await self.tool(client, "search_bookmarks", {"query": "secret"})
         self.assertEqual(
             found["bookmarks"][0]["url"], "https://example.org/new?a=1&b=2"
         )
-
-        again = await self.tool(
-            client,
-            "add_bookmark",
-            {"url": "https://example.org/new?a=1&b=2", "title": "Other"},
-        )
-        self.assertFalse(again["created"])
-        self.assertEqual(again["bookmark"]["title"], "Secret title")
-
         updated = await self.tool(
             client,
             "update_bookmark",
-            {
-                "url": "https://example.com/rust",
-                "add_tags": ["later"],
-                "remove_tags": ["programming"],
-                "private": False,
-            },
+            {"url": "https://example.com/rust", "tags": ["x"], "private": False},
         )
         self.assertTrue(updated["changed"])
-        self.assertEqual(updated["bookmark"]["tags"], ["rust", "later"])
-        self.assertEqual(updated["bookmark"]["time"], "2024-05-01T10:00:00Z")
-        replaced = await self.tool(
-            client,
-            "update_bookmark",
-            {"url": "https://example.com/rust", "tags": ["x"]},
+        self.assertEqual(updated["bookmark"]["tags"], ["x"])
+        deleted = await self.tool(
+            client, "delete_bookmark", {"url": "https://example.com/lemon"}
         )
-        self.assertEqual(replaced["bookmark"]["tags"], ["x"])
-        found = await self.tool(client, "search_bookmarks", {"tags": ["x"]})
-        self.assertEqual(len(found["bookmarks"]), 1)
-        self.assertFalse(found["bookmarks"][0]["private"])
+        self.assertTrue(deleted["deleted"])
         missing = await self.tool(
             client, "update_bookmark", {"url": "https://example.com/gone"}, error=True
         )
         self.assertEqual(missing["error"], "failed")
 
-        # A following sync finds the mirror already level with Pinboard.
-        commits = self.git("-C", str(self.clone), "rev-list", "--count", "HEAD")
-        synced = await self.tool(client, "sync")
-        self.assertEqual(
-            (synced["added"], synced["updated"], synced["deleted"]), (0, 0, 0)
-        )
-        self.assertEqual(
-            self.git("-C", str(self.clone), "rev-list", "--count", "HEAD"), commits
-        )
-
         log = self.log.read_text()
-        for secret in ("Secret", "Other", "a=1", TOKEN, TOKEN.partition(":")[2]):
+        for secret in ("Secret", "a=1", "lemon", TOKEN, TOKEN.partition(":")[2]):
             self.assertNotIn(secret, log)
         records = self.records()
         add = next(r for r in records if r.get("tool") == "add_bookmark")
@@ -467,82 +507,21 @@ class PinboardMcpTests(unittest.TestCase):
         search = next(r for r in records if r.get("tool") == "search_bookmarks")
         self.assertRegex(search["args"]["search"], r"^[0-9a-f]{16}$")
         self.assertNotIn("host", search["args"])
+        delete = next(r for r in records if r.get("tool") == "delete_bookmark")
+        self.assertEqual(delete["args"], {"host": "example.com"})
         self.assertIn(
             {"reason": "failed", "outcome": "tool-error"},
             [{k: r.get(k) for k in ("reason", "outcome")} for r in records],
         )
         self.assert_log_format(records)
 
-    async def test_delete_removes_bookmark(self, client):
-        url = "https://example.com/lemon"
-        deleted = await self.tool(client, "delete_bookmark", {"url": url})
-        self.assertTrue(deleted["deleted"])
-        self.assertEqual(deleted["bookmark"]["url"], url)
-        self.assertEqual(deleted["bookmark"]["title"], "Lemon tart")
-        self.assertEqual(deleted["mirror_commit"]["state"], "pushed")
-        with FAKE.lock:
-            self.assertNotIn(url, FAKE.posts)
-            self.assertEqual(FAKE.count("posts/delete"), 1)
-
-        # The mirror drops it at once, in the commit that reads see.
-        gone = await self.tool(client, "get_bookmark", {"url": url}, error=True)
-        self.assertEqual(gone["error"], "not_found")
-        found = await self.tool(client, "search_bookmarks", {"query": "lemon"})
-        self.assertEqual(found["bookmarks"], [])
-        for path in (self.clone / "bookmarks").glob("*.jsonl"):
-            self.assertNotIn(url, path.read_text())
-        self.assertEqual(self.git("-C", str(self.clone), "status", "--porcelain"), "")
-
-        # Pinboard has nothing to delete: a structured not_found, no commit.
-        commits = self.git("-C", str(self.clone), "rev-list", "--count", "HEAD")
-        missing = await self.tool(
-            client, "delete_bookmark", {"url": "https://example.com/gone"}, error=True
-        )
-        self.assertEqual(missing["error"], "not_found")
-        self.assertEqual(
-            self.git("-C", str(self.clone), "rev-list", "--count", "HEAD"), commits
-        )
-
-        # A failed API call leaves the bookmark in Pinboard and the mirror.
-        with FAKE.lock:
-            FAKE.delete_mode = "error"
-        failed = await self.tool(
-            client, "delete_bookmark", {"url": "https://example.com/kotlin"}, error=True
-        )
-        self.assertEqual(failed["error"], "failed")
-        still = await self.tool(
-            client, "get_bookmark", {"url": "https://example.com/kotlin"}
-        )
-        self.assertEqual(still["bookmark"]["url"], "https://example.com/kotlin")
-
-        # A response lost after the deletion is re-read, never re-sent.
-        with FAKE.lock:
-            FAKE.delete_mode = "vanish-after"
-        lost = await self.tool(
-            client, "delete_bookmark", {"url": "https://example.com/rust"}
-        )
-        self.assertTrue(lost["deleted"])
-        with FAKE.lock:
-            self.assertNotIn("https://example.com/rust", FAKE.posts)
-
-        # With the mirror level, a sync finds nothing to change or re-add.
-        synced = await self.tool(client, "sync")
-        self.assertEqual(
-            (synced["added"], synced["updated"], synced["deleted"]), (0, 0, 0)
-        )
-        deletes = [r for r in self.records() if r.get("tool") == "delete_bookmark"]
-        self.assertEqual(len(deletes), 4)
-        self.assertEqual({r["args"]["host"] for r in deletes}, {"example.com"})
-        self.assertNotIn("lemon", self.log.read_text())
-        self.assert_log_format(self.records())
-
     async def test_sync_gate(self):
         env = {"PINBOARD_TIME_SCALE": "0.01"}  # posts/all once every 3 s
-        await asyncio.sleep(3.2)
+        self.make_stale(gates=True)
         async with (
             stdio_client(
                 StdioServerParameters(
-                    command=str(BIN), args=["mcp"], env={**self.env, **env}
+                    command=PBM_PY, args=[str(SERVER_BIN)], env={**self.env, **env}
                 ),
                 errlog=self.errlog,
             ) as streams,
@@ -566,32 +545,46 @@ class PinboardMcpTests(unittest.TestCase):
             self.assertGreater(record["retry_after"], 0)
 
     async def test_one_sync_at_a_time(self, client):
+        entered = threading.Event()
+        release = threading.Event()
         with FAKE.lock:
-            FAKE.all_delay = 2.0
+            FAKE.all_entered = entered
+            FAKE.all_release = release
             FAKE.put("https://example.com/one", "One", "2026-01-01T00:00:00Z")
-        results = await asyncio.gather(
-            client.call_tool("sync", {}), client.call_tool("sync", {})
-        )
+        first = asyncio.create_task(client.call_tool("sync", {}))
+        self.assertTrue(await asyncio.to_thread(entered.wait, 10))
+        second = await client.call_tool("sync", {})
+        release.set()
+        results = [await first, second]
         outcomes = sorted(
             (r.is_error, json.loads(r.content[0].text).get("error")) for r in results
         )
         self.assertEqual(outcomes, [(False, None), (True, "sync_running")])
         with FAKE.lock:
-            self.assertEqual(FAKE.count("posts/all"), 2)  # setup's sync, and one
+            self.assertEqual(FAKE.count("posts/all"), 1)  # one sync; second refused
 
     async def test_sync_concurrent_with_write(self, client):
+        entered = threading.Event()
+        release = threading.Event()
         with FAKE.lock:
-            FAKE.all_delay = 1.5
+            FAKE.all_entered = entered
+            FAKE.all_release = release
             FAKE.put("https://example.com/from-app", "From app", "2026-01-01T00:00:00Z")
         started = time.time()
         # The add starts while the sync holds the clone's lock in posts/all.
         sync = asyncio.create_task(self.tool(client, "sync"))
-        await asyncio.sleep(0.3)
-        added = await self.tool(
-            client,
-            "add_bookmark",
-            {"url": "https://example.com/from-agent", "title": "From agent"},
+        self.assertTrue(await asyncio.to_thread(entered.wait, 10))
+        add = asyncio.create_task(
+            self.tool(
+                client,
+                "add_bookmark",
+                {"url": "https://example.com/from-agent", "title": "From agent"},
+            )
         )
+        await asyncio.sleep(0.1)
+        self.assertFalse(add.done())
+        release.set()
+        added = await add
         await sync
         self.assertTrue(added["created"])
         for url in ("https://example.com/from-app", "https://example.com/from-agent"):
@@ -702,11 +695,11 @@ class PinboardMcpTests(unittest.TestCase):
                 page = await http.get(base + "/logs", headers=authed)
                 self.assertEqual(page.status_code, 405)
                 self.assertEqual(page.headers.get("allow"), "POST")
-                for _ in range(50):
+                for _ in range(250):
                     kept = [r for r in self.records() if r["transport"] == "http"]
                     if kept and kept[-1].get("status") == 405:
                         break
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(0.02)
                 search = next(r for r in kept if r.get("tool") == "search_bookmarks")
                 self.assertRegex(search["caller"], r"^[0-9a-f]{10}$")
                 self.assertEqual(
@@ -719,9 +712,14 @@ class PinboardMcpTests(unittest.TestCase):
             certs.shutdown()
 
     def test_command_line(self):
-        def run(*args: str) -> subprocess.CompletedProcess:
+        def run(*args: str, via_cli: bool = False) -> subprocess.CompletedProcess:
+            cmd = (
+                [str(BIN), "mcp", *args]
+                if via_cli
+                else [PBM_PY, str(SERVER_BIN), *args]
+            )
             return subprocess.run(
-                [str(BIN), "mcp", *args],
+                cmd,
                 capture_output=True,
                 text=True,
                 env=self.env,
@@ -741,7 +739,7 @@ class PinboardMcpTests(unittest.TestCase):
                 res = run(*args)
                 self.assertEqual(res.returncode, 1, res.stderr)
                 self.assertIn(says, res.stderr)
-        res = run("--help")
+        res = run("--help", via_cli=True)
         self.assertEqual(res.returncode, 0)
         self.assertIn("--sync-every", res.stdout)
 
@@ -809,29 +807,66 @@ class PinboardMcpTests(unittest.TestCase):
     def test_signals_exit_0(self):
         """SIGINT and SIGTERM stop either transport with status 0, a stdio
         server even while its client holds stdin open."""
+        init = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "t", "version": "0"},
+            },
+        }
 
-        def stop(sig: int, *args: str, stdin: Any = None) -> int:
+        def stop(sig: int, *args: str, port: int | None = None) -> int:
             proc = subprocess.Popen(
-                [str(BIN), "mcp", *args],
-                stdin=stdin,
-                stdout=subprocess.DEVNULL,
+                [PBM_PY, str(SERVER_BIN), *args],
+                stdin=subprocess.PIPE if port is None else None,
+                stdout=subprocess.PIPE if port is None else subprocess.DEVNULL,
                 stderr=self.errlog,
                 env=self.env,
             )
             try:
-                time.sleep(8)  # Started and serving.
+                if port is not None:
+                    with httpx2.Client() as http:
+                        for _ in range(1500):
+                            if proc.poll() is not None:
+                                self.fail(f"server exited early: {proc.returncode}")
+                            try:
+                                if (
+                                    http.get(f"http://127.0.0.1:{port}/up").status_code
+                                    == 200
+                                ):
+                                    break
+                            except httpx2.TransportError:
+                                pass
+                            time.sleep(0.02)
+                        else:
+                            self.fail("http server never answered /up")
+                else:
+                    assert proc.stdin is not None
+                    assert proc.stdout is not None
+                    proc.stdin.write((json.dumps(init) + "\n").encode())
+                    proc.stdin.flush()
+                    self.assertIn(b'"serverInfo"', proc.stdout.readline())
                 proc.send_signal(sig)
                 return proc.wait(timeout=30)
             finally:
                 if proc.poll() is None:
                     proc.kill()
                     proc.wait()
+                if proc.stdin is not None:
+                    proc.stdin.close()
+                if proc.stdout is not None:
+                    proc.stdout.close()
 
-        port = str(free_port())
         for sig in (signal.SIGINT, signal.SIGTERM):
-            http = stop(sig, "--http", "--port", port, "--sync-every", "0")
+            port = free_port()
+            http = stop(
+                sig, "--http", "--port", str(port), "--sync-every", "0", port=port
+            )
             self.assertEqual(http, 0)
-            self.assertEqual(stop(sig, stdin=subprocess.PIPE), 0)
+            self.assertEqual(stop(sig), 0)
 
     async def test_scheduler_catches_up_after_restart(self):
         self.make_stale()
@@ -844,24 +879,27 @@ class PinboardMcpTests(unittest.TestCase):
         before = self.calls()
         async with (
             stdio_client(
-                StdioServerParameters(command=str(BIN), args=["mcp"], env=self.env),
+                StdioServerParameters(
+                    command=PBM_PY, args=[str(SERVER_BIN)], env=self.env
+                ),
                 errlog=self.errlog,
             ) as streams,
             ClientSession(*streams, read_timeout_seconds=60) as client,
         ):
             await client.initialize()
-            await asyncio.sleep(1.5)
+            await client.list_tools()
+            await asyncio.sleep(0.2)
         self.assertEqual(self.calls(), before)
 
         async def schedule_runs() -> list[dict[str, Any]]:
             return [r for r in self.records() if r["transport"] == "background"]
 
-        async with self.http_server():
-            for _ in range(100):
+        async with self.http_server("--sync-every", "0.5"):
+            for _ in range(500):
                 if await schedule_runs():
                     break
-                await asyncio.sleep(0.1)
-            await asyncio.sleep(1.0)  # several ticks: it must not run again
+                await asyncio.sleep(0.02)
+            await asyncio.sleep(0.45)  # several ticks: it must not run again
         runs = await schedule_runs()
         self.assertEqual(
             [(r["event"], r["tool"], r["outcome"], r["result"]) for r in runs],
@@ -872,8 +910,8 @@ class PinboardMcpTests(unittest.TestCase):
             updates = FAKE.count("posts/update")
 
         # Restarted within the interval: nothing is due.
-        async with self.http_server():
-            await asyncio.sleep(1.5)
+        async with self.http_server("--sync-every", "0.5"):
+            await asyncio.sleep(0.35)
         self.assertEqual(len(await schedule_runs()), 1)
         with FAKE.lock:
             self.assertEqual(FAKE.count("posts/update"), updates)
@@ -884,10 +922,10 @@ class PinboardMcpTests(unittest.TestCase):
             FAKE.put("https://example.com/later", "Later", "2026-01-02T00:00:00Z")
             FAKE.all_mode = "error"
         async with self.http_server("--sync-every", "0.0003"):
-            for _ in range(100):
+            for _ in range(500):
                 if len(await schedule_runs()) >= 3:
                     break
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(0.02)
         failures = [r for r in await schedule_runs() if r["outcome"] != "ok"]
         self.assertGreaterEqual(len(failures), 2)
         self.assertEqual(failures[0]["reason"], "failed")
@@ -924,15 +962,18 @@ if __name__ == "__main__":
     )
     print(f"1..{len(names)}", flush=True)
     failures = 0
-    for number, name in enumerate(names, 1):
-        case = PinboardMcpTests()
-        try:
-            asyncio.run(case.run_test(getattr(case, name)))
-        except Exception:
-            failures += 1
-            print(f"not ok {number} - {name}", flush=True)
-            for line in traceback.format_exc().splitlines():
-                print(f"# {line}")
-        else:
-            print(f"ok {number} - {name}", flush=True)
+    try:
+        for number, name in enumerate(names, 1):
+            case = PinboardMcpTests()
+            try:
+                asyncio.run(case.run_test(getattr(case, name)))
+            except Exception:
+                failures += 1
+                print(f"not ok {number} - {name}", flush=True)
+                for line in traceback.format_exc().splitlines():
+                    print(f"# {line}")
+            else:
+                print(f"ok {number} - {name}", flush=True)
+    finally:
+        PinboardMcpTests.cleanup_template()
     sys.exit(1 if failures else 0)

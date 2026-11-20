@@ -19,12 +19,14 @@ if [ -e "$DIR" ]; then
 fi
 
 BIN="$(cd "$(dirname "$0")/../scripts" && pwd)/taskgo"
+if [ -z "${TASKGO_PY:-}" ]; then
+  TASKGO_PY=$(uv sync -q --script "$BIN" </dev/null && uv python find --script "$BIN")
+fi
 export GIT_AUTHOR_NAME="Taskgo Synthetic" GIT_AUTHOR_EMAIL="taskgo@example.com"
 export GIT_COMMITTER_NAME="$GIT_AUTHOR_NAME" GIT_COMMITTER_EMAIL="$GIT_AUTHOR_EMAIL"
 export TASKGO_TODAY=2026-10-11
 unset CLAUDE_CODE_SESSION_ID CLAUDE_CODE_REMOTE_SESSION_ID CODEX_SESSION_ID AI_AGENT
 
-tg() { "$BIN" --root "$DIR" "$@" >/dev/null; }
 commit() { git -C "$DIR" add -A && git -C "$DIR" commit -q -m "$1"; }
 
 mkdir -p "$DIR/alpha/tasks" "$DIR/beta/tasks" "$DIR/beta/decisions" "$DIR/alpha/results"
@@ -59,77 +61,127 @@ printf 'n,value\n1,2\n' >"$DIR/alpha/results/data.csv"
 printf '# Beta\n\nAnother synthetic project.\n' >"$DIR/beta/README.md"
 commit "chore: start the synthetic tracker"
 
-tg create alpha "Build the widget" --no-commit \
-  --problem "There is no widget." --goal "A widget exists." \
-  --criteria "The widget turns." --sketch "Start with the gears."
-tg create alpha "Paint the widget" --no-commit --goal "The widget is blue."
-tg create alpha "Wait for the paint supplier" --no-commit \
-  --goal "Paint has arrived." --add-wait-for issue/123456 --add-wait-for 2026-12-01
-tg create alpha "Polish the widget" --no-commit --goal "It shines." --due 2026-10-13
-tg create beta "Measure the widget" --no-commit --goal "Dimensions are known." \
-  --stale-after 2026-11-01
-cat >"$DIR/beta/decisions/001-use-gears.md" <<'MD'
-# 1. Use gears
+"$TASKGO_PY" - "$BIN" "$DIR" <<'PY'
+import contextlib
+import importlib.machinery
+import importlib.util
+import io
+import subprocess
+import sys
 
-## Status
+bin_path, root_dir = sys.argv[1], sys.argv[2]
+loader = importlib.machinery.SourceFileLoader("taskgo_cli_synth", bin_path)
+spec = importlib.util.spec_from_loader(loader.name, loader)
+assert spec is not None
+tg = importlib.util.module_from_spec(spec)
+sys.modules[loader.name] = tg
+loader.exec_module(tg)
 
-Accepted
 
-## Context
+def run_tg(*args: str) -> str:
+    tg._REPO_ROOT_CACHE = None
+    tg._EXPLICIT_ROOT = None
+    tg._ACTIVE_COMMAND = None
+    tg._OFFLINE_FLAG = False
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        try:
+            tg.main(["--root", root_dir, *args])
+        except SystemExit as exc:
+            if exc.code not in (None, 0):
+                raise RuntimeError(f"taskgo {args} failed: {err.getvalue()}") from exc
+    return out.getvalue()
 
-Widgets turn.
 
-## Decision
+def create_id(*args: str) -> str:
+    return run_tg("create", *args).splitlines()[0].split("\t", 1)[0]
 
-Use gears.
 
-## Consequences
+def commit(msg: str) -> None:
+    subprocess.run(["git", "-C", root_dir, "add", "-A"], check=True)
+    subprocess.run(["git", "-C", root_dir, "commit", "-q", "-m", msg], check=True)
 
-Gears wear out.
-MD
-cat >"$DIR/beta/decisions/002-use-belts.md" <<'MD'
----
-supersedes: [001-use-gears]
----
 
-# 2. Use belts
+build = create_id(
+    "alpha",
+    "Build the widget",
+    "--no-commit",
+    "--problem",
+    "There is no widget.",
+    "--goal",
+    "A widget exists.",
+    "--criteria",
+    "The widget turns.",
+    "--sketch",
+    "Start with the gears.",
+)
+paint = create_id("alpha", "Paint the widget", "--no-commit", "--goal", "The widget is blue.")
+create_id(
+    "alpha",
+    "Wait for the paint supplier",
+    "--no-commit",
+    "--goal",
+    "Paint has arrived.",
+    "--add-wait-for",
+    "issue/123456",
+    "--add-wait-for",
+    "2026-12-01",
+)
+polish = create_id(
+    "alpha", "Polish the widget", "--no-commit", "--goal", "It shines.", "--due", "2026-10-13"
+)
+measure = create_id(
+    "beta",
+    "Measure the widget",
+    "--no-commit",
+    "--goal",
+    "Dimensions are known.",
+    "--stale-after",
+    "2026-11-01",
+)
 
-## Status
+with open(f"{root_dir}/beta/decisions/001-use-gears.md", "w") as fh:
+    fh.write(
+        "# 1. Use gears\n\n## Status\n\nAccepted\n\n## Context\n\nWidgets turn.\n\n"
+        "## Decision\n\nUse gears.\n\n## Consequences\n\nGears wear out.\n"
+    )
+with open(f"{root_dir}/beta/decisions/002-use-belts.md", "w") as fh:
+    fh.write(
+        "---\nsupersedes: [001-use-gears]\n---\n\n# 2. Use belts\n\n## Status\n\n"
+        "Accepted\n\n## Context\n\nGears wore out.\n\n## Decision\n\nUse belts.\n\n"
+        "## Consequences\n\nBelts stretch.\n"
+    )
+run_tg("sync")
+commit("chore: plan the widget")
 
-Accepted
+run_tg("update", paint, "--add-blocked-by", build)
+run_tg("update", measure, "--add-blocked-by", polish)
+run_tg(
+    "update",
+    build,
+    "--status",
+    "in-progress",
+    "--add-conversation",
+    "claude://00000000-0000-0000-0000-000000000001",
+)
+run_tg("sync")
+commit("chore: start building the widget")
 
-## Context
+run_tg(
+    "update",
+    build,
+    "--status",
+    "done",
+    "--outcome",
+    "The widget turns.",
+    "--findings",
+    "Gears were noisy.",
+)
+run_tg("update", polish, "--slug", "shine-widget")
+run_tg("sync")
+commit("chore: finish building the widget")
 
-Gears wore out.
-
-## Decision
-
-Use belts.
-
-## Consequences
-
-Belts stretch.
-MD
-tg sync
-commit "chore: plan the widget"
-
-id_of() { "$BIN" --root "$DIR" list --json | python3 -c "import json,sys; print(next(r['id'] for r in json.load(sys.stdin) if r['title']==sys.argv[1]))" "$1"; }
-BUILD=$(id_of "Build the widget")
-PAINT=$(id_of "Paint the widget")
-POLISH=$(id_of "Polish the widget")
-MEASURE=$(id_of "Measure the widget")
-
-tg update "$PAINT" --add-blocked-by "$BUILD"
-tg update "$MEASURE" --add-blocked-by "$POLISH"
-tg update "$BUILD" --status in-progress --add-conversation claude://00000000-0000-0000-0000-000000000001
-tg sync
-commit "chore: start building the widget"
-
-tg update "$BUILD" --status "done" --outcome "The widget turns." --findings "Gears were noisy."
-tg update "$POLISH" --slug shine-widget
-tg sync
-commit "chore: finish building the widget"
-
-tg update "$PAINT" --status in-progress
-tg sync
-commit "chore: start painting"
+run_tg("update", paint, "--status", "in-progress")
+run_tg("sync")
+commit("chore: start painting")
+PY

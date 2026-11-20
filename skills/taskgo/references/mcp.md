@@ -288,7 +288,6 @@ To try a server by hand, from the skill directory:
 tests/make-synthetic /tmp/synth
 scripts/taskgo --root /tmp/synth mcp --no-fetch --auth none &
 tests/compare-cli http://127.0.0.1:8789/mcp /tmp/synth   # server versus CLI
-tests/mcp-call http://127.0.0.1:8789/mcp list_tasks '{"state":"ready"}'
 ```
 
 `compare-cli` prints only check names and counts, never file contents, so it is

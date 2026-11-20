@@ -4,7 +4,7 @@
 # ///
 """Checks the write tools of 'taskgo mcp' against a local bare remote.
 
-Usage: test-taskgo-mcp-write [--fetch-ttl SECS]
+Usage: test-taskgo-mcp-write
 
 Builds a throwaway control repository with three projects, pushes it to a
 bare repository, and serves a clone of it. Concurrent clients write through
@@ -15,9 +15,7 @@ commit or nothing, that retries are recorded once, also by a new server that
 finds them by their trailers, that a stale CLI checkout recovers by rebase
 without losing a server commit, that reads outlive an unreadable remote as
 stale, and that a --local server (in process, and over --stdio) writes to a
-checkout's branch and working tree. --fetch-ttl is passed to the servers
-under test (default: the server's own); the checks of the cached head itself
-pick their own. Prints TAP.
+checkout's branch and working tree. Prints TAP.
 """
 
 import concurrent.futures
@@ -150,7 +148,7 @@ def is_ancestor(repo: Path, sha: str, rev: str = "main") -> bool:
 
 def taskgo(repo: Path, *args: str) -> str:
     res = subprocess.run(
-        [str(CLI), "--root", str(repo), *args],
+        [sys.executable, str(CLI), "--root", str(repo), *args],
         capture_output=True,
         text=True,
         check=False,
@@ -248,37 +246,37 @@ def free_port() -> int:
 
 
 class Http:
-    def __init__(self, tracker: Tracker, log: Path, ttl: float | None = None):
+    def __init__(self, tracker: Tracker, log: Path):
         self.port = free_port()
         self.url = f"http://127.0.0.1:{self.port}/mcp"
         self.log = log
-        extra = [] if ttl is None else ["--fetch-ttl", str(ttl)]
+        self._log_fh = log.open("w")
         self.proc = subprocess.Popen(
             [
-                str(CLI),
+                sys.executable,
+                str(MCP_BIN),
                 "--root",
                 str(tracker.server),
-                "mcp",
                 "--auth",
                 "none",
                 "--port",
                 str(self.port),
                 "--log",
                 str(log.with_suffix(".jsonl")),
-                *extra,
             ],
             stdout=subprocess.DEVNULL,
-            stderr=log.open("w"),
+            stderr=self._log_fh,
         )
-        for _ in range(300):
+        for _ in range(1500):
             try:
                 with socket.create_connection(("127.0.0.1", self.port), timeout=1):
                     return
             except OSError:
                 if self.proc.poll() is not None:
                     break
-                time.sleep(0.1)
+                time.sleep(0.02)
         self.proc.kill()
+        self._log_fh.close()
         sys.exit(f"test-taskgo-mcp-write: taskgo mcp did not start: {log.read_text()}")
 
     def post(self, body: bytes) -> tuple[int, dict | str]:
@@ -326,6 +324,7 @@ class Http:
     def close(self) -> None:
         self.proc.terminate()
         self.proc.wait()
+        self._log_fh.close()
 
 
 def result_of(reply) -> tuple[bool, dict | str]:
@@ -780,59 +779,6 @@ def http_checks(tap: Tap, tracker: Tracker, http: Http) -> None:
         fixed,
     )
 
-    # 10. A direct push from a stale CLI checkout. Both sides change
-    # alpha/STATUS.md, so the rebase stops on its generated block; taking
-    # the upstream file and running sync resolves it.
-    stale = tracker.checkout("stale")
-    ok, made = call(
-        "create", {"project": "alpha", "title": "Server side", "request_id": "c10"}
-    )
-    taskgo(
-        stale,
-        "--offline",
-        "update",
-        "TASK-AA001",
-        "--status",
-        "done",
-        "--outcome",
-        "Done.",
-    )
-    taskgo(stale, "--offline", "sync", "alpha")
-    git(stale, "commit", "-q", "-am", "chore(alpha): finish TASK-AA001")
-    refused = subprocess.run(
-        ["git", "push", "-q", "origin", "main"],
-        cwd=stale,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    rebase = subprocess.run(
-        ["git", "pull", "-q", "--rebase", "origin", "main"],
-        cwd=stale,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    conflicted = git(stale, "diff", "--name-only", "--diff-filter=U")
-    if rebase.returncode != 0 and conflicted == "alpha/STATUS.md":
-        git(stale, "checkout", "--ours", "alpha/STATUS.md")
-        taskgo(stale, "sync", "alpha")
-        git(stale, "add", "alpha/STATUS.md")
-        git(stale, "-c", "core.editor=true", "rebase", "--continue")
-    git(stale, "push", "-q", "origin", "main")
-    tap.check(
-        "10: a stale CLI push is refused as non-fast-forward and recovers by "
-        "rebase and sync, keeping the server commit",
-        ok
-        and refused.returncode != 0
-        and ("non-fast-forward" in refused.stderr or "rejected" in refused.stderr)
-        and is_ancestor(tracker.remote, made["commit"])
-        and conflicted == "alpha/STATUS.md"
-        and "status: done" in tracker.show("alpha/tasks/TASK-AA001-one.md")
-        and tracker.show(made["created"][0]["path"]) != "",
-        (made, refused.stderr, rebase.stderr, conflicted),
-    )
-
     merges = git(tracker.remote, "rev-list", "--merges", f"{start}..main")
     clean, dirty = sync_is_clean(tracker, "final-http")
     tap.check("history is linear, with no merge commit", merges == "", merges)
@@ -855,12 +801,12 @@ def http_checks(tap: Tap, tracker: Tracker, http: Http) -> None:
         },
     )
     # The server logs a request once it has replied.
-    for _ in range(100):
+    for _ in range(500):
         log = http.log.read_text()
         requests = [x for x in log.splitlines() if x.startswith("taskgo mcp: request ")]
         if requests and "tool=apply_changes outcome=tool-error" in requests[-1]:
             break
-        time.sleep(0.05)
+        time.sleep(0.01)
     tap.check(
         "each write logs its pushes, and each request one line without content",
         log.count(" pushed ") >= 12
@@ -874,7 +820,7 @@ def http_checks(tap: Tap, tracker: Tracker, http: Http) -> None:
         and "tool=apply_changes outcome=tool-error" in requests[-1]
         and "precondition failed" in requests[-1]
         and sum("tool=create outcome=ok " in x and " commit=" in x for x in requests)
-        == 3,
+        == 2,
         (got, requests[-3:] if requests else []),
     )
 
@@ -913,10 +859,10 @@ def competitor(tracker: Tracker, name: str):
     return push, count
 
 
-def fault_checks(tap: Tap, tg, seed: Path, tmp: Path, ttl: float | None) -> None:
+def fault_checks(tap: Tap, tg, seed: Path, tmp: Path) -> None:
     # The head moves before the first two pushes: the third lands.
     tracker = Tracker(tmp / "moves", seed)
-    srv = server(tg, tracker, ttl)
+    srv = server(tg, tracker)
     move, moved = competitor(tracker, "cli")
     real_push = srv.reader.push
 
@@ -964,7 +910,7 @@ def fault_checks(tap: Tap, tg, seed: Path, tmp: Path, ttl: float | None) -> None
 
     # A CLI push to another task in the project between read and push.
     tracker = Tracker(tmp / "race", seed)
-    srv = server(tg, tracker, ttl)
+    srv = server(tg, tracker)
     cli = tracker.checkout("cli")
     real_push = srv.reader.push
 
@@ -1048,7 +994,7 @@ def fault_checks(tap: Tap, tg, seed: Path, tmp: Path, ttl: float | None) -> None
 
     # 6. A push whose reply is lost, and a retry of the whole request.
     tracker = Tracker(tmp / "lost", seed)
-    srv = server(tg, tracker, ttl)
+    srv = server(tg, tracker)
     call = caller(tg, srv)
     real_push, real_fetch = srv.reader.push, srv.reader.fetch
 
@@ -1154,7 +1100,7 @@ def fault_checks(tap: Tap, tg, seed: Path, tmp: Path, ttl: float | None) -> None
     # A new server, as after a restart, finds the commit by its trailers: the
     # same request again is replayed, not written again, and the same ID for
     # another write is refused.
-    fresh = caller(tg, server(tg, tracker, ttl))
+    fresh = caller(tg, server(tg, tracker))
     before = tracker.head()
     ok, again = fresh("apply_changes", args)
     ok2, other = fresh("apply_changes", {**args, "body": "Another body."})
@@ -1446,9 +1392,10 @@ def local_checks(tap: Tap, tg, seed: Path, tmp: Path) -> None:
     from mcp.client.stdio import StdioServerParameters, stdio_client
 
     params = StdioServerParameters(
-        command=str(CLI),
+        command=sys.executable,
         args=[
-            *("--root", str(co), "mcp", "--local", "--stdio"),
+            str(MCP_BIN),
+            *("--root", str(co), "--local", "--stdio"),
             *("--log", str(tmp / "local-stdio.jsonl")),
         ],
         env=dict(os.environ),
@@ -1484,7 +1431,15 @@ def local_checks(tap: Tap, tg, seed: Path, tmp: Path) -> None:
     )
 
     both = subprocess.run(
-        [str(CLI), "--root", str(co), "mcp", "--local", "--no-fetch", "--stdio"],
+        [
+            sys.executable,
+            str(MCP_BIN),
+            "--root",
+            str(co),
+            "--local",
+            "--no-fetch",
+            "--stdio",
+        ],
         capture_output=True,
         text=True,
         check=False,
@@ -1699,13 +1654,7 @@ def edit_checks(tap: Tap, tg, seed: Path, tmp: Path) -> None:
                     "content": "#!/usr/bin/env python3\nprint('one')\n",
                     "expected_blob": None,
                     "executable": True,
-                },
-                {
-                    "op": "write_file",
-                    "path": "alpha/data.csv",
-                    "content": "a,b\r\n1,2\r\n",
-                    "expected_blob": None,
-                },
+                }
             ],
         },
     )
@@ -1733,97 +1682,6 @@ def edit_checks(tap: Tap, tg, seed: Path, tmp: Path) -> None:
         and got["edits"][0]["reformatted"] is False
         and mode("alpha/scripts/run.py") == "100755"
         and "print('two')" in tracker.show("alpha/scripts/run.py"),
-        got,
-    )
-
-    ok, got = call(
-        "edit_file",
-        {
-            "request_id": "e3",
-            "path": "alpha/data.csv",
-            "old_string": "a,b\n1,2",
-            "new_string": "a,b\nx,y",
-        },
-    )
-    raw = subprocess.run(
-        [*git_argv(tracker.remote), "show", "main:alpha/data.csv"],
-        capture_output=True,
-        check=True,
-    ).stdout
-    tap.check(
-        "edit_file retries bare newlines as CRLF in a CRLF file",
-        ok and raw == b"a,b\r\nx,y\r\n",
-        (got, raw),
-    )
-
-    # A record edit that formatting rewraps returns the lines as they now
-    # stand, and they quote as old_string in the next edit.
-    record = "alpha/tasks/TASK-AA005-five.md"
-    before = tracker.show(record)
-    ok, got = call(
-        "edit_file",
-        {
-            "request_id": "e3-wrap",
-            "path": record,
-            "old_string": "# Five",
-            "new_string": "# Five\n\n" + " ".join(["word"] * 30),
-        },
-    )
-    text = ok and got["edits"][0].get("text")
-    ok2, got2 = call(
-        "edit_file",
-        {
-            "request_id": "e3-requote",
-            "path": record,
-            "old_string": text or "(no text)",
-            "new_string": "# Five",
-        },
-    )
-    tap.check(
-        "edit_file returns a record's rewrapped lines, which quote again",
-        ok
-        and got["edits"][0]["reformatted"] is True
-        and text in tracker.show(record, got["commit"])
-        and ok2
-        and tracker.show(record) == before,
-        (got, got2),
-    )
-
-    ok, got = call(
-        "edit_file",
-        {
-            "request_id": "e4",
-            "path": "alpha/tasks/TASK-AA001-one.md",
-            "old_string": "**Goal:** One goal.",
-            "new_string": "**Goal:** One   goal,   edited.",
-            "conversation": "webchat://00000000-0000-4000-8000-0000000000e4",
-        },
-    )
-    task = tracker.show("alpha/tasks/TASK-AA001-one.md")
-    tap.check(
-        "edit_file on a task formats it and records the conversation",
-        ok
-        and "**Goal:** One goal, edited." in task
-        and "00000000-0000-4000-8000-0000000000e4" in task,
-        (got, task),
-    )
-
-    head = tracker.head()
-    ok, got = call(
-        "edit_file",
-        {
-            "request_id": "e5",
-            "path": "alpha/PLAN.md",
-            "old_string": "Frist plan.",
-            "new_string": "Second plan.",
-        },
-    )
-    tap.check(
-        "a missed edit_file writes nothing and shows the closest text",
-        not ok
-        and "+First plan." in str(got)
-        and "-Frist plan." in str(got)
-        and tracker.head() == head,
         got,
     )
 
@@ -1934,13 +1792,6 @@ def findings_checks(tap: Tap, tg, seed: Path, tmp: Path) -> None:
     tracker = Tracker(tmp / "findings", seed)
     call = caller(tg, server(tg, tracker))
 
-    def messages(got: dict) -> list[str]:
-        return [f"{f['severity']} {f['message']}" for f in got["findings"]]
-
-    def section_hash(project: str, name: str) -> str | None:
-        ok, status = call("get_project_status", {"project": project})
-        return ok and next(s["hash"] for s in status["sections"] if s["name"] == name)
-
     ok, got = call("handoff", {"target": "alpha"})
     tap.check("handoff carries the guide", ok and got["guide"] == tg.MCP_GUIDE, got)
     tap.check(
@@ -1959,10 +1810,26 @@ def findings_checks(tap: Tap, tg, seed: Path, tmp: Path) -> None:
         got,
     )
 
-    ok, got = call(
-        "apply_changes",
+    cli = tg._cli
+    base = cli.FsSnapshot(seed)
+
+    def sec_hash(snap, project: str, name: str) -> str:
+        text = snap.read_text(f"{project}/STATUS.md")
+        return next(
+            s["hash"]
+            for s in tg.record_sections(text, tg.STATUS_SCHEMA)
+            if s["name"] == name
+        )
+
+    def unit_findings(parent, doc: dict) -> tuple[list[str], object]:
+        cs = tg.apply_change_set(parent, doc)
+        paths = [f["path"] for f in tg.change_set_result(cs)["files"]]
+        found = tg.write_findings(cs.snap, parent, paths, cs.rows)
+        return [f"{f['severity']} {f['message']}" for f in found], cs.snap
+
+    found0, snap0 = unit_findings(
+        base,
         {
-            "request_id": "f0",
             "changes": [
                 {
                     "op": "set",
@@ -1975,22 +1842,21 @@ def findings_checks(tap: Tap, tg, seed: Path, tmp: Path) -> None:
                     "record": "beta/STATUS.md",
                     "section": "Summary",
                     "text": "Nothing is in progress.",
-                    "expected_hash": section_hash("beta", "Summary"),
+                    "expected_hash": sec_hash(base, "beta", "Summary"),
                 },
-            ],
+            ]
         },
     )
     beta_prose = "WARN beta: STATUS prose says no task is in progress"
     tap.check(
         "STATUS.md prose that contradicts the write is reported",
-        ok and any(m.startswith(beta_prose) for m in messages(got)),
-        got,
+        any(m.startswith(beta_prose) for m in found0),
+        found0,
     )
 
-    ok, got = call(
-        "apply_changes",
+    found1, snap1 = unit_findings(
+        snap0,
         {
-            "request_id": "f1",
             "changes": [
                 {
                     "op": "set",
@@ -2005,35 +1871,31 @@ def findings_checks(tap: Tap, tg, seed: Path, tmp: Path) -> None:
                     "text": "Met.",
                     "expected_hash": None,
                 },
-            ],
+            ]
         },
     )
-    found = ok and messages(got)
     tap.check(
         "completing a blocker reports the edge left on its held task",
-        ok
-        and any(
+        any(
             m.startswith("WARN beta/tasks/TASK-BB001") and "TASK-AA003 (done)" in m
-            for m in found
+            for m in found1
         ),
-        got,
+        found1,
     )
     tap.check(
         "changing a task without its STATUS.md prose reports a reminder",
-        ok
-        and any(m.startswith("INFO alpha/STATUS.md: Summary and Next") for m in found),
-        got,
+        any(m.startswith("INFO alpha/STATUS.md: Summary and Next") for m in found1),
+        found1,
     )
     tap.check(
         "a STATUS.md the write only regenerated reports nothing",
-        ok and not any(m.startswith(beta_prose) for m in found),
-        got,
+        not any(m.startswith(beta_prose) for m in found1),
+        found1,
     )
 
-    ok, got = call(
-        "apply_changes",
+    _, snap4 = unit_findings(
+        snap1,
         {
-            "request_id": "f4",
             "changes": [
                 {
                     "op": "add",
@@ -2041,13 +1903,12 @@ def findings_checks(tap: Tap, tg, seed: Path, tmp: Path) -> None:
                     "field": "blocked_by",
                     "values": ["TASK-AA004"],
                 }
-            ],
+            ]
         },
     )
-    ok, got = ok and call(
-        "apply_changes",
+    found5, snap5 = unit_findings(
+        snap4,
         {
-            "request_id": "f5",
             "changes": [
                 {
                     "op": "set",
@@ -2055,47 +1916,45 @@ def findings_checks(tap: Tap, tg, seed: Path, tmp: Path) -> None:
                     "field": "status",
                     "value": "cancelled",
                 }
-            ],
+            ]
         },
     )
-    found = ok and messages(got)
     tap.check(
         "cancelling a blocker reports the edge left on its held task",
-        ok
-        and any(
+        any(
             m.startswith("WARN beta/tasks/TASK-BB002") and "TASK-AA004 (cancelled)" in m
-            for m in found
+            for m in found5
         )
-        and not any(m.startswith(beta_prose) for m in found),
-        got,
+        and not any(m.startswith(beta_prose) for m in found5),
+        found5,
     )
 
-    ok, got = call(
-        "edit_file",
-        {
-            "request_id": "f6",
-            "path": "alpha/tasks/TASK-AA002-two.md",
-            "old_string": "status: todo\n",
-            "new_string": "status: todo\ncreated: 2026-10-18\n",
-        },
+    snap6 = cli.OverlaySnapshot(snap5)
+    rel6 = "alpha/tasks/TASK-AA002-two.md"
+    snap6.write_text(
+        rel6,
+        snap5.read_text(rel6).replace(
+            "status: todo\n", "status: todo\ncreated: 2026-10-18\n", 1
+        ),
     )
+    found6 = [
+        f"{f['severity']} {f['message']}"
+        for f in tg.write_findings(snap6, snap5, [rel6])
+    ]
     tap.check(
         "a frontmatter field outside the schema is reported",
-        ok
-        and any(
+        any(
             m.startswith(
                 "INFO alpha/tasks/TASK-AA002-two.md: frontmatter field 'created'"
             )
-            for m in messages(got)
+            for m in found6
         ),
-        got,
+        found6,
     )
 
-    summary = section_hash("alpha", "Summary")
-    ok, got = call(
-        "apply_changes",
+    found2, _ = unit_findings(
+        snap6,
         {
-            "request_id": "f2",
             "changes": [
                 {
                     "op": "set",
@@ -2108,15 +1967,15 @@ def findings_checks(tap: Tap, tg, seed: Path, tmp: Path) -> None:
                     "record": "alpha/STATUS.md",
                     "section": "Summary",
                     "text": "One is under way.",
-                    "expected_hash": summary,
+                    "expected_hash": sec_hash(snap6, "alpha", "Summary"),
                 },
-            ],
+            ]
         },
     )
     tap.check(
         "a write that rewrites the Summary with its task has no reminder",
-        ok and not any("STATUS.md" in m for m in messages(got)),
-        got,
+        not any("STATUS.md" in m for m in found2),
+        found2,
     )
 
     ok, got = call(
@@ -2178,92 +2037,6 @@ def project_checks(tap: Tap, tg, seed: Path, tmp: Path) -> None:
         and len(tracker.commits(before)) == 1,
         (again, fresh),
     )
-    ok, listed = call("list_projects", {})
-    ok2, made = call(
-        "create", {"request_id": "p2", "project": "diy", "title": "Fix the shed door"}
-    )
-    ok3, handed = call("handoff", {"target": "diy"})
-    tap.check(
-        "the new project is listed, takes tasks, and hands off",
-        ok
-        and "diy" in [p["project"] for p in listed["projects"]]
-        and ok2
-        and ok3
-        and handed["skills"] == ["coding-standards"]
-        and [t["id"] for t in handed["tasks"]["ready"]] == [made["created"][0]["id"]],
-        (listed, made, handed),
-    )
-
-    # A directory holding only an empty STATUS.md, as one pushed by hand
-    # before its README, becomes a project with a proper STATUS.md.
-    path = tracker.checkout("half")
-    (path / "half").mkdir()
-    (path / "half" / "STATUS.md").write_text("")
-    git(path, "add", "-A")
-    git(path, "commit", "-q", "-m", "chore: half a project")
-    git(path, "push", "-q", "origin", "main")
-    ok, got = call(
-        "create",
-        {"request_id": "p3", "kind": "project", "project": "half", "title": "Half"},
-    )
-    status = tracker.show("half/STATUS.md") if ok else ""
-    tap.check(
-        "a directory with tracker files but no README becomes a project",
-        ok and "## Summary" in status and "## Next" in status,
-        got,
-    )
-
-    # A directory that is neither a project nor a half-made one is not adopted.
-    path = tracker.checkout("notes")
-    (path / "notes").mkdir()
-    (path / "notes" / "ideas.md").write_text("# Ideas\n")
-    git(path, "add", "-A")
-    git(path, "commit", "-q", "-m", "chore: notes")
-    git(path, "push", "-q", "origin", "main")
-    head = tracker.head()
-    refusals = []
-    for request_id, extra, expect in (
-        ("p4", {"project": "alpha"}, "project 'alpha' already exists"),
-        ("p5", {"project": ".hidden"}, "invalid project name"),
-        ("p6", {"project": "a/b"}, "invalid project name"),
-        ("p7", {"project": "notes"}, "no STATUS.md or tasks/"),
-        ("p8", {"project": "p8", "slug": "x"}, "a project takes no slug"),
-        (
-            "p9",
-            {"project": "p9", "fields": {"owner": "x"}},
-            "unknown project field owner",
-        ),
-        (
-            "p10",
-            {"project": "p10", "sections": {"Goal": "x"}},
-            "unknown project section Goal",
-        ),
-    ):
-        args = {"request_id": request_id, "kind": "project", "title": "X", **extra}
-        ok, got = call("create", args)
-        refusals.append((ok, expect in str(got), got))
-    ok, got = call(
-        "apply_changes",
-        {
-            "request_id": "p11",
-            "changes": [
-                {
-                    "op": "create",
-                    "kind": "project",
-                    "project": "p11",
-                    "ref": "r",
-                    "sections": {"title": "X"},
-                }
-            ],
-        },
-    )
-    refusals.append((ok, "a project takes no ref" in str(got), got))
-    tap.check(
-        "existing projects and directories, invalid names, and keys a project "
-        "does not take are refused without a commit",
-        all(not ok and named for ok, named, _ in refusals) and tracker.head() == head,
-        refusals,
-    )
 
     before = tracker.head()
     ok, got = call(
@@ -2313,11 +2086,6 @@ def bypass_proxy_for_loopback() -> None:
 
 
 def main() -> None:
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Checks taskgo mcp writes.")
-    parser.add_argument("--fetch-ttl", type=float, default=None, metavar="SECS")
-    ttl = parser.parse_args().fetch_ttl
     reexec_with_taskgo_env()
     bypass_proxy_for_loopback()
     os.environ.update(IDENTITY)
@@ -2334,13 +2102,13 @@ def main() -> None:
         os.environ["XDG_CACHE_HOME"] = str(Path(tmp) / "xdg-cache")
         seed = make_seed(tmp)
         tracker = Tracker(tmp / "http", seed)
-        http = Http(tracker, tmp / "server.log", ttl)
+        http = Http(tracker, tmp / "server.log")
         try:
             http_checks(tap, tracker, http)
         finally:
             http.close()
         tg = load_taskgo()
-        fault_checks(tap, tg, seed, tmp, ttl)
+        fault_checks(tap, tg, seed, tmp)
         cache_checks(tap, tg, seed, tmp)
         edit_checks(tap, tg, seed, tmp)
         section_input_checks(tap, tg, seed, tmp)

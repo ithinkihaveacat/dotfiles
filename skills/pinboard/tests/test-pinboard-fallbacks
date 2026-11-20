@@ -10,8 +10,10 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -23,7 +25,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE / "fixtures"))
-from fake_pinboard import API, FAKE, TOKEN  # noqa: E402
+from fake_pinboard import API, FAKE, SERVER, TOKEN  # noqa: E402
 
 BIN = HERE.parent / "scripts" / "pinboard"
 TMP = Path(tempfile.mkdtemp())
@@ -223,13 +225,42 @@ def make_repo(records: list[dict]) -> Path:
     return repo
 
 
-def audit(repo: Path, *args: str, env: dict | None = None):
-    return subprocess.run(
-        [str(BIN), "--repo", str(repo), "audit", *args],
-        capture_output=True,
-        text=True,
-        env=env or ENV,
-        check=False,
+def audit(
+    repo: Path, *args: str, env: dict | None = None, cli: bool = False
+) -> subprocess.CompletedProcess[str]:
+    if cli or env is not None:
+        return subprocess.run(
+            [sys.executable, str(BIN), "--repo", str(repo), "audit", *args],
+            capture_output=True,
+            text=True,
+            env=env or ENV,
+            check=False,
+        )
+    argv = ["--repo", str(repo), "audit", *args]
+    old_env = os.environ.copy()
+    old_git_env = PB.GIT_ENV
+    old_cmd = PB._command
+    old_secrets = list(PB._secrets)
+    old_in, old_out, old_err = sys.stdin, sys.stdout, sys.stderr
+    out, err = io.StringIO(), io.StringIO()
+    os.environ.clear()
+    os.environ.update(ENV)
+    PB.GIT_ENV = {**ENV, "GIT_TERMINAL_PROMPT": "0", "LC_ALL": "C"}
+    sys.stdin, sys.stdout, sys.stderr = io.StringIO(""), out, err
+    try:
+        try:
+            rc = PB.main(argv)
+        except SystemExit as exc:
+            rc = exc.code if isinstance(exc.code, int) else (1 if exc.code else 0)
+    finally:
+        sys.stdin, sys.stdout, sys.stderr = old_in, old_out, old_err
+        PB._command = old_cmd
+        PB._secrets[:] = old_secrets
+        PB.GIT_ENV = old_git_env
+        os.environ.clear()
+        os.environ.update(old_env)
+    return subprocess.CompletedProcess(
+        [str(BIN), *argv], rc, out.getvalue(), err.getvalue()
     )
 
 
@@ -240,9 +271,8 @@ def journal(state: Path, pass_id: str = "2026") -> list[dict]:
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
 
-def fixture(name: str) -> tuple[Path, Path, list[dict]]:
-    reset_api()
-    records = [
+def fixture_records() -> list[dict]:
+    return [
         record(
             f"{BASE}/gone",
             "Gone Article",
@@ -280,6 +310,11 @@ def fixture(name: str) -> tuple[Path, Path, list[dict]]:
             [".status:ok", ".checked:2026"],
         ),
     ]
+
+
+def fixture(name: str) -> tuple[Path, Path, list[dict]]:
+    reset_api()
+    records = fixture_records()
     for item in records:
         FAKE.put(
             item["url"],
@@ -320,6 +355,66 @@ def seed_checks(state: Path, verdicts: dict[str, str]) -> None:
     )
 
 
+def seed_fixture(
+    name: str, *, with_repo: bool = False
+) -> tuple[Path, Path, list[dict]]:
+    """Build a pass and hand-seeded check journal without running HTTP checks."""
+    reset_api()
+    records = fixture_records()
+    if with_repo:
+        for item in records:
+            FAKE.put(
+                item["url"],
+                item["title"],
+                item["time"],
+                tags=" ".join(item["tags"]),
+            )
+        repo = make_repo(records)
+    else:
+        repo = TMP / f"unused-{name}"
+    state = TMP / name
+    pass_dir = state / "2026"
+    pass_dir.mkdir(parents=True, exist_ok=True)
+    plan = [
+        {
+            "url": item["url"],
+            "meta": item.get("meta", ""),
+            "title": item["title"],
+            "time": item["time"],
+        }
+        for item in records
+    ]
+    (pass_dir / "plan.jsonl").write_text(
+        "".join(json.dumps(item, ensure_ascii=False) + "\n" for item in plan)
+    )
+    (pass_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "pass": "2026",
+                "cohort": ".checked:2026",
+                "filter": {"tags": [], "year": None},
+                "created": "2026-01-01T00:00:00Z",
+                "count": len(plan),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    )
+    seed_checks(
+        state,
+        {
+            f"{BASE}/gone": "dead",
+            f"{BASE}/wall": "blocked",
+            f"{BASE}/changed": "changed",
+            f"{BASE}/nogood": "blocked",
+            f"{BASE}/sub/article": "blocked",
+            f"{BASE}/ok": "ok",
+        },
+    )
+    return repo, state, records
+
+
 def tags_of(url: str) -> set[str]:
     return set(FAKE.posts[url]["tags"].split())
 
@@ -334,6 +429,7 @@ def load_pinboard():
 
 
 PB = load_pinboard()
+PB.GIT_ENV = {**ENV, "GIT_TERMINAL_PROMPT": "0", "LC_ALL": "C"}
 
 
 def test_alt_tags() -> None:
@@ -432,7 +528,7 @@ def test_snapshot_score() -> None:
 
 
 def test_year_filter() -> None:
-    repo, state, _ = fixture("years")
+    repo, state, _ = seed_fixture("years")
     proc = audit(
         repo,
         "fallbacks",
@@ -658,7 +754,7 @@ def test_archive_today() -> None:
 
 
 def test_subscription() -> None:
-    repo, state, _ = fixture("subscription")
+    repo, state, _ = seed_fixture("subscription", with_repo=True)
     headers = TMP / "subscription.headers"
     headers.write_text("Cookie: session=test\nUser-Agent: Test\n")
     headers.chmod(0o600)
@@ -713,7 +809,7 @@ def test_subscription() -> None:
 
 
 def test_subscription_config_and_permissions() -> None:
-    repo, state, _ = fixture("subscription-config")
+    repo, state, _ = seed_fixture("subscription-config")
     headers = TMP / "config.headers"
     headers.write_text("Cookie: session=test\n")
     headers.chmod(0o600)
@@ -765,7 +861,7 @@ def test_subscription_config_and_permissions() -> None:
 
 
 def test_unreachable_archive_today() -> None:
-    repo, state, _ = fixture("unreachable")
+    repo, state, _ = seed_fixture("unreachable")
     env = {**ENV, "PINBOARD_ARCHIVE_TODAY": "http://127.0.0.1:1/newest/"}
     proc = audit(
         repo,
@@ -792,7 +888,7 @@ def test_unreachable_archive_today() -> None:
 
 
 def test_check_dry_run() -> None:
-    repo, state, _ = fixture("dry-run")
+    repo, state, _ = seed_fixture("dry-run")
     before = len([e for e in journal(state) if e["op"] == "fallback"])
     hits = dict(HITS)
     proc = audit(
@@ -828,4 +924,12 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        rc = main()
+    finally:
+        SITE.shutdown()
+        SITE.server_close()
+        SERVER.shutdown()
+        SERVER.server_close()
+        shutil.rmtree(TMP, ignore_errors=True)
+    sys.exit(rc)

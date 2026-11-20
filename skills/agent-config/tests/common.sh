@@ -29,12 +29,25 @@ REPO_ROOT="$(cd -P "${COMMON_SH_DIR}/../../.." && pwd)"
 # near the top of each test file, before the first assertion.
 skill_test_init() {
   TMPDIR=$(mktemp -d)
-  TMPDIR=$(python3 -c "import pathlib; print(pathlib.Path('${TMPDIR}').resolve())")
+  TMPDIR=$(cd -P "$TMPDIR" && pwd)
   MOCK_BIN_DIR=$(mktemp -d)
   MOCK_HOME="${TMPDIR}/mock_home"
   mkdir -p "$MOCK_HOME/.claude" "$MOCK_HOME/.gemini/antigravity-cli"
   # shellcheck disable=SC2064  # expand the paths now, at trap-install time
   trap "rm -rf -- '${TMPDIR}' '${MOCK_BIN_DIR}'" EXIT
+
+  # Save host uv cache before overriding HOME, so tests that need cached PyPI
+  # packages (e.g. PyYAML in test-skill-doctor) can still reach them offline.
+  HOST_UV_CACHE="${UV_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/uv}"
+  export HOST_UV_CACHE
+
+  # scripts/skill uses Python >=3.11 stdlib only; invoke directly via python3
+  # when >=3.11 is available to avoid per-call uv launcher overhead.
+  if python3 -c 'import sys; raise SystemExit(sys.version_info < (3, 11))' 2>/dev/null; then
+    SKILL_CMD=(python3 "$SCRIPT")
+  else
+    SKILL_CMD=("$SCRIPT")
+  fi
 
   # Mock executables so skill detects both Claude and Codex paths by default.
   touch "$MOCK_BIN_DIR/claude" "$MOCK_BIN_DIR/codex"
@@ -99,15 +112,7 @@ EOF
 # loudly enough). Callers set SKILL_SOURCE_DIRS and the like in the
 # environment.
 doctor_json() {
-  "${SCRIPT}" doctor --json 2>/dev/null || true
-}
-
-# own_output TEXT -- print TEXT without the lines that begin "warning: ".
-# uv writes those to stderr before a `uv run --script` tool starts (for a
-# deprecated UV_* variable, say); skill prefixes its own warnings with its name,
-# so checks on captured output still see everything skill wrote.
-own_output() {
-  grep -v '^warning: ' <<<"$1" || true
+  "${SKILL_CMD[@]}" doctor --json 2>/dev/null || true
 }
 
 # json_get JSON EXPR -- evaluate a Python expression against the parsed JSON
@@ -115,44 +120,61 @@ own_output() {
 # lists space-joined, None as empty. Used to read `skill doctor --json` /
 # `skill list --json` output without depending on jq.
 json_get() {
-  printf '%s' "$1" | python3 -c '
+  json_gets "$1" "$2"
+}
+
+# json_gets JSON EXPR... -- evaluate one or more Python expressions against a
+# single parsed JSON blob, printing one line per expression.
+json_gets() {
+  local json_input="$1"
+  shift
+  printf '%s' "$json_input" | python3 -c '
 import sys, json
 d = json.load(sys.stdin)
 safe = {n: getattr(__builtins__, n, None) if not isinstance(__builtins__, dict) else __builtins__[n]
         for n in ("next", "len", "sorted", "any", "all", "set", "list", "str", "int")}
-v = eval(sys.argv[1], {"__builtins__": {}}, dict(d=d, **safe))
-if isinstance(v, bool):
-    print("true" if v else "false")
-elif isinstance(v, (list, tuple)):
-    print(" ".join(str(x) for x in v))
-elif v is None:
-    print("")
-else:
-    print(v)
-' "$2"
+for expr in sys.argv[1:]:
+    v = eval(expr, {"__builtins__": {}}, dict(d=d, **safe))
+    if isinstance(v, bool):
+        print("true" if v else "false")
+    elif isinstance(v, (list, tuple)):
+        print(" ".join(str(x) for x in v))
+    elif v is None:
+        print("")
+    else:
+        print(v)
+' "$@"
 }
 
 # catalog_field JSONL NAME FIELD -- print one field of the `skill catalog --json`
-# record named NAME. The catalog emits JSON Lines (one object per skill), so it
-# needs its own reader rather than json_get. Prints "null" for a JSON null (an
-# unmeasured remote skill), "<absent>" if the record lacks the field, and
-# "<missing>" if no record carries that name.
+# record named NAME.
 catalog_field() {
-  printf '%s' "$1" | python3 -c '
+  catalog_fields "$1" "$2" "$3"
+}
+
+# catalog_fields JSONL NAME FIELD... -- print multiple fields (one per line) of
+# the `skill catalog --json` record named NAME. Prints "null" for a JSON null,
+# "<absent>" if the record lacks the field, and "<missing>" if no record matches.
+catalog_fields() {
+  local jsonl="$1" name="$2"
+  shift 2
+  printf '%s' "$jsonl" | python3 -c '
 import sys, json
-name, field = sys.argv[1], sys.argv[2]
+name, fields = sys.argv[1], sys.argv[2:]
 for line in sys.stdin:
     line = line.strip()
     if not line:
         continue
     d = json.loads(line)
     if d["name"] == name:
-        v = d.get(field, "<absent>")
-        print("null" if v is None else v)
+        for field in fields:
+            v = d.get(field, "<absent>")
+            print("null" if v is None else v)
         break
 else:
-    print("<missing>")
-' "$2" "$3"
+    for _ in fields:
+        print("<missing>")
+' "$name" "$@"
 }
 
 # check_status JSON NAME -- print the status (OK/WARNING/ERROR) of the doctor

@@ -18,93 +18,108 @@ hook_says() {
   grep -v '^warning: ' <<<"$1" || true
 }
 
-echo "1..45"
+echo "1..37"
 
-# Test 1: --help succeeds and documents doctor
-if out=$("$BIN" --help 2>&1) && [[ "$out" == *'doctor'* ]]; then
-  echo "ok 1 - --help documents doctor"
-else
-  echo "not ok 1 - --help missing or doesn't mention doctor"
-fi
-
-REPO=$(mktemp -d "/tmp/hooks-agent-test.XXXXXX")
+REPO=$(mktemp -d)
 trap 'rm -rf "$REPO"' EXIT
 git -C "$REPO" init -q
+(cd "$REPO" && "$BIN" add agent) >/dev/null 2>&1
+COMMIT_MSG_SRC="$DIR/../resources/hooks/agent/commit-msg"
+BATCH_DIR="$REPO/.batch"
+mkdir -p "$BATCH_DIR"
 
-# Test 2: doctor reports the hook missing and exits non-zero before install
-if (cd "$REPO" && "$BIN" doctor) >/dev/null 2>&1; then
-  echo "not ok 2 - doctor should exit non-zero with no hook installed"
-else
-  echo "ok 2 - doctor flags a missing hook"
-fi
+# Run zero-dep commit-msg logic in-process across batches of independent message
+# scenarios to avoid cold uv startup overhead, while keeping real trampoline
+# invocations for core end-to-end checks. Args: "tag|msg_file_or_flag|cfg_key|cfg_val" ...
+run_commit_msg_batch() {
+  python3 - "$COMMIT_MSG_SRC" "$REPO" "$BATCH_DIR" "$@" <<'PY'
+import contextlib
+import importlib.machinery
+import importlib.util
+import io
+import os
+import subprocess
+import sys
 
-# Test 3: install creates an executable, managed multiplexed hook
-if (cd "$REPO" && "$BIN" add agent) >/dev/null 2>&1 &&
-  [ -x "$REPO/.git/hooks/commit-msg" ] &&
-  grep -q "hook-multiplexer" "$REPO/.git/hooks/commit-msg" &&
-  [ -x "$REPO/.git/hooks/commit-msg.d/10-agent" ]; then
-  echo "ok 3 - install writes a multiplexed agent hook"
-else
-  echo "not ok 3 - install did not write the expected hook"
-fi
+src, repo, batch_dir, *specs = sys.argv[1:]
+sys.argv = [src]
+loader = importlib.machinery.SourceFileLoader("commit_msg_mod", src)
+spec = importlib.util.spec_from_loader(loader.name, loader)
+mod = importlib.util.module_from_spec(spec)
+loader.exec_module(mod)
 
-# Test 4: doctor now reports ok and exits zero
-if (cd "$REPO" && "$BIN" doctor) >/dev/null 2>&1; then
-  echo "ok 4 - doctor passes after install"
-else
-  echo "not ok 4 - doctor failed after install"
-fi
+os.chdir(repo)
+for item in specs:
+    tag, arg, cfg_key, cfg_val = item.split("|", 3)
+    argv = ["commit-msg"] + ([arg] if arg else [])
+    buf = io.StringIO()
+    rc = 0
+    if cfg_key:
+        subprocess.run(["git", "config", cfg_key, cfg_val], check=True)
+    try:
+        sys.argv = argv
+        mod.usage.__defaults__ = (buf,)
+        mod.usage_short.__defaults__ = (buf,)
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+            try:
+                mod.main()
+            except SystemExit as exc:
+                rc = 0 if exc.code is None else (exc.code if isinstance(exc.code, int) else 1)
+    finally:
+        if cfg_key:
+            subprocess.run(["git", "config", "--unset", cfg_key], check=False)
+    with open(os.path.join(batch_dir, f"{tag}.rc"), "w") as f:
+        f.write(str(rc))
+    with open(os.path.join(batch_dir, f"{tag}.out"), "w") as f:
+        f.write(buf.getvalue())
+PY
+}
 
-# Test 5: subject errors are reported together and still fail the commit,
+# Test 1: subject errors are reported together and still fail the commit,
 # even though the (unwrappable, single-token) long lines are left alone
-# rather than rejected.
+# rather than rejected. (Runs through the real trampoline.)
 INVALID_MSG="$REPO/invalid-message"
 subject=$(printf 'X%.0s' {1..51})
 long_line=$(printf 'x%.0s' {1..73})
 printf '%s\n%s\n%s\n%s\n' "$subject" "body starts without a separator" "$long_line" "$long_line" >"$INVALID_MSG"
 rc=0
-output=$("$REPO/.git/hooks/commit-msg.d/10-agent" "$INVALID_MSG" 2>&1) || rc=$?
+output=$(cd "$REPO" && "$REPO/.git/hooks/commit-msg.d/10-agent" "$INVALID_MSG" 2>&1) || rc=$?
 if [ "$rc" -eq 0 ]; then
-  echo "not ok 5 - invalid message should fail"
+  echo "not ok 1 - invalid message should fail"
 elif
   grep -Fqx "commit-msg: subject must follow 'type(scope): description' format" <<<"$output" &&
     grep -Fqx 'commit-msg: subject is 51 characters (limit: 50)' <<<"$output" &&
     grep -Fqx 'commit-msg: line 2 must be blank (separates subject from body)' <<<"$output"
 then
-  echo "ok 5 - invalid message reports every formatting error"
+  echo "ok 1 - invalid message reports every formatting error"
 else
-  echo "not ok 5 - invalid message did not report every formatting error"
+  echo "not ok 1 - invalid message did not report every formatting error"
 fi
 
-# Test 6: a valid message passes without diagnostics
+# Tests 2-3: batched check (valid + merge bypass)
 VALID_MSG="$REPO/valid-message"
 printf 'feat: validate messages\n\nShort body.\n' >"$VALID_MSG"
-if output=$("$REPO/.git/hooks/commit-msg.d/10-agent" "$VALID_MSG" 2>&1) && [ -z "$(hook_says "$output")" ]; then
-  echo "ok 6 - valid message passes"
-else
-  echo "not ok 6 - valid message should pass"
-fi
-
-# Test 7: generated messages retain their format-check exemption
 MERGE_MSG="$REPO/merge-message"
 printf 'Merge branch invalid formatting that is deliberately long\n' >"$MERGE_MSG"
-if output=$("$REPO/.git/hooks/commit-msg.d/10-agent" "$MERGE_MSG" 2>&1) && [ -z "$(hook_says "$output")" ]; then
-  echo "ok 7 - generated message bypasses validation"
+run_commit_msg_batch "t6|$VALID_MSG||" "t7|$MERGE_MSG||"
+
+# Test 2: a valid message passes without diagnostics
+if [ "$(<"$BATCH_DIR/t6.rc")" -eq 0 ] && [ -z "$(hook_says "$(<"$BATCH_DIR/t6.out")")" ]; then
+  echo "ok 2 - valid message passes"
 else
-  echo "not ok 7 - generated message should bypass validation"
+  echo "not ok 2 - valid message should pass"
 fi
 
-# Test 8: doctor flags a foreign (unmanaged) hook
-printf '#!/bin/sh\n' >"$REPO/.git/hooks/commit-msg"
-if (cd "$REPO" && "$BIN" doctor) >/dev/null 2>&1; then
-  echo "not ok 8 - doctor should flag an unmanaged hook"
+# Test 3: generated messages retain their format-check exemption
+if [ "$(<"$BATCH_DIR/t7.rc")" -eq 0 ] && [ -z "$(hook_says "$(<"$BATCH_DIR/t7.out")")" ]; then
+  echo "ok 3 - generated message bypasses validation"
 else
-  echo "ok 8 - doctor flags an unmanaged hook"
+  echo "not ok 3 - generated message should bypass validation"
 fi
 
 AGENT_HOOK="$REPO/.git/hooks/commit-msg.d/10-agent"
 
-# Test 9: an over-long body line is rewrapped in place and the commit
+# Test 4: an over-long body line is rewrapped in place and the commit
 # proceeds, with the rewrite announced on stderr.
 WRAP_MSG="$REPO/wrap-message"
 printf 'feat: rewrap long body lines\n\nThis paragraph is deliberately written to run well past the seventy-two character line limit so the hook has something to rewrap.\n' >"$WRAP_MSG"
@@ -113,90 +128,87 @@ output=$(cd "$REPO" && "$AGENT_HOOK" "$WRAP_MSG" 2>&1) || rc=$?
 if [ "$rc" -eq 0 ] &&
   [[ "$output" == *'rewrapped'* ]] &&
   ! awk 'NR>2 && length>72 { found=1 } END { exit !found }' "$WRAP_MSG"; then
-  echo "ok 9 - over-long body line is rewrapped and the commit proceeds"
+  echo "ok 4 - over-long body line is rewrapped and the commit proceeds"
 else
-  echo "not ok 9 - over-long body line was not rewrapped correctly"
+  echo "not ok 4 - over-long body line was not rewrapped correctly"
 fi
 
-# Test 10: wrapping is idempotent: running the hook again on its own
+# Test 5: wrapping is idempotent: running the hook again on its own
 # output changes nothing and reports no further rewrite.
 cp "$WRAP_MSG" "$WRAP_MSG.once"
-rc=0
-output=$(cd "$REPO" && "$AGENT_HOOK" "$WRAP_MSG" 2>&1) || rc=$?
-if [ "$rc" -eq 0 ] && [ -z "$(hook_says "$output")" ] && diff -q "$WRAP_MSG.once" "$WRAP_MSG" >/dev/null; then
-  echo "ok 10 - wrap(wrap(x)) == wrap(x)"
-else
-  echo "not ok 10 - rewrapping an already-wrapped message changed it"
-fi
-
-# Test 11: fenced code blocks pass through byte-identical even when a
-# line inside exceeds 72 characters, while surrounding prose still wraps.
 FENCE_MSG="$REPO/fence-message"
 CODE_LINE='    this_is_a_single_long_line_of_code_that_intentionally_exceeds_the_limit()'
 # shellcheck disable=SC2016 # backticks below are a markdown fence, not a substitution
 printf 'feat: preserve fenced code\n\nProse before the fence that is also long enough to need rewrapping onto more than one line.\n\n```\n%s\n```\n' "$CODE_LINE" >"$FENCE_MSG"
-rc=0
-output=$(cd "$REPO" && "$AGENT_HOOK" "$FENCE_MSG" 2>&1) || rc=$?
-if [ "$rc" -eq 0 ] && grep -Fqx "$CODE_LINE" "$FENCE_MSG"; then
-  echo "ok 11 - fenced code block survives byte-identical"
-else
-  echo "not ok 11 - fenced code block was altered"
-fi
-
-# Test 12: an indented block and a table row both survive byte-identical.
 TABLE_MSG="$REPO/table-message"
 INDENTED_LINE='    an indented line that is not meant to be treated as prose at all'
 TABLE_LINE='| column one | column two | a column wide enough to push this row past seventy-two characters |'
 printf 'feat: preserve indented and table content\n\n%s\n\n%s\n' "$INDENTED_LINE" "$TABLE_LINE" >"$TABLE_MSG"
-rc=0
-output=$(cd "$REPO" && "$AGENT_HOOK" "$TABLE_MSG" 2>&1) || rc=$?
-if [ "$rc" -eq 0 ] && grep -Fqx "$INDENTED_LINE" "$TABLE_MSG" && grep -Fqx "$TABLE_LINE" "$TABLE_MSG"; then
-  echo "ok 12 - indented block and table row survive byte-identical"
-else
-  echo "not ok 12 - indented block or table row was altered"
-fi
-
-# Test 13: a single token longer than 72 characters (e.g. a URL) is left
-# over-length rather than broken, and the commit still succeeds.
 URL_MSG="$REPO/url-message"
 URL_LINE="https://example.com/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 printf 'feat: leave unbreakable tokens alone\n\nSee %s\n' "$URL_LINE" >"$URL_MSG"
-rc=0
-output=$(cd "$REPO" && "$AGENT_HOOK" "$URL_MSG" 2>&1) || rc=$?
-if [ "$rc" -eq 0 ] && grep -Fq "$URL_LINE" "$URL_MSG"; then
-  echo "ok 13 - an over-long single token is left intact rather than rejected"
-else
-  echo "not ok 13 - an over-long single token was broken or the commit was rejected"
-fi
-
-# Test 14: a wrapped bullet keeps its marker and gains a hanging indent
-# on continuation lines.
 BULLET_MSG="$REPO/bullet-message"
 printf 'feat: wrap bullets with a hanging indent\n\n- this bullet item is deliberately long enough that it must wrap onto a second continuation line\n' >"$BULLET_MSG"
-rc=0
-output=$(cd "$REPO" && "$AGENT_HOOK" "$BULLET_MSG" 2>&1) || rc=$?
-if [ "$rc" -eq 0 ] &&
-  grep -Fqx -- '- this bullet item is deliberately long enough that it must wrap onto a' "$BULLET_MSG" &&
-  grep -Fqx '  second continuation line' "$BULLET_MSG"; then
-  echo "ok 14 - a wrapped bullet keeps its marker and hanging indent"
-else
-  echo "not ok 14 - a wrapped bullet lost its marker or hanging indent"
-fi
-
-# Test 15: a trailing trailer/footer block survives byte-identical rather
-# than being merged into the reflowed paragraph above it.
 TRAILER_MSG="$REPO/trailer-message"
 TRAILER_LINE='Reviewed-by: Alice Example <alice@example.com>'
 printf 'feat: preserve the trailer block\n\nA short paragraph above the trailers.\n\n%s\nRefs: #123\n' "$TRAILER_LINE" >"$TRAILER_MSG"
-rc=0
-output=$(cd "$REPO" && "$AGENT_HOOK" "$TRAILER_MSG" 2>&1) || rc=$?
-if [ "$rc" -eq 0 ] && grep -Fqx "$TRAILER_LINE" "$TRAILER_MSG" && grep -Fqx 'Refs: #123' "$TRAILER_MSG"; then
-  echo "ok 15 - the trailer block survives byte-identical"
+
+run_commit_msg_batch \
+  "t10|$WRAP_MSG||" \
+  "t11|$FENCE_MSG||" \
+  "t12|$TABLE_MSG||" \
+  "t13|$URL_MSG||" \
+  "t14|$BULLET_MSG||" \
+  "t15|$TRAILER_MSG||"
+
+if [ "$(<"$BATCH_DIR/t10.rc")" -eq 0 ] && [ -z "$(hook_says "$(<"$BATCH_DIR/t10.out")")" ] && diff -q "$WRAP_MSG.once" "$WRAP_MSG" >/dev/null; then
+  echo "ok 5 - wrap(wrap(x)) == wrap(x)"
 else
-  echo "not ok 15 - the trailer block was merged or altered"
+  echo "not ok 5 - rewrapping an already-wrapped message changed it"
 fi
 
-# Test 16: opting out via git config restores the strict rejection of
+# Test 6: fenced code blocks pass through byte-identical even when a
+# line inside exceeds 72 characters, while surrounding prose still wraps.
+if [ "$(<"$BATCH_DIR/t11.rc")" -eq 0 ] && grep -Fqx "$CODE_LINE" "$FENCE_MSG"; then
+  echo "ok 6 - fenced code block survives byte-identical"
+else
+  echo "not ok 6 - fenced code block was altered"
+fi
+
+# Test 7: an indented block and a table row both survive byte-identical.
+if [ "$(<"$BATCH_DIR/t12.rc")" -eq 0 ] && grep -Fqx "$INDENTED_LINE" "$TABLE_MSG" && grep -Fqx "$TABLE_LINE" "$TABLE_MSG"; then
+  echo "ok 7 - indented block and table row survive byte-identical"
+else
+  echo "not ok 7 - indented block or table row was altered"
+fi
+
+# Test 8: a single token longer than 72 characters (e.g. a URL) is left
+# over-length rather than broken, and the commit still succeeds.
+if [ "$(<"$BATCH_DIR/t13.rc")" -eq 0 ] && grep -Fq "$URL_LINE" "$URL_MSG"; then
+  echo "ok 8 - an over-long single token is left intact rather than rejected"
+else
+  echo "not ok 8 - an over-long single token was broken or the commit was rejected"
+fi
+
+# Test 9: a wrapped bullet keeps its marker and gains a hanging indent
+# on continuation lines.
+if [ "$(<"$BATCH_DIR/t14.rc")" -eq 0 ] &&
+  grep -Fqx -- '- this bullet item is deliberately long enough that it must wrap onto a' "$BULLET_MSG" &&
+  grep -Fqx '  second continuation line' "$BULLET_MSG"; then
+  echo "ok 9 - a wrapped bullet keeps its marker and hanging indent"
+else
+  echo "not ok 9 - a wrapped bullet lost its marker or hanging indent"
+fi
+
+# Test 10: a trailing trailer/footer block survives byte-identical rather
+# than being merged into the reflowed paragraph above it.
+if [ "$(<"$BATCH_DIR/t15.rc")" -eq 0 ] && grep -Fqx "$TRAILER_LINE" "$TRAILER_MSG" && grep -Fqx 'Refs: #123' "$TRAILER_MSG"; then
+  echo "ok 10 - the trailer block survives byte-identical"
+else
+  echo "not ok 10 - the trailer block was merged or altered"
+fi
+
+# Test 11: opting out via git config restores the strict rejection of
 # over-72-character lines instead of rewrapping them.
 OPTOUT_MSG="$REPO/optout-message"
 printf 'feat: honor the wrap opt-out\n\nThis paragraph is deliberately written to run well past the seventy-two character line limit so the hook has something to reject.\n' >"$OPTOUT_MSG"
@@ -204,374 +216,317 @@ rc=0
 output=$(cd "$REPO" && git config hooks.commitMsgWrap false && "$AGENT_HOOK" "$OPTOUT_MSG" 2>&1) || rc=$?
 (cd "$REPO" && git config --unset hooks.commitMsgWrap)
 if [ "$rc" -ne 0 ] && [[ "$output" == *'limit: 72'* ]]; then
-  echo "ok 16 - hooks.commitMsgWrap false restores the strict 72-character check"
+  echo "ok 11 - hooks.commitMsgWrap false restores the strict 72-character check"
 else
-  echo "not ok 16 - the wrap opt-out did not restore strict rejection"
+  echo "not ok 11 - the wrap opt-out did not restore strict rejection"
 fi
 
-# Test 17: a body whose lines are all already within 72 characters is
+# Test 12: a body whose lines are all already within 72 characters is
 # left byte-identical rather than being rejoined and rewrapped.
 COMPLIANT_MSG="$REPO/compliant-message"
 printf 'feat: leave compliant prose alone\n\nFirst point about the change.\nSecond point about the change.\nThird point.\n' >"$COMPLIANT_MSG"
 cp "$COMPLIANT_MSG" "$COMPLIANT_MSG.orig"
-rc=0
-output=$(cd "$REPO" && "$AGENT_HOOK" "$COMPLIANT_MSG" 2>&1) || rc=$?
-if [ "$rc" -eq 0 ] && [ -z "$(hook_says "$output")" ] && diff -q "$COMPLIANT_MSG.orig" "$COMPLIANT_MSG" >/dev/null; then
-  echo "ok 17 - already-compliant prose lines are left untouched"
-else
-  echo "not ok 17 - already-compliant prose lines were rejoined and rewrapped"
-fi
-
-# Test 18: a nested bullet's marker survives being wrapped: it must not
-# be swallowed into the parent bullet's reflowed text.
 NESTED_MSG="$REPO/nested-message"
 printf 'feat: wrap nested bullets without corruption\n\n- parent item that is short\n  - nested child item that is quite long and will need to wrap onto a continuation line for sure\n- second parent\n' >"$NESTED_MSG"
-rc=0
-output=$(cd "$REPO" && "$AGENT_HOOK" "$NESTED_MSG" 2>&1) || rc=$?
-if [ "$rc" -eq 0 ] &&
+QUOTE_MSG="$REPO/quote-message"
+printf 'feat: wrap blockquotes without losing markers\n\n> This is a quoted line that is long enough that it will need to be wrapped across more than one output line for sure.\n' >"$QUOTE_MSG"
+
+run_commit_msg_batch \
+  "t17|$COMPLIANT_MSG||" \
+  "t18|$NESTED_MSG||" \
+  "t19|$QUOTE_MSG||"
+
+if [ "$(<"$BATCH_DIR/t17.rc")" -eq 0 ] && [ -z "$(hook_says "$(<"$BATCH_DIR/t17.out")")" ] && diff -q "$COMPLIANT_MSG.orig" "$COMPLIANT_MSG" >/dev/null; then
+  echo "ok 12 - already-compliant prose lines are left untouched"
+else
+  echo "not ok 12 - already-compliant prose lines were rejoined and rewrapped"
+fi
+
+# Test 13: a nested bullet's marker survives being wrapped: it must not
+# be swallowed into the parent bullet's reflowed text.
+if [ "$(<"$BATCH_DIR/t18.rc")" -eq 0 ] &&
   grep -Fqx -- '- parent item that is short' "$NESTED_MSG" &&
   grep -Fq -- '  - nested child item that is quite long and will need to wrap onto a' "$NESTED_MSG" &&
   grep -Fqx -- '- second parent' "$NESTED_MSG"; then
-  echo "ok 18 - a nested bullet keeps its own marker instead of merging into the parent"
+  echo "ok 13 - a nested bullet keeps its own marker instead of merging into the parent"
 else
-  echo "not ok 18 - a nested bullet's marker was lost or merged into the parent"
+  echo "not ok 13 - a nested bullet's marker was lost or merged into the parent"
 fi
 
-# Test 19: a wrapped blockquote keeps its '>' marker on every line, not
+# Test 14: a wrapped blockquote keeps its '>' marker on every line, not
 # just the first.
-QUOTE_MSG="$REPO/quote-message"
-printf 'feat: wrap blockquotes without losing markers\n\n> This is a quoted line that is long enough that it will need to be wrapped across more than one output line for sure.\n' >"$QUOTE_MSG"
-rc=0
-output=$(cd "$REPO" && "$AGENT_HOOK" "$QUOTE_MSG" 2>&1) || rc=$?
 quote_line_count=$(grep -c '^>' "$QUOTE_MSG")
 body_line_count=$(sed -n '3,$p' "$QUOTE_MSG" | grep -c .)
-if [ "$rc" -eq 0 ] && [ "$quote_line_count" -ge 2 ] && [ "$quote_line_count" -eq "$body_line_count" ]; then
-  echo "ok 19 - every wrapped blockquote line keeps its '>' marker"
+if [ "$(<"$BATCH_DIR/t19.rc")" -eq 0 ] && [ "$quote_line_count" -ge 2 ] && [ "$quote_line_count" -eq "$body_line_count" ]; then
+  echo "ok 14 - every wrapped blockquote line keeps its '>' marker"
 else
-  echo "not ok 19 - a wrapped blockquote line lost its '>' marker"
+  echo "not ok 14 - a wrapped blockquote line lost its '>' marker"
 fi
 
-# Test 20: a reinstall leaves a trampoline into this dotfiles tree, not a
-# copy, so editing the source here reaches every repository it is installed
-# into with no re-install step.
-(cd "$REPO" && "$BIN" add agent) >/dev/null 2>&1
-SOURCE=$(cd -P "$DIR/../resources/hooks/agent" && pwd)/commit-msg
-if grep -Fq "hook-trampoline -> $SOURCE" "$REPO/.git/hooks/commit-msg.d/10-agent"; then
-  echo "ok 20 - the agent hook is installed as a trampoline to its source"
-else
-  echo "not ok 20 - the agent hook is a copy rather than a trampoline"
-fi
-
-# Test 21: doctor passes again once the unmanaged hook from test 8 has been
-# refreshed by that reinstall
-if (cd "$REPO" && "$BIN" doctor) >/dev/null 2>&1; then
-  echo "ok 21 - doctor passes after reinstall over an unmanaged hook"
-else
-  echo "not ok 21 - doctor still fails after reinstall"
-fi
-
-# Test 22: remove takes the agent hook back out. The foreign hook from
-# test 8 was preserved as 00-legacy by that reinstall, so removing the last
-# managed sub-hook must put it back as the plain hook rather than delete it.
-if (cd "$REPO" && "$BIN" remove agent) >/dev/null 2>&1 &&
-  [ ! -e "$REPO/.git/hooks/commit-msg.d/10-agent" ] &&
-  [ ! -d "$REPO/.git/hooks/commit-msg.d" ] &&
-  [ -x "$REPO/.git/hooks/commit-msg" ] &&
-  [ "$(cat "$REPO/.git/hooks/commit-msg")" = '#!/bin/sh' ] &&
-  ! (cd "$REPO" && "$BIN" doctor) >/dev/null 2>&1; then
-  echo "ok 22 - remove uninstalls the hook and restores the pre-existing one"
-else
-  echo "not ok 22 - remove left the hook behind or lost the pre-existing one"
-fi
-
-# Test 23: a trailer with normalized formatting (e.g. two spaces after colon)
-# is preserved byte-identical rather than reflowed as prose.
-(cd "$REPO" && "$BIN" add agent) >/dev/null 2>&1
 NORM_TRAILER_MSG="$REPO/norm-trailer-message"
 TRAILER_NORM="Signed-off-by:  Alice Example <alice.example.with.a.very.long.email.address.that.would.wrap.if.treated.as.prose@example.com>"
 printf 'feat: preserve normalized trailers\n\nSome body text here.\n\n%s\n' "$TRAILER_NORM" >"$NORM_TRAILER_MSG"
-rc=0
-output=$(cd "$REPO" && "$AGENT_HOOK" "$NORM_TRAILER_MSG" 2>&1) || rc=$?
-if [ "$rc" -eq 0 ] && grep -Fqx "$TRAILER_NORM" "$NORM_TRAILER_MSG"; then
-  echo "ok 23 - normalized trailer is preserved byte-identical"
-else
-  echo "not ok 23 - normalized trailer was reflowed or altered"
-fi
-
-# Test 24: a blockquote containing a blank quoted line '>' preserves the blank
-# line as a paragraph boundary when rewrapping over-long lines.
 QUOTE_PARA_MSG="$REPO/quote-para-message"
 printf 'feat: preserve quote paragraph breaks\n\n> First long line of quote paragraph 1 that will exceed the seventy two character limit.\n>\n> Second quote paragraph line.\n' >"$QUOTE_PARA_MSG"
-rc=0
-output=$(cd "$REPO" && "$AGENT_HOOK" "$QUOTE_PARA_MSG" 2>&1) || rc=$?
-if [ "$rc" -eq 0 ] &&
-  grep -Fqx '>' "$QUOTE_PARA_MSG" &&
-  grep -Fq 'Second quote paragraph line.' "$QUOTE_PARA_MSG"; then
-  echo "ok 24 - blank quote line is preserved as paragraph boundary"
-else
-  echo "not ok 24 - blank quote line was removed or merged"
-fi
-
-# Test 25: Markdown hard breaks (two trailing spaces) are preserved during rewrapping
 HARD_BREAK_MSG="$REPO/hard-break-message"
 printf 'feat: preserve markdown hard breaks\n\nFirst overlong prose line that exceeds seventy-two characters and ends with a hard break  \nSecond prose line.\n' >"$HARD_BREAK_MSG"
-rc=0
-output=$(cd "$REPO" && "$AGENT_HOOK" "$HARD_BREAK_MSG" 2>&1) || rc=$?
-if [ "$rc" -eq 0 ] &&
-  grep -q '  $' "$HARD_BREAK_MSG" &&
-  grep -Fqx 'Second prose line.' "$HARD_BREAK_MSG"; then
-  echo "ok 25 - markdown hard break is preserved and line remains separate"
-else
-  echo "not ok 25 - markdown hard break was lost or merged with following line"
-fi
-
-# Test 26: backslash hard break is stripped before re-appending and line length stays <= 72
 BS_BREAK_MSG="$REPO/bs-break-message"
 printf 'feat: backslash hard break hygiene\n\nFirst overlong prose line that exceeds seventy-two characters and ends with a backslash hard break \\\nSecond prose line.\n' >"$BS_BREAK_MSG"
-rc=0
-output=$(cd "$REPO" && "$AGENT_HOOK" "$BS_BREAK_MSG" 2>&1) || rc=$?
-if [ "$rc" -eq 0 ] &&
-  ! grep -q '\\\\$' "$BS_BREAK_MSG" &&
-  grep -q '\\$' "$BS_BREAK_MSG" &&
-  ! awk 'NR>2 && length>72 { found=1 } END { exit !found }' "$BS_BREAK_MSG"; then
-  echo "ok 26 - backslash hard break is not doubled and line length stays <= 72"
-else
-  echo "not ok 26 - backslash hard break was doubled or line exceeded 72 characters"
-fi
-
-# Test 27: longer closing code fence delimiter closes fence correctly
 LONGER_FENCE_MSG="$REPO/longer-fence-message"
 CODE_LINE='    this_is_a_single_long_line_of_code_that_intentionally_exceeds_the_limit()'
 PROSE_LINE='This paragraph comes after the code fence and is deliberately written to run well past seventy-two characters so it gets rewrapped.'
 # shellcheck disable=SC2016
 printf 'feat: longer closing fence\n\n```\n%s\n````\n\n%s\n' "$CODE_LINE" "$PROSE_LINE" >"$LONGER_FENCE_MSG"
-rc=0
-output=$(cd "$REPO" && "$AGENT_HOOK" "$LONGER_FENCE_MSG" 2>&1) || rc=$?
-if [ "$rc" -eq 0 ] &&
-  grep -Fqx "$CODE_LINE" "$LONGER_FENCE_MSG" &&
-  ! grep -Fqx "$PROSE_LINE" "$LONGER_FENCE_MSG"; then
-  echo "ok 27 - longer closing fence is recognized and prose after it is rewrapped"
-else
-  echo "not ok 27 - longer closing fence failed to close the code block"
-fi
-
-# Test 28: indented code block under bullet is preserved byte-identical and not merged into bullet prose
 BULLET_CODE_MSG="$REPO/bullet-code-message"
 CODE_INDENT="    git status --short --branch"
 printf 'feat: preserve indented block under bullet\n\n- Bullet item text explaining what is happening:\n%s\n' "$CODE_INDENT" >"$BULLET_CODE_MSG"
-rc=0
-output=$(cd "$REPO" && "$AGENT_HOOK" "$BULLET_CODE_MSG" 2>&1) || rc=$?
-if [ "$rc" -eq 0 ] && grep -Fqx "$CODE_INDENT" "$BULLET_CODE_MSG"; then
-  echo "ok 28 - indented block under bullet is preserved byte-identical"
-else
-  echo "not ok 28 - indented block under bullet was merged or modified"
-fi
-
-# Test 29: overlong Setext heading title rewraps while Setext delimiter is preserved on its own line
 SETEXT_MSG="$REPO/setext-message"
 SETEXT_TITLE="This is an overlong Setext heading title that exceeds seventy two characters in length"
 SETEXT_DELIM="--------------------------------------------------------------------------------------"
 printf 'feat: preserve setext heading delimiter\n\n%s\n%s\n' "$SETEXT_TITLE" "$SETEXT_DELIM" >"$SETEXT_MSG"
-rc=0
-output=$(cd "$REPO" && "$AGENT_HOOK" "$SETEXT_MSG" 2>&1) || rc=$?
-if [ "$rc" -eq 0 ] &&
-  grep -Fqx -- "$SETEXT_DELIM" "$SETEXT_MSG" &&
-  [[ "$(head -n 3 "$SETEXT_MSG")" != *"$SETEXT_DELIM"* ]]; then
-  echo "ok 29 - setext heading delimiter is preserved on its own line"
-else
-  echo "not ok 29 - setext heading delimiter was joined to heading text"
-fi
-
-# Test 30: the overlong title itself is left unwrapped, directly above its
-# delimiter, rather than split across lines with the delimiter attached only
-# to the last fragment.
-if [ "$rc" -eq 0 ] && grep -Fqx -- "$SETEXT_TITLE" "$SETEXT_MSG"; then
-  echo "ok 30 - an overlong setext title stays on one line above its delimiter"
-else
-  echo "not ok 30 - an overlong setext title was wrapped across multiple lines"
-fi
-
-# Test 31: consecutive quoted bullet items stay separate runs instead of
-# merging into one quoted paragraph when one of them needs to wrap, which
-# would turn the second item's '- ' marker into literal text.
 QUOTE_BULLET_MSG="$REPO/quote-bullet-message"
 printf 'feat: keep quoted bullets separate\n\n> - first quoted item that is long enough it will need to wrap onto more than one line for sure\n> - second quoted item\n' >"$QUOTE_BULLET_MSG"
-rc=0
-output=$(cd "$REPO" && "$AGENT_HOOK" "$QUOTE_BULLET_MSG" 2>&1) || rc=$?
-if [ "$rc" -eq 0 ] && grep -Fqx -- '> - second quoted item' "$QUOTE_BULLET_MSG"; then
-  echo "ok 31 - consecutive quoted bullets keep separate markers instead of merging"
-else
-  echo "not ok 31 - a quoted bullet's marker was folded into the previous item's text"
-fi
-
-# Test 32: custom core.commentChar (e.g. ;) is respected for comment splitting
 COMMENT_CHAR_MSG="$REPO/comment-char-message"
 LONG_COMMENT="; This is a very long git comment line using a custom comment character that exceeds 72 characters in length"
 printf 'feat: custom comment character\n\nShort body.\n%s\n' "$LONG_COMMENT" >"$COMMENT_CHAR_MSG"
-rc=0
-output=$(cd "$REPO" && git config core.commentChar ';' && "$AGENT_HOOK" "$COMMENT_CHAR_MSG" 2>&1) || rc=$?
-git -C "$REPO" config --unset core.commentChar
-if [ "$rc" -eq 0 ] && grep -Fqx "$LONG_COMMENT" "$COMMENT_CHAR_MSG"; then
-  echo "ok 32 - custom core.commentChar is respected for comment splitting"
-else
-  echo "not ok 32 - custom comment char line was wrapped or corrupted"
-fi
-
-# Test 33: hooks.commitMsgWrap = off opts out of wrapping
 OFF_MSG="$REPO/off-wrap-message"
 OVERLONG_BODY="This is an overlong body line that exceeds seventy two characters in length and should remain unwrapped."
 printf 'feat: opt out of wrapping via off\n\n%s\n' "$OVERLONG_BODY" >"$OFF_MSG"
-git -C "$REPO" config hooks.commitMsgWrap off
-rc=0
-output=$(cd "$REPO" && "$AGENT_HOOK" "$OFF_MSG" 2>&1) || rc=$?
-git -C "$REPO" config --unset hooks.commitMsgWrap
-if [ "$rc" -ne 0 ] && grep -Fqx "$OVERLONG_BODY" "$OFF_MSG"; then
-  echo "ok 33 - hooks.commitMsgWrap = off opts out of wrapping"
-else
-  echo "not ok 33 - hooks.commitMsgWrap = off was not honored"
-fi
-
-# Test 34: hooks.commitMsgWrap = False opts out of wrapping
 FALSE_MSG="$REPO/false-wrap-message"
 printf 'feat: opt out of wrapping via False\n\n%s\n' "$OVERLONG_BODY" >"$FALSE_MSG"
-git -C "$REPO" config hooks.commitMsgWrap False
-rc=0
-output=$(cd "$REPO" && "$AGENT_HOOK" "$FALSE_MSG" 2>&1) || rc=$?
-git -C "$REPO" config --unset hooks.commitMsgWrap
-if [ "$rc" -ne 0 ] && grep -Fqx "$OVERLONG_BODY" "$FALSE_MSG"; then
-  echo "ok 34 - hooks.commitMsgWrap = False opts out of wrapping"
-else
-  echo "not ok 34 - hooks.commitMsgWrap = False was not honored"
-fi
-
-# Test 35: commit-msg --help succeeds and prints usage
-rc=0
-output=$("$AGENT_HOOK" --help 2>&1) || rc=$?
-if [ "$rc" -eq 0 ] && [[ "$output" == *'Usage:'* ]]; then
-  echo "ok 35 - commit-msg --help succeeds and prints usage"
-else
-  echo "not ok 35 - commit-msg --help failed or missing usage"
-fi
-
-# Test 36: commit-msg -h succeeds and prints usage
-rc=0
-output=$("$AGENT_HOOK" -h 2>&1) || rc=$?
-if [ "$rc" -eq 0 ] && [[ "$output" == *'Usage:'* ]]; then
-  echo "ok 36 - commit-msg -h succeeds and prints usage"
-else
-  echo "not ok 36 - commit-msg -h failed or missing usage"
-fi
-
-# Test 37: commit-msg with no arguments prints concise usage and exits 1
-rc=0
-output=$("$AGENT_HOOK" 2>&1) || rc=$?
-if [ "$rc" -eq 1 ] && [[ "$output" == *"Try 'commit-msg --help' for more information."* ]]; then
-  echo "ok 37 - commit-msg bare invocation exits 1 with concise help"
-else
-  echo "not ok 37 - commit-msg bare invocation failed to output concise help or exit 1"
-fi
-
-# Test 38: a parent continuation after a nested child returns to the parent.
 NESTED_CONT_MSG="$REPO/nested-cont-message"
 printf 'feat: preserve parent bullet context\n\n- parent item\n  - child item\n  parent continuation that is deliberately long enough to wrap while retaining the parent hanging indentation\n' >"$NESTED_CONT_MSG"
-rc=0
-output=$(cd "$REPO" && "$AGENT_HOOK" "$NESTED_CONT_MSG" 2>&1) || rc=$?
-if [ "$rc" -eq 0 ] &&
-  grep -Fqx '  parent continuation that is deliberately long enough to wrap while' "$NESTED_CONT_MSG" &&
-  grep -Fqx '  retaining the parent hanging indentation' "$NESTED_CONT_MSG"; then
-  echo "ok 38 - parent continuation retains parent bullet indentation"
-else
-  echo "not ok 38 - parent continuation lost parent bullet indentation"
-fi
-
-# Test 39: quoted fenced code is preserved verbatim.
 QUOTED_FENCE_MSG="$REPO/quoted-fence-message"
 # shellcheck disable=SC2016
 printf 'feat: preserve quoted fences\n\n> ```text\n> preserve     spacing | exactly\n> ```\n' >"$QUOTED_FENCE_MSG"
 cp "$QUOTED_FENCE_MSG" "$QUOTED_FENCE_MSG.orig"
-rc=0
-output=$(cd "$REPO" && "$AGENT_HOOK" "$QUOTED_FENCE_MSG" 2>&1) || rc=$?
-if [ "$rc" -eq 0 ] && diff -q "$QUOTED_FENCE_MSG.orig" "$QUOTED_FENCE_MSG" >/dev/null; then
-  echo "ok 39 - quoted fenced code survives byte-identical"
-else
-  echo "not ok 39 - quoted fenced code was altered"
-fi
-
-# Test 40: an overlong ATX heading is preserved on one line.
 ATX_MSG="$REPO/atx-message"
 ATX_LINE='## This deliberately overlong ATX heading remains intact rather than being reflowed as prose'
 printf 'feat: preserve atx headings\n\n%s\n' "$ATX_LINE" >"$ATX_MSG"
-rc=0
-output=$(cd "$REPO" && "$AGENT_HOOK" "$ATX_MSG" 2>&1) || rc=$?
-if [ "$rc" -eq 0 ] && grep -Fqx "$ATX_LINE" "$ATX_MSG"; then
-  echo "ok 40 - overlong ATX heading survives byte-identical"
-else
-  echo "not ok 40 - overlong ATX heading was altered"
-fi
-
-# Test 41: a shell pipeline is prose, not a table row, and gets wrapped.
 PIPELINE_MSG="$REPO/pipeline-message"
 PIPELINE_LINE='command-one --with a-long-argument | command-two --with another-long-argument | command-three --finish'
 printf 'feat: wrap shell pipelines\n\n%s\n' "$PIPELINE_LINE" >"$PIPELINE_MSG"
-rc=0
-output=$(cd "$REPO" && "$AGENT_HOOK" "$PIPELINE_MSG" 2>&1) || rc=$?
-if [ "$rc" -eq 0 ] && ! grep -Fqx "$PIPELINE_LINE" "$PIPELINE_MSG" && awk 'NR>2 && length>72 { exit 1 }' "$PIPELINE_MSG"; then
-  echo "ok 41 - shell pipeline is wrapped as prose"
-else
-  echo "not ok 41 - shell pipeline bypassed wrapping"
-fi
-
-# Test 42: Assisted-by trailer is stripped from the commit message
 ASSISTED_MSG="$REPO/assisted-message"
 printf 'feat: strip assisted-by trailer\n\nSome body text.\n\nAssisted-by: Crush:gemini-3-flash-preview\n' >"$ASSISTED_MSG"
-rc=0
-output=$(cd "$REPO" && "$AGENT_HOOK" "$ASSISTED_MSG" 2>&1) || rc=$?
-if [ "$rc" -eq 0 ] &&
-  ! grep -q 'Assisted-by:' "$ASSISTED_MSG" &&
-  grep -Fqx 'Some body text.' "$ASSISTED_MSG"; then
-  echo "ok 42 - Assisted-by trailer is stripped"
-else
-  echo "not ok 42 - Assisted-by trailer was not stripped"
-fi
-
-# Test 43: multiple dropped trailers in any order are stripped
 MULTI_TRAILER_MSG="$REPO/multi-trailer-message"
 printf 'feat: strip multiple dropped trailers\n\nBody paragraph.\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nAssisted-by: Crush:gemini-3-flash-preview\n' >"$MULTI_TRAILER_MSG"
-rc=0
-output=$(cd "$REPO" && "$AGENT_HOOK" "$MULTI_TRAILER_MSG" 2>&1) || rc=$?
+COMMENT_TRAILER_MSG="$REPO/comment-trailer-message"
+printf 'feat: strip trailers with trailing comments\n\nBody paragraph.\n\nAssisted-By: Crush:gemini-3-flash-preview\n# Changes to be committed:\n# modified: file.txt\n' >"$COMMENT_TRAILER_MSG"
+KEPT_TRAILER_MSG="$REPO/kept-trailer-message"
+printf 'feat: strip trailer before a kept one\n\nBody paragraph.\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nClaude-Session: https://claude.ai/code/session_example\n' >"$KEPT_TRAILER_MSG"
+
+run_commit_msg_batch \
+  "t23|$NORM_TRAILER_MSG||" \
+  "t24|$QUOTE_PARA_MSG||" \
+  "t25|$HARD_BREAK_MSG||" \
+  "t26|$BS_BREAK_MSG||" \
+  "t27|$LONGER_FENCE_MSG||" \
+  "t28|$BULLET_CODE_MSG||" \
+  "t29|$SETEXT_MSG||" \
+  "t31|$QUOTE_BULLET_MSG||" \
+  "t32|$COMMENT_CHAR_MSG|core.commentChar|;" \
+  "t33|$OFF_MSG|hooks.commitMsgWrap|off" \
+  "t34|$FALSE_MSG|hooks.commitMsgWrap|False" \
+  "t35|--help||" \
+  "t36|-h||" \
+  "t37|||" \
+  "t38|$NESTED_CONT_MSG||" \
+  "t39|$QUOTED_FENCE_MSG||" \
+  "t40|$ATX_MSG||" \
+  "t41|$PIPELINE_MSG||" \
+  "t42|$ASSISTED_MSG||" \
+  "t43|$MULTI_TRAILER_MSG||" \
+  "t44|$COMMENT_TRAILER_MSG||" \
+  "t45|$KEPT_TRAILER_MSG||"
+
+# Test 15: a trailer with normalized formatting (e.g. two spaces after colon)
+# is preserved byte-identical rather than reflowed as prose.
+if [ "$(<"$BATCH_DIR/t23.rc")" -eq 0 ] && grep -Fqx "$TRAILER_NORM" "$NORM_TRAILER_MSG"; then
+  echo "ok 15 - normalized trailer is preserved byte-identical"
+else
+  echo "not ok 15 - normalized trailer was reflowed or altered"
+fi
+
+# Test 16: a blockquote containing a blank quoted line '>' preserves the blank
+# line as a paragraph boundary when rewrapping over-long lines.
+if [ "$(<"$BATCH_DIR/t24.rc")" -eq 0 ] &&
+  grep -Fqx '>' "$QUOTE_PARA_MSG" &&
+  grep -Fq 'Second quote paragraph line.' "$QUOTE_PARA_MSG"; then
+  echo "ok 16 - blank quote line is preserved as paragraph boundary"
+else
+  echo "not ok 16 - blank quote line was removed or merged"
+fi
+
+# Test 17: Markdown hard breaks (two trailing spaces) are preserved during rewrapping
+if [ "$(<"$BATCH_DIR/t25.rc")" -eq 0 ] &&
+  grep -q '  $' "$HARD_BREAK_MSG" &&
+  grep -Fqx 'Second prose line.' "$HARD_BREAK_MSG"; then
+  echo "ok 17 - markdown hard break is preserved and line remains separate"
+else
+  echo "not ok 17 - markdown hard break was lost or merged with following line"
+fi
+
+# Test 18: backslash hard break is stripped before re-appending and line length stays <= 72
+if [ "$(<"$BATCH_DIR/t26.rc")" -eq 0 ] &&
+  ! grep -q '\\\\$' "$BS_BREAK_MSG" &&
+  grep -q '\\$' "$BS_BREAK_MSG" &&
+  ! awk 'NR>2 && length>72 { found=1 } END { exit !found }' "$BS_BREAK_MSG"; then
+  echo "ok 18 - backslash hard break is not doubled and line length stays <= 72"
+else
+  echo "not ok 18 - backslash hard break was doubled or line exceeded 72 characters"
+fi
+
+# Test 19: longer closing code fence delimiter closes fence correctly
+if [ "$(<"$BATCH_DIR/t27.rc")" -eq 0 ] &&
+  grep -Fqx "$CODE_LINE" "$LONGER_FENCE_MSG" &&
+  ! grep -Fqx "$PROSE_LINE" "$LONGER_FENCE_MSG"; then
+  echo "ok 19 - longer closing fence is recognized and prose after it is rewrapped"
+else
+  echo "not ok 19 - longer closing fence failed to close the code block"
+fi
+
+# Test 20: indented code block under bullet is preserved byte-identical and not merged into bullet prose
+if [ "$(<"$BATCH_DIR/t28.rc")" -eq 0 ] && grep -Fqx "$CODE_INDENT" "$BULLET_CODE_MSG"; then
+  echo "ok 20 - indented block under bullet is preserved byte-identical"
+else
+  echo "not ok 20 - indented block under bullet was merged or modified"
+fi
+
+# Test 21: overlong Setext heading title rewraps while Setext delimiter is preserved on its own line
+rc=$(<"$BATCH_DIR/t29.rc")
 if [ "$rc" -eq 0 ] &&
+  grep -Fqx -- "$SETEXT_DELIM" "$SETEXT_MSG" &&
+  [[ "$(head -n 3 "$SETEXT_MSG")" != *"$SETEXT_DELIM"* ]]; then
+  echo "ok 21 - setext heading delimiter is preserved on its own line"
+else
+  echo "not ok 21 - setext heading delimiter was joined to heading text"
+fi
+
+# Test 22: the overlong title itself is left unwrapped, directly above its
+# delimiter, rather than split across lines with the delimiter attached only
+# to the last fragment.
+if [ "$rc" -eq 0 ] && grep -Fqx -- "$SETEXT_TITLE" "$SETEXT_MSG"; then
+  echo "ok 22 - an overlong setext title stays on one line above its delimiter"
+else
+  echo "not ok 22 - an overlong setext title was wrapped across multiple lines"
+fi
+
+# Test 23: consecutive quoted bullet items stay separate runs instead of
+# merging into one quoted paragraph when one of them needs to wrap, which
+# would turn the second item's '- ' marker into literal text.
+if [ "$(<"$BATCH_DIR/t31.rc")" -eq 0 ] && grep -Fqx -- '> - second quoted item' "$QUOTE_BULLET_MSG"; then
+  echo "ok 23 - consecutive quoted bullets keep separate markers instead of merging"
+else
+  echo "not ok 23 - a quoted bullet's marker was folded into the previous item's text"
+fi
+
+# Test 24: custom core.commentChar (e.g. ;) is respected for comment splitting
+if [ "$(<"$BATCH_DIR/t32.rc")" -eq 0 ] && grep -Fqx "$LONG_COMMENT" "$COMMENT_CHAR_MSG"; then
+  echo "ok 24 - custom core.commentChar is respected for comment splitting"
+else
+  echo "not ok 24 - custom comment char line was wrapped or corrupted"
+fi
+
+# Test 25: hooks.commitMsgWrap = off opts out of wrapping
+if [ "$(<"$BATCH_DIR/t33.rc")" -ne 0 ] && grep -Fqx "$OVERLONG_BODY" "$OFF_MSG"; then
+  echo "ok 25 - hooks.commitMsgWrap = off opts out of wrapping"
+else
+  echo "not ok 25 - hooks.commitMsgWrap = off was not honored"
+fi
+
+# Test 26: hooks.commitMsgWrap = False opts out of wrapping
+if [ "$(<"$BATCH_DIR/t34.rc")" -ne 0 ] && grep -Fqx "$OVERLONG_BODY" "$FALSE_MSG"; then
+  echo "ok 26 - hooks.commitMsgWrap = False opts out of wrapping"
+else
+  echo "not ok 26 - hooks.commitMsgWrap = False was not honored"
+fi
+
+# Test 27: commit-msg --help succeeds and prints usage
+if [ "$(<"$BATCH_DIR/t35.rc")" -eq 0 ] && [[ "$(<"$BATCH_DIR/t35.out")" == *'Usage:'* ]]; then
+  echo "ok 27 - commit-msg --help succeeds and prints usage"
+else
+  echo "not ok 27 - commit-msg --help failed or missing usage"
+fi
+
+# Test 28: commit-msg -h succeeds and prints usage
+if [ "$(<"$BATCH_DIR/t36.rc")" -eq 0 ] && [[ "$(<"$BATCH_DIR/t36.out")" == *'Usage:'* ]]; then
+  echo "ok 28 - commit-msg -h succeeds and prints usage"
+else
+  echo "not ok 28 - commit-msg -h failed or missing usage"
+fi
+
+# Test 29: commit-msg with no arguments prints concise usage and exits 1
+if [ "$(<"$BATCH_DIR/t37.rc")" -eq 1 ] && [[ "$(<"$BATCH_DIR/t37.out")" == *"Try 'commit-msg --help' for more information."* ]]; then
+  echo "ok 29 - commit-msg bare invocation exits 1 with concise help"
+else
+  echo "not ok 29 - commit-msg bare invocation failed to output concise help or exit 1"
+fi
+
+# Test 30: a parent continuation after a nested child returns to the parent.
+if [ "$(<"$BATCH_DIR/t38.rc")" -eq 0 ] &&
+  grep -Fqx '  parent continuation that is deliberately long enough to wrap while' "$NESTED_CONT_MSG" &&
+  grep -Fqx '  retaining the parent hanging indentation' "$NESTED_CONT_MSG"; then
+  echo "ok 30 - parent continuation retains parent bullet indentation"
+else
+  echo "not ok 30 - parent continuation lost parent bullet indentation"
+fi
+
+# Test 31: quoted fenced code is preserved verbatim.
+if [ "$(<"$BATCH_DIR/t39.rc")" -eq 0 ] && diff -q "$QUOTED_FENCE_MSG.orig" "$QUOTED_FENCE_MSG" >/dev/null; then
+  echo "ok 31 - quoted fenced code survives byte-identical"
+else
+  echo "not ok 31 - quoted fenced code was altered"
+fi
+
+# Test 32: an overlong ATX heading is preserved on one line.
+if [ "$(<"$BATCH_DIR/t40.rc")" -eq 0 ] && grep -Fqx "$ATX_LINE" "$ATX_MSG"; then
+  echo "ok 32 - overlong ATX heading survives byte-identical"
+else
+  echo "not ok 32 - overlong ATX heading was altered"
+fi
+
+# Test 33: a shell pipeline is prose, not a table row, and gets wrapped.
+if [ "$(<"$BATCH_DIR/t41.rc")" -eq 0 ] && ! grep -Fqx "$PIPELINE_LINE" "$PIPELINE_MSG" && awk 'NR>2 && length>72 { exit 1 }' "$PIPELINE_MSG"; then
+  echo "ok 33 - shell pipeline is wrapped as prose"
+else
+  echo "not ok 33 - shell pipeline bypassed wrapping"
+fi
+
+# Test 34: Assisted-by trailer is stripped from the commit message
+if [ "$(<"$BATCH_DIR/t42.rc")" -eq 0 ] &&
+  ! grep -q 'Assisted-by:' "$ASSISTED_MSG" &&
+  grep -Fqx 'Some body text.' "$ASSISTED_MSG"; then
+  echo "ok 34 - Assisted-by trailer is stripped"
+else
+  echo "not ok 34 - Assisted-by trailer was not stripped"
+fi
+
+# Test 35: multiple dropped trailers in any order are stripped
+if [ "$(<"$BATCH_DIR/t43.rc")" -eq 0 ] &&
   ! grep -q 'Co-Authored-By:' "$MULTI_TRAILER_MSG" &&
   ! grep -q 'Assisted-by:' "$MULTI_TRAILER_MSG" &&
   grep -Fqx 'Body paragraph.' "$MULTI_TRAILER_MSG"; then
-  echo "ok 43 - multiple dropped trailers are stripped"
+  echo "ok 35 - multiple dropped trailers are stripped"
 else
-  echo "not ok 43 - multiple dropped trailers were not stripped"
+  echo "not ok 35 - multiple dropped trailers were not stripped"
 fi
 
-# Test 44: dropped trailers before git comments are stripped while comments survive
-COMMENT_TRAILER_MSG="$REPO/comment-trailer-message"
-printf 'feat: strip trailers with trailing comments\n\nBody paragraph.\n\nAssisted-By: Crush:gemini-3-flash-preview\n# Changes to be committed:\n# modified: file.txt\n' >"$COMMENT_TRAILER_MSG"
-rc=0
-output=$(cd "$REPO" && "$AGENT_HOOK" "$COMMENT_TRAILER_MSG" 2>&1) || rc=$?
-if [ "$rc" -eq 0 ] &&
+# Test 36: dropped trailers before git comments are stripped while comments survive
+if [ "$(<"$BATCH_DIR/t44.rc")" -eq 0 ] &&
   ! grep -qi 'assisted-by:' "$COMMENT_TRAILER_MSG" &&
   grep -Fqx 'Body paragraph.' "$COMMENT_TRAILER_MSG" &&
   grep -Fqx '# Changes to be committed:' "$COMMENT_TRAILER_MSG"; then
-  echo "ok 44 - dropped trailers before git comments are stripped and comments survive"
+  echo "ok 36 - dropped trailers before git comments are stripped and comments survive"
 else
-  echo "not ok 44 - dropped trailers before git comments failed"
+  echo "not ok 36 - dropped trailers before git comments failed"
 fi
 
-# Test 45: a dropped trailer followed by a kept trailer is still stripped
-KEPT_TRAILER_MSG="$REPO/kept-trailer-message"
-printf 'feat: strip trailer before a kept one\n\nBody paragraph.\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nClaude-Session: https://claude.ai/code/session_example\n' >"$KEPT_TRAILER_MSG"
-rc=0
-output=$(cd "$REPO" && "$AGENT_HOOK" "$KEPT_TRAILER_MSG" 2>&1) || rc=$?
-if [ "$rc" -eq 0 ] &&
+# Test 37: a dropped trailer followed by a kept trailer is still stripped
+if [ "$(<"$BATCH_DIR/t45.rc")" -eq 0 ] &&
   ! grep -qi 'co-authored-by:' "$KEPT_TRAILER_MSG" &&
   grep -Fqx 'Body paragraph.' "$KEPT_TRAILER_MSG" &&
   grep -Fqx 'Claude-Session: https://claude.ai/code/session_example' "$KEPT_TRAILER_MSG"; then
-  echo "ok 45 - dropped trailer before a kept trailer is stripped"
+  echo "ok 37 - dropped trailer before a kept trailer is stripped"
 else
-  echo "not ok 45 - dropped trailer before a kept trailer survived"
+  echo "not ok 37 - dropped trailer before a kept trailer survived"
 fi

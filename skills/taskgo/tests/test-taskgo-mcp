@@ -4,16 +4,23 @@ set -euo pipefail
 # shellcheck source=skills/taskgo/tests/common.sh disable=SC1091
 source "$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 taskgo_test_init
+export TASKGO_PY
 MCP_PY=$(uv sync -q --script "$MCP_BIN" </dev/null && uv python find --script "$MCP_BIN")
+MCP_PID=""
+cleanup_mcp() {
+  if [[ -n "$MCP_PID" ]]; then
+    kill "$MCP_PID" 2>/dev/null || true
+    wait "$MCP_PID" 2>/dev/null || true
+    MCP_PID=""
+  fi
+  rm -rf -- "$TEST_ROOT"
+}
+trap cleanup_mcp EXIT
 
 echo "1..13"
 
-REPO="$TEST_ROOT/repo"
-init_base_repo "$REPO"
-
 TREE_REPO="$TEST_ROOT/tree-repo"
-TREE_EXPORT="$TEST_ROOT/tree-export"
-mkdir -p "$TREE_REPO"/{alpha/tasks,alpha/decisions,beta/tasks} "$TREE_EXPORT"
+mkdir -p "$TREE_REPO"/{alpha/tasks,alpha/decisions,beta/tasks}
 git -C "$TREE_REPO" init -q
 printf '%s\n' '# Agent instructions' '' 'This repository follows taskgo:' \
   '<https://github.com/ithinkihaveacat/dotfiles/tree/main/skills/taskgo>.' \
@@ -35,7 +42,6 @@ printf '%s\n' '---' 'supersedes: [0001]' '---' '' '# Second decision' '' '## Con
   '## Consequences' '' 'x' >"$TREE_REPO/alpha/decisions/0002-second.md"
 (tg --root "$TREE_REPO" sync) >/dev/null 2>&1
 git -C "$TREE_REPO" add -A && git -C "$TREE_REPO" commit -qm 'tree fixture'
-git -C "$TREE_REPO" archive HEAD | tar -x -C "$TREE_EXPORT"
 sed -i.bak 's/^status: in-progress$/status: done/' "$TREE_REPO/alpha/tasks/TASK-7E001-first.md"
 rm -f "$TREE_REPO/alpha/tasks/TASK-7E001-first.md.bak"
 
@@ -80,7 +86,7 @@ assert all("taskgo " not in t["description"] for t in by.values()), "CLI equival
 assert all("at" not in t["inputSchema"]["properties"] for t in writes.values())
 got = task["result"]["structuredContent"]
 print(got["as_of"]["commit"], got["task"]["status"])
-' "$TEST_ROOT/mcp-stdio.log" "$BIN" --root "$TREE_REPO" mcp --stdio --no-fetch \
+' "$TEST_ROOT/mcp-stdio.log" "$MCP_PY" "$MCP_BIN" --root "$TREE_REPO" mcp --stdio --no-fetch \
     --branch "$(git -C "$TREE_REPO" branch --show-current)" --log "$TEST_ROOT/mcp-stdio.jsonl"
 ) || true
 # Each of the four messages, the notification included, logs one line, and
@@ -107,24 +113,33 @@ fi
 
 # Every tool's output matches the CLI's at the served commit.
 MCP_SYNTH="$TEST_ROOT/synthetic"
+MCP_SYNTH_LOG="$TEST_ROOT/mcp-synthetic.log"
 MCP_PORT=$("$TASKGO_PY" -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
 "$TEST_DIR/make-synthetic" "$MCP_SYNTH" >/dev/null 2>&1
-"$BIN" --root "$MCP_SYNTH" mcp --no-fetch --auth none --port "$MCP_PORT" \
-  --log "$TEST_ROOT/mcp-synthetic.jsonl" 2>/dev/null &
+"$MCP_PY" "$MCP_BIN" --root "$MCP_SYNTH" mcp --no-fetch --auth none --port "$MCP_PORT" \
+  --log "$TEST_ROOT/mcp-synthetic.jsonl" 2>"$MCP_SYNTH_LOG" &
 MCP_PID=$!
-for _ in $(seq 100); do
-  "$TASKGO_PY" -c 'import socket, sys; socket.create_connection(("127.0.0.1", int(sys.argv[1])), 1)' \
-    "$MCP_PORT" 2>/dev/null && break
-  sleep 0.1
-done
-if MCP_CMP=$("$TASKGO_PY" "$TEST_DIR/compare-cli" "http://127.0.0.1:$MCP_PORT/mcp" "$MCP_SYNTH" 2>&1); then
+"$TASKGO_PY" -c '
+import os, socket, sys, time
+port, pid = int(sys.argv[1]), int(sys.argv[2])
+for _ in range(1500):
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        sys.exit(1)
+    try:
+        with socket.create_connection(("127.0.0.1", port), 0.2):
+            sys.exit(0)
+    except OSError:
+        time.sleep(0.02)
+sys.exit(1)
+' "$MCP_PORT" "$MCP_PID"
+if MCP_CMP=$("$TASKGO_PY" "$TEST_DIR/compare-cli" --fast "http://127.0.0.1:$MCP_PORT/mcp" "$MCP_SYNTH" 2>&1); then
   echo 'ok 2 - mcp tools match the CLI on a synthetic tracker'
 else
   echo 'not ok 2 - mcp tools match the CLI on a synthetic tracker'
   printf '# %s\n' "$MCP_CMP"
 fi
-kill "$MCP_PID" 2>/dev/null || true
-wait "$MCP_PID" 2>/dev/null || true
 
 if MCP_AUTH=$("$MCP_PY" "$TEST_DIR/auth-check" 2>&1); then
   echo 'ok 3 - mcp checks Cloudflare Access tokens'
@@ -138,7 +153,7 @@ fi
 IDH_REPO="$TEST_ROOT/id-hist-repo"
 mkdir -p "$IDH_REPO/proj/tasks"
 git -C "$IDH_REPO" init -q -b main
-cp "$REPO/AGENTS.md" "$IDH_REPO/AGENTS.md"
+cp "$TREE_REPO/AGENTS.md" "$IDH_REPO/AGENTS.md"
 printf '# Project\n' >"$IDH_REPO/proj/README.md"
 printf '%s\n' '---' 'id: TASK-7E201' 'status: todo' '---' '' '# Deleted later' \
   >"$IDH_REPO/proj/tasks/TASK-7E201-deleted.md"
@@ -179,12 +194,15 @@ else
 fi
 
 # A 2026-07-28 client and a 2025-11-25 one, over HTTP and over --stdio.
-if MCP_ERAS=$("$MCP_PY" "$TEST_DIR/protocol-check" "$MCP_SYNTH" 2>&1); then
+if MCP_ERAS=$("$MCP_PY" "$TEST_DIR/protocol-check" --http-url "http://127.0.0.1:$MCP_PORT/mcp" --http-log "$MCP_SYNTH_LOG" "$MCP_SYNTH" 2>&1); then
   echo 'ok 5 - mcp serves both protocol eras over both transports'
 else
   echo 'not ok 5 - mcp serves both protocol eras over both transports'
   printf '# %s\n' "$MCP_ERAS"
 fi
+kill "$MCP_PID" 2>/dev/null || true
+wait "$MCP_PID" 2>/dev/null || true
+MCP_PID=""
 
 # Test 183: read slices lines 1-indexed and inclusive, splitting at '\n' only
 # and keeping CRLF bytes; clamps out-of-range lines; caps output at 256 KiB
@@ -209,15 +227,31 @@ git -C "$READ_REPO" add -A
 git -C "$READ_REPO" commit -qm 'read fixtures'
 printf 'changed\n' >"$READ_REPO/p/empty.txt"
 if READ_ERR=$("$TASKGO_PY" -c '
-import json, subprocess, sys
+import contextlib, importlib.machinery, importlib.util, io, json, subprocess, sys
 py, bin_, repo = sys.argv[1], sys.argv[2], sys.argv[3]
+loader = importlib.machinery.SourceFileLoader("taskgo_cli_read", bin_)
+spec = importlib.util.spec_from_loader(loader.name, loader)
+tg = importlib.util.module_from_spec(spec)
+sys.modules[loader.name] = tg
+loader.exec_module(tg)
+
+def run_tg(*args):
+    tg._REPO_ROOT_CACHE = None
+    tg._EXPLICIT_ROOT = None
+    tg._ACTIVE_COMMAND = None
+    tg._OFFLINE_FLAG = False
+    out, err = io.StringIO(), io.StringIO()
+    rc = 0
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        try:
+            tg.main(["--root", repo, *args])
+        except SystemExit as e:
+            rc = 0 if e.code is None else (e.code if isinstance(e.code, int) else 1)
+    return rc, out.getvalue()
 
 def read(*args):
-    res = subprocess.run(
-        [py, bin_, "--root", repo, "read", *args, "--json"],
-        capture_output=True, text=True,
-    )
-    return json.loads(res.stdout) if res.returncode == 0 else None
+    rc, out = run_tg("read", *args, "--json")
+    return json.loads(out) if rc == 0 else None
 
 def check(name, ok):
     if not ok:
@@ -296,15 +330,32 @@ git -C "$SEARCH_REPO" add -A
 git -C "$SEARCH_REPO" commit -qm 'search fixtures'
 printf 'gamma needle\n' >>"$SEARCH_REPO/p/a-b/one.md"
 if SEARCH_ERR=$("$TASKGO_PY" -c '
-import json, subprocess, sys
+import contextlib, importlib.machinery, importlib.util, io, json, os, subprocess, sys
 py, bin_, repo = sys.argv[1], sys.argv[2], sys.argv[3]
+loader = importlib.machinery.SourceFileLoader("taskgo_cli_search", bin_)
+spec = importlib.util.spec_from_loader(loader.name, loader)
+tg = importlib.util.module_from_spec(spec)
+sys.modules[loader.name] = tg
+loader.exec_module(tg)
 
 def search(*args):
-    res = subprocess.run(
-        [py, bin_, "--root", repo, "search", *args],
-        capture_output=True, text=True, cwd="/",
-    )
-    return res.returncode, res.stdout, res.stderr
+    saved_cwd = os.getcwd()
+    tg._REPO_ROOT_CACHE = None
+    tg._EXPLICIT_ROOT = None
+    tg._ACTIVE_COMMAND = None
+    tg._OFFLINE_FLAG = False
+    out, err = io.StringIO(), io.StringIO()
+    rc = 0
+    try:
+        os.chdir("/")
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                tg.main(["--root", repo, "search", *args])
+            except SystemExit as e:
+                rc = 0 if e.code is None else (e.code if isinstance(e.code, int) else 1)
+    finally:
+        os.chdir(saved_cwd)
+    return rc, out.getvalue(), err.getvalue()
 
 def js(*args):
     rc, out, _ = search("--json", *args)
@@ -349,8 +400,11 @@ for bad in (["--no-ind", "x"], ["-if/etc/passwd", "x"], ["--file=/etc/passwd"],
             ["x", "--", ".git/HEAD"], ["--json"]):
     rc, out, err = search(*bad)
     check(f"refuse {bad}", rc == 2 and out == "")
-rc, out, err = search("--help")
-check("help", rc == 0 and "GREP_ARGS" in out)
+help_res = subprocess.run(
+    [py, bin_, "--root", repo, "search", "--help"],
+    capture_output=True, text=True, cwd="/",
+)
+check("help", help_res.returncode == 0 and "GREP_ARGS" in help_res.stdout)
 ' "$TASKGO_PY" "$BIN" "$SEARCH_REPO" 2>&1); then
   echo 'ok 7 - search greps files, caps output, and refuses unsafe options'
 else
@@ -438,81 +492,137 @@ mkdir -p "$SKILLS_REPO/nobin"
 printf '#!/usr/bin/env bash\nexit 1\n' >"$SKILLS_REPO/nobin/skill"
 chmod +x "$SKILLS_REPO/nobin/skill"
 
-# Test 191: skills prints the list; handoff carries it, with the command on
-# a line of its own (propagating --offline when handoff runs offline)
-SKILLS_OUT="$(AGENT_OFFLINE=0 tg --root "$SKILLS_REPO" skills proj)"
-SKILLS_JSON="$(AGENT_OFFLINE=0 tg --root "$SKILLS_REPO" skills proj --json)"
-SKILLS_NONE="$(AGENT_OFFLINE=0 tg --root "$SKILLS_REPO" skills bare)"
-SKILLS_NOTE="$(AGENT_OFFLINE=0 tg --root "$SKILLS_REPO" handoff proj 2>/dev/null)"
-SKILLS_NOTE_OFFLINE_PRE="$(AGENT_OFFLINE=0 tg --root "$SKILLS_REPO" --offline handoff proj 2>/dev/null)"
-SKILLS_NOTE_OFFLINE_POST="$(AGENT_OFFLINE=0 tg --root "$SKILLS_REPO" handoff proj --offline 2>/dev/null)"
-SKILLS_NOTE_OFFLINE_ENV="$(AGENT_OFFLINE=1 tg --root "$SKILLS_REPO" handoff proj 2>/dev/null)"
-SKILLS_BARE_NOTE="$(AGENT_OFFLINE=0 tg --root "$SKILLS_REPO" handoff bare 2>/dev/null)"
-SKILLS_PAYLOAD="$(AGENT_OFFLINE=0 tg --root "$SKILLS_REPO" handoff proj --json 2>/dev/null)"
-if [[ "$SKILLS_OUT" == $'coding-standards\nlocal:notes\ncoding-standard' ]] &&
-  [[ "$SKILLS_JSON" == '["coding-standards", "local:notes", "coding-standard"]' ]] &&
-  [[ -z "$SKILLS_NONE" ]] &&
-  [[ "$SKILLS_NOTE" == *$'\n\nSkills: coding-standards, local:notes, coding-standard. '* ]] &&
-  [[ "$SKILLS_NOTE" == *$'\n\n  taskgo skills proj | skill --scope session add -' ]] &&
-  [[ "$SKILLS_NOTE_OFFLINE_PRE" == *$'\n\n  taskgo --offline skills proj | skill --scope session add -' ]] &&
-  [[ "$SKILLS_NOTE_OFFLINE_POST" == *$'\n\n  taskgo --offline skills proj | skill --scope session add -' ]] &&
-  [[ "$SKILLS_NOTE_OFFLINE_ENV" == *$'\n\n  taskgo --offline skills proj | skill --scope session add -' ]] &&
-  [[ "$SKILLS_NOTE" == *"supports session scope in your launcher"* ]] &&
-  [[ "$SKILLS_NOTE" == *'skill resolve <NAME>'* ]] &&
-  [[ "$SKILLS_BARE_NOTE" != *"Skills:"* ]] &&
-  "$TASKGO_PY" -c '
-import json, sys
-got = json.loads(sys.argv[1])
+# Test 191-193: skills, handoff, and doctor against a project's declared skills.
+# Run one real CLI smoke check alongside in-process checks using the shared loader.
+SKILLS_CLI_NOTE="$(AGENT_OFFLINE=0 tg --root "$SKILLS_REPO" --offline handoff proj 2>/dev/null)"
+if SKILLS_OUT=$(
+  "$TASKGO_PY" - "$BIN" "$SKILLS_REPO" "$SKILLS_CLI_NOTE" 2>&1 <<'PY'
+import contextlib
+import importlib.machinery
+import importlib.util
+import io
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+bin_, repo, cli_offline_note = sys.argv[1], Path(sys.argv[2]), sys.argv[3]
+loader = importlib.machinery.SourceFileLoader("taskgo_cli_skills", bin_)
+spec = importlib.util.spec_from_loader(loader.name, loader)
+assert spec is not None
+tg = importlib.util.module_from_spec(spec)
+sys.modules[loader.name] = tg
+loader.exec_module(tg)
+
+orig_env = os.environ.copy()
+
+
+def run_tg(*args, env_over=None):
+    os.environ.clear()
+    os.environ.update(orig_env)
+    if env_over:
+        os.environ.update(env_over)
+    tg._REPO_ROOT_CACHE = None
+    tg._EXPLICIT_ROOT = None
+    tg._ACTIVE_COMMAND = None
+    tg._OFFLINE_FLAG = False
+    out, err = io.StringIO(), io.StringIO()
+    rc = 0
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        try:
+            tg.main(["--root", str(repo), *args])
+        except SystemExit as e:
+            rc = 0 if e.code is None else (e.code if isinstance(e.code, int) else 1)
+    return rc, out.getvalue(), err.getvalue()
+
+
+# Test 191
+_, skills_out, _ = run_tg("skills", "proj", env_over={"AGENT_OFFLINE": "0"})
+_, skills_json, _ = run_tg("skills", "proj", "--json", env_over={"AGENT_OFFLINE": "0"})
+_, skills_none, _ = run_tg("skills", "bare", env_over={"AGENT_OFFLINE": "0"})
+_, skills_note, _ = run_tg("handoff", "proj", env_over={"AGENT_OFFLINE": "0"})
+_, skills_off_pre, _ = run_tg(
+    "--offline", "handoff", "proj", env_over={"AGENT_OFFLINE": "0"}
+)
+_, skills_off_post, _ = run_tg(
+    "handoff", "proj", "--offline", env_over={"AGENT_OFFLINE": "0"}
+)
+_, skills_off_env, _ = run_tg("handoff", "proj", env_over={"AGENT_OFFLINE": "1"})
+_, skills_bare_note, _ = run_tg("handoff", "bare", env_over={"AGENT_OFFLINE": "0"})
+_, skills_payload_raw, _ = run_tg(
+    "handoff", "proj", "--json", env_over={"AGENT_OFFLINE": "0"}
+)
+assert skills_out.rstrip("\n") == "coding-standards\nlocal:notes\ncoding-standard", skills_out
+assert skills_json.strip() == '["coding-standards", "local:notes", "coding-standard"]', skills_json
+assert skills_none == "", skills_none
+assert "\n\nSkills: coding-standards, local:notes, coding-standard. " in skills_note, skills_note
+assert "\n\n  taskgo skills proj | skill --scope session add -" in skills_note, skills_note
+for note in (cli_offline_note, skills_off_pre, skills_off_post, skills_off_env):
+    assert "\n\n  taskgo --offline skills proj | skill --scope session add -" in note, note
+assert "supports session scope in your launcher" in skills_note, skills_note
+assert "skill resolve <NAME>" in skills_note, skills_note
+assert "Skills:" not in skills_bare_note, skills_bare_note
+got = json.loads(skills_payload_raw)
 assert got["skills"] == ["coding-standards", "local:notes", "coding-standard"], got["skills"]
 assert got["frontmatter"]["skills"] == got["skills"], got["frontmatter"]
 assert "\n\n  taskgo skills proj | skill --scope session add -\n\n" in got["note"], got["note"]
 assert "supports session scope in your launcher" in got["note"], got["note"]
 assert "skill resolve <NAME>" in got["note"], got["note"]
-' "$SKILLS_PAYLOAD"; then
+print("OK_9")
+
+# Test 192
+path_bin = f"{repo / 'bin'}:{orig_env.get('PATH', '')}"
+path_nobin = f"{repo / 'nobin'}:{orig_env.get('PATH', '')}"
+rc_proj, doc_out, doc_err = run_tg(
+    "doctor", "proj", env_over={"AGENT_OFFLINE": "0", "PATH": path_bin}
+)
+skills_doc = doc_out + doc_err
+rc_bare, _, _ = run_tg(
+    "doctor", "bare", env_over={"AGENT_OFFLINE": "0", "PATH": path_bin}
+)
+_, nocli_out, nocli_err = run_tg(
+    "doctor", "proj", env_over={"AGENT_OFFLINE": "0", "PATH": path_nobin}
+)
+skills_nocli = nocli_out + nocli_err
+assert "[WARN]  proj/README.md: unknown skill 'coding-standard' (did you mean 'coding-standards'?)" in skills_doc, skills_doc
+assert "unknown skill 'coding-standards'" not in skills_doc, skills_doc
+assert "unknown skill 'local:notes'" not in skills_doc, skills_doc
+assert rc_proj == 1 and rc_bare == 0, (rc_proj, rc_bare)
+assert "[INFO]  skills not checked (skill CLI not found or failed)" in skills_nocli, skills_nocli
+assert "unknown skill" not in skills_nocli, skills_nocli
+print("OK_10")
+
+# Test 193
+(repo / "proj" / "README.md").write_text("---\nskills:\n  notes: true\n---\n\n# Proj\n")
+_, shape_out, shape_err = run_tg("doctor", "proj", env_over={"PATH": path_nobin})
+skills_shape = shape_out + shape_err
+_, shape_list, _ = run_tg("skills", "proj")
+(repo / "proj" / "README.md").write_text("---\nskills:\n  - ../escape\n---\n\n# Proj\n")
+_, spec_out, spec_err = run_tg("doctor", "proj", env_over={"PATH": path_nobin})
+skills_spec = spec_out + spec_err
+assert "[WARN]  proj/README.md: skills must be a list of skill names, not" in skills_shape, skills_shape
+assert shape_list == "", shape_list
+assert "skills must be a list of skill names, not '../escape'" in skills_spec, skills_spec
+print("OK_11")
+PY
+); then
   echo 'ok 9 - skills prints a project'"'"'s skills; handoff carries them and propagates --offline'
-else
-  echo 'not ok 9 - skills prints a project'"'"'s skills; handoff carries them and propagates --offline'
-  printf '# %s\n' "$SKILLS_OUT" "$SKILLS_JSON" "$SKILLS_NOTE"
-fi
-
-# Test 192: doctor checks the names against the skill CLI's catalog (forcing
-# AGENT_OFFLINE=1), and says when it cannot
-set +e
-SKILLS_DOCTOR="$(AGENT_OFFLINE=0 PATH="$SKILLS_REPO/bin:$PATH" tg --root "$SKILLS_REPO" doctor proj 2>&1)"
-SKILLS_DOCTOR_RC=0
-AGENT_OFFLINE=0 PATH="$SKILLS_REPO/bin:$PATH" tg --root "$SKILLS_REPO" doctor proj >/dev/null 2>&1 || SKILLS_DOCTOR_RC=$?
-SKILLS_DOCTOR_BARE_RC=0
-AGENT_OFFLINE=0 PATH="$SKILLS_REPO/bin:$PATH" tg --root "$SKILLS_REPO" doctor bare >/dev/null 2>&1 || SKILLS_DOCTOR_BARE_RC=$?
-SKILLS_DOCTOR_NOCLI="$(AGENT_OFFLINE=0 PATH="$SKILLS_REPO/nobin:$PATH" tg --root "$SKILLS_REPO" doctor proj 2>&1)"
-set -e
-if [[ "$SKILLS_DOCTOR" == *"[WARN]  proj/README.md: unknown skill 'coding-standard' (did you mean 'coding-standards'?)"* ]] &&
-  [[ "$SKILLS_DOCTOR" != *"unknown skill 'coding-standards'"* ]] &&
-  [[ "$SKILLS_DOCTOR" != *"unknown skill 'local:notes'"* ]] &&
-  [[ "$SKILLS_DOCTOR_RC" -eq 1 ]] && [[ "$SKILLS_DOCTOR_BARE_RC" -eq 0 ]] &&
-  [[ "$SKILLS_DOCTOR_NOCLI" == *"[INFO]  skills not checked (skill CLI not found or failed)"* ]] &&
-  [[ "$SKILLS_DOCTOR_NOCLI" != *"unknown skill"* ]]; then
   echo 'ok 10 - doctor warns about a declared skill the catalog lacks, and says when it cannot check'
-else
-  echo 'not ok 10 - doctor warns about a declared skill the catalog lacks, and says when it cannot check'
-  printf '# %s\n' "$SKILLS_DOCTOR" "$SKILLS_DOCTOR_NOCLI"
-fi
-
-# Test 193: a skills value that is not a list of names is reported, and
-# yields no skills
-set +e
-printf '%s\n' '---' 'skills:' '  notes: true' '---' '' '# Proj' >"$SKILLS_REPO/proj/README.md"
-SKILLS_SHAPE="$(PATH="$SKILLS_REPO/nobin:$PATH" tg --root "$SKILLS_REPO" doctor proj 2>&1)"
-SKILLS_SHAPE_LIST="$(tg --root "$SKILLS_REPO" skills proj)"
-printf '%s\n' '---' 'skills:' '  - ../escape' '---' '' '# Proj' >"$SKILLS_REPO/proj/README.md"
-SKILLS_SPEC="$(PATH="$SKILLS_REPO/nobin:$PATH" tg --root "$SKILLS_REPO" doctor proj 2>&1)"
-set -e
-if [[ "$SKILLS_SHAPE" == *"[WARN]  proj/README.md: skills must be a list of skill names, not"* ]] &&
-  [[ -z "$SKILLS_SHAPE_LIST" ]] &&
-  [[ "$SKILLS_SPEC" == *"skills must be a list of skill names, not '../escape'"* ]]; then
   echo 'ok 11 - doctor reports a skills value that is not a list of skill names'
 else
+  if [[ "$SKILLS_OUT" == *OK_9* ]]; then
+    echo 'ok 9 - skills prints a project'"'"'s skills; handoff carries them and propagates --offline'
+  else
+    echo 'not ok 9 - skills prints a project'"'"'s skills; handoff carries them and propagates --offline'
+  fi
+  if [[ "$SKILLS_OUT" == *OK_10* ]]; then
+    echo 'ok 10 - doctor warns about a declared skill the catalog lacks, and says when it cannot check'
+  else
+    echo 'not ok 10 - doctor warns about a declared skill the catalog lacks, and says when it cannot check'
+  fi
   echo 'not ok 11 - doctor reports a skills value that is not a list of skill names'
-  printf '# %s\n' "$SKILLS_SHAPE" "$SKILLS_SPEC"
+  printf '# %s\n' "$SKILLS_OUT"
 fi
 
 # A server stops on SIGINT or SIGTERM with status 0 within a few seconds, over
@@ -520,10 +630,10 @@ fi
 MCP_SIGNALS=$(
   "$TASKGO_PY" -c '
 import json, signal, socket, subprocess, sys, time
-bin_, repo, branch, log = sys.argv[1:]
+py, mcp_bin, repo, branch, log = sys.argv[1:]
 init = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}}}
 s = socket.socket(); s.bind(("127.0.0.1", 0)); port = s.getsockname()[1]; s.close()
-common = [bin_, "--root", repo, "mcp", "--no-fetch", "--branch", branch, "--log", log]
+common = [py, mcp_bin, "--root", repo, "mcp", "--no-fetch", "--branch", branch, "--log", log]
 for transport, extra in (("stdio", ["--stdio"]), ("http", ["--auth", "none", "--port", str(port)])):
     for sig in (signal.SIGINT, signal.SIGTERM):
         proc = subprocess.Popen(common + extra, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
@@ -533,12 +643,12 @@ for transport, extra in (("stdio", ["--stdio"]), ("http", ["--auth", "none", "--
                 proc.stdin.flush()
                 assert b"serverInfo" in proc.stdout.readline(), transport
             else:
-                for _ in range(150):
+                for _ in range(1500):
                     try:
                         socket.create_connection(("127.0.0.1", port), 1).close()
                         break
                     except OSError:
-                        time.sleep(0.2)
+                        time.sleep(0.02)
             proc.send_signal(sig)
             print(transport, sig.name, proc.wait(timeout=10))
         except Exception as e:
@@ -547,7 +657,7 @@ for transport, extra in (("stdio", ["--stdio"]), ("http", ["--auth", "none", "--
             if proc.poll() is None:
                 proc.kill()
                 proc.wait()
-' "$BIN" "$TREE_REPO" "$(git -C "$TREE_REPO" branch --show-current)" "$TEST_ROOT/mcp-signals.jsonl" 2>&1
+' "$MCP_PY" "$MCP_BIN" "$TREE_REPO" "$(git -C "$TREE_REPO" branch --show-current)" "$TEST_ROOT/mcp-signals.jsonl" 2>&1
 ) || true
 if [[ $MCP_SIGNALS == $'stdio SIGINT 0\nstdio SIGTERM 0\nhttp SIGINT 0\nhttp SIGTERM 0' ]]; then
   echo 'ok 12 - mcp exits 0 on SIGINT and SIGTERM over both transports'

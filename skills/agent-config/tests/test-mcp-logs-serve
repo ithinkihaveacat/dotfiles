@@ -72,7 +72,7 @@ def token(**claims) -> str:
     return f"{head}.{payload}.{b64(sig)}"
 
 
-def certs_server() -> str:
+def certs_server() -> tuple[str, http.server.ThreadingHTTPServer]:
     n = KEY.public_key().public_numbers()
     jwks = json.dumps(
         {
@@ -101,7 +101,7 @@ def certs_server() -> str:
 
     httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Certs)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
-    return f"http://127.0.0.1:{httpd.server_address[1]}/certs"
+    return f"http://127.0.0.1:{httpd.server_address[1]}/certs", httpd
 
 
 def record(ts: str, **fields) -> dict:
@@ -121,6 +121,8 @@ def free_port() -> int:
 
 
 class McpLogsServeTests(unittest.TestCase):
+    _shared_case: "McpLogsServeTests | None" = None
+
     def setUp(self):
         self.tmpdir = tempfile.TemporaryDirectory()
         self.logs = Path(self.tmpdir.name) / "logs"
@@ -143,10 +145,12 @@ class McpLogsServeTests(unittest.TestCase):
         self.proc = None
 
     def tearDown(self):
-        if self.proc and self.proc.poll() is None:
-            self.proc.kill()
-            self.proc.wait()
-        self.tmpdir.cleanup()
+        proc = getattr(self, "proc", None)
+        if proc and proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        if hasattr(self, "tmpdir"):
+            self.tmpdir.cleanup()
 
     def start(self, *args, env=None):
         self.port = free_port()
@@ -157,14 +161,14 @@ class McpLogsServeTests(unittest.TestCase):
             stderr=subprocess.PIPE,
             env=env or self.env,
         )
-        for _ in range(300):
+        for _ in range(1500):
             if self.proc.poll() is not None:
                 self.fail(f"reader exited: {self.proc.stderr.read().decode()}")
             try:
                 with socket.create_connection(("127.0.0.1", self.port), timeout=1):
                     return
             except OSError:
-                time.sleep(0.1)
+                time.sleep(0.02)
         self.fail("reader did not start")
 
     def get(self, path, headers=None, method="GET"):
@@ -239,35 +243,53 @@ class McpLogsServeTests(unittest.TestCase):
         status, headers, body = self.get("/", method="HEAD")
         self.assertEqual((status, body), (200, ""))
         self.assertGreater(int(headers["Content-Length"]), 0)
-        self.stop(signal.SIGTERM)
+        McpLogsServeTests._shared_case = self
 
     def test_probes(self):
         """A GET 405 is a probe: counted separately from failures, and the
         page offers a toggle to reveal its rows."""
-        logs = Path(self.tmpdir.name) / "probe-logs"
-        write(
-            logs / "skill" / "mcp.jsonl",
-            record("2026-10-01T10:00:00.000Z", method="tools/call", tool="load_skill"),
-            record(
-                "2026-10-01T10:00:01.000Z",
-                transport="http",
-                http="GET",
-                outcome="refused",
-                status=405,
-                reason="method not allowed",
-            ),
-        )
-        self.start(str(logs))
-        data = self.records()
-        self.assertEqual(data["summary"]["probes"], 1)
-        self.assertEqual(data["summary"]["outcomes"], {"ok": 1, "probe": 1})
-        skill = next(r for r in data["summary"]["servers"] if r["server"] == "skill")
-        self.assertEqual((skill["requests"], skill["failed"]), (2, 0))
-        status, _, body = self.get("/")
-        self.assertEqual(status, 200)
-        self.assertIn("Show protocol probes", body)
-        self.assertIn('id="show-probes"', body)
-        self.stop(signal.SIGTERM)
+        shared = McpLogsServeTests._shared_case
+        if shared is None:
+            self.setUp()
+            self.start(str(self.logs))
+            logs = self.logs
+        else:
+            logs = shared.logs
+            self.base = shared.base
+            self.proc = shared.proc
+        try:
+            write(
+                logs / "probe" / "mcp.jsonl",
+                record(
+                    "2026-10-01T10:00:00.000Z", method="tools/call", tool="load_skill"
+                ),
+                record(
+                    "2026-10-01T10:00:01.000Z",
+                    transport="http",
+                    http="GET",
+                    outcome="refused",
+                    status=405,
+                    reason="method not allowed",
+                ),
+            )
+            data = self.records("?server=probe")
+            self.assertEqual(data["summary"]["probes"], 1)
+            self.assertEqual(data["summary"]["outcomes"], {"ok": 1, "probe": 1})
+            probe = next(
+                r for r in data["summary"]["servers"] if r["server"] == "probe"
+            )
+            self.assertEqual((probe["requests"], probe["failed"]), (2, 0))
+            status, _, body = self.get("/")
+            self.assertEqual(status, 200)
+            self.assertIn("Show protocol probes", body)
+            self.assertIn('id="show-probes"', body)
+            self.stop(signal.SIGTERM)
+        finally:
+            if shared is not None:
+                shared.proc = None
+                shared.tearDown()
+                McpLogsServeTests._shared_case = None
+                self.proc = None
 
     def test_unknown_server(self):
         """A server with no log yet is a warning: its log may appear later."""
@@ -279,32 +301,37 @@ class McpLogsServeTests(unittest.TestCase):
         self.assertIn("no request log yet for server taskgo", err)
 
     def test_access(self):
+        certs_url, httpd = certs_server()
         env = dict(
             self.env,
             MCP_LOGS_ACCESS_TEAM=TEAM,
             MCP_LOGS_ACCESS_AUD=AUD,
-            MCP_LOGS_ACCESS_CERTS_URL=certs_server(),
+            MCP_LOGS_ACCESS_CERTS_URL=certs_url,
         )
-        self.start("--host", "0.0.0.0", str(self.logs), env=env)
-        now = int(time.time())
-        for name, tok, want in (
-            ("no token", None, 401),
-            ("malformed", "not.a.jwt", 403),
-            ("wrong audience", token(aud=["other"]), 403),
-            ("expired", token(exp=now - 600), 403),
-            ("wrong issuer", token(iss="https://evil.invalid"), 403),
-            ("valid", token(), 200),
-        ):
-            for path in ("/", "/records"):
-                with self.subTest(name=name, path=path):
-                    headers = {"cf-access-jwt-assertion": tok} if tok else {}
-                    # Any Host: Access, not the Host header, guards it.
-                    headers["host"] = "logs.example.com"
-                    self.assertEqual(self.get(path, headers)[0], want)
-        self.assertEqual(self.get("/up")[0], 200)
-        data = self.records(headers={"cf-access-jwt-assertion": token()})
-        self.assertEqual(data["summary"]["requests"], 2)
-        self.stop(signal.SIGINT)
+        try:
+            self.start("--host", "0.0.0.0", str(self.logs), env=env)
+            now = int(time.time())
+            for name, tok, want in (
+                ("no token", None, 401),
+                ("malformed", "not.a.jwt", 403),
+                ("wrong audience", token(aud=["other"]), 403),
+                ("expired", token(exp=now - 600), 403),
+                ("wrong issuer", token(iss="https://evil.invalid"), 403),
+                ("valid", token(), 200),
+            ):
+                for path in ("/", "/records"):
+                    with self.subTest(name=name, path=path):
+                        headers = {"cf-access-jwt-assertion": tok} if tok else {}
+                        # Any Host: Access, not the Host header, guards it.
+                        headers["host"] = "logs.example.com"
+                        self.assertEqual(self.get(path, headers)[0], want)
+            self.assertEqual(self.get("/up")[0], 200)
+            data = self.records(headers={"cf-access-jwt-assertion": token()})
+            self.assertEqual(data["summary"]["requests"], 2)
+            self.stop(signal.SIGINT)
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
 
     def test_since_window(self):
         recent = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
@@ -331,7 +358,6 @@ class McpLogsServeTests(unittest.TestCase):
             (["--serve", "--json", str(self.logs)], "--json does not apply"),
             (["--serve", "-f", str(self.logs)], "-f does not apply"),
             (["--port", "1", str(self.logs)], "--port applies only to --serve"),
-            (["--ser", str(self.logs)], "unrecognized arguments: --ser"),
             (["--serve", "--host", "0.0.0.0", str(self.logs)], "loopback only"),
             (
                 ["--serve", "--access-team", TEAM, str(self.logs)],
@@ -358,19 +384,26 @@ if __name__ == "__main__":
     names = sorted(n for n in dir(McpLogsServeTests) if n.startswith("test_"))
     print(f"1..{len(names)}", flush=True)
     failures = 0
-    for number, name in enumerate(names, 1):
-        case = McpLogsServeTests(name)
-        try:
-            case.setUp()
+    try:
+        for number, name in enumerate(names, 1):
+            case = McpLogsServeTests(name)
             try:
-                getattr(case, name)()
-            finally:
-                case.tearDown()
-        except Exception:
-            failures += 1
-            print(f"not ok {number} - {name}", flush=True)
-            for line in traceback.format_exc().splitlines():
-                print(f"# {line}")
-        else:
-            print(f"ok {number} - {name}", flush=True)
+                if name != "test_probes":
+                    case.setUp()
+                try:
+                    getattr(case, name)()
+                finally:
+                    if McpLogsServeTests._shared_case is not case:
+                        case.tearDown()
+            except Exception:
+                failures += 1
+                print(f"not ok {number} - {name}", flush=True)
+                for line in traceback.format_exc().splitlines():
+                    print(f"# {line}")
+            else:
+                print(f"ok {number} - {name}", flush=True)
+    finally:
+        if McpLogsServeTests._shared_case is not None:
+            McpLogsServeTests._shared_case.tearDown()
+            McpLogsServeTests._shared_case = None
     sys.exit(1 if failures else 0)

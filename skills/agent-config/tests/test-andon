@@ -165,11 +165,8 @@ else
   listed=$("$BIN" list 2>/dev/null | wc -l | tr -d ' ')
   "$BIN" pull --color yellow --kind other --summary s --details d >/dev/null 2>"$TMP/err" || status=$?
   chmod -R u+w "$ANDON_STATE_DIR"
-  # Lines that begin "warning: " are uv's (a deprecated UV_* variable, say), not
-  # andon's, which prefixes its own with its name.
-  grep -v '^warning: ' "$TMP/err" >"$TMP/err.own" || true
   detail="listed $listed, status $status: $(cat "$TMP/err")"
-  if [[ $listed -gt 0 && $status == 1 && "$(cat "$TMP/err.own")" == *"set ANDON_STATE_DIR"* && "$(wc -l <"$TMP/err.own" | tr -d ' ')" == 1 ]]; then
+  if [[ $listed -gt 0 && $status == 1 && "$(cat "$TMP/err")" == *"set ANDON_STATE_DIR"* && "$(wc -l <"$TMP/err" | tr -d ' ')" == 1 ]]; then
     ok "read-only store lists, and pull fails with a one-line hint"
   else
     not_ok "read-only store lists, and pull fails with a one-line hint" "$detail"
@@ -187,34 +184,38 @@ else
 fi
 
 # 15: SIGTERM while waiting for the lock exits 130 with a bare newline
-if ! command -v python3 >/dev/null 2>&1; then
-  ok "SIGTERM exits 130 # SKIP python3 not installed"
-else
-  touch "$ANDON_STATE_DIR/events.jsonl.lock"
-  python3 -c 'import fcntl, sys, time
+touch "$ANDON_STATE_DIR/events.jsonl.lock"
+python3 -c 'import fcntl, sys, time
 f = open(sys.argv[1], "a")
 fcntl.flock(f, fcntl.LOCK_EX)
-time.sleep(6)' "$ANDON_STATE_DIR/events.jsonl.lock" &
-  holder=$!
-  sleep 0.5
-  "$BIN" pull --color yellow --kind other --summary s --details d >/dev/null 2>"$TMP/err" &
-  puller=$!
-  sleep 2
-  kill -TERM "$puller"
-  status=0
-  wait "$puller" || status=$?
-  kill "$holder" 2>/dev/null || true
-  wait "$holder" 2>/dev/null || true
-  leftovers=$(find "$ANDON_STATE_DIR" -name '.events.*.tmp' | wc -l | tr -d ' ')
-  # uv's warnings precede andon's output as whole lines; leave them out and
-  # compare what andon wrote byte for byte.
-  grep -v '^warning: ' "$TMP/err" >"$TMP/err.own" || true
-  detail="status $status, stderr $(od -c "$TMP/err.own" | head -2), leftovers $leftovers"
-  if [[ $status == 130 && "$(cat "$TMP/err.own")" == "" && $(wc -c <"$TMP/err.own") -eq 1 && $leftovers == 0 ]]; then
-    ok "SIGTERM while waiting for the lock exits 130 cleanly"
-  else
-    not_ok "SIGTERM while waiting for the lock exits 130 cleanly" "$detail"
-  fi
+open(sys.argv[2], "w").close()
+time.sleep(6)' "$ANDON_STATE_DIR/events.jsonl.lock" "$TMP/lock.ready" &
+holder=$!
+for _ in $(seq 1 250); do
+  [[ -e "$TMP/lock.ready" ]] && break
+  sleep 0.02
+done
+"$BIN" pull --color yellow --kind other --summary s --details d >/dev/null 2>"$TMP/err" &
+puller=$!
+if [[ -r "/proc/$puller/wchan" ]]; then
+  for _ in $(seq 1 250); do
+    grep -qE 'flock|locks_lock' "/proc/$puller/wchan" 2>/dev/null && break
+    sleep 0.01
+  done
+else
+  sleep 0.8
+fi
+kill -TERM "$puller"
+status=0
+wait "$puller" || status=$?
+kill "$holder" 2>/dev/null || true
+wait "$holder" 2>/dev/null || true
+leftovers=$(find "$ANDON_STATE_DIR" -name '.events.*.tmp' | wc -l | tr -d ' ')
+detail="status $status, stderr $(od -c "$TMP/err" | head -2), leftovers $leftovers"
+if [[ $status == 130 && "$(cat "$TMP/err")" == "" && $(wc -c <"$TMP/err") -eq 1 && $leftovers == 0 ]]; then
+  ok "SIGTERM while waiting for the lock exits 130 cleanly"
+else
+  not_ok "SIGTERM while waiting for the lock exits 130 cleanly" "$detail"
 fi
 
 # 16: legacy alerts lacking level load and list with default level

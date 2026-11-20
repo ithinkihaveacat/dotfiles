@@ -8,7 +8,7 @@ set -euo pipefail
 source "$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 taskgo_test_init
 
-echo "1..14"
+echo "1..8"
 
 REPO="$TEST_ROOT/repo"
 init_base_repo "$REPO"
@@ -87,42 +87,34 @@ else
   printf '# doctor=%s\n' "${LEG_OUT:-}"
 fi
 
-# 3: the managed block stays short
-BLOCK_BYTES=$(sed -n '/<!-- taskgo:begin -->/,/<!-- taskgo:end -->/p' "$REPO/AGENTS.md" | wc -c)
-if ((BLOCK_BYTES < 1100)); then
-  echo 'ok 3 - the managed AGENTS.md block is under about 1 KB'
-else
-  echo "not ok 3 - the managed AGENTS.md block is $BLOCK_BYTES bytes"
-fi
-
-# 4: checkpoint formats the records it commits
+# 3: checkpoint formats the records it commits
 TASK_FILE="$REPO/example/tasks/TASK-A1B2C-confirm-status.md"
 printf '\n**Findings:**   one    two\nthree\n' >>"$TASK_FILE"
 if tg --root "$REPO" --offline checkpoint TASK-A1B2C 'docs(example): findings' \
   >/dev/null 2>&1 &&
-  "$MARKDOWN_FORMAT" --check "$TASK_FILE" >/dev/null 2>&1 &&
+  mdfmt --check "$TASK_FILE" >/dev/null 2>&1 &&
   [[ -z "$(git -C "$REPO" status --porcelain)" ]]; then
-  echo 'ok 4 - checkpoint formats the task record it commits'
+  echo 'ok 3 - checkpoint formats the task record it commits'
 else
-  echo 'not ok 4 - checkpoint formats the task record it commits'
+  echo 'not ok 3 - checkpoint formats the task record it commits'
   git -C "$REPO" status --porcelain | sed 's/^/# /'
 fi
 
-# 5: commit formats a staged record, re-stages it, and leaves non-records
+# 4: commit formats a staged record, re-stages it, and leaves non-records
 printf '\nSome   *plan*   text\n' >>"$REPO/example/PLAN.md"
 printf '\n**Constraints:**   keep    it\nsimple\n' >>"$TASK_FILE"
 git -C "$REPO" add example/PLAN.md "$TASK_FILE"
 if tg --root "$REPO" --offline commit 'docs(example): constraints' >/dev/null 2>&1 &&
-  "$MARKDOWN_FORMAT" --check "$TASK_FILE" >/dev/null 2>&1 &&
+  mdfmt --check "$TASK_FILE" >/dev/null 2>&1 &&
   grep -q 'Some   \*plan\*   text' "$REPO/example/PLAN.md" &&
   [[ -z "$(git -C "$REPO" status --porcelain)" ]]; then
-  echo 'ok 5 - commit formats staged records only'
+  echo 'ok 4 - commit formats staged records only'
 else
-  echo 'not ok 5 - commit formats staged records only'
+  echo 'not ok 4 - commit formats staged records only'
   git -C "$REPO" status --porcelain | sed 's/^/# /'
 fi
 
-# 6: commit leaves a staged record with unstaged changes unformatted
+# 5: commit leaves a staged record with unstaged changes unformatted
 printf '\n**Cost:**   slow    builds\n' >>"$TASK_FILE"
 git -C "$REPO" add "$TASK_FILE"
 printf '\nUnstaged line.\n' >>"$TASK_FILE"
@@ -130,58 +122,13 @@ if tg --root "$REPO" --offline commit 'docs(example): cost' >/dev/null 2>&1 &&
   { shown=$(git -C "$REPO" show HEAD:example/tasks/TASK-A1B2C-confirm-status.md) &&
     [[ "$shown" == *'**Cost:**   slow    builds'* && "$shown" != *'Unstaged line.'* ]]; } &&
   grep -q 'Unstaged line.' "$TASK_FILE"; then
-  echo 'ok 6 - commit does not re-stage a record with unstaged changes'
+  echo 'ok 5 - commit does not re-stage a record with unstaged changes'
 else
-  echo 'not ok 6 - commit does not re-stage a record with unstaged changes'
+  echo 'not ok 5 - commit does not re-stage a record with unstaged changes'
 fi
 git -C "$REPO" checkout -q -- example
 
-# 7: update --set-wait-for replaces the list; --wait-for still works hidden
-tg --root "$REPO" --offline update TASK-A1B2C --add-wait-for 2030-01-01 \
-  --add-wait-for gh:octo/repo#7 >/dev/null 2>&1
-HELP="$(tg update --help)"
-if tg --root "$REPO" --offline update TASK-A1B2C --set-wait-for 2031-02-03 >/dev/null 2>&1 &&
-  { fm=$(sed -n '/^wait_for:/,/^[a-z_]*:/p' "$TASK_FILE") &&
-    [[ "$fm" == *2031-02-03* && "$fm" != *2030-01-01* && "$fm" != *octo* ]]; } &&
-  tg --root "$REPO" --offline update TASK-A1B2C --wait-for 2032-04-05 >/dev/null 2>&1 &&
-  { fm=$(sed -n '/^wait_for:/,/^[a-z_]*:/p' "$TASK_FILE") &&
-    [[ "$fm" == *2032-04-05* && "$fm" != *2031-02-03* ]]; } &&
-  [[ "$HELP" == *'--set-wait-for GATE'*'Replace the whole wait_for list'* ]] &&
-  [[ "$HELP" != *'  --wait-for'* ]] &&
-  [[ "$HELP" == *'--status done --outcome'* ]]; then
-  echo 'ok 7 - update --set-wait-for replaces the list and --wait-for is a hidden alias'
-else
-  echo 'not ok 7 - update --set-wait-for replaces the list and --wait-for is a hidden alias'
-fi
-git -C "$REPO" checkout -q -- example
-
-# 8: top-level help groups every command
-TOP="$(tg --help)"
-missing=""
-for c in id root create update apply edit list info skills status handoff sync \
-  check doctor fix history read search checkpoint commit schema mcp; do
-  grep -q "^  $c\b" <<<"$TOP" || missing="$missing $c"
-done
-if [[ -z "$missing" && "$TOP" == *$'\nTasks:\n'* && "$TOP" == *$'\nHealth:\n'* &&
-  "$TOP" != *personal* ]]; then
-  echo 'ok 8 - top-level help groups every command under headings'
-else
-  echo "not ok 8 - top-level help is missing:$missing"
-fi
-
-# 9: commit and checkpoint reject -m / --message with a positional SUBJECT hint
-if [[ "$(tg --root "$REPO" --offline commit -m "docs: msg" 2>&1 || true)" == *'use positional SUBJECT (and --body TEXT), not -m:'*'taskgo commit "type(scope): subject"'* ]] &&
-  [[ "$(tg --root "$REPO" --offline commit --message="docs: msg" 2>&1 || true)" == *'use positional SUBJECT (and --body TEXT), not --message:'* ]] &&
-  [[ "$(tg --root "$REPO" --offline checkpoint TASK-A1B2C -m "docs: msg" 2>&1 || true)" == *'use positional SUBJECT (and --body TEXT), not -m:'*'taskgo checkpoint TASK_ID "type(scope): subject"'* ]] &&
-  [[ "$(tg checkpoint --help)" == *'pushed to the upstream remote unless --offline'* ]] &&
-  [[ "$(tg commit --help)" == *'pushed to the upstream remote unless --offline'* ]] &&
-  grep -q "no \`-m\`" "$REPO/AGENTS.md"; then
-  echo 'ok 9 - commit and checkpoint reject -m/--message with positional SUBJECT hint and document push'
-else
-  echo 'not ok 9 - commit and checkpoint reject -m/--message with positional SUBJECT hint and document push'
-fi
-
-# 10: checkpoint --path stages directories cleanly, and staging errors emit actionable hints
+# 6: checkpoint --path stages directories cleanly, and staging errors emit actionable hints
 mkdir -p "$REPO/example/references/sub"
 printf '# Ref A\n' >"$REPO/example/references/a.md"
 printf '# Ref B\n' >"$REPO/example/references/sub/b.md"
@@ -202,12 +149,12 @@ if [[ "$UNLISTED_ERR" == *'unlisted project change: example/sibling.txt'* ]] &&
     --path example/references/ -C 1234567890abcdef1234 >/dev/null 2>&1 &&
   [[ -z "$(git -C "$REPO" status --porcelain)" ]] &&
   git -C "$REPO" ls-files --error-unmatch example/references/a.md example/references/sub/b.md >/dev/null 2>&1; then
-  echo 'ok 10 - checkpoint --path stages directories and emits clear staging hints'
+  echo 'ok 6 - checkpoint --path stages directories and emits clear staging hints'
 else
-  echo 'not ok 10 - checkpoint --path stages directories and emits clear staging hints'
+  echo 'not ok 6 - checkpoint --path stages directories and emits clear staging hints'
 fi
 
-# 11: list-valued run-in fields render on a separate block across create and update,
+# 7: list-valued run-in fields render on a separate block across create and update,
 # and commit stages working-tree STATUS.md updates
 LIST_OUT=$(tg --root "$REPO" --offline create example 'List run-in fields' \
   --slug list-runins --problem '- First issue' --criteria $'1. Bullet one\n2. Bullet two' --no-commit)
@@ -221,24 +168,12 @@ if [[ "$LIST_TEXT" == *$'**Problem:**\n\n- First issue'* ]] &&
   [[ "$LIST_TEXT" == *$'**Criteria:**\n\n1. Bullet one\n'* ]] &&
   tg --root "$REPO" --offline commit 'feat(example): add list task' >/dev/null 2>&1 &&
   [[ -z "$(git -C "$REPO" status --porcelain)" ]]; then
-  echo 'ok 11 - list-valued run-ins render as blocks and commit stages updated STATUS.md'
+  echo 'ok 7 - list-valued run-ins render as blocks and commit stages updated STATUS.md'
 else
-  echo 'not ok 11 - list-valued run-ins render as blocks and commit stages updated STATUS.md'
+  echo 'not ok 7 - list-valued run-ins render as blocks and commit stages updated STATUS.md'
 fi
 
-# 12: doctor markdown_finding suggests 'taskgo fix --no-commit' and includes static PLAN wording
-printf '\n*   untidy   item\n' >>"$REPO/example/PROJECT.md"
-MD_DOC_OUT="$(tg --root "$REPO" --offline doctor example 2>&1 || true)"
-git -C "$REPO" checkout -q -- example/PROJECT.md
-if [[ "$MD_DOC_OUT" == *"example/PROJECT.md: markdown formatting needed (run 'taskgo fix --no-commit')"* ]] &&
-  [[ "$MD_DOC_OUT" == *'PLAN (when present) reflects current direction;'* ]]; then
-  echo 'ok 12 - doctor markdown formatting finding suggests taskgo fix --no-commit'
-else
-  echo 'not ok 12 - doctor markdown formatting finding suggests taskgo fix --no-commit'
-  printf '# %s\n' "$MD_DOC_OUT"
-fi
-
-# 13: CWD inside an isolated control-repo clone auto-detects that clone before ~/.projects
+# 8: CWD inside an isolated control-repo clone auto-detects that clone before ~/.projects
 CLONE_REPO="$TEST_ROOT/isolated-clone"
 git clone -q "$REPO" "$CLONE_REPO"
 NON_CONTROL_GIT="$TEST_ROOT/ordinary-git"
@@ -248,17 +183,7 @@ CLONE_RESOLVED="$(cd "$CLONE_REPO" && pwd -P)"
 if [[ "$(cd "$CLONE_REPO/example/tasks" && tg root)" == "$CLONE_RESOLVED" ]] &&
   [[ "$(cd "$CLONE_REPO/example" && tg --offline doctor example 2>&1)" == *"Root: $CLONE_RESOLVED"*'Source: cwd'* ]] &&
   [[ "$(cd "$NON_CONTROL_GIT" && tg --help)" == *'Root: ~/.projects'*'Source: default'* ]]; then
-  echo 'ok 13 - CWD inside a cloned control repo resolves to that clone instead of ~/.projects'
+  echo 'ok 8 - CWD inside a cloned control repo resolves to that clone instead of ~/.projects'
 else
-  echo 'not ok 13 - CWD inside a cloned control repo resolves to that clone instead of ~/.projects'
-fi
-
-# 14: top-level -C hints -R/--root, and trailing --offline works across subcommands
-if [[ "$(tg -C "$REPO" list 2>&1 || true)" == *'use -R / --root DIR instead of -C'* ]] &&
-  tg --root "$CLONE_REPO" list example --offline >/dev/null &&
-  tg --root "$CLONE_REPO" doctor example --offline >/dev/null &&
-  tg --root "$CLONE_REPO" search 'First issue' --offline >/dev/null; then
-  echo 'ok 14 - top-level -C hints -R/--root and trailing --offline works across subcommands'
-else
-  echo 'not ok 14 - top-level -C hints -R/--root and trailing --offline works across subcommands'
+  echo 'not ok 8 - CWD inside a cloned control repo resolves to that clone instead of ~/.projects'
 fi

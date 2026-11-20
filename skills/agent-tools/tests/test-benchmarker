@@ -237,7 +237,7 @@ OUTDIR_QUOTE="$WORK/bench_quote"
 MOCK_ECHO="$WORK/mock_echo.sh"
 cat <<'EOF' >"$MOCK_ECHO"
 #!/usr/bin/env bash
-printf "%s" "$1" > captured.txt
+printf "%s" "$1"
 EOF
 chmod +x "$MOCK_ECHO"
 
@@ -245,11 +245,14 @@ COMPLEX_PROMPT="Don't break; echo 'nested' && \"double\""
 if "$BIN" --cmd "$MOCK_ECHO {prompt}" \
   --dim prompt="$COMPLEX_PROMPT" \
   --output-dir "$OUTDIR_QUOTE" >"$OUTPUT" 2>&1; then
-  if grep -q "Don't break; echo 'nested'" "$OUTDIR_QUOTE"/runs/*/metadata.json &&
+  CAPTURED=$(cat "$OUTDIR_QUOTE"/runs/*/stdout.txt 2>/dev/null || true)
+  if [[ "$CAPTURED" == "$COMPLEX_PROMPT" ]] &&
+    grep -q "Don't break; echo 'nested'" "$OUTDIR_QUOTE"/runs/*/metadata.json &&
     grep -q "status.*success" "$OUTDIR_QUOTE"/runs/*/metadata.json; then
     echo "ok 10 - Injected template placeholders are safely shell-escaped against quote breakout"
   else
     echo "not ok 10 - Quote escaping failed or command errored"
+    echo "# captured stdout: $CAPTURED"
     sed 's/^/# /' "$OUTPUT"
   fi
 else
@@ -392,24 +395,37 @@ fi
 # Test 15: Clean cancellation without unhandled CancelledError traceback
 OUTDIR_SIG="$WORK/bench_sig"
 MOCK_LONG="$WORK/mock_long.sh"
-cat <<'EOF' >"$MOCK_LONG"
+SIG_READY="$WORK/bench_sig.ready"
+cat <<EOF >"$MOCK_LONG"
 #!/usr/bin/env bash
+: >"$SIG_READY"
 sleep 30
 EOF
 chmod +x "$MOCK_LONG"
 
-# Launch in background, send SIGTERM, verify clean exit without traceback
+# Launch in background, wait until child task starts, send SIGTERM, verify clean exit without traceback
 "$BIN" --cmd "$MOCK_LONG" --output-dir "$OUTDIR_SIG" >"$OUTPUT" 2>&1 &
 BG_PID=$!
-sleep 0.5
-kill -TERM "$BG_PID" 2>/dev/null || true
-wait "$BG_PID" 2>/dev/null || true
-
-if grep -q "Traceback (most recent call last)" "$OUTPUT" || grep -q "asyncio.exceptions.CancelledError" "$OUTPUT"; then
-  echo "not ok 15 - SIGTERM caused unhandled Python traceback"
+for _ in $(seq 1 250); do
+  if [[ -f "$SIG_READY" ]] || ! kill -0 "$BG_PID" 2>/dev/null; then
+    break
+  fi
+  sleep 0.02
+done
+if [[ ! -f "$SIG_READY" ]]; then
+  kill -TERM "$BG_PID" 2>/dev/null || true
+  wait "$BG_PID" 2>/dev/null || true
+  echo "not ok 15 - SIGTERM target never started child task"
   sed 's/^/# /' "$OUTPUT"
 else
-  echo "ok 15 - SIGTERM cancels worker tasks cleanly without dumping traceback"
+  kill -TERM "$BG_PID" 2>/dev/null || true
+  wait "$BG_PID" 2>/dev/null || true
+  if grep -q "Traceback (most recent call last)" "$OUTPUT" || grep -q "asyncio.exceptions.CancelledError" "$OUTPUT"; then
+    echo "not ok 15 - SIGTERM caused unhandled Python traceback"
+    sed 's/^/# /' "$OUTPUT"
+  else
+    echo "ok 15 - SIGTERM cancels worker tasks cleanly without dumping traceback"
+  fi
 fi
 
 # Test 16: Teardown waits for a live orphan, kills it, and does not wait on its zombie

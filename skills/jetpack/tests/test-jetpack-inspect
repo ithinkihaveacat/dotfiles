@@ -1,105 +1,132 @@
 #!/usr/bin/env bash
 #
-# Tests for bin/jetpack inspect subcommand
+# Hermetic tests for bin/jetpack inspect subcommand (offline seeded cache).
 
 set -u
 
-# Setup paths
 SCRIPT_DIR=$(dirname "$0")
 ROOT_DIR="$SCRIPT_DIR/.."
 BIN_JETPACK="$ROOT_DIR/scripts/jetpack"
 
-# Temporary directory for downloads
 TEST_TMP=$(mktemp -d)
 trap 'rm -rf "$TEST_TMP"' EXIT
+export XDG_CACHE_HOME="$TEST_TMP/cache"
+export JETPACK_CACHE_DIR="$TEST_TMP/cache/jetpack"
+export TMPDIR="$TEST_TMP"
+export AGENT_OFFLINE=1
 
-# Total number of tests
-TOTAL_TESTS=7
+TOTAL_TESTS=5
 TEST_NUM=0
-
 echo "1..$TOTAL_TESTS"
 
-run_test() {
-  local args="$1"
-  local description="$2"
+mkdir -p "$JETPACK_CACHE_DIR"
+cat >"$JETPACK_CACHE_DIR/androidx-index.json" <<'EOF'
+{
+  "Index": [
+    {
+      "groupId": "androidx.lifecycle",
+      "artifactId": "lifecycle-viewmodel",
+      "version": "2.8.7",
+      "fqcns": []
+    },
+    {
+      "groupId": "androidx.lifecycle",
+      "artifactId": "lifecycle-viewmodel-android",
+      "version": "2.8.7",
+      "fqcns": [
+        "androidx.lifecycle.ViewModel"
+      ]
+    },
+    {
+      "groupId": "androidx.wear.tiles",
+      "artifactId": "tiles",
+      "version": "1.4.0",
+      "fqcns": [
+        "androidx.wear.tiles.TileService"
+      ]
+    },
+    {
+      "groupId": "androidx.wear.compose",
+      "artifactId": "compose-material3",
+      "version": "1.0.0",
+      "fqcns": [
+        "androidx.wear.compose.material3.Button",
+        "androidx.wear.compose.material3.futurepkg.FutureFeature"
+      ]
+    }
+  ]
+}
+EOF
 
+seed_artifact() {
+  local group="$1" artifact="$2" version="$3" rel_src="$4" src_body="$5"
+  local gpath="${group//./\/}"
+  local base="$JETPACK_CACHE_DIR/http/dl.google.com/android/maven2/$gpath/$artifact"
+  mkdir -p "$base/$version" "$TEST_TMP/src/$(dirname "$rel_src")"
+  cat >"$base/maven-metadata.xml" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<metadata>
+  <groupId>$group</groupId>
+  <artifactId>$artifact</artifactId>
+  <versioning>
+    <latest>$version</latest>
+    <release>$version</release>
+    <versions><version>$version</version></versions>
+  </versioning>
+</metadata>
+EOF
+  cat >"$base/$version/$artifact-$version.pom" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<project>
+  <groupId>$group</groupId>
+  <artifactId>$artifact</artifactId>
+  <version>$version</version>
+</project>
+EOF
+  printf '%s\n' "$src_body" >"$TEST_TMP/src/$rel_src"
+  python3 - "$TEST_TMP/src" "$base/$version/$artifact-$version-sources.jar" "$rel_src" <<'PY'
+import os, sys, zipfile
+root, jar_path, rel = sys.argv[1:4]
+with zipfile.ZipFile(jar_path, "w") as z:
+    z.write(os.path.join(root, rel), rel)
+PY
+  rm -rf "$TEST_TMP/src"
+}
+
+seed_artifact "androidx.lifecycle" "lifecycle-viewmodel" "2.8.7" \
+  "androidx/lifecycle/ViewModel.kt" "public abstract class ViewModel"
+seed_artifact "androidx.wear.tiles" "tiles" "1.4.0" \
+  "androidx/wear/tiles/TileService.java" "public abstract class TileService {}"
+seed_artifact "androidx.wear.compose" "compose-material3" "1.0.0" \
+  "androidx/wear/compose/material3/Button.kt" "public fun Button() = Unit"
+
+run_inspect() {
+  local description="$1" expected_rc="$2" expected_out="$3"
+  shift 3
   TEST_NUM=$((TEST_NUM + 1))
-
-  # Run in subshell to capture exit code
-  # We use a unique output dir for each test to avoid conflicts
-  # shellcheck disable=SC2086  # Intended word splitting for test arguments
-  if "$BIN_JETPACK" inspect --output "$TEST_TMP/$TEST_NUM" $args >"$TEST_TMP/out.$TEST_NUM" 2>&1; then
+  local out_file="$TEST_TMP/out.$TEST_NUM" rc=0
+  "$BIN_JETPACK" inspect --output "$TEST_TMP/work.$TEST_NUM" "$@" >"$out_file" 2>&1 || rc=$?
+  if [[ "$rc" -eq "$expected_rc" ]] && grep -Fq "$expected_out" "$out_file"; then
     echo "ok $TEST_NUM - $description"
-  elif grep -q "offline" "$TEST_TMP/out.$TEST_NUM"; then
-    echo "ok $TEST_NUM - $description # SKIP cold cache in offline mode"
   else
-    echo "not ok $TEST_NUM - $description"
-    echo "# Command failed: $BIN_JETPACK inspect $args"
-    cat "$TEST_TMP/out.$TEST_NUM" | sed 's/^/# /'
+    echo "not ok $TEST_NUM - $description (rc=$rc, expected $expected_rc)"
+    sed 's/^/# /' "$out_file"
   fi
 }
 
-run_test_warning() {
-  local args="$1"
-  local expected_warning="$2"
-  local description="$3"
+run_inspect "inspect FQCN resolves and prints class source" 0 \
+  "public abstract class ViewModel" "androidx.lifecycle.ViewModel"
 
-  TEST_NUM=$((TEST_NUM + 1))
+run_inspect "inspect Maven coordinate extracts sources" 0 \
+  "$TEST_TMP/work.2" "androidx.wear.tiles:tiles"
 
-  # shellcheck disable=SC2086  # Intended word splitting for test arguments
-  if "$BIN_JETPACK" inspect --output "$TEST_TMP/$TEST_NUM" $args >"$TEST_TMP/out.$TEST_NUM" 2>&1; then
-    if grep -Fq "$expected_warning" "$TEST_TMP/out.$TEST_NUM"; then
-      echo "ok $TEST_NUM - $description"
-    else
-      echo "not ok $TEST_NUM - $description (warning not found: $expected_warning)"
-      cat "$TEST_TMP/out.$TEST_NUM" | sed 's/^/# /'
-    fi
-  elif grep -q "offline" "$TEST_TMP/out.$TEST_NUM"; then
-    echo "ok $TEST_NUM - $description # SKIP cold cache in offline mode"
-  else
-    echo "not ok $TEST_NUM - $description"
-    echo "# Command failed: $BIN_JETPACK inspect $args"
-    cat "$TEST_TMP/out.$TEST_NUM" | sed 's/^/# /'
-  fi
-}
+run_inspect "inspect FQCN with pinned version extracts sources" 0 \
+  "public abstract class ViewModel" "androidx.lifecycle.ViewModel" "2.8.7"
 
-run_test_failure_with_hint() {
-  local args="$1"
-  local expected_hint="$2"
-  local description="$3"
+run_inspect "inspect missing package in STABLE emits warning" 0 \
+  "was not found in STABLE of androidx.wear.compose:compose-material3" \
+  "androidx.wear.compose.material3.futurepkg"
 
-  TEST_NUM=$((TEST_NUM + 1))
-
-  # shellcheck disable=SC2086  # Intended word splitting for test arguments
-  if ! "$BIN_JETPACK" inspect --output "$TEST_TMP/$TEST_NUM" $args >"$TEST_TMP/out.$TEST_NUM" 2>&1; then
-    if grep -Fq "$expected_hint" "$TEST_TMP/out.$TEST_NUM"; then
-      echo "ok $TEST_NUM - $description"
-    elif grep -q "offline" "$TEST_TMP/out.$TEST_NUM"; then
-      echo "ok $TEST_NUM - $description # SKIP cold cache in offline mode"
-    else
-      echo "not ok $TEST_NUM - $description (hint not found: $expected_hint)"
-      cat "$TEST_TMP/out.$TEST_NUM" | sed 's/^/# /'
-    fi
-  else
-    echo "not ok $TEST_NUM - $description (expected command to fail)"
-    cat "$TEST_TMP/out.$TEST_NUM" | sed 's/^/# /'
-  fi
-}
-
-# The failing test case reported by user
-run_test "androidx.lifecycle.ViewModel" "inspect androidx.lifecycle.ViewModel should succeed"
-
-# Additional examples from help
-run_test "androidx.core.splashscreen.SplashScreen" "inspect androidx.core.splashscreen.SplashScreen"
-run_test "androidx.wear.tiles:tiles" "inspect androidx.wear.tiles:tiles (coordinate)"
-run_test "androidx.wear.ambient.AmbientLifecycleObserver" "inspect androidx.wear.ambient.AmbientLifecycleObserver"
-
-# Pinned version test
-# shellcheck disable=SC2086
-run_test "androidx.lifecycle.ViewModel 2.8.7" "inspect androidx.lifecycle.ViewModel 2.8.7 (pinned)"
-
-# Missing package and class in STABLE checks
-# shellcheck disable=SC2086
-run_test_warning "androidx.wear.compose.material3.onehandedgesture" "was not found in STABLE of androidx.wear.compose:compose-material3" "inspect missing package in STABLE emits warning"
-# shellcheck disable=SC2086
-run_test_failure_with_hint "androidx.wear.compose.material3.onehandedgesture.OneHandedGestureManager" "was not found in STABLE; it may be in a newer pre-release track; try:" "inspect missing class in STABLE fails and emits hint"
+run_inspect "inspect missing class in STABLE fails with SNAPSHOT hint" 1 \
+  "was not found in STABLE; it may be in a newer pre-release track; try:" \
+  "androidx.wear.compose.material3.futurepkg.FutureFeature"

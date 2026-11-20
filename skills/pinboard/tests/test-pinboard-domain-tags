@@ -9,8 +9,10 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -20,7 +22,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE / "fixtures"))
-from fake_pinboard import API, FAKE, TOKEN  # noqa: E402
+from fake_pinboard import API, FAKE, SERVER, TOKEN  # noqa: E402
 
 BIN = HERE.parent / "scripts" / "pinboard"
 TMP = Path(tempfile.mkdtemp())
@@ -71,6 +73,7 @@ def load_pinboard():
 
 
 PB = load_pinboard()
+PB.GIT_ENV = {**ENV, "GIT_TERMINAL_PROMPT": "0", "LC_ALL": "C"}
 
 
 def reset_api() -> None:
@@ -131,17 +134,43 @@ def make_repo(records: list[dict]) -> Path:
 
 
 def tags_tool(
-    repo: Path, *args: str, state: Path | None = None
+    repo: Path, *args: str, state: Path | None = None, cli: bool = False
 ) -> subprocess.CompletedProcess[str]:
-    cmd = [str(BIN), "--repo", str(repo), "domain-tags", *args]
+    argv = ["--repo", str(repo), "domain-tags", *args]
     if state is not None:
-        cmd += ["--state", str(state)]
-    return subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        env=ENV,
-        check=False,
+        argv += ["--state", str(state)]
+    if cli:
+        return subprocess.run(
+            [sys.executable, str(BIN), *argv],
+            capture_output=True,
+            text=True,
+            env=ENV,
+            check=False,
+        )
+    old_env = os.environ.copy()
+    old_git_env = PB.GIT_ENV
+    old_cmd = PB._command
+    old_secrets = list(PB._secrets)
+    old_in, old_out, old_err = sys.stdin, sys.stdout, sys.stderr
+    out, err = io.StringIO(), io.StringIO()
+    os.environ.clear()
+    os.environ.update(ENV)
+    PB.GIT_ENV = {**ENV, "GIT_TERMINAL_PROMPT": "0", "LC_ALL": "C"}
+    sys.stdin, sys.stdout, sys.stderr = io.StringIO(""), out, err
+    try:
+        try:
+            rc = PB.main(argv)
+        except SystemExit as exc:
+            rc = exc.code if isinstance(exc.code, int) else (1 if exc.code else 0)
+    finally:
+        sys.stdin, sys.stdout, sys.stderr = old_in, old_out, old_err
+        PB._command = old_cmd
+        PB._secrets[:] = old_secrets
+        PB.GIT_ENV = old_git_env
+        os.environ.clear()
+        os.environ.update(old_env)
+    return subprocess.CompletedProcess(
+        [str(BIN), *argv], rc, out.getvalue(), err.getvalue()
     )
 
 
@@ -242,7 +271,7 @@ def test_plan_reports_domains_and_collisions() -> None:
     reset_api()
     repo, _ = fixture()
     state = TMP / "plan-state"
-    proc = tags_tool(repo, "plan", "--dry-run", "--json", state=state)
+    proc = tags_tool(repo, "plan", "--dry-run", "--json", state=state, cli=True)
     ok(proc.returncode == 0, "plan --dry-run succeeds", proc.stderr)
     payload = plan_json(proc)
     ok(payload["groups"] == 3, "three domains reach five URLs", payload)
@@ -390,4 +419,10 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        rc = main()
+    finally:
+        SERVER.shutdown()
+        SERVER.server_close()
+        shutil.rmtree(TMP, ignore_errors=True)
+    sys.exit(rc)
