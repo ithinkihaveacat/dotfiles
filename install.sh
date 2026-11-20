@@ -2485,7 +2485,7 @@ function feature_agents {
         echo "warning: failed to grant path permissions" >&2
     fi
 
-    for ws in "${ro_paths[@]}" "${rw_paths[@]}"; do
+    for ws in "${rw_paths[@]}"; do
       if [ -d "$ws/.git" ] || [ -d "$ws/.agents/skills" ]; then
         (cd "$ws" && x "$permission_tool" apply) ||
           echo "warning: failed to apply permissions in $ws" >&2
