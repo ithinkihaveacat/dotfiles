@@ -28,9 +28,9 @@ with agents such as Claude Code, Codex, and Gemini CLI.
 `install.sh` symlinks `home/.*` into `$HOME`, installs packages, and wires up
 tool-specific config. It is safe to run multiple times, and doubles as the
 updater: an existing checkout is fast-forwarded after approval before applying.
-Use `./install.sh --apply` to apply local edits without Git updates. It can be
-run locally (`./install.sh`) or piped straight from the network (see
-[Installation](#installation)).
+Use `./install.sh --apply` to re-apply the installed checkout without Git
+updates. It can be run locally (`./install.sh`) or piped straight from the
+network (see [Installation](#installation)).
 
 How coding agents are set up (global instructions, hooks, launch wrappers, and
 what each agent receives) is described in
@@ -345,40 +345,37 @@ detect outdated libraries, script-based installations, or processes on macOS.
 
 ### Developing and publishing changes
 
-These checkouts are live working environments, not release installations. Edit
-and try scripts, configuration, and skills locally on any machine; commit and
-publish completed changes promptly. Public, personal, and work content stay in
-their respective repositories. Existing tools and local commits work offline.
+Keep `~/.dotfiles` and any active overlays (`~/.private`, `~/.corp`) as clean,
+pull-only runtime installations on `main` (`install.sh` grants coding agents
+read-only access to them). Develop changes in a separate checkout of this
+repository on a topic branch (or linked worktree), run the relevant formatters
+and `prove` tests there, push the branch, and open a draft pull request. Public,
+personal, and work content stay in their respective repositories.
 
 ```bash
-./install.sh --apply     # Apply this checkout; do not fetch or change Git history
-git push-pr             # Publish committed work and open a draft PR
+git switch -c feat/my-change
+git push -u origin HEAD
+gh pr create --draft
 ```
 
-`git push-pr` fetches remote refs but never updates the checkout. It stops if
-upstream has commits missing locally. It publishes all commits ahead of
-upstream, not a selection of files, and reports the exact published commit. Use
-follow-up commits for review changes; `git push-pr -f` is available for
-deliberate topic rewrites and uses `--force-with-lease`. Offline publication
-fails without losing local commits.
-
-Merge PRs with **merge commits**, not squash or rebase merges, so the original
-local commits remain in upstream history. Agents may merge routine changes after
-CI passes. No custom merge helper is needed: inspect the PR and checks with
-`gh pr view <PR>` and `gh pr checks <PR>`, then use
+Merge PRs with **merge commits**, not squash or rebase merges, so branch commits
+remain intact in upstream history. Agents may merge routine changes after CI
+passes: inspect the PR and checks with `gh pr view <PR>` and
+`gh pr checks <PR>`, then run
 `gh pr merge <PR> --merge --match-head-commit <full-PR-head-SHA>`. Only merge a
 ready PR whose relevant checks passed for that SHA; do not use `--admin` or
 `--auto`. Marking a draft ready and notifying people are separate actions.
 
 ### Adopting incoming changes
 
-Publishing and merging do not activate changes on other machines. Run
-`./install.sh` deliberately to inspect incoming commits and a diffstat; enter
-`d` for the full diff, `y` to approve, or anything else to stop. All overlays
-are checked and approved before any checkout advances. Dirty incoming updates
-and unfinished Git operations stop the run. Failed updates stop before applying
-features. If an update fails after earlier repositories advanced, they stay
-advanced: no rollback or history repair is attempted.
+Publishing and merging do not activate changes on any machine, including the one
+where the PR was authored. Run `~/.dotfiles/install.sh` deliberately to inspect
+incoming commits and a diffstat; enter `d` for the full diff, `y` to approve, or
+anything else to stop. All overlays are checked and approved before any checkout
+advances. Dirty incoming updates and unfinished Git operations stop the run.
+Failed updates stop before applying features. If an update fails after earlier
+repositories advanced, they stay advanced: no rollback or history repair is
+attempted.
 
 The installer never rebases, resets, or stashes, regardless of `pull.rebase`.
 When local commits have diverged from upstream, the run stops unless every local
@@ -388,21 +385,16 @@ automation). Local commits that are already published, including old
 squash-merged ones, still stop the run for individual reconciliation. Diagnose
 those using `git status` and `git log --graph --oneline --all`. Local commits
 with no incoming updates are left intact; unpublished ones are reported with a
-warning that names the `git push-pr` command.
+warning to publish them from a topic branch or separate checkout.
 
 Macs, work computers, and server host configuration should use manual
 interactive updates, not unattended pulls. Agent hosts can explicitly accept
-fast-forwards with `./install.sh --accept-updates --no-input`; `--no-input`
-alone does not approve incoming code, and `--integrate` is the further explicit
-choice to merge unpublished divergence. `--apply` skips only Git updates; use
-`AGENT_OFFLINE=1` to skip network-dependent features too. The installer does not
-update `~/.ssh`.
-
-Local edits to live scripts and startup configuration can execute immediately,
-before a commit or PR. Use worktrees for broad agent changes on trusted devices,
-and for independent concurrent tasks. Serialize work in a shared live checkout.
-PRs and CI provide workflow and reliability checks, not proof against malicious
-code; local push guards are not access controls.
+fast-forwards with `~/.dotfiles/install.sh --accept-updates --no-input`;
+`--no-input` alone does not approve incoming code, and `--integrate` is the
+further explicit choice to merge unpublished divergence. `--apply` skips only
+Git updates; use `AGENT_OFFLINE=1` to skip network-dependent features too. The
+installer does not update `~/.ssh`. PRs and CI provide workflow and reliability
+checks, not proof against malicious code.
 
 The `curl ... | bash` installation command executes downloaded code immediately;
 it is for deliberate bootstrap, not reviewed updates on trusted machines. Use
