@@ -2455,12 +2455,16 @@ function feature_browse {
 
   # browse is useful only to an agent that can call it, and this repository
   # configures it for OpenCode only. Browsers on other computers reach the
-  # relay when there is no local browser to pair (a headless machine), and are
-  # paired once by hand with `browse pair`.
+  # relay when there is no local browser to pair (a headless machine with no
+  # local VNC desktop or explicit loopback browse config), and are paired once
+  # by hand with `browse pair`.
   is_opencode_agent || return 0
   heading "browse"
 
-  if [ "$PLATFORM" = linux ] && [ -z "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then
+  if [ "$PLATFORM" = linux ] && [ -z "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] &&
+    [ ! -f "$XDG_CONFIG_HOME/tigervnc/passwd" ] &&
+    ! { exists jq &&
+      [ "$(jq -r '.hostname // empty' "$XDG_CONFIG_HOME/browse/config.json" 2>/dev/null)" = "127.0.0.1" ]; }; then
     relay=1
     args=(--remote "${args[@]}")
   fi
