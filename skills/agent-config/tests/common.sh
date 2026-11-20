@@ -36,10 +36,12 @@ skill_test_init() {
   # shellcheck disable=SC2064  # expand the paths now, at trap-install time
   trap "rm -rf -- '${TMPDIR}' '${MOCK_BIN_DIR}'" EXIT
 
-  # Save host uv cache before overriding HOME, so tests that need cached PyPI
-  # packages (e.g. PyYAML in test-skill-doctor) can still reach them offline.
+  # Save host uv cache and managed Python dir before overriding HOME, so tests
+  # that need cached PyPI packages (e.g. PyYAML in test-skill-doctor) can still
+  # reach them offline.
   HOST_UV_CACHE="${UV_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/uv}"
-  export HOST_UV_CACHE
+  HOST_UV_PYTHON_INSTALL_DIR="${UV_PYTHON_INSTALL_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/uv/python}"
+  export HOST_UV_CACHE HOST_UV_PYTHON_INSTALL_DIR
 
   # scripts/skill uses Python >=3.11 stdlib only; invoke directly via python3
   # when >=3.11 is available to avoid per-call uv launcher overhead.
