@@ -28,61 +28,50 @@ underlying tools directly. Where this file is more opinionated, follow it.
 
 ## Branches and Pull Requests
 
-These repositories contain executable configuration, tools, and skills. Publish
-through PRs, preserve history, and keep publication separate from adoption on
-another machine. Default-branch protection depends on each repository's GitHub
-plan and settings; local push guards prevent mistakes, not malicious access.
+This repository contains executable configuration, tools, and skills. Keep
+publication separate from adoption on each machine:
 
-To keep local skills and tools immediately usable on agent hosts without leaving
-stale `[origin/...: gone]` branches behind, **never run `git checkout -b`** in
-`~/.dotfiles`, `~/.private`, or `~/.ssh`. Commit directly to your local default
-branch (`main`, or `master` in `~/.ssh`) and publish with
-`git push-pr [-f] [BRANCH]` (`bin/git-push-pr`), which pushes
-`HEAD:refs/heads/<topic>` and opens a draft PR (`gh pr create --draft`) without
-switching branches (bare `git push` is also disabled by
-`etc/git/pr-only.gitconfig` in `~/.dotfiles`, `~/.private`, and `~/.ssh`). The
-default branch name `pr/<slug>` is derived from the first local commit's subject
-ahead of upstream, so after `git commit --amend`, re-running `git push-pr -f`
-updates the same PR cleanly as long as that subject stays the same (if you
-change the subject, pass the previous branch explicitly with
-`git push-pr -f <branch>`). Force updates use `--force-with-lease` and are only
-for topic branches. Prefer follow-up commits to rewriting published work. The
-helper publishes all commits ahead of upstream; inspect that range first.
+- **Pull-only runtime installs:** `~/.dotfiles` and active overlay installs
+  (`~/.private`, `~/.corp`) are pull-only runtime checkouts kept cleanly on
+  their default branch (`main`). Never edit files, create branches, or commit
+  inside `~/.dotfiles`, `~/.private`, or `~/.corp` directly—not even when a
+  symlink or `metadata.source` resolves there.
+- **Develop in a separate checkout:** Make changes in a separate development
+  checkout of this repository (check the project tracker `README.md` if tracked,
+  or use a dedicated clone or linked worktree outside `$HOME/.*`). In this
+  public repository, create a topic branch (`git switch -c <branch>`), push it
+  (`git push -u origin HEAD`), and open a draft PR (`gh pr create --draft`). Use
+  linked worktrees off that development checkout when running independent
+  changes concurrently. Companion repositories (`private`, `corp`) define their
+  own publication workflow in their respective `AGENTS.md` files.
 
-**Use merge commits for PRs, never squash or rebase merges.** Local commits then
-remain ancestors of the merged default branch. Agents may merge routine PRs
-after the relevant CI checks pass, using GitHub's merge-commit method and
-checking the expected PR head. Never bypass protection, force-push the default
-branch, or merge unrelated work. Draft staging, marking ready, and notifying
-reviewers are separate actions; do not notify people without explicit
-authorization.
+**Use merge commits for PRs, never squash or rebase merges.** Agents may merge
+routine PRs after the relevant CI checks pass, using GitHub's merge-commit
+method and checking the expected PR head
+(`gh pr merge <PR> --merge --match-head-commit <SHA>`). Never bypass protection,
+force-push the default branch, or merge unrelated work. Draft staging, marking
+ready, and notifying reviewers are separate actions; do not notify people
+without explicit authorization.
 
-Live development can happen on any machine. A shared checkout is one stream of
-work: serialize edits there; use worktrees for independent or risky changes. On
-trusted personal or work computers, stage broad agent changes in a worktree
-before deliberately activating them. If the user explicitly asks for commits on
-a named local topic or experiment branch without opening a PR, keep the live
-checkout on `main` and create the branch in a temporary linked worktree
-(`git worktree add -b <branch> <dir> main`). Local edits to symlinked code are
-already live, regardless of PR status.
-
-`./install.sh --apply` applies the current checkout without Git updates. Normal
-runs preflight all overlays, show the exact incoming range, and prompt `[y/N/d]`
-(`d` prints the diff) before any checkout advances. Updates fast-forward;
-unpublished divergence that merges cleanly is offered as a merge with the same
-approval (`--integrate` for agent hosts), while published divergence, dirty
-incoming updates, or declined approval stop the run before applying features.
-There is no automatic rebase, reset, stash, or rollback. `pull.rebase` does not
-change this policy. Diagnose unexpected states separately. Offline work stays
-local; `AGENT_OFFLINE=1` skips network features and Git updates.
+`./install.sh --apply` applies the live `~/.dotfiles` (and overlay) checkouts
+without Git updates. Normal `./install.sh` runs preflight all overlays, show the
+exact incoming range, and prompt `[y/N/d]` (`d` prints the diff) before any
+checkout advances. Updates fast-forward; unpublished divergence that merges
+cleanly is offered as a merge with the same approval (`--integrate` for agent
+hosts), while published divergence, dirty incoming updates, or declined approval
+stop the run before applying features. There is no automatic rebase, reset,
+stash, or rollback. `pull.rebase` does not change this policy. Diagnose
+unexpected states separately. Offline work stays local; `AGENT_OFFLINE=1` skips
+network features and Git updates.
 
 Macs, work computers, and server host configuration require deliberate incoming
 updates; do not pass `--accept-updates` or schedule unattended pulls there. On
 agent hosts, explicit `--accept-updates --no-input` permits unattended
-fast-forwards, and adding `--integrate` also merges unpublished divergence.
-Publishing or merging a PR never updates another machine. `./install.sh`
-intentionally does not pull `~/.ssh`; inspect and fast-forward it manually. CI
-is a reliability check, not a security boundary against its author.
+fast-forwards (or `git -C ~/.dotfiles pull --ff-only` after a PR merges), and
+adding `--integrate` also merges unpublished divergence. Publishing or merging a
+PR never updates another machine. `./install.sh` intentionally does not pull
+`~/.ssh`; inspect and update it separately. CI is a reliability check, not a
+security boundary against its author.
 
 ## Privacy and Information Control
 

@@ -22,12 +22,18 @@ workflows, helper scripts, and local conventions.
   (Claude wrapper or Antigravity), or read
   `$(skill --offline resolve <NAME>)/SKILL.md` directly (OpenCode/Codex; never
   install workspace/user skills as a fallback).
-- **Skill provenance and relative paths**: User-scope default skills are
-  symlinks, whereas workspace and session skills are directory copies carrying
-  `metadata.source` in `SKILL.md` frontmatter. Resolve cross-skill links
-  (`../<sibling>/...`) or upstream skill edits against `metadata.source` /
-  `skill --offline resolve <NAME>` (or symlink `realpath`), and run
-  repo-relative commands from the target repository root.
+- **Skill provenance and pull-only runtime checkouts**: User-scope default
+  skills are symlinks, whereas workspace and session skills are directory copies
+  carrying `metadata.source` in `SKILL.md` frontmatter. Resolve cross-skill
+  links (`../<sibling>/...`) against `metadata.source` /
+  `skill --offline resolve <NAME>` (or symlink `realpath`). `~/.dotfiles` and
+  active overlay installs (`~/.private`, `~/.corp`) are pull-only runtime
+  checkouts—never edit, stage, or commit inside them, even when a skill symlink
+  or `metadata.source` resolves there. Make edits in a separate development
+  checkout of the target repository instead (consulting the project tracker
+  `README.md` when tracked, or asking the user where the development checkout
+  lives), and update live installs only by fast-forwarding from upstream after
+  publication.
 - **Common skill triggers**:
   - **Android & Wear OS devices**: Use the relevant device skill's exact `adb`
     commands and scripts (e.g., for screenshots or UI interaction).

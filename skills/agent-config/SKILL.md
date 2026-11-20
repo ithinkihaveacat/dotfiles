@@ -548,8 +548,10 @@ session's `Artifact Directory Path`, e.g.
 frontmatter; read `<artifactDir>/.agents/skills/<skill>/SKILL.md` printed by
 `add` to use it in the current turn, as the harness injects it into `<skills>`
 from the next turn onward. Either way the repository's `.git/info/exclude` is
-left untouched; to edit the upstream skill itself, follow `metadata.source` in
-`SKILL.md` (or run `skill resolve <skill>`).
+left untouched; to inspect the upstream skill source, check `metadata.source` in
+`SKILL.md` (or run `skill resolve <skill>`), and make upstream edits in a
+separate development checkout rather than inside pull-only `~/.dotfiles`,
+`~/.private`, or `~/.corp` installs.
 
 OpenCode and Codex do not support this CLI's session scope. Reuse skills already
 provided by the harness and use its skill loader for missing ones. For a local
@@ -573,7 +575,7 @@ launchers support session skills, and what a new launcher needs to, is in
 permission cmd add "git show" "git log"   # allow commands on every detected agent
 permission cmd add --deny "rm -rf"        # block command outright
 permission cmd add --ask "adb-tile-add" --agent claude
-permission path add ~/.dotfiles ~/.corp   # grant directory access
+permission path add --ro ~/.dotfiles ~/.corp   # grant read-only directory access
 permission list                           # list commands and paths
 ```
 

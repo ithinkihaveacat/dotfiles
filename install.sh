@@ -890,7 +890,7 @@ git_up() {
   if [ "$behind" -eq 0 ]; then
     if [ "$ahead" -gt 0 ]; then
       if [ "$unpublished" -gt 0 ]; then
-        echo "warning: $dir ($branch) has $unpublished unpublished commit(s) ahead of $upstream; publish with 'git push-pr' in $dir" >&2
+        echo "warning: $dir ($branch) has $unpublished unpublished commit(s) ahead of $upstream; publish them from a topic branch or separate checkout" >&2
       else
         echo "note: $dir ($branch) is ahead of $upstream by $ahead published commit(s); nothing incoming" >&2
       fi
@@ -1047,7 +1047,7 @@ function git_apply_updates {
         echo "error: merge failed for $dir; earlier repositories may have advanced; no rollback attempted" >&2
         return 1
       fi
-      echo "note: merged $upstream into ${GIT_UPDATE_BRANCHES[$i]} in $dir; publish with 'git push-pr' in $dir" >&2
+      echo "note: merged $upstream into ${GIT_UPDATE_BRANCHES[$i]} in $dir; publish the merge from a topic branch or separate checkout" >&2
     elif ! x git -C "$dir" merge --ff-only --no-autostash "$target"; then
       echo "error: fast-forward failed for $dir; earlier repositories may have advanced; no rollback attempted" >&2
       return 1
@@ -2415,31 +2415,38 @@ function feature_agents {
 
   local permission_tool="$SRCDIR/bin/permission"
   if [ -x "$permission_tool" ]; then
-    local paths_to_approve=()
+    local ro_paths=()
+    local rw_paths=()
     local src ws
 
-    # Pre-approve base dotfiles and any active overlays
+    # Grant read-only access to live dotfiles and active overlays so agents
+    # read installed skills and scripts without editing runtime checkouts.
     for src in "${SRCDIRS[@]}"; do
-      [ -d "$src" ] && paths_to_approve+=("$src")
+      [ -d "$src" ] && ro_paths+=("$src")
     done
 
     # Include user projects repository if present
     if [ -d "$HOME/.projects" ]; then
-      paths_to_approve+=("$HOME/.projects")
+      rw_paths+=("$HOME/.projects")
     fi
 
     # Allow agent sandboxes to write uv tool state and Andon alert logs
     # when ~/.local is otherwise mounted read-only.
     xmkdir "$XDG_DATA_HOME/uv"
     xmkdir "$XDG_STATE_HOME/andon"
-    paths_to_approve+=("$XDG_DATA_HOME/uv" "$XDG_STATE_HOME/andon")
+    rw_paths+=("$XDG_DATA_HOME/uv" "$XDG_STATE_HOME/andon")
 
-    if [[ ${#paths_to_approve[@]} -gt 0 ]]; then
-      x "$permission_tool" path add "${paths_to_approve[@]}" ||
+    if [[ ${#ro_paths[@]} -gt 0 ]]; then
+      x "$permission_tool" path add --ro "${ro_paths[@]}" ||
+        echo "warning: failed to grant read-only path permissions" >&2
+    fi
+
+    if [[ ${#rw_paths[@]} -gt 0 ]]; then
+      x "$permission_tool" path add "${rw_paths[@]}" ||
         echo "warning: failed to grant path permissions" >&2
     fi
 
-    for ws in "${paths_to_approve[@]}"; do
+    for ws in "${ro_paths[@]}" "${rw_paths[@]}"; do
       if [ -d "$ws/.git" ] || [ -d "$ws/.agents/skills" ]; then
         (cd "$ws" && x "$permission_tool" apply) ||
           echo "warning: failed to apply permissions in $ws" >&2
