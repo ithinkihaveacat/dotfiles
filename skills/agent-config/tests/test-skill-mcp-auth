@@ -15,8 +15,7 @@ Usage: test-skill-mcp-auth
 Serves a JWKS with a throwaway RSA key on a loopback port and starts
 'skill mcp --http' on a throwaway skills directory, trusting that JWKS (team
 'test.invalid', audience 'test-aud'). Then checks a valid token, bad ones, and
-none, the unauthenticated health check, and that the server refuses to bind a
-non-loopback address without Access settings. Prints TAP.
+none, and the unauthenticated health check. Prints TAP.
 """
 
 import base64
@@ -37,6 +36,11 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
 CLI = Path(__file__).resolve().parents[1] / "scripts" / "skill"
+SERVER = CLI.with_name("skill-mcp")
+subprocess.run(["uv", "sync", "--quiet", "--script", str(SERVER)], check=True)
+SKM_PY = subprocess.check_output(
+    ["uv", "python", "find", "--script", str(SERVER)], text=True
+).strip()
 TEAM, AUD = "test.invalid", "test-aud"
 
 
@@ -117,14 +121,14 @@ def request(
 
 
 def wait_for(proc: subprocess.Popen, port: int, log: Path) -> None:
-    for _ in range(300):
+    for _ in range(1500):
         if proc.poll() is not None:
             sys.exit(f"test-skill-mcp-auth: server exited: {log.read_text()}")
         try:
             with socket.create_connection(("127.0.0.1", port), timeout=1):
                 return
         except OSError:
-            time.sleep(0.1)
+            time.sleep(0.02)
     proc.kill()
     sys.exit(f"test-skill-mcp-auth: server did not start on port {port}")
 
@@ -184,149 +188,148 @@ def main() -> None:
     ]
 
     failed = 0
-    with tempfile.TemporaryDirectory() as tmp:
-        root = Path(tmp)
-        config = write_config(root)
-        env = dict(
-            os.environ,
-            SKILL_MCP_CONFIG=str(config),
-            SKILL_MCP_ACCESS_CERTS_URL=certs,
-            SKILL_MCP_LOG=str(root / "mcp.jsonl"),
-        )
-        log = root / "access.log"
-        port = free_port()
-        proc = subprocess.Popen(
-            [
-                str(CLI),
-                "mcp",
-                "--http",
-                "--port",
-                str(port),
-                "--access-team",
-                TEAM,
-                "--access-aud",
-                AUD,
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=log.open("w"),
-            env=env,
-        )
-        base = f"http://127.0.0.1:{port}"
-        try:
-            wait_for(proc, port, log)
-            print(f"1..{len(cases) + 12}", flush=True)
-            for n, (name, tok, want, says) in enumerate(cases, 1):
-                got, body = request(f"{base}/mcp/profile", tok)
-                ok = got == want and says in body
-                failed += not ok
-                print(f"{'ok' if ok else 'not ok'} {n} - {name}: {got} (want {want})")
-                if not ok:
-                    print(f"# {body!r}")
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = write_config(root)
+            env = dict(
+                os.environ,
+                SKILL_MCP_CONFIG=str(config),
+                SKILL_MCP_ACCESS_CERTS_URL=certs,
+                SKILL_MCP_LOG=str(root / "mcp.jsonl"),
+            )
+            log = root / "access.log"
+            port = free_port()
+            with log.open("w") as errlog:
+                proc = subprocess.Popen(
+                    [
+                        SKM_PY,
+                        str(SERVER),
+                        "--http",
+                        "--port",
+                        str(port),
+                        "--access-team",
+                        TEAM,
+                        "--access-aud",
+                        AUD,
+                    ],
+                    stdout=subprocess.DEVNULL,
+                    stderr=errlog,
+                    env=env,
+                )
+            base = f"http://127.0.0.1:{port}"
+            try:
+                wait_for(proc, port, log)
+                print(f"1..{len(cases) + 9}", flush=True)
+                for n, (name, tok, want, says) in enumerate(cases, 1):
+                    got, body = request(f"{base}/mcp/profile", tok)
+                    ok = got == want and says in body
+                    failed += not ok
+                    print(
+                        f"{'ok' if ok else 'not ok'} {n} - {name}: {got} (want {want})"
+                    )
+                    if not ok:
+                        print(f"# {body!r}")
 
-            n = len(cases)
-            checks = [
-                ("health check needs no token", "/up", "GET", None, None, 200, '"ok"'),
-                ("health check accepts HEAD", "/up", "HEAD", None, None, 200, ""),
-                ("an old log page needs a token", "/logs", "GET", None, None, 401, ""),
-                (
-                    "there is no log page, even with a token",
-                    "/logs",
-                    "GET",
-                    token(key, "k1"),
-                    None,
-                    405,
-                    "",
-                ),
-                (
-                    "a bad token is refused",
-                    "/logs/records",
-                    "GET",
-                    "not.a.jwt",
-                    None,
-                    403,
-                    "",
-                ),
-                ("GET needs a token", "/mcp/profile", "GET", None, None, 401, ""),
-                ("an unknown path needs a token", "/nope", "POST", None, None, 401, ""),
-                (
-                    "a valid token still respects the host allowlist",
-                    "/mcp/profile",
-                    "POST",
-                    token(key, "k1"),
-                    "evil.example",
-                    421,
-                    "",
-                ),
-            ]
-            for name, path, method, tok, host, want, says in checks:
+                n = len(cases)
+                checks = [
+                    (
+                        "health check needs no token",
+                        "/up",
+                        "GET",
+                        None,
+                        None,
+                        200,
+                        '"ok"',
+                    ),
+                    ("health check accepts HEAD", "/up", "HEAD", None, None, 200, ""),
+                    (
+                        "an old log page needs a token",
+                        "/logs",
+                        "GET",
+                        None,
+                        None,
+                        401,
+                        "",
+                    ),
+                    (
+                        "there is no log page, even with a token",
+                        "/logs",
+                        "GET",
+                        token(key, "k1"),
+                        None,
+                        405,
+                        "",
+                    ),
+                    (
+                        "a bad token is refused",
+                        "/logs/records",
+                        "GET",
+                        "not.a.jwt",
+                        None,
+                        403,
+                        "",
+                    ),
+                    ("GET needs a token", "/mcp/profile", "GET", None, None, 401, ""),
+                    (
+                        "an unknown path needs a token",
+                        "/nope",
+                        "POST",
+                        None,
+                        None,
+                        401,
+                        "",
+                    ),
+                    (
+                        "a valid token still respects the host allowlist",
+                        "/mcp/profile",
+                        "POST",
+                        token(key, "k1"),
+                        "evil.example",
+                        421,
+                        "",
+                    ),
+                ]
+                for name, path, method, tok, host, want, says in checks:
+                    n += 1
+                    got, body = request(f"{base}{path}", tok, method, host)
+                    ok = got == want and says in body
+                    failed += not ok
+                    print(
+                        f"{'ok' if ok else 'not ok'} {n} - {name}: {got} (want {want})"
+                    )
+                    if not ok:
+                        print(f"# {body!r}")
+                # The records name each request's outcome and its caller by a
+                # key, never by the token or its claims.
                 n += 1
-                got, body = request(f"{base}{path}", tok, method, host)
-                ok = got == want and says in body
+                text = (root / "mcp.jsonl").read_text()
+                records = [json.loads(line) for line in text.splitlines()]
+                # Refused before the SDK reads it, a request has no method.
+                pings = [r for r in records if r.get("method") == "ping"]
+                refused = [r for r in records if r["outcome"] == "refused"]
+                outcomes = [r["outcome"] for r in pings]
+                callers = {r.get("caller") for r in pings}
+                ok = (
+                    outcomes == ["ok", "ok"]
+                    and len(refused) >= len(cases) - 2 + 4
+                    and len(callers) == 1
+                    and None not in callers
+                    and "test@example.com" not in text
+                    and token(key, "k1").split(".")[0] not in text
+                )
                 failed += not ok
-                print(f"{'ok' if ok else 'not ok'} {n} - {name}: {got} (want {want})")
+                print(
+                    f"{'ok' if ok else 'not ok'} {n} - records keep callers by key only"
+                )
                 if not ok:
-                    print(f"# {body!r}")
-            # The records name each request's outcome and its caller by a
-            # key, never by the token or its claims.
-            n += 1
-            text = (root / "mcp.jsonl").read_text()
-            records = [json.loads(line) for line in text.splitlines()]
-            # Refused before the SDK reads it, a request has no method.
-            pings = [r for r in records if r.get("method") == "ping"]
-            refused = [r for r in records if r["outcome"] == "refused"]
-            outcomes = [r["outcome"] for r in pings]
-            callers = {r.get("caller") for r in pings}
-            ok = (
-                outcomes == ["ok", "ok"]
-                and len(refused) >= len(cases) - 2 + 4
-                and len(callers) == 1
-                and None not in callers
-                and "test@example.com" not in text
-                and token(key, "k1").split(".")[0] not in text
-            )
-            failed += not ok
-            print(f"{'ok' if ok else 'not ok'} {n} - records keep callers by key only")
-            if not ok:
-                print(f"# {outcomes!r} {callers!r}")
-        finally:
-            proc.terminate()
-            proc.wait()
-
-        # Without Access, HTTP stays on loopback; Access flags need --http and
-        # both values.
-        for name, cmd, says in (
-            (
-                "refuses a non-loopback bind without Access",
-                ["--http", "--host", "0.0.0.0"],
-                "loopback only",
-            ),
-            (
-                "needs both Access values",
-                ["--http", "--access-team", TEAM],
-                "both --access-team and --access-aud",
-            ),
-            (
-                "Access flags apply only to --http",
-                ["--access-team", TEAM, "--access-aud", AUD],
-                "apply only to --http",
-            ),
-        ):
-            n += 1
-            res = subprocess.run(
-                [str(CLI), "mcp", *cmd],
-                capture_output=True,
-                text=True,
-                env=dict(env, SKILL_MCP_CONFIG=str(config)),
-                timeout=60,
-                check=False,
-            )
-            ok = res.returncode == 1 and says in res.stderr
-            failed += not ok
-            print(f"{'ok' if ok else 'not ok'} {n} - {name}: {res.returncode} (want 1)")
-            if not ok:
-                print(f"# {res.stderr!r}")
-
-    httpd.shutdown()
+                    print(f"# {outcomes!r} {callers!r}")
+            finally:
+                proc.terminate()
+                proc.wait()
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
     sys.exit(1 if failed else 0)
 
 

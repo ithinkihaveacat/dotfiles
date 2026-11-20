@@ -19,7 +19,7 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
 # flip the styled/unstyled assertions.
 unset NO_COLOR FORCE_COLOR
 
-echo "1..63"
+echo "1..62"
 
 # Test 1: --help exits zero and documents every command
 if out=$("$REAL_BIN" --help 2>&1) &&
@@ -42,8 +42,11 @@ else
   echo "not ok 2 - bare invocation should exit zero"
 fi
 
-WORK=$(mktemp -d "/tmp/hook-test.XXXXXX")
+WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
+HOME="$WORK/home"
+mkdir -p "$HOME"
+export HOME
 
 # A stub 'prettier' on PATH, so 'add node'/'apply' pass their dependency
 # check on a machine with no real prettier install: these tests exercise the
@@ -406,12 +409,18 @@ else
 fi
 
 # Test 26: trampoline targets with special characters are shell-quoted safely
+SPECIAL_SRC="$WORK/src with spaces & \$dollar"
+mkdir -p "$SPECIAL_SRC/agent"
+write_src "$SPECIAL_SRC/agent/commit-msg" 'echo special >> "$LOG"'
 PATH_REPO="$WORK/repo with spaces & \$dollar"
 mkdir -p "$PATH_REPO"
 git -C "$PATH_REPO" init -q
-(cd "$PATH_REPO" && "$BIN" add agent) >/dev/null 2>&1
+(cd "$PATH_REPO" && "$BIN" --source-dir "$SPECIAL_SRC" add agent) >/dev/null 2>&1
+rm -f "$LOG"
 if grep -q "exec '" "$PATH_REPO/.git/hooks/commit-msg.d/10-agent" &&
-  (cd "$PATH_REPO" && "$BIN" doctor) >/dev/null 2>&1; then
+  (cd "$PATH_REPO" && "$BIN" --source-dir "$SPECIAL_SRC" doctor) >/dev/null 2>&1 &&
+  "$PATH_REPO/.git/hooks/commit-msg" "$PATH_REPO/msg" </dev/null &&
+  [ "$(cat "$LOG")" = "special" ]; then
   echo "ok 26 - trampoline target is safely shell-quoted"
 else
   echo "not ok 26 - trampoline target quoting failed"
@@ -469,14 +478,16 @@ fi
 
 # Test 31: AGENT_OFFLINE=false disables offline mode
 OFFLINE_REPO=$(new_repo offline_test)
-out=$(cd "$OFFLINE_REPO" && AGENT_OFFLINE=false "$BIN" add gerrit 2>&1) || true
-if [[ "$out" == *'offline mode'* ]]; then
-  echo "not ok 31 - AGENT_OFFLINE=false did not disable offline mode"
-else
+rc=0
+out=$(cd "$OFFLINE_REPO" && PATH="$STUB:$PATH" AGENT_OFFLINE=false "$BIN" add gerrit 2>&1) || rc=$?
+if [ "$rc" -eq 0 ] && [[ "$out" != *'offline mode'* ]] &&
+  [ -x "$OFFLINE_REPO/.git/hooks/commit-msg.d/50-gerrit" ]; then
   echo "ok 31 - AGENT_OFFLINE=false correctly disables offline mode"
+else
+  echo "not ok 31 - AGENT_OFFLINE=false did not disable offline mode (rc=$rc)"
 fi
 
-# Test 32: 'add node' refuses when npx exists but no prettier is actually
+# Test 32: 'add node' refuses with exit 127 when npx exists but no prettier is
 # runnable through it or on PATH -- mirrors the exact probe the installed
 # pre-commit hook uses at commit time, rather than just checking npx exists.
 NPX_ONLY_STUB="$WORK/npx-only"
@@ -485,10 +496,12 @@ printf '%s\n' '#!/bin/sh' 'exit 1' >"$NPX_ONLY_STUB/npx"
 chmod +x "$NPX_ONLY_STUB/npx"
 ln -s "$(command -v git)" "$NPX_ONLY_STUB/git"
 NPX_ONLY_REPO=$(new_repo npxonly)
-if ! (cd "$NPX_ONLY_REPO" && PATH="$NPX_ONLY_STUB:/usr/bin:/bin" "$BIN" add node) >/dev/null 2>&1; then
-  echo "ok 32 - add node refuses when npx exists but no prettier is runnable"
+rc=0
+(cd "$NPX_ONLY_REPO" && PATH="$NPX_ONLY_STUB:/usr/bin:/bin" "$BIN" add node) >/dev/null 2>&1 || rc=$?
+if [ "$rc" -eq 127 ]; then
+  echo "ok 32 - add node refuses with exit 127 when npx exists but no prettier is runnable"
 else
-  echo "not ok 32 - add node accepted an npx with no runnable prettier"
+  echo "not ok 32 - add node should fail with exit 127 when no prettier is runnable (got $rc)"
 fi
 
 # Test 33: remove drops an owned sub-hook even if its multiplexer was since
@@ -546,60 +559,45 @@ else
   echo "not ok 35 - an option outside its subcommand was silently accepted"
 fi
 
-# Test 36: missing dependency failure exits 127
-NO_PRETTIER_STUB="$WORK/no-prettier"
-mkdir -p "$NO_PRETTIER_STUB"
-printf '%s\n' '#!/bin/sh' 'exit 1' >"$NO_PRETTIER_STUB/npx"
-chmod +x "$NO_PRETTIER_STUB/npx"
-ln -s "$(command -v git)" "$NO_PRETTIER_STUB/git"
-MISSING_DEP_REPO=$(new_repo missingdep)
-rc=0
-(cd "$MISSING_DEP_REPO" && PATH="$NO_PRETTIER_STUB:/usr/bin:/bin" "$BIN" add node) >/dev/null 2>&1 || rc=$?
-if [ "$rc" -eq 127 ]; then
-  echo "ok 36 - missing dependency failure exits 127"
-else
-  echo "not ok 36 - missing dependency failure should exit 127 (got $rc)"
-fi
-
-# Test 37: explicit 'add gerrit' re-fetches when already current
+# Test 36: explicit 'add gerrit' re-fetches when already current
 : >"$COUNT_FILE"
 (cd "$REFETCH_REPO" && PATH="$REFETCH_STUB:$PATH" AGENT_OFFLINE=0 "$BIN" add gerrit) >/dev/null 2>&1
 if [ "$(wc -l <"$COUNT_FILE")" -eq 1 ]; then
-  echo "ok 37 - explicit 'add gerrit' re-fetches when already current"
+  echo "ok 36 - explicit 'add gerrit' re-fetches when already current"
 else
-  echo "not ok 37 - explicit 'add gerrit' did not re-fetch"
+  echo "not ok 36 - explicit 'add gerrit' did not re-fetch"
 fi
 
-# Test 38: catalog succeeds outside a git repository
-NON_REPO_DIR=$(mktemp -d "/tmp/non-repo.XXXXXX")
+# Test 37: catalog succeeds outside a git repository
+NON_REPO_DIR="$WORK/non-repo"
+mkdir -p "$NON_REPO_DIR"
 rc=0
 cat_out=$(cd "$NON_REPO_DIR" && "$BIN" catalog 2>&1) || rc=$?
-rm -rf "$NON_REPO_DIR"
 if [ "$rc" -eq 0 ] && grep -q '^agent' <<<"$cat_out"; then
-  echo "ok 38 - catalog runs outside a git repository"
+  echo "ok 37 - catalog runs outside a git repository"
 else
-  echo "not ok 38 - catalog failed outside a git repository (rc=$rc)"
+  echo "not ok 37 - catalog failed outside a git repository (rc=$rc)"
 fi
 
-# Test 39: clean --force without --all is rejected
+# Test 38: clean --force without --all is rejected
 rc=0
 (cd "$REPO" && "$BIN" clean --force) >/dev/null 2>&1 || rc=$?
 if [ "$rc" -ne 0 ]; then
-  echo "ok 39 - clean --force without --all is rejected"
+  echo "ok 38 - clean --force without --all is rejected"
 else
-  echo "not ok 39 - clean --force without --all was accepted"
+  echo "not ok 38 - clean --force without --all was accepted"
 fi
 
-# Test 40: catalog rejecting positional arguments
+# Test 39: catalog rejecting positional arguments
 rc=0
 "$BIN" catalog garbage >/dev/null 2>&1 || rc=$?
 if [ "$rc" -ne 0 ]; then
-  echo "ok 40 - catalog rejects positional arguments"
+  echo "ok 39 - catalog rejects positional arguments"
 else
-  echo "not ok 40 - catalog accepted positional arguments"
+  echo "not ok 39 - catalog accepted positional arguments"
 fi
 
-# Test 41: FORCE_COLOR styles diagnostic tags even when piped. Earlier tests
+# Test 40: FORCE_COLOR styles diagnostic tags even when piped. Earlier tests
 # may have removed the profile from $REPO, so (re-)install it first; add is
 # idempotent.
 (cd "$REPO" && "$BIN" add agent) >/dev/null 2>&1
@@ -607,64 +605,64 @@ out=$(cd "$REPO" && FORCE_COLOR=1 "$BIN" doctor 2>&1)
 
 case $out in
   *$'\033[32m'"[PASS]"*)
-    echo "ok 41 - FORCE_COLOR styles PASS tags"
+    echo "ok 40 - FORCE_COLOR styles PASS tags"
     ;;
   *)
-    echo "not ok 41 - FORCE_COLOR did not style PASS tags"
+    echo "not ok 40 - FORCE_COLOR did not style PASS tags"
     ;;
 esac
 
-# Test 42: NO_COLOR suppresses styling even when FORCE_COLOR is set
+# Test 41: NO_COLOR suppresses styling even when FORCE_COLOR is set
 out=$(cd "$REPO" && NO_COLOR=1 FORCE_COLOR=1 "$BIN" doctor 2>&1)
 case $out in
   *$'\033'*)
-    echo "not ok 42 - NO_COLOR did not suppress styling"
+    echo "not ok 41 - NO_COLOR did not suppress styling"
     ;;
   *)
-    echo "ok 42 - NO_COLOR suppresses styling despite FORCE_COLOR"
+    echo "ok 41 - NO_COLOR suppresses styling despite FORCE_COLOR"
     ;;
 esac
 
-# Test 43: piped output carries no escape sequences by default
+# Test 42: piped output carries no escape sequences by default
 out=$(cd "$REPO" && "$BIN" doctor 2>&1)
 case $out in
   *$'\033'*)
-    echo "not ok 43 - piped output unexpectedly contained escape sequences"
+    echo "not ok 42 - piped output unexpectedly contained escape sequences"
     ;;
   *)
     case $out in
       *'[PASS]'* | *'[WARN]'*)
-        echo "ok 43 - piped output is plain ASCII tags"
+        echo "ok 42 - piped output is plain ASCII tags"
         ;;
       *)
-        echo "not ok 43 - piped output missing expected tags"
+        echo "not ok 42 - piped output missing expected tags"
         ;;
     esac
     ;;
 esac
 
-# Test 44: --source-dir overrides source root
+# Test 43: --source-dir overrides source root
 CUSTOM_SRC="$WORK/custom-src"
 mkdir -p "$CUSTOM_SRC/agent"
 write_src "$CUSTOM_SRC/agent/commit-msg" 'echo custom >> "$LOG"'
 CUSTOM_REPO=$(new_repo custom-repo)
 if (cd "$CUSTOM_REPO" && "$BIN" --source-dir "$CUSTOM_SRC" add agent) >/dev/null 2>&1 &&
   grep -Fq "hook-trampoline -> $CUSTOM_SRC/agent/commit-msg" "$CUSTOM_REPO/.git/hooks/commit-msg.d/10-agent"; then
-  echo "ok 44 - --source-dir flag overrides default hook source root"
+  echo "ok 43 - --source-dir flag overrides default hook source root"
 else
-  echo "not ok 44 - --source-dir failed to override source root"
+  echo "not ok 43 - --source-dir failed to override source root"
 fi
 
-# Test 45: HOOK_SOURCE_DIR overrides source root
+# Test 44: HOOK_SOURCE_DIR overrides source root
 ENV_SRC="$WORK/env-src"
 mkdir -p "$ENV_SRC/agent"
 write_src "$ENV_SRC/agent/commit-msg" 'echo env >> "$LOG"'
 ENV_REPO=$(new_repo env-repo)
 if (cd "$ENV_REPO" && HOOK_SOURCE_DIR="$ENV_SRC" "$BIN" add agent) >/dev/null 2>&1 &&
   grep -Fq "hook-trampoline -> $ENV_SRC/agent/commit-msg" "$ENV_REPO/.git/hooks/commit-msg.d/10-agent"; then
-  echo "ok 45 - HOOK_SOURCE_DIR overrides default hook source root"
+  echo "ok 44 - HOOK_SOURCE_DIR overrides default hook source root"
 else
-  echo "not ok 45 - HOOK_SOURCE_DIR failed to override source root"
+  echo "not ok 44 - HOOK_SOURCE_DIR failed to override source root"
 fi
 
 # External sub-hooks: a hook source outside the dotfiles tree, joined to the
@@ -684,7 +682,7 @@ subhook_keys() { # subhook_keys DIR -> space-terminated sub-hook names
   done
 }
 
-# Test 46: add --external installs a trampoline under the multiplexer and
+# Test 45: add --external installs a trampoline under the multiplexer and
 # preserves the pre-existing hook as 00-legacy, which runs first; stdin
 # reaches the external sub-hook
 rm -f "$LOG"
@@ -696,57 +694,57 @@ if (cd "$EXT_REPO" && "$BIN" add --external pre-push:90-check "$EXT_SRC") >/dev/
   [ "$(cat "$LOG")" = "legacy
 external origin
 ref-line" ]; then
-  echo "ok 46 - add --external installs a trampoline beside the preserved hook"
+  echo "ok 45 - add --external installs a trampoline beside the preserved hook"
 else
-  echo "not ok 46 - add --external did not produce the expected layout"
+  echo "not ok 45 - add --external did not produce the expected layout"
 fi
 
-# Test 47: re-adding is idempotent
+# Test 46: re-adding is idempotent
 cp "$EXT_REPO/.git/hooks/pre-push.d/90-check" "$WORK/ext-before"
 if (cd "$EXT_REPO" && "$BIN" add --external pre-push:90-check "$EXT_SRC") >/dev/null 2>&1 &&
   cmp -s "$WORK/ext-before" "$EXT_REPO/.git/hooks/pre-push.d/90-check" &&
   [ "$(subhook_keys "$EXT_REPO/.git/hooks/pre-push.d")" = "00-legacy 90-check " ]; then
-  echo "ok 47 - re-adding an external sub-hook changes nothing"
+  echo "ok 46 - re-adding an external sub-hook changes nothing"
 else
-  echo "not ok 47 - re-adding an external sub-hook was not idempotent"
+  echo "not ok 46 - re-adding an external sub-hook was not idempotent"
 fi
 
-# Test 48: list shows the external sub-hook and its source
+# Test 47: list shows the external sub-hook and its source
 out=$(cd "$EXT_REPO" && "$BIN" list 2>/dev/null)
 if [[ $out == *"external"*"pre-push"*"90-check -> $EXT_SRC"* ]]; then
-  echo "ok 48 - list shows external sub-hooks with their source"
+  echo "ok 47 - list shows external sub-hooks with their source"
 else
-  echo "not ok 48 - list did not show the external sub-hook: $out"
+  echo "not ok 47 - list did not show the external sub-hook: $out"
 fi
 
-# Test 49: doctor passes an external sub-hook rather than ignoring it
+# Test 48: doctor passes an external sub-hook rather than ignoring it
 out=$(cd "$EXT_REPO" && AGENT_REQUIRED_HOOKS='' "$BIN" doctor 2>&1)
 if [[ $out == *"[PASS]"*"external: pre-push:90-check installed and current"* ]] &&
   (cd "$EXT_REPO" && AGENT_REQUIRED_HOOKS='' "$BIN" doctor) >/dev/null 2>&1; then
-  echo "ok 49 - doctor reports a current external sub-hook as PASS"
+  echo "ok 48 - doctor reports a current external sub-hook as PASS"
 else
-  echo "not ok 49 - doctor did not pass the external sub-hook: $out"
+  echo "not ok 48 - doctor did not pass the external sub-hook: $out"
 fi
 
-# Test 50: apply and clean leave external sub-hooks in place
+# Test 49: apply and clean leave external sub-hooks in place
 if (cd "$EXT_REPO" && AGENT_REQUIRED_HOOKS='agent' "$BIN" apply) >/dev/null 2>&1 &&
   (cd "$EXT_REPO" && "$BIN" clean) >/dev/null 2>&1 &&
   [ -x "$EXT_REPO/.git/hooks/pre-push.d/90-check" ] &&
   [ ! -e "$EXT_REPO/.git/hooks/commit-msg.d/10-agent" ]; then
-  echo "ok 50 - apply and clean leave external sub-hooks alone"
+  echo "ok 49 - apply and clean leave external sub-hooks alone"
 else
-  echo "not ok 50 - apply or clean disturbed an external sub-hook"
+  echo "not ok 49 - apply or clean disturbed an external sub-hook"
 fi
 
-# Test 51: a key owned by a profile is refused
+# Test 50: a key owned by a profile is refused
 if ! (cd "$EXT_REPO" && "$BIN" add --external commit-msg:10-agent "$EXT_SRC") >/dev/null 2>&1 &&
   [ ! -e "$EXT_REPO/.git/hooks/commit-msg.d/10-agent" ]; then
-  echo "ok 51 - add --external refuses a key that belongs to a profile"
+  echo "ok 50 - add --external refuses a key that belongs to a profile"
 else
-  echo "not ok 51 - add --external accepted a profile's key"
+  echo "not ok 50 - add --external accepted a profile's key"
 fi
 
-# Test 52: malformed specs, reserved keys and non-executable sources are
+# Test 51: malformed specs, reserved keys and non-executable sources are
 # refused before anything is written
 printf 'echo not executable\n' >"$WORK/plain-src"
 if ! (cd "$EXT_REPO" && "$BIN" add --external pre-push "$EXT_SRC") >/dev/null 2>&1 &&
@@ -755,62 +753,62 @@ if ! (cd "$EXT_REPO" && "$BIN" add --external pre-push "$EXT_SRC") >/dev/null 2>
   ! (cd "$EXT_REPO" && "$BIN" add --external pre-push:91-plain "$WORK/plain-src") >/dev/null 2>&1 &&
   ! (cd "$EXT_REPO" && "$BIN" add --external pre-push:92-none "$WORK/missing") >/dev/null 2>&1 &&
   [ "$(subhook_keys "$EXT_REPO/.git/hooks/pre-push.d")" = "00-legacy 90-check " ]; then
-  echo "ok 52 - add --external validates its spec and source"
+  echo "ok 51 - add --external validates its spec and source"
 else
-  echo "not ok 52 - add --external accepted an invalid spec or source"
+  echo "not ok 51 - add --external accepted an invalid spec or source"
 fi
 
-# Test 53: an unmanaged sub-hook at the key is neither overwritten nor removed
+# Test 52: an unmanaged sub-hook at the key is neither overwritten nor removed
 printf '#!/bin/sh\nexit 0\n' >"$EXT_REPO/.git/hooks/pre-push.d/80-mine"
 chmod +x "$EXT_REPO/.git/hooks/pre-push.d/80-mine"
 if ! (cd "$EXT_REPO" && "$BIN" add --external pre-push:80-mine "$EXT_SRC") >/dev/null 2>&1 &&
   ! (cd "$EXT_REPO" && "$BIN" remove --external pre-push:80-mine) >/dev/null 2>&1 &&
   ! grep -q 'hook-trampoline' "$EXT_REPO/.git/hooks/pre-push.d/80-mine"; then
-  echo "ok 53 - --external never touches a sub-hook it did not install"
+  echo "ok 52 - --external never touches a sub-hook it did not install"
 else
-  echo "not ok 53 - --external overwrote or removed a foreign sub-hook"
+  echo "not ok 52 - --external overwrote or removed a foreign sub-hook"
 fi
 rm -f "$EXT_REPO/.git/hooks/pre-push.d/80-mine"
 
-# Test 54: doctor fails an external sub-hook whose source has gone away
+# Test 53: doctor fails an external sub-hook whose source has gone away
 mv "$EXT_SRC" "$EXT_SRC.moved"
 out=$(cd "$EXT_REPO" && AGENT_REQUIRED_HOOKS='' "$BIN" doctor 2>&1)
 rc=$?
 mv "$EXT_SRC.moved" "$EXT_SRC"
 if [ "$rc" -ne 0 ] && [[ $out == *"[FAIL]"*"external: pre-push:90-check"*"no longer exists"* ]]; then
-  echo "ok 54 - doctor fails an external sub-hook with a missing source"
+  echo "ok 53 - doctor fails an external sub-hook with a missing source"
 else
-  echo "not ok 54 - doctor missed an orphaned external sub-hook: $out"
+  echo "not ok 53 - doctor missed an orphaned external sub-hook: $out"
 fi
 
-# Test 55: remove --external restores the pre-existing hook
+# Test 54: remove --external restores the pre-existing hook
 if (cd "$EXT_REPO" && "$BIN" rm --external pre-push:90-check) >/dev/null 2>&1 &&
   [ ! -e "$EXT_REPO/.git/hooks/pre-push.d" ] &&
   grep -q 'echo legacy' "$EXT_REPO/.git/hooks/pre-push"; then
-  echo "ok 55 - remove --external restores the pre-existing hook"
+  echo "ok 54 - remove --external restores the pre-existing hook"
 else
-  echo "not ok 55 - remove --external did not restore the original hook"
+  echo "not ok 54 - remove --external did not restore the original hook"
 fi
 
-# Test 56: --external is rejected by commands it does not apply to
+# Test 55: --external is rejected by commands it does not apply to
 if ! (cd "$EXT_REPO" && "$BIN" list --external) >/dev/null 2>&1 &&
   ! (cd "$EXT_REPO" && "$BIN" apply --external) >/dev/null 2>&1; then
-  echo "ok 56 - --external is rejected outside add and remove"
+  echo "ok 55 - --external is rejected outside add and remove"
 else
-  echo "not ok 56 - --external was silently accepted"
+  echo "not ok 55 - --external was silently accepted"
 fi
 
-# Test 57: --copy installs an external sub-hook as a self-contained copy
+# Test 56: --copy installs an external sub-hook as a self-contained copy
 if (cd "$EXT_REPO" && "$BIN" add --copy --external pre-push:90-check "$EXT_SRC") >/dev/null 2>&1 &&
   grep -Fq "hook-copy -> $EXT_SRC" "$EXT_REPO/.git/hooks/pre-push.d/90-check" &&
   grep -q 'echo external' "$EXT_REPO/.git/hooks/pre-push.d/90-check" &&
   [[ "$(cd "$EXT_REPO" && "$BIN" list 2>/dev/null)" == *'90-check'* ]]; then
-  echo "ok 57 - add --copy --external installs a copy that list still sees"
+  echo "ok 56 - add --copy --external installs a copy that list still sees"
 else
-  echo "not ok 57 - add --copy --external did not install a copy"
+  echo "not ok 56 - add --copy --external did not install a copy"
 fi
 
-# Test 58: doctor warns on and apply removes a retired init.templatedir
+# Test 57: doctor warns on and apply removes a retired init.templatedir
 # post-checkout hook, while leaving a foreign post-checkout hook alone
 RETIRED_REPO=$(new_repo retired)
 cat >"$RETIRED_REPO/.git/hooks/post-checkout" <<'EOF'
@@ -833,12 +831,12 @@ if [ "$doc_rc" -ne 0 ] &&
   [[ $doc_out == *"[WARN]"*"post-checkout: retired init.templatedir hook"* ]] &&
   [ "$removed_retired" = yes ] &&
   [ -x "$RETIRED_REPO/.git/hooks/post-checkout" ]; then
-  echo "ok 58 - doctor flags and apply removes a retired init.templatedir post-checkout hook"
+  echo "ok 57 - doctor flags and apply removes a retired init.templatedir post-checkout hook"
 else
-  echo "not ok 58 - retired post-checkout template handling failed (rc=$doc_rc, removed=$removed_retired): $doc_out"
+  echo "not ok 57 - retired post-checkout template handling failed (rc=$doc_rc, removed=$removed_retired): $doc_out"
 fi
 
-# Test 59: -C/--directory and --quiet work together: --quiet suppresses
+# Test 58: -C/--directory and --quiet work together: --quiet suppresses
 # informational messages on first install while keeping errors visible, and a
 # repeated apply is silent even without --quiet
 QUIET_REPO=$(new_repo quiet)
@@ -850,12 +848,12 @@ if [ -z "$q_first" ] && [ -z "$q_repeat" ] &&
   [ -x "$QUIET_REPO/.git/hooks/commit-msg.d/10-agent" ] &&
   [ "$q_err_rc" -ne 0 ] && [[ $q_err == *"unknown profile"* ]] &&
   ! "$BIN" -C "$QUIET_REPO" list --quiet >/dev/null 2>&1; then
-  echo "ok 59 - -C/--directory and --quiet silence informational output and repeated apply is a silent no-op"
+  echo "ok 58 - -C/--directory and --quiet silence informational output and repeated apply is a silent no-op"
 else
-  echo "not ok 59 - -C/--directory, --quiet or repeated apply behaviour wrong (first='$q_first' repeat='$q_repeat' err='$q_err')"
+  echo "not ok 58 - -C/--directory, --quiet or repeated apply behaviour wrong (first='$q_first' repeat='$q_repeat' err='$q_err')"
 fi
 
-# Test 60: etc/agents/agy/hooks/PreToolUse ignores non-commit commands, safely
+# Test 59: etc/agents/agy/hooks/PreToolUse ignores non-commit commands, safely
 # handles non-git directories and ~, and lazily installs 10-agent on git commit
 # (via workspacePaths, 'cd <repo> && git commit', and 'git -C <repo> commit')
 PRE_HOOK="$DIR/../../../etc/agents/agy/hooks/PreToolUse"
@@ -887,12 +885,12 @@ if [ "$out_clone" = '{"decision":"allow"}' ] &&
   [ -x "$PRE_WS/.git/hooks/commit-msg.d/10-agent" ] &&
   [ -x "$PRE_SUB/.git/hooks/commit-msg.d/10-agent" ] &&
   [ -x "$PRE_GITC/.git/hooks/commit-msg.d/10-agent" ]; then
-  echo "ok 60 - PreToolUse lazily installs 10-agent on git commit and ignores non-commit or non-git calls"
+  echo "ok 59 - PreToolUse lazily installs 10-agent on git commit and ignores non-commit or non-git calls"
 else
-  echo "not ok 60 - PreToolUse behaviour wrong (clone='$out_clone' plain='$out_plain' ws='$out_ws' cd='$out_cd' gitc='$out_gitc')"
+  echo "not ok 59 - PreToolUse behaviour wrong (clone='$out_clone' plain='$out_plain' ws='$out_ws' cd='$out_cd' gitc='$out_gitc')"
 fi
 
-# Test 61: etc/agents/hooks/ensure-commit-hooks, run directly by Claude Code,
+# Test 60: etc/agents/hooks/ensure-commit-hooks, run directly by Claude Code,
 # reads Claude's payload (cwd, tool_input.command), installs 10-agent on git
 # commit, and stays silent with exit 0 so it never sets a permission decision
 ECH_HOOK="$DIR/../../../etc/agents/hooks/ensure-commit-hooks"
@@ -918,12 +916,12 @@ if [ "$ech_skip" = status=0 ] && [ "$ech_plain" = status=0 ] &&
   [ ! -e "$ECH_PLAIN/.git" ] &&
   [ -x "$ECH_CWD/.git/hooks/commit-msg.d/10-agent" ] &&
   [ -x "$ECH_CD/.git/hooks/commit-msg.d/10-agent" ]; then
-  echo "ok 61 - ensure-commit-hooks handles Claude Code payloads silently"
+  echo "ok 60 - ensure-commit-hooks handles Claude Code payloads silently"
 else
-  echo "not ok 61 - ensure-commit-hooks behaviour wrong (skip='$ech_skip' plain='$ech_plain' cwd='$ech_cwd' cd='$ech_cd')"
+  echo "not ok 60 - ensure-commit-hooks behaviour wrong (skip='$ech_skip' plain='$ech_plain' cwd='$ech_cwd' cd='$ech_cd')"
 fi
 
-# Test 62: retired pre-multiplexer '# git-hook(s)-agent:' scripts are flagged by
+# Test 61: retired pre-multiplexer '# git-hook(s)-agent:' scripts are flagged by
 # doctor/status and purged by apply
 ZOMBIE_REPO=$(new_repo zombie)
 printf '#!/bin/sh\n# git-hooks-agent: commit-msg\nexit 99\n' >"$ZOMBIE_REPO/.git/hooks/commit-msg"
@@ -934,12 +932,12 @@ z_rc=$?
 if [ "$z_rc" -ne 0 ] && [[ "$z_doc" == *"[WARN]"*"retired"* ]] &&
   [ ! -e "$ZOMBIE_REPO/.git/hooks/commit-msg.d/00-legacy" ] &&
   [ -x "$ZOMBIE_REPO/.git/hooks/commit-msg.d/10-agent" ]; then
-  echo "ok 62 - retired pre-multiplexer hooks are flagged by doctor/status and purged by apply"
+  echo "ok 61 - retired pre-multiplexer hooks are flagged by doctor/status and purged by apply"
 else
-  echo "not ok 62 - retired pre-multiplexer hook handling failed (rc=$z_rc)"
+  echo "not ok 61 - retired pre-multiplexer hook handling failed (rc=$z_rc)"
 fi
 
-# Test 63: ensure-commit-hooks skips third-party clones unless opted in
+# Test 62: ensure-commit-hooks skips third-party clones unless opted in
 EXT_CLONE=$(new_repo ext-clone)
 git -C "$EXT_CLONE" remote add origin https://github.com/other-org/snippets.git
 OPTIN_CLONE=$(new_repo optin-clone)
@@ -949,7 +947,7 @@ claude_call "$EXT_CLONE" "git commit -m test" >/dev/null
 claude_call "$OPTIN_CLONE" "git commit -m test" >/dev/null
 if [ ! -e "$EXT_CLONE/.git/hooks/commit-msg.d/10-agent" ] &&
   [ -x "$OPTIN_CLONE/.git/hooks/commit-msg.d/10-agent" ]; then
-  echo "ok 63 - ensure-commit-hooks skips third-party clones unless opted in"
+  echo "ok 62 - ensure-commit-hooks skips third-party clones unless opted in"
 else
-  echo "not ok 63 - ensure-commit-hooks third-party scoping failed"
+  echo "not ok 62 - ensure-commit-hooks third-party scoping failed"
 fi

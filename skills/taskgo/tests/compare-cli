@@ -13,6 +13,11 @@ tool's payload with the CLI's output. Prints one line per check and counts
 only, never file contents, so it is safe to run against a private tracker.
 """
 
+import argparse
+import contextlib
+import importlib.machinery
+import importlib.util
+import io
 import json
 import os
 import subprocess
@@ -20,6 +25,7 @@ import sys
 import tempfile
 import urllib.request
 from pathlib import Path
+from typing import Any
 
 HERE = Path(__file__).resolve().parent
 CLI = HERE.parent / "scripts" / "taskgo"
@@ -63,9 +69,19 @@ def call(url: str, tool: str, args: dict) -> tuple[bool, dict | str]:
     return True, result["structuredContent"]
 
 
+def load_taskgo() -> Any:
+    loader = importlib.machinery.SourceFileLoader("taskgo_cli_under_test", str(CLI))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    assert spec is not None
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[loader.name] = mod
+    loader.exec_module(mod)
+    return mod
+
+
 class Checker:
-    def __init__(self, url: str, root: Path, today: str):
-        self.url, self.root = url, root
+    def __init__(self, url: str, root: Path, today: str, fast_tg: Any = None):
+        self.url, self.root, self.fast_tg = url, root, fast_tg
         self.env = dict(os.environ, TASKGO_TODAY=today, NO_COLOR="1")
         for k in (
             "CLAUDE_CODE_SESSION_ID",
@@ -73,11 +89,45 @@ class Checker:
             "CODEX_SESSION_ID",
         ):
             self.env.pop(k, None)
+        self.taskgo_py = os.environ.get("TASKGO_PY")
         self.passed = self.failed = 0
 
     def cli(self, *args: str) -> subprocess.CompletedProcess:
+        argv = ["--root", str(self.root), *args]
+        if self.fast_tg is not None:
+            tg = self.fast_tg
+            saved_env = os.environ.copy()
+            out_buf, err_buf = io.StringIO(), io.StringIO()
+            rc = 0
+            try:
+                os.environ.clear()
+                os.environ.update(self.env)
+                tg._REPO_ROOT_CACHE = None
+                tg._EXPLICIT_ROOT = None
+                tg._ACTIVE_COMMAND = None
+                tg._OFFLINE_FLAG = False
+                with (
+                    contextlib.redirect_stdout(out_buf),
+                    contextlib.redirect_stderr(err_buf),
+                ):
+                    tg.main(argv)
+            except SystemExit as exc:
+                if exc.code is None:
+                    rc = 0
+                elif isinstance(exc.code, int):
+                    rc = exc.code
+                else:
+                    print(exc.code, file=err_buf)
+                    rc = 1
+            finally:
+                os.environ.clear()
+                os.environ.update(saved_env)
+            return subprocess.CompletedProcess(
+                argv, rc, out_buf.getvalue(), err_buf.getvalue()
+            )
+        cmd = [self.taskgo_py, str(CLI), *argv] if self.taskgo_py else [str(CLI), *argv]
         return subprocess.run(
-            [str(CLI), "--root", str(self.root), *args],
+            cmd,
             capture_output=True,
             text=True,
             env=self.env,
@@ -101,10 +151,15 @@ def note_prefix(text: str) -> str:
 
 
 def main() -> None:
-    if len(sys.argv) != 3:
-        print("usage: compare-cli URL LOCAL_REPO", file=sys.stderr)
-        sys.exit(2)
-    url, repo = sys.argv[1], Path(sys.argv[2]).resolve()
+    ap = argparse.ArgumentParser()
+    ap.add_argument(
+        "--fast", action="store_true", help="Invoke scripts/taskgo in-process"
+    )
+    ap.add_argument("url")
+    ap.add_argument("local_repo")
+    parsed = ap.parse_args()
+    url, repo = parsed.url, Path(parsed.local_repo).resolve()
+    fast_tg = load_taskgo() if parsed.fast else None
     bypass_proxy_for_loopback()
     ok, head = call(url, "list_projects", {})
     if not ok:
@@ -123,7 +178,7 @@ def main() -> None:
         subprocess.run(
             ["git", "-C", str(root), "checkout", "-q", "-B", "main"], check=True
         )
-        c = Checker(url, root, today)
+        c = Checker(url, root, today, fast_tg=fast_tg)
 
         c.check(
             "list_projects",

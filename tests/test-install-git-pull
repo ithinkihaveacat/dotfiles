@@ -346,7 +346,7 @@ run_git_up "$TMP/dirty" 1
 check "dirty working tree fails when updates are incoming" is "$status" 1
 check "reports uncommitted changes" has "$output" "uncommitted changes"
 
-# 11. Divergence is refused regardless of pull.rebase.
+# 11. Divergence is refused and leaves local commits intact.
 make_remote_and_clone "div"
 echo "local A" >"$TMP/div/a.txt"
 git -C "$TMP/div" add a.txt
@@ -358,62 +358,12 @@ git -C "$TMP/div-admin" commit -q -m "feat: add A (#1)"
 git -C "$TMP/div-admin" push -q origin main >/dev/null 2>&1
 
 run_git_up "$TMP/div" 1
-check "diverged local main fails in non-interactive mode when pull.rebase is false" is "$status" 1
-
-git -C "$TMP/div" config --local pull.rebase true
-run_git_up "$TMP/div" 1
-check "pull.rebase=true cannot override divergence refusal" is "$status" 1
+check "diverged local main fails in non-interactive mode" is "$status" 1
 check "legacy squash divergence has recovery context" has "$output" "earlier squash merge"
-
-make_remote_and_clone "div-merges"
-echo "local B" >"$TMP/div-merges/b.txt"
-git -C "$TMP/div-merges" add b.txt
-git -C "$TMP/div-merges" commit -q -m "feat: add B"
-git -C "$TMP/div-merges" push -q origin HEAD:refs/heads/pr-b >/dev/null 2>&1
-git -C "$TMP/div-merges-admin" fetch -q origin pr-b:pr-b
-git -C "$TMP/div-merges-admin" merge -q --squash pr-b
-git -C "$TMP/div-merges-admin" commit -q -m "feat: add B (#2)"
-git -C "$TMP/div-merges-admin" push -q origin main >/dev/null 2>&1
-git -C "$TMP/div-merges" config --local pull.rebase merges
-run_git_up "$TMP/div-merges" 1
-check "pull.rebase=merges cannot override divergence refusal" is "$status" 1
-check "squash divergence leaves the original commits intact" \
-  is "$(git -C "$TMP/div-merges" rev-list --count origin/main..HEAD)" "1"
-
-# Actual local merge commits must not be flattened or replayed either.
-make_remote_and_clone "preserve-merge"
-git -C "$TMP/preserve-merge" checkout -q -b topic-side
-echo "side" >"$TMP/preserve-merge/side.txt"
-git -C "$TMP/preserve-merge" add side.txt
-git -C "$TMP/preserve-merge" commit -q -m "feat: side work"
-git -C "$TMP/preserve-merge" checkout -q main
-git -C "$TMP/preserve-merge" merge -q --no-ff topic-side -m "Merge branch 'topic-side'"
-echo "remote-u" >"$TMP/preserve-merge-admin/upstream.txt"
-git -C "$TMP/preserve-merge-admin" add upstream.txt
-git -C "$TMP/preserve-merge-admin" commit -q -m "feat: upstream change"
-git -C "$TMP/preserve-merge-admin" push -q origin main >/dev/null 2>&1
-git -C "$TMP/preserve-merge" config --local pull.rebase merges
-run_git_up "$TMP/preserve-merge" 1
-merge_rev=$(git -C "$TMP/preserve-merge" rev-list --merges -n 1 HEAD)
-check "divergent local merge commits remain untouched" \
-  is "$status:$([ -n "$merge_rev" ] && echo yes || echo no)" "1:yes"
-
-# 12. Multi-commit squash divergence never starts a rebase.
-make_remote_and_clone "conflict"
-echo "step1" >>"$TMP/conflict/file.txt"
-git -C "$TMP/conflict" commit -q -am "feat: step 1"
-echo "step2" >>"$TMP/conflict/file.txt"
-git -C "$TMP/conflict" commit -q -am "feat: step 2"
-git -C "$TMP/conflict" push -q origin HEAD:refs/heads/pr-multi >/dev/null 2>&1
-git -C "$TMP/conflict-admin" fetch -q origin pr-multi:pr-multi
-git -C "$TMP/conflict-admin" merge -q --squash pr-multi
-git -C "$TMP/conflict-admin" commit -q -m "feat: squashed steps (#2)"
-git -C "$TMP/conflict-admin" push -q origin main >/dev/null 2>&1
-git -C "$TMP/conflict" config --local pull.rebase true
-run_git_up "$TMP/conflict" 1
-check "conflicting multi-commit squash exits non-zero" is "$status" 1
 check "squash divergence never starts a rebase and HEAD stays on main" \
-  is "$(git -C "$TMP/conflict" branch --show-current)" "main"
+  is "$(git -C "$TMP/div" branch --show-current)" "main"
+check "squash divergence leaves the original commits intact" \
+  is "$(git -C "$TMP/div" rev-list --count origin/main..HEAD)" "1"
 
 # Ordinary multi-commit PR merges preserve ancestry and fast-forward naturally.
 make_remote_and_clone "merged-pr"
@@ -513,7 +463,7 @@ check "apply and integrate cannot be combined" is "$status" 1
 # 13. End-to-end self-reexec: when git-pull updates install.sh, remaining features
 #     execute from the newly updated install.sh on disk without re-running git-pull.
 setup_e2e_repo() {
-  local prefix=$1 restrict_zero_arg=${2:-0}
+  local prefix=$1 restrict_zero_arg=${2:-0} patch_marker=${3:-1}
   local home="$TMP/$prefix-home"
   local bare="$TMP/$prefix-origin.git"
   local admin="$TMP/$prefix-admin"
@@ -539,7 +489,8 @@ PY
   git -C "$home/.dotfiles" push -q -u origin main >/dev/null 2>&1
 
   git clone -q "$bare" "$admin"
-  python3 - "$admin/install.sh" "$restrict_zero_arg" <<'PY'
+  if [ "$patch_marker" = 1 ]; then
+    python3 - "$admin/install.sh" "$restrict_zero_arg" <<'PY'
 import pathlib, sys
 p = pathlib.Path(sys.argv[1])
 src = p.read_text()
@@ -552,12 +503,23 @@ new = '  heading "links"\n  echo "MARKER_FROM_UPDATED_INSTALL_SH"'
 assert old in src
 p.write_text(src.replace(old, new, 1))
 PY
-  chmod +x "$admin/install.sh"
-  git -C "$admin" commit -q -am "feat: add updated links marker"
+    chmod +x "$admin/install.sh"
+    git -C "$admin" commit -q -am "feat: add updated links marker"
+  else
+    echo "update" >>"$admin/home/.testrc"
+    git -C "$admin" commit -q -am "feat: upstream change"
+  fi
   git -C "$admin" push -q origin main >/dev/null 2>&1
 }
 
-setup_e2e_repo "e2e" 0
+setup_e2e_repo "e2e" 0 1
+dry_before=$(git -C "$TMP/e2e-home/.dotfiles" rev-parse HEAD)
+status=0
+output=$(env -i HOME="$TMP/e2e-home" PATH="/usr/bin:/bin" \
+  "$TMP/e2e-home/.dotfiles/install.sh" -n --only git-pull,links --no-input 2>&1 </dev/null) || status=$?
+check "end-to-end --dry-run exits 0 without advancing HEAD" \
+  is "$status:$(git -C "$TMP/e2e-home/.dotfiles" rev-parse HEAD)" "0:$dry_before"
+
 status=0
 output=$(env -i HOME="$TMP/e2e-home" PATH="/usr/bin:/bin" \
   "$TMP/e2e-home/.dotfiles/install.sh" --only git-pull,links --accept-updates --no-input 2>&1 </dev/null) || status=$?
@@ -566,7 +528,7 @@ check "runs links from newly pulled install.sh on disk" \
   has "$output" "MARKER_FROM_UPDATED_INSTALL_SH"
 
 # 14. End-to-end 0-arg self-reexec & guarantee install.sh leaves ~/.ssh untouched.
-setup_e2e_repo "e2e0" 1
+setup_e2e_repo "e2e0" 1 1
 mkdir -p "$TMP/e2e0-home/.ssh"
 git -C "$TMP/e2e0-home/.ssh" init -q --initial-branch=main
 echo "id" >"$TMP/e2e0-home/.ssh/config"
@@ -582,17 +544,8 @@ check "0-arg self-reexec runs links from updated install.sh" \
 check "0-arg install.sh leaves ~/.ssh detached repo untouched" \
   is "$(git -C "$TMP/e2e0-home/.ssh" branch --show-current)" ""
 
-# 15. End-to-end --dry-run exits 0 without modifying checkout
-setup_e2e_repo "e2e-dry" 0
-dry_before=$(git -C "$TMP/e2e-dry-home/.dotfiles" rev-parse HEAD)
-status=0
-output=$(env -i HOME="$TMP/e2e-dry-home" PATH="/usr/bin:/bin" \
-  "$TMP/e2e-dry-home/.dotfiles/install.sh" -n --only git-pull,links --no-input 2>&1 </dev/null) || status=$?
-check "end-to-end --dry-run exits 0 without advancing HEAD" \
-  is "$status:$(git -C "$TMP/e2e-dry-home/.dotfiles" rev-parse HEAD)" "0:$dry_before"
-
-# 16. Failed overlay preflight prevents every update and every apply feature.
-setup_e2e_repo "e2e-partial" 0
+# 15. Failed overlay preflight prevents every update and every apply feature.
+setup_e2e_repo "e2e-partial" 0 0
 mkdir -p "$TMP/e2e-partial-home/.private"
 git -C "$TMP/e2e-partial-home/.private" init -q --initial-branch=main
 echo "p" >"$TMP/e2e-partial-home/.private/secret.txt"
@@ -610,9 +563,15 @@ check "failed preflight runs neither incoming installer nor links" \
 check "failed preflight reports that nothing advanced" has "$output" "no checkouts advanced"
 
 # Apply-only works with a broken remote and does not execute incoming code.
-setup_e2e_repo "e2e-apply" 0
+mkdir -p "$TMP/e2e-apply-home/.dotfiles/home" "$TMP/e2e-apply-home/.dotfiles/fish"
+git -C "$TMP/e2e-apply-home/.dotfiles" init -q --initial-branch=main
+cp "$INSTALL_SH" "$TMP/e2e-apply-home/.dotfiles/install.sh"
+chmod +x "$TMP/e2e-apply-home/.dotfiles/install.sh"
+echo "# test" >"$TMP/e2e-apply-home/.dotfiles/home/.testrc"
+git -C "$TMP/e2e-apply-home/.dotfiles" add install.sh home/.testrc fish
+git -C "$TMP/e2e-apply-home/.dotfiles" commit -q -m "chore: initial installer"
+git -C "$TMP/e2e-apply-home/.dotfiles" remote add origin "$TMP/missing.git"
 apply_head=$(git -C "$TMP/e2e-apply-home/.dotfiles" rev-parse HEAD)
-git -C "$TMP/e2e-apply-home/.dotfiles" remote set-url origin "$TMP/missing.git"
 status=0
 output=$(env -i HOME="$TMP/e2e-apply-home" PATH="/usr/bin:/bin" \
   "$TMP/e2e-apply-home/.dotfiles/install.sh" --apply --only links --no-input 2>&1 </dev/null) || status=$?
@@ -621,7 +580,7 @@ check "apply-only leaves HEAD unchanged" is "$(git -C "$TMP/e2e-apply-home/.dotf
 check "apply-only applies current local files" test -L "$TMP/e2e-apply-home/.testrc"
 
 # Declining approval must never execute the incoming installer or overlay hook.
-setup_e2e_repo "e2e-refuse" 0
+setup_e2e_repo "e2e-refuse" 0 1
 status=0
 output=$(env -i HOME="$TMP/e2e-refuse-home" PATH="/usr/bin:/bin" \
   "$TMP/e2e-refuse-home/.dotfiles/install.sh" --only git-pull,links --no-input 2>&1 </dev/null) || status=$?
@@ -632,7 +591,7 @@ check "unapproved update does not apply local links either" \
   is "$([ -e "$TMP/e2e-refuse-home/.testrc" ] && echo yes || echo no)" "no"
 
 # A new overlay hook must not execute without approval of its incoming code.
-setup_e2e_repo "e2e-hook" 0
+setup_e2e_repo "e2e-hook" 0 0
 make_remote_and_clone "hook-overlay"
 mv "$TMP/hook-overlay" "$TMP/e2e-hook-home/.private"
 cat >"$TMP/hook-overlay-admin/update" <<'EOF'

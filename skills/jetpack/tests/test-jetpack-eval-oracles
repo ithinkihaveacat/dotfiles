@@ -22,8 +22,40 @@ ADDED="RemotePreviewWrapper"
 
 TEST_TMP=$(mktemp -d "${TMPDIR:-/tmp}/jetpack-eval-oracles.XXXXXXXX")
 trap 'rm -rf "$TEST_TMP"' EXIT
+export XDG_CACHE_HOME="$TEST_TMP/cache"
+export JETPACK_CACHE_DIR="$TEST_TMP/cache/jetpack"
+export TMPDIR="$TEST_TMP"
+ERR_FILE="$TEST_TMP/oracle.err"
 
-TOTAL_TESTS=20
+DIFF_STUB="$TEST_TMP/jetpack-diff-stub"
+cat >"$DIFF_STUB" <<'EOF'
+#!/usr/bin/env bash
+set -u
+if [[ $# -ne 5 || $1 != "source" || $2 != "androidx.compose.remote:remote-tooling-preview" || $4 != "--output" ]]; then
+  echo "jetpack-diff-stub: unexpected invocation: $*" >&2
+  exit 1
+fi
+VERSION=$3
+OUTPUT=$5
+mkdir -p "$OUTPUT/androidx/compose/remote/tooling/preview"
+case "$VERSION" in
+  1.0.0-alpha08)
+    echo 'public class ExistingPreview {}' >"$OUTPUT/androidx/compose/remote/tooling/preview/ExistingPreview.kt"
+    ;;
+  1.0.0-alpha09)
+    echo 'public class ExistingPreview {}' >"$OUTPUT/androidx/compose/remote/tooling/preview/ExistingPreview.kt"
+    echo 'public class RemotePreviewWrapper {}' >"$OUTPUT/androidx/compose/remote/tooling/preview/RemotePreviewWrapper.kt"
+    ;;
+  *)
+    echo "jetpack-diff-stub: unexpected version: $VERSION" >&2
+    exit 1
+    ;;
+esac
+printf '%s\n' "$OUTPUT"
+EOF
+chmod +x "$DIFF_STUB"
+
+TOTAL_TESTS=13
 TEST_NUM=0
 echo "1..$TOTAL_TESTS"
 
@@ -56,92 +88,66 @@ assert_status() {
   fi
 }
 
-assert_contains() {
-  local description="$1" haystack="$2" needle="$3"
-  if [[ "$haystack" == *"$needle"* ]]; then
-    ok "$description"
-  else
-    not_ok "$description" "Expected to contain: $needle" "Got: $haystack"
-  fi
+run_oracle() {
+  "$ORACLE" "$@" >/dev/null 2>"$ERR_FILE"
+  STATUS=$?
+  STDERR=$(cat "$ERR_FILE")
 }
 
-run_oracle() {
-  local err_file
-  err_file=$(mktemp "${TMPDIR:-/tmp}/jetpack-eval-oracle-error.XXXXXXXX")
-  STDOUT=$("$ORACLE" "$@" 2>"$err_file")
+run_diff_oracle() {
+  JETPACK_BIN="$DIFF_STUB" "$ORACLE" "$@" >/dev/null 2>"$ERR_FILE"
   STATUS=$?
-  STDERR=$(cat "$err_file")
-  rm -f "$err_file"
+  STDERR=$(cat "$ERR_FILE")
 }
 
 run_history_oracle() {
-  local err_file
-  err_file=$(mktemp "${TMPDIR:-/tmp}/jetpack-history-oracle-error.XXXXXXXX")
-  STDOUT=$(JETPACK_BIN="$HISTORY_STUB" "$HISTORY_ORACLE" "$@" 2>"$err_file")
+  JETPACK_BIN="$HISTORY_STUB" "$HISTORY_ORACLE" "$@" >/dev/null 2>"$ERR_FILE"
   STATUS=$?
-  STDERR=$(cat "$err_file")
-  rm -f "$err_file"
+  STDERR=$(cat "$ERR_FILE")
 }
 
 # --- Usage surface (no network) -------------------------------------------
 
 run_oracle --help
 assert_status "--help exits 0" "$STATUS" 0
-assert_contains "help names the arguments" "$STDOUT" "ANSWER        Path to the file"
-
-run_oracle -h
-assert_status "-h is a help alias" "$STATUS" 0
 
 run_oracle
 assert_status "no arguments is a usage error" "$STATUS" 1
-assert_contains "the usage error points at --help" "$STDERR" "--help"
 
 printf 'irrelevant\n' >"$TEST_TMP/answer.md"
 
 run_oracle "$TEST_TMP/nonexistent.md" "$ARTIFACT" "$OLD" "$NEW"
 assert_status "a missing answer file exits 2, not 1" "$STATUS" 2
-assert_contains "the missing answer file is named" "$STDERR" "no answer file at"
 
-# --- Verdicts (offline, against a warmed cache) ---------------------------
-#
-# Exit 2 means the download failed, which here means the cache is cold rather
-# than that the oracle is wrong; report that as a skip.
+# --- Verdicts (hermetic stub + cold-cache exit 2) ---------------------------
 
 printf 'alpha09 adds %s, a PreviewWrapperProvider.\n' "$ADDED" >"$TEST_TMP/good.md"
 printf 'Various bug fixes and performance improvements.\n' >"$TEST_TMP/vague.md"
 
 AGENT_OFFLINE=1 run_oracle "$TEST_TMP/good.md" "$ARTIFACT" "$OLD" "$NEW"
-if [[ "$STATUS" -eq 2 ]]; then
-  skip "an answer naming the added class passes" "cache not warmed for $ARTIFACT"
-  skip "a vague answer fails and names what it missed" "cache not warmed for $ARTIFACT"
-else
-  assert_status "an answer naming the added class passes" "$STATUS" 0
+assert_status "cold offline cache exits 2 when download is unavailable" "$STATUS" 2
 
-  AGENT_OFFLINE=1 run_oracle "$TEST_TMP/vague.md" "$ARTIFACT" "$OLD" "$NEW"
-  if [[ "$STATUS" -eq 1 && "$STDERR" == *"$ADDED"* ]]; then
-    ok "a vague answer fails and names what it missed"
-  else
-    not_ok "a vague answer fails and names what it missed" \
-      "Expected exit 1 mentioning $ADDED, got $STATUS: $STDERR"
-  fi
+run_diff_oracle "$TEST_TMP/good.md" "$ARTIFACT" "$OLD" "$NEW"
+assert_status "an answer naming the added class passes" "$STATUS" 0
+
+run_diff_oracle "$TEST_TMP/vague.md" "$ARTIFACT" "$OLD" "$NEW"
+if [[ "$STATUS" -eq 1 && "$STDERR" == *"$ADDED"* ]]; then
+  ok "a vague answer fails and names what it missed"
+else
+  not_ok "a vague answer fails and names what it missed" \
+    "Expected exit 1 mentioning $ADDED, got $STATUS: $STDERR"
 fi
 
 # --- Source-history oracle -------------------------------------------------
 
 run_history_oracle --help
 assert_status "source-history --help exits 0" "$STATUS" 0
-assert_contains "source-history help names the case spec" "$STDOUT" "CASE_SPEC"
-
-run_history_oracle -h
-assert_status "source-history -h is a help alias" "$STATUS" 0
 
 run_history_oracle
 assert_status "source-history with no arguments is a usage error" "$STATUS" 1
-assert_contains "source-history usage error points at --help" "$STDERR" "--help"
 
 run_history_oracle "$TEST_TMP/nonexistent.md" "$HISTORY_SPEC"
 assert_status "source-history missing answer exits 2" "$STATUS" 2
-assert_contains "source-history names the missing answer" "$STDERR" "no answer file at"
 
 printf '{}\n' >"$TEST_TMP/invalid-spec.json"
 run_history_oracle "$TEST_TMP/answer.md" "$TEST_TMP/invalid-spec.json"

@@ -1,8 +1,4 @@
-#!/usr/bin/env -S uv run --script
-# /// script
-# requires-python = ">=3.11"
-# dependencies = []
-# ///
+#!/usr/bin/env python3
 """TAP-compatible test suite for adb-screenrecord."""
 
 import json
@@ -129,11 +125,17 @@ done
 echo data >"${!#}"
 """
 
+MOCK_SLEEP = r"""#!/bin/sh
+# Skip the 0.5s SurfaceFlinger wake delay in mocked unit runs.
+[ "${1:-}" = "0.5" ] && exit 0
+PATH="/usr/bin:/bin" exec sleep "$@"
+"""
+
 
 def run_mocked(
     args: list[str], env_extra: dict[str, str] | None = None
 ) -> tuple[subprocess.CompletedProcess, dict[str, list[str]]]:
-    """Run adb-screenrecord against mock adb, scrcpy, and ffmpeg binaries.
+    """Run adb-screenrecord against mock adb, scrcpy, ffmpeg, and sleep binaries.
 
     Returns the completed process and the argument lines each mock logged.
     """
@@ -144,6 +146,7 @@ def run_mocked(
             ("adb", MOCK_ADB),
             ("scrcpy", MOCK_SCRCPY),
             ("ffmpeg", MOCK_FFMPEG),
+            ("sleep", MOCK_SLEEP),
         ):
             path = mock_bin / name
             path.write_text(body)
@@ -182,9 +185,67 @@ def all_adb_targeted(adb_lines: list[str], serial: str) -> bool:
     )
 
 
+def run_signal_test(
+    tap: TapRunner,
+    device_available: bool,
+    skip_reason: str,
+    description: str,
+    fail_label: str,
+    sig: signal.Signals,
+    *,
+    double: bool = False,
+) -> None:
+    """Verify live adb-screenrecord exits 0 and writes a valid MP4 on signal."""
+    if not device_available:
+        tap.skip(description, skip_reason)
+        return
+    with tempfile.TemporaryDirectory() as temp_dir:
+        out_file = os.path.join(temp_dir, "test_signal.mp4")
+        proc = subprocess.Popen(
+            [SCREENRECORD_BIN, out_file],
+            start_new_session=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        time.sleep(3)
+        try:
+            os.killpg(proc.pid, sig)
+            if double:
+                time.sleep(0.05)
+                os.killpg(proc.pid, sig)
+        except ProcessLookupError:
+            pass
+        try:
+            _, stderr_data = proc.communicate(timeout=10)
+            ret = proc.returncode
+            stderr = stderr_data.decode("utf-8", errors="replace")
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            _, stderr_data = proc.communicate()
+            ret = proc.returncode
+            stderr = (
+                stderr_data.decode("utf-8", errors="replace")
+                + "\n(timed out after 10s)"
+            )
+        valid, msg = validate_mp4(out_file)
+        if ret == 0 and valid:
+            tap.ok(f"{description} ({msg})")
+        else:
+            tap.not_ok(fail_label, f"exit: {ret}, {msg}\nstderr: {stderr}")
+
+
 def main() -> int:
     tap = TapRunner(plan_count=11)
-    device_available = is_device_connected()
+    live_enabled = os.environ.get("ADB_LIVE_TEST") == "1"
+    device_available = live_enabled and is_device_connected()
+    skip_reason = (
+        "no adb device connected"
+        if live_enabled
+        else "live device tests require ADB_LIVE_TEST=1"
+    )
 
     # Test 1: Help and usage
     res = subprocess.run(
@@ -212,7 +273,7 @@ def main() -> int:
 
     # Test 3: Timed capture (--duration)
     if not device_available:
-        tap.skip("timed capture produces valid playable MP4", "no adb device connected")
+        tap.skip("timed capture produces valid playable MP4", skip_reason)
     else:
         with tempfile.TemporaryDirectory() as temp_dir:
             out_file = os.path.join(temp_dir, "test_timed.mp4")
@@ -228,138 +289,32 @@ def main() -> int:
             else:
                 tap.not_ok("timed capture failed", f"{msg}\nstderr: {res.stderr}")
 
-    # Test 4: SIGINT interruption (Ctrl-C clean exit & moov atom writing)
-    if not device_available:
-        tap.skip(
-            "SIGINT interruption produces valid playable MP4", "no adb device connected"
-        )
-    else:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            out_file = os.path.join(temp_dir, "test_sigint.mp4")
-            proc = subprocess.Popen(
-                [SCREENRECORD_BIN, out_file],
-                start_new_session=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-            time.sleep(3)
-            try:
-                os.killpg(proc.pid, signal.SIGINT)
-            except ProcessLookupError:
-                pass
-            try:
-                _, stderr_data = proc.communicate(timeout=10)
-                ret = proc.returncode
-                stderr = stderr_data.decode("utf-8", errors="replace")
-            except subprocess.TimeoutExpired:
-                try:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                _, stderr_data = proc.communicate()
-                ret = proc.returncode
-                stderr = (
-                    stderr_data.decode("utf-8", errors="replace")
-                    + "\n(timed out after 10s)"
-                )
-            valid, msg = validate_mp4(out_file)
-            if ret == 0 and valid:
-                tap.ok(f"SIGINT interruption produces valid playable MP4 ({msg})")
-            else:
-                tap.not_ok(
-                    "SIGINT interruption failed",
-                    f"exit: {ret}, {msg}\nstderr: {stderr}",
-                )
-
-    # Test 5: Double SIGINT (rapid Ctrl-C) resilience during cleanup
-    if not device_available:
-        tap.skip(
-            "double SIGINT interruption completes cleanup cleanly",
-            "no adb device connected",
-        )
-    else:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            out_file = os.path.join(temp_dir, "test_double_sigint.mp4")
-            proc = subprocess.Popen(
-                [SCREENRECORD_BIN, out_file],
-                start_new_session=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-            time.sleep(3)
-            try:
-                os.killpg(proc.pid, signal.SIGINT)
-                time.sleep(0.05)
-                os.killpg(proc.pid, signal.SIGINT)
-            except ProcessLookupError:
-                pass
-            try:
-                _, stderr_data = proc.communicate(timeout=10)
-                ret = proc.returncode
-                stderr = stderr_data.decode("utf-8", errors="replace")
-            except subprocess.TimeoutExpired:
-                try:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                _, stderr_data = proc.communicate()
-                ret = proc.returncode
-                stderr = (
-                    stderr_data.decode("utf-8", errors="replace")
-                    + "\n(timed out after 10s)"
-                )
-            valid, msg = validate_mp4(out_file)
-            if ret == 0 and valid:
-                tap.ok(f"double SIGINT interruption completes cleanup cleanly ({msg})")
-            else:
-                tap.not_ok(
-                    "double SIGINT interruption failed",
-                    f"exit: {ret}, {msg}\nstderr: {stderr}",
-                )
-
-    # Test 6: SIGTERM interruption (Task cancellation clean exit & moov atom writing)
-    if not device_available:
-        tap.skip(
-            "SIGTERM interruption produces valid playable MP4",
-            "no adb device connected",
-        )
-    else:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            out_file = os.path.join(temp_dir, "test_sigterm.mp4")
-            proc = subprocess.Popen(
-                [SCREENRECORD_BIN, out_file],
-                start_new_session=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-            time.sleep(3)
-            try:
-                os.killpg(proc.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-            try:
-                _, stderr_data = proc.communicate(timeout=10)
-                ret = proc.returncode
-                stderr = stderr_data.decode("utf-8", errors="replace")
-            except subprocess.TimeoutExpired:
-                try:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                _, stderr_data = proc.communicate()
-                ret = proc.returncode
-                stderr = (
-                    stderr_data.decode("utf-8", errors="replace")
-                    + "\n(timed out after 10s)"
-                )
-            valid, msg = validate_mp4(out_file)
-            if ret == 0 and valid:
-                tap.ok(f"SIGTERM interruption produces valid playable MP4 ({msg})")
-            else:
-                tap.not_ok(
-                    "SIGTERM interruption failed",
-                    f"exit: {ret}, {msg}\nstderr: {stderr}",
-                )
+    # Tests 4-6: SIGINT, double SIGINT, and SIGTERM interruption handling
+    run_signal_test(
+        tap,
+        device_available,
+        skip_reason,
+        "SIGINT interruption produces valid playable MP4",
+        "SIGINT interruption failed",
+        signal.SIGINT,
+    )
+    run_signal_test(
+        tap,
+        device_available,
+        skip_reason,
+        "double SIGINT interruption completes cleanup cleanly",
+        "double SIGINT interruption failed",
+        signal.SIGINT,
+        double=True,
+    )
+    run_signal_test(
+        tap,
+        device_available,
+        skip_reason,
+        "SIGTERM interruption produces valid playable MP4",
+        "SIGTERM interruption failed",
+        signal.SIGTERM,
+    )
 
     # Test 7: --serial targets the scrcpy path and overrides ANDROID_SERIAL
     res, logs = run_mocked(

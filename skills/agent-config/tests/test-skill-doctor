@@ -17,11 +17,16 @@ UI_DIR="${TMPDIR}/ui"
 mkdir -p "$UI_DIR"
 cd "$UI_DIR"
 git init -q
-"${SCRIPT}" add coding-standards >/dev/null 2>&1
+"${SKILL_CMD[@]}" add coding-standards >/dev/null 2>&1
 healthy_json=$(doctor_json)
-if [ "$(json_get "$healthy_json" 'd["healthy"]')" = "true" ] &&
-  [ "$(check_status "$healthy_json" "Installed Skills")" = "OK" ] &&
-  [ "$(check_status "$healthy_json" "Symlink Health")" = "OK" ] &&
+{
+  IFS= read -r h_healthy
+  IFS= read -r h_inst
+  IFS= read -r h_sym
+} < <(json_gets "$healthy_json" 'd["healthy"]' 'next((c["status"] for c in d["checks"] if c["name"]=="Installed Skills"), "MISSING")' 'next((c["status"] for c in d["checks"] if c["name"]=="Symlink Health"), "MISSING")')
+if [ "$h_healthy" = "true" ] &&
+  [ "$h_inst" = "OK" ] &&
+  [ "$h_sym" = "OK" ] &&
   human=$("${SCRIPT}" doctor 2>&1) &&
   [[ "$human" == *"[PASS] Workspace:"* ]] &&
   [[ "$human" == *"[PASS] Installed Skills: 1 skill(s) installed"* ]]; then
@@ -39,7 +44,7 @@ cd "$EMPTY_DIR"
 git init -q
 ej=$(doctor_json)
 args_rc=0
-"${SCRIPT}" doctor coding-standards >/dev/null 2>&1 || args_rc=$?
+"${SKILL_CMD[@]}" doctor coding-standards >/dev/null 2>&1 || args_rc=$?
 if [ "$(json_get "$ej" 'd["healthy"]')" = "true" ] && [ "$args_rc" -eq 2 ]; then
   echo "ok 2 - [Doctor] an empty workspace is healthy; skill arguments are a usage error"
 else
@@ -56,15 +61,24 @@ git init -q
 mkdir -p .claude/skills .agents/skills
 ln -s /nonexistent/target .claude/skills/broken
 aj=$(doctor_json)
-ah=$("${SCRIPT}" doctor 2>&1) || true
-if [ "$(check_status "$aj" "Symlink Health")" = "WARNING" ] &&
-  [ "$(json_get "$aj" 'd["healthy"]')" = "false" ] &&
-  [ "$(json_get "$aj" '[l["path"] for l in d["links"] if l["broken"]]')" = ".claude/skills/broken" ] &&
-  [[ "$ah" == *"skill remove broken"* ]] &&
+{
+  IFS= read -r a_sym
+  IFS= read -r a_healthy
+  IFS= read -r a_broken
+  IFS= read -r a_has_fix
+} < <(json_gets "$aj" \
+  'next((c["status"] for c in d["checks"] if c["name"]=="Symlink Health"), "MISSING")' \
+  'd["healthy"]' \
+  '[l["path"] for l in d["links"] if l["broken"]]' \
+  'any("skill remove broken" in line for c in d["checks"] if c["name"]=="Symlink Health" for line in c["details"])')
+if [ "$a_sym" = "WARNING" ] &&
+  [ "$a_healthy" = "false" ] &&
+  [ "$a_broken" = ".claude/skills/broken" ] &&
+  [ "$a_has_fix" = "true" ] &&
   [ -L .claude/skills/broken ]; then
   echo "ok 3 - [Symlink Health] doctor flags broken links and leaves them in place"
 else
-  echo "not ok 3 - [Symlink Health] doctor missed or removed a broken link: $ah / $aj"
+  echo "not ok 3 - [Symlink Health] doctor missed or removed a broken link: $aj"
 fi
 cd "$TMPDIR"
 
@@ -76,8 +90,12 @@ git init -q
 mkdir -p .claude/skills .agents/skills
 printf 'x' >.claude/skills/stray.txt
 uj=$(doctor_json)
-if [ "$(check_status "$uj" "Directory Cleanliness")" = "ERROR" ] &&
-  [ "$(json_get "$uj" 'd["unmanaged"]')" = ".claude/skills/stray.txt" ]; then
+{
+  IFS= read -r u_clean
+  IFS= read -r u_unmanaged
+} < <(json_gets "$uj" 'next((c["status"] for c in d["checks"] if c["name"]=="Directory Cleanliness"), "MISSING")' 'd["unmanaged"]')
+if [ "$u_clean" = "ERROR" ] &&
+  [ "$u_unmanaged" = ".claude/skills/stray.txt" ]; then
   echo "ok 4 - [Directory Cleanliness] doctor flags an unmanaged file"
 else
   echo "not ok 4 - [Directory Cleanliness] doctor missed unmanaged file: $uj"
@@ -94,21 +112,30 @@ mkdir -p .claude/skills .agents/skills .claude/skills/local-skill
 printf 'local' >.claude/skills/local-skill/SKILL.md
 git add .claude/skills/local-skill/SKILL.md
 tj=$(doctor_json)
-if [ "$(json_get "$tj" 'd["healthy"]')" = "true" ] &&
-  [ -z "$(json_get "$tj" 'd["unmanaged"]')" ]; then
+{
+  IFS= read -r t_healthy
+  IFS= read -r t_unmanaged
+  IFS= read -r t_vcs_status
+  IFS= read -r t_vcs_summary
+} < <(json_gets "$tj" \
+  'd["healthy"]' \
+  'd["unmanaged"]' \
+  'next((c["status"] for c in d["checks"] if c["name"]=="VCS-Managed Skills"), "MISSING")' \
+  'next((c["summary"] for c in d["checks"] if c["name"]=="VCS-Managed Skills"), "").startswith("Found 1 skill")')
+if [ "$t_healthy" = "true" ] &&
+  [ -z "$t_unmanaged" ]; then
   echo "ok 5 - [Directory Cleanliness] doctor ignores tracked skill directory"
 else
   echo "not ok 5 - [Directory Cleanliness] doctor failed on tracked skill: $tj"
 fi
 
 # Test 6: doctor lists VCS-managed skills in its report.
-lj=$(doctor_json)
-if [ "$(check_status "$lj" "VCS-Managed Skills")" = "OK" ] &&
-  [ "$(json_get "$lj" 'next((c["summary"] for c in d["checks"] if c["name"]=="VCS-Managed Skills"), "").startswith("Found 1 skill")')" = "true" ] &&
-  [[ "$lj" == *"local-skill"* ]]; then
+if [ "$t_vcs_status" = "OK" ] &&
+  [ "$t_vcs_summary" = "true" ] &&
+  [[ "$tj" == *"local-skill"* ]]; then
   echo "ok 6 - [Diagnostics] doctor lists VCS-managed skills"
 else
-  echo "not ok 6 - [Diagnostics] doctor failed to list VCS-managed skills: $lj"
+  echo "not ok 6 - [Diagnostics] doctor failed to list VCS-managed skills: $tj"
 fi
 cd "$TMPDIR"
 
@@ -120,14 +147,17 @@ git init -q
 mkdir -p .claude/skills
 mv "$MOCK_HOME/.claude" "$MOCK_HOME/.claude-backup"
 oj=$(doctor_json)
-oh=$("${SCRIPT}" doctor 2>&1) || true
 mv "$MOCK_HOME/.claude-backup" "$MOCK_HOME/.claude"
-if [ "$(check_status "$oj" "Orphaned Directories")" = "WARNING" ] &&
-  [[ "$oh" == *"Orphaned Directories"* ]] &&
-  [[ "$oh" == *".claude/skills (local folder exists, but ~/.claude config directory does not exist)"* ]]; then
+{
+  IFS= read -r o_status
+  IFS= read -r o_detail
+} < <(json_gets "$oj" \
+  'next((c["status"] for c in d["checks"] if c["name"]=="Orphaned Directories"), "MISSING")' \
+  'any(".claude/skills (local folder exists, but ~/.claude config directory does not exist)" in line for c in d["checks"] if c["name"]=="Orphaned Directories" for line in c["details"])')
+if [ "$o_status" = "WARNING" ] && [ "$o_detail" = "true" ]; then
   echo "ok 7 - [Orphaned] doctor flags orphaned local directories"
 else
-  echo "not ok 7 - [Orphaned] doctor did not report orphaned directories: $oh"
+  echo "not ok 7 - [Orphaned] doctor did not report orphaned directories: $oj"
 fi
 cd "$TMPDIR"
 
@@ -141,15 +171,22 @@ ln -s /nonexistent/stray-target .claude/skills/stray-broken
 ln -s /nonexistent/tracked-target .claude/skills/tracked-broken
 git add .claude/skills/tracked-broken
 xj=$(doctor_json)
-xh=$("${SCRIPT}" doctor 2>&1) || true
-if [ "$(check_status "$xj" "Symlink Health")" = "ERROR" ] &&
-  [ "$(json_get "$xj" '[l["name"] for l in d["links"] if l["broken"] and not l["tracked"]]')" = "stray-broken" ] &&
-  [ "$(json_get "$xj" '[l["name"] for l in d["links"] if l["tracked"]]')" = "tracked-broken" ] &&
-  [[ "$xh" == *"Broken links tracked by version control:"* ]] &&
-  [[ "$xh" == *"'skill' never removes a tracked link"* ]]; then
+{
+  IFS= read -r x_sym
+  IFS= read -r x_stray
+  IFS= read -r x_tracked
+} < <(json_gets "$xj" \
+  'next((c["status"] for c in d["checks"] if c["name"]=="Symlink Health"), "MISSING")' \
+  '[l["name"] for l in d["links"] if l["broken"] and not l["tracked"]]' \
+  '[l["name"] for l in d["links"] if l["tracked"]]')
+if [ "$x_sym" = "ERROR" ] &&
+  [ "$x_stray" = "stray-broken" ] &&
+  [ "$x_tracked" = "tracked-broken" ] &&
+  [[ "$xj" == *"Broken links tracked by version control:"* ]] &&
+  [[ "$xj" == *"'skill' never removes a tracked link"* ]]; then
   echo "ok 8 - [Symlink Health] doctor separates tracked from stray broken links"
 else
-  echo "not ok 8 - [Symlink Health] tracked/stray split wrong: $xh"
+  echo "not ok 8 - [Symlink Health] tracked/stray split wrong: $xj"
 fi
 cd "$TMPDIR"
 
@@ -164,8 +201,11 @@ mkdir -p .claude/skills .agents/skills
 ln -s "${MIX_DIR}/real-skill" .claude/skills/mix-skill
 ln -s "${MIX_DIR}/deleted-skill" .agents/skills/mix-skill
 dj=$(doctor_json)
-if [ "$(json_get "$dj" 'len([l for l in d["links"] if l["broken"]])')" = "1" ] &&
-  [ "$(json_get "$dj" 'd["healthy"]')" = "false" ]; then
+{
+  IFS= read -r d_broken_n
+  IFS= read -r d_healthy
+} < <(json_gets "$dj" 'len([l for l in d["links"] if l["broken"]])' 'd["healthy"]')
+if [ "$d_broken_n" = "1" ] && [ "$d_healthy" = "false" ]; then
   echo "ok 9 - [Symlink Health] cross-destination live and broken links are not double-counted"
 else
   echo "not ok 9 - [Symlink Health] expected 1 broken link, got: $dj"
@@ -177,19 +217,24 @@ DRIFT_DIR="${TMPDIR}/drift"
 mkdir -p "$DRIFT_DIR"
 cd "$DRIFT_DIR"
 git init -q
-"${SCRIPT}" add coding-standards >/dev/null 2>&1
+"${SKILL_CMD[@]}" add coding-standards >/dev/null 2>&1
 printf '# unrelated\n' >.git/info/exclude
 drift_json=$(doctor_json)
-drift_h=$("${SCRIPT}" doctor 2>&1) || true
-"${SCRIPT}" add emumanager >/dev/null 2>&1
+"${SKILL_CMD[@]}" add emumanager >/dev/null 2>&1
 fixed_json=$(doctor_json)
-if [ "$(check_status "$drift_json" "Workspace Exclusions")" = "ERROR" ] &&
-  [[ "$drift_h" == *"skill add"* ]] &&
+{
+  IFS= read -r drift_excl
+  IFS= read -r drift_hint
+} < <(json_gets "$drift_json" \
+  'next((c["status"] for c in d["checks"] if c["name"]=="Workspace Exclusions"), "MISSING")' \
+  'any("skill add" in line for c in d["checks"] if c["name"]=="Workspace Exclusions" for line in c["details"])')
+if [ "$drift_excl" = "ERROR" ] &&
+  [ "$drift_hint" = "true" ] &&
   [ "$(json_get "$fixed_json" 'd["healthy"]')" = "true" ] &&
   [ -z "$(git status --porcelain)" ]; then
   echo "ok 10 - [Exclusions] doctor flags exclude drift; the next add rewrites it"
 else
-  echo "not ok 10 - [Exclusions] drift not flagged or not repaired: $drift_h"
+  echo "not ok 10 - [Exclusions] drift not flagged or not repaired: $drift_json"
 fi
 cd "$TMPDIR"
 
@@ -212,9 +257,15 @@ cd "$PLUGIN_PATH_DIR"
 git init -q
 mkdir -p .claude/skills .agents/skills
 pj=$(doctor_json)
-if [ "$(check_status "$pj" "Plugin Local Paths")" = "OK" ] &&
-  [ "$(check_status "$pj" "Catalog Cache")" = "OK" ] &&
-  [ "$(json_get "$pj" 'd["healthy"]')" = "true" ]; then
+{
+  IFS= read -r p_local
+  IFS= read -r p_cache
+  IFS= read -r p_healthy
+} < <(json_gets "$pj" \
+  'next((c["status"] for c in d["checks"] if c["name"]=="Plugin Local Paths"), "MISSING")' \
+  'next((c["status"] for c in d["checks"] if c["name"]=="Catalog Cache"), "MISSING")' \
+  'd["healthy"]')
+if [ "$p_local" = "OK" ] && [ "$p_cache" = "OK" ] && [ "$p_healthy" = "true" ]; then
   echo "ok 11 - [Catalog Cache] plugin-provided local path skill does not require catalog stub"
 else
   echo "not ok 11 - [Catalog Cache] plugin path skill reported catalog error: $pj"
@@ -243,8 +294,13 @@ cd "$REMOTE_PLUGIN_DIR"
 git init -q
 mkdir -p .claude/skills .agents/skills
 rj=$(doctor_json)
-if [ "$(check_status "$rj" "Catalog Cache")" = "ERROR" ] &&
-  [ "$(check_status "$rj" "Plugin Local Paths")" = "ERROR" ]; then
+{
+  IFS= read -r r_cache
+  IFS= read -r r_local
+} < <(json_gets "$rj" \
+  'next((c["status"] for c in d["checks"] if c["name"]=="Catalog Cache"), "MISSING")' \
+  'next((c["status"] for c in d["checks"] if c["name"]=="Plugin Local Paths"), "MISSING")')
+if [ "$r_cache" = "ERROR" ] && [ "$r_local" = "ERROR" ]; then
   echo "ok 12 - [Catalog Cache] correctly separates remote catalog stubs from local plugin paths"
 else
   echo "not ok 12 - [Catalog Cache] failed to distinguish remote stubs from local paths: $rj"
@@ -270,8 +326,8 @@ EOF
 
 cd "$VIRT_SNAP_DIR"
 git init -q
-"${SCRIPT}" --scope user add virt-skill >/dev/null 2>&1
-"${SCRIPT}" add virt-skill >/dev/null 2>&1
+"${SKILL_CMD[@]}" --scope user add virt-skill >/dev/null 2>&1
+"${SKILL_CMD[@]}" add virt-skill >/dev/null 2>&1
 vj=$(doctor_json)
 if [ "$(readlink "${HOME}/.claude/skills/virt-skill")" = "${VIRT_SNAP_DIR}/vfs/head/virt-skill" ] &&
   grep -q "source: \"${VIRT_SNAP_DIR}/vfs/head/virt-skill\"" .claude/skills/virt-skill/SKILL.md &&
@@ -280,7 +336,7 @@ if [ "$(readlink "${HOME}/.claude/skills/virt-skill")" = "${VIRT_SNAP_DIR}/vfs/h
 else
   echo "not ok 13 - [Plugins] virtual target mishandled: $vj"
 fi
-"${SCRIPT}" --scope user clean >/dev/null 2>&1 || true
+"${SKILL_CMD[@]}" --scope user clean >/dev/null 2>&1 || true
 rm -f "${XDG_CONFIG_HOME}/skill/plugins/99_test_virt_snap.py"
 cd "$TMPDIR"
 
@@ -291,7 +347,7 @@ cd "$FAIL_DIR"
 git init -q
 mkdir -p .claude/skills
 printf 'x' >.claude/skills/junk
-if fout=$("${SCRIPT}" doctor 2>&1); then
+if fout=$("${SKILL_CMD[@]}" doctor 2>&1); then
   echo "not ok 14 - [Doctor UI] doctor succeeded unexpectedly in unhealthy workspace"
 elif [[ "$fout" == *"[FAIL] Directory Cleanliness:"* ]] &&
   [[ "$fout" == *"To resolve:"* ]]; then
@@ -309,26 +365,40 @@ mkdir -p "$GONE_SRC" "$GONE_WS"
 printf -- '---\nname: temp-skill\n---\nbody\n' >"${GONE_SRC}/SKILL.md"
 cd "$GONE_WS"
 git init -q
-"${SCRIPT}" add "$GONE_SRC" >/dev/null 2>&1
+"${SKILL_CMD[@]}" add "$GONE_SRC" >/dev/null 2>&1
 rm -rf "${TMPDIR}/ephemeral-src"
 gj=$(doctor_json)
-gh=$("${SCRIPT}" doctor 2>&1) || true
-if [ "$(check_status "$gj" "Symlink Health")" = "WARNING" ] &&
-  [ "$(json_get "$gj" 'd["healthy"]')" = "false" ] &&
-  [ "$(json_get "$gj" 'all(l["broken"] for l in d["links"])')" = "true" ] &&
-  [[ "$gh" == *"skill remove temp-skill"* ]] &&
+{
+  IFS= read -r g_sym
+  IFS= read -r g_healthy
+  IFS= read -r g_all_broken
+  IFS= read -r g_has_fix
+} < <(json_gets "$gj" \
+  'next((c["status"] for c in d["checks"] if c["name"]=="Symlink Health"), "MISSING")' \
+  'd["healthy"]' \
+  'all(l["broken"] for l in d["links"])' \
+  'any("skill remove temp-skill" in line for c in d["checks"] if c["name"]=="Symlink Health" for line in c["details"])')
+if [ "$g_sym" = "WARNING" ] &&
+  [ "$g_healthy" = "false" ] &&
+  [ "$g_all_broken" = "true" ] &&
+  [ "$g_has_fix" = "true" ] &&
   [ -f .agents/skills/temp-skill/SKILL.md ]; then
   echo "ok 15 - [Symlink Health] doctor flags copies with missing metadata.source and keeps them"
 else
-  echo "not ok 15 - [Symlink Health] missing source check failed: $gh / $gj"
+  echo "not ok 15 - [Symlink Health] missing source check failed: $gj"
 fi
 cd "$TMPDIR"
 
 # Test 16: inject_copy_source & read_copy_source handle block, flow (quoted
 # colons/spaces, multiline nested strings, Prettier indented), unclosed braces,
 # scalars, sequences, body traps, and non-path URLs cleanly.
-if yaml_out=$(run_module "
+if yaml_out=$(UV_CACHE_DIR="${HOST_UV_CACHE:-$UV_CACHE_DIR}" UV_PYTHON_INSTALL_DIR="${HOST_UV_PYTHON_INSTALL_DIR:-}" uv run --quiet --no-project --with pyyaml==6.0.3 python3 -c "
+import importlib.machinery, importlib.util, yaml
 from pathlib import Path
+loader = importlib.machinery.SourceFileLoader('m', '${SCRIPT}')
+spec = importlib.util.spec_from_loader('m', loader)
+m = importlib.util.module_from_spec(spec)
+loader.exec_module(m)
 src = '/tmp/my:skill #1/dir'
 cases = [
     '# Plain body\n',
@@ -348,27 +418,22 @@ cases = [
     '---\nname: n\nmetadata: {note: don\x27t edit, v: 1}\n---\nbody\n',
     '---\nname: o\nmetadata: {\n  broken: \"abc\n}\ndescription: survived\n---\nbody\n',
 ]
-try:
-    import yaml
-except ImportError:
-    yaml = None
 for idx, raw in enumerate(cases):
     out = m.inject_copy_source(raw, src)
     assert m.read_copy_source_from_content(out) == src, f'case {idx}:\n{out}'
     fm = out[4:].split('\n---\n', 1)[0]
     assert sum(1 for l in fm.splitlines() if not l.startswith((' ', '\t')) and l.lstrip().startswith('metadata:')) == 1
-    if yaml is not None:
-        parsed = yaml.safe_load(fm)
-        assert parsed['metadata']['source'] == src, f'yaml {idx}: {parsed}'
-        if idx == 4:
-            md = parsed['metadata']
-            assert md['app:id'] == 'foo:bar' and md['@scope/pkg'] == 'a  b' and md['true'] == '1' and True not in md
-        if idx == 6:
-            assert parsed['metadata']['openclaw']['label'] == 'Install  gog' and parsed['description'] == 'kept-flow'
-        if idx in (8, 9, 10, 11, 15):
-            assert 'description' in parsed
-        if idx == 14:
-            assert parsed['metadata']['note'] == \"don\x27t edit\"
+    parsed = yaml.safe_load(fm)
+    assert parsed['metadata']['source'] == src, f'yaml {idx}: {parsed}'
+    if idx == 4:
+        md = parsed['metadata']
+        assert md['app:id'] == 'foo:bar' and md['@scope/pkg'] == 'a  b' and md['true'] == '1' and True not in md
+    if idx == 6:
+        assert parsed['metadata']['openclaw']['label'] == 'Install  gog' and parsed['description'] == 'kept-flow'
+    if idx in (8, 9, 10, 11, 15):
+        assert 'description' in parsed
+    if idx == 14:
+        assert parsed['metadata']['note'] == \"don\x27t edit\"
 
 assert m.read_copy_source_from_content('---\nname: t\n---\nmetadata:\n  source: \"/ignore\"\n') is None
 url_dir = Path('${TMPDIR}/url-meta-skill')
@@ -395,18 +460,18 @@ git -C "$MIXED_WS" add .claude/skills/emumanager/SKILL.md && git -C "$MIXED_WS" 
 cp -r "${SKILL_SOURCE_DIRS}/emumanager" "${MIXED_WS}/.agents/skills/emumanager"
 printf -- '---\nname: emumanager\nmetadata:\n  source: "%s"\n---\nstale copy\n' \
   "${SKILL_SOURCE_DIRS}/emumanager" >"${MIXED_WS}/.agents/skills/emumanager/SKILL.md"
-"${SCRIPT}" -C "$MIXED_WS" update emumanager >/dev/null 2>&1
-"${SCRIPT}" -C "$MIXED_WS" add coding-standards >/dev/null 2>&1
-mixed_doc=$("${SCRIPT}" -C "$MIXED_WS" doctor --json 2>/dev/null || true)
+"${SKILL_CMD[@]}" -C "$MIXED_WS" update emumanager >/dev/null 2>&1
+"${SKILL_CMD[@]}" -C "$MIXED_WS" add coding-standards >/dev/null 2>&1
+mixed_doc=$("${SKILL_CMD[@]}" -C "$MIXED_WS" doctor --json 2>/dev/null || true)
 prune_err_rc=0
-"${SCRIPT}" -C "$MIXED_WS" add --prune coding-standards nonexistent-typo >/dev/null 2>&1 || prune_err_rc=$?
+"${SKILL_CMD[@]}" -C "$MIXED_WS" add --prune coding-standards nonexistent-typo >/dev/null 2>&1 || prune_err_rc=$?
 cat <<EOF >"${XDG_CONFIG_HOME}/skill/plugins/97_opt_ambig.py"
 def register(api):
     api.register_skill("opta:ambig-opt", {"path": "${SKILL_SOURCE_DIRS}/coding-standards", "optional": True})
     api.register_skill("optb:ambig-opt", {"path": "${SKILL_SOURCE_DIRS}/emumanager", "optional": True})
 EOF
 ambig_rc=0
-"${SCRIPT}" -C "$MIXED_WS" add --prune ambig-opt >/dev/null 2>&1 || ambig_rc=$?
+"${SKILL_CMD[@]}" -C "$MIXED_WS" add --prune ambig-opt >/dev/null 2>&1 || ambig_rc=$?
 rm -f "${XDG_CONFIG_HOME}/skill/plugins/97_opt_ambig.py"
 if grep -q "committed body" "${MIXED_WS}/.claude/skills/emumanager/SKILL.md" &&
   ! grep -q "stale copy" "${MIXED_WS}/.agents/skills/emumanager/SKILL.md" &&
@@ -427,18 +492,18 @@ printf -- '---\nname: bloat-skill\n---\nbody\n' >"${BLOAT_SRC}/SKILL.md"
 ln -s /nonexistent/python "${BLOAT_SRC}/.venv/bin/python"
 ln -s ../../nonexistent-license "${BLOAT_SRC}/LICENSE"
 git -C "$RO_WS" init -q
-"${SCRIPT}" -C "$RO_WS" add "$BLOAT_SRC" >/dev/null 2>&1
+"${SKILL_CMD[@]}" -C "$RO_WS" add "$BLOAT_SRC" >/dev/null 2>&1
 chmod 0555 "${RO_WS}/.claude/skills"
 ro_rm_rc=0
-"${SCRIPT}" -C "$RO_WS" remove bloat-skill >/dev/null 2>&1 || ro_rm_rc=$?
+"${SKILL_CMD[@]}" -C "$RO_WS" remove bloat-skill >/dev/null 2>&1 || ro_rm_rc=$?
 chmod 0755 "${RO_WS}/.claude/skills"
 mkdir -p "${RO_WS}/.claude/skills/bloat-skill/ro-sub"
 ln -s /usr/bin/env "${RO_WS}/.claude/skills/bloat-skill/root-link"
 ln -s /nonexistent/broken "${RO_WS}/.claude/skills/bloat-skill/broken-link"
 chmod 0555 "${RO_WS}/.claude/skills/bloat-skill/ro-sub"
-"${SCRIPT}" -C "$RO_WS" add "$BLOAT_SRC" >/dev/null 2>&1
+"${SKILL_CMD[@]}" -C "$RO_WS" add "$BLOAT_SRC" >/dev/null 2>&1
 clean_rm_rc=0
-"${SCRIPT}" -C "$RO_WS" remove bloat-skill >/dev/null 2>&1 || clean_rm_rc=$?
+"${SKILL_CMD[@]}" -C "$RO_WS" remove bloat-skill >/dev/null 2>&1 || clean_rm_rc=$?
 if [ "$ro_rm_rc" -ne 0 ] && [ "$clean_rm_rc" -eq 0 ] &&
   [ ! -e "${RO_WS}/.agents/skills/bloat-skill" ] &&
   [ -z "$(git -C "$RO_WS" status --porcelain)" ]; then
@@ -482,28 +547,28 @@ ADHOC_WS="${TMPDIR}/adhoc-ws"
 mkdir -p "$UP_WS" "$ADHOC_WS"
 git -C "$UP_WS" init -q
 git -C "$ADHOC_WS" init -q
-SKILL_CACHE_DIR="$SYM_CACHE" _SKILL_TEST_REMOTE="$UP_A" "${SCRIPT}" -C "$UP_WS" add remote:alpha-pkg vfs:shared-vfs >/dev/null 2>&1
-SKILL_CACHE_DIR="$SYM_CACHE" _SKILL_TEST_REMOTE="$UP_B" "${SCRIPT}" --scope user add remote:beta-pkg >/dev/null 2>&1
+SKILL_CACHE_DIR="$SYM_CACHE" _SKILL_TEST_REMOTE="$UP_A" "${SKILL_CMD[@]}" -C "$UP_WS" add remote:alpha-pkg vfs:shared-vfs >/dev/null 2>&1
+SKILL_CACHE_DIR="$SYM_CACHE" _SKILL_TEST_REMOTE="$UP_B" "${SKILL_CMD[@]}" --scope user add remote:beta-pkg >/dev/null 2>&1
 printf -- '---\nname: shared-name\n---\nalpha-v2\n' >"${UP_A}/skills/shared-name/SKILL.md" && git -C "$UP_A" commit -q -am "a2"
 printf -- '---\nname: shared-name\n---\nbeta-v2\n' >"${UP_B}/skills/shared-name/SKILL.md" && git -C "$UP_B" commit -q -am "b2"
 printf -- '---\nname: shared-vfs\n---\nvfs-v2\n' >"${VFS_BASE}/snaps/s1/shared-vfs/SKILL.md"
-SKILL_CACHE_DIR="$SYM_CACHE" _SKILL_TEST_REMOTE="$UP_B" "${SCRIPT}" -C "$UP_WS" update remote:beta-pkg snap:shared-vfs >/dev/null 2>&1
+SKILL_CACHE_DIR="$SYM_CACHE" _SKILL_TEST_REMOTE="$UP_B" "${SKILL_CMD[@]}" -C "$UP_WS" update remote:beta-pkg snap:shared-vfs >/dev/null 2>&1
 kept_isolated=0
 grep -q "^alpha-v1$" "${UP_WS}/.agents/skills/shared-name/SKILL.md" &&
   grep -q "^vfs-v1$" "${UP_WS}/.agents/skills/shared-vfs/SKILL.md" &&
   grep -q "^beta-v2$" "${HOME}/.claude/skills/shared-name/SKILL.md" && kept_isolated=1
-SKILL_CACHE_DIR="$SYM_CACHE" _SKILL_TEST_REMOTE="$UP_A" "${SCRIPT}" -C "$UP_WS" update shared-name vfs:shared-vfs >/dev/null 2>&1
-"${SCRIPT}" --scope user clean >/dev/null 2>&1 || true
+SKILL_CACHE_DIR="$SYM_CACHE" _SKILL_TEST_REMOTE="$UP_A" "${SKILL_CMD[@]}" -C "$UP_WS" update shared-name vfs:shared-vfs >/dev/null 2>&1
+"${SKILL_CMD[@]}" --scope user clean >/dev/null 2>&1 || true
 ANTIGRAVITY_APP_DATA_DIR="${TMPDIR}/sess-app" ANTIGRAVITY_CONVERSATION_ID=conv-up \
-  SKILL_CACHE_DIR="$SYM_CACHE" _SKILL_TEST_REMOTE="$UP_A" "${SCRIPT}" --scope session add remote:alpha-pkg >/dev/null 2>&1
+  SKILL_CACHE_DIR="$SYM_CACHE" _SKILL_TEST_REMOTE="$UP_A" "${SKILL_CMD[@]}" --scope session add remote:alpha-pkg >/dev/null 2>&1
 printf -- '---\nname: shared-name\n---\nalpha-v3\n' >"${UP_A}/skills/shared-name/SKILL.md" && git -C "$UP_A" commit -q -am "a3"
 ANTIGRAVITY_APP_DATA_DIR="${TMPDIR}/sess-app" ANTIGRAVITY_CONVERSATION_ID=conv-up \
-  SKILL_CACHE_DIR="$SYM_CACHE" _SKILL_TEST_REMOTE="$UP_A" "${SCRIPT}" --scope session update --all >/dev/null 2>&1
+  SKILL_CACHE_DIR="$SYM_CACHE" _SKILL_TEST_REMOTE="$UP_A" "${SKILL_CMD[@]}" --scope session update --all >/dev/null 2>&1
 printf -- '---\nname: shared-name\n---\nlocal-v1\n' >"${TMPDIR}/adhoc-src/shared-name/SKILL.md"
-"${SCRIPT}" -C "$ADHOC_WS" add "${TMPDIR}/adhoc-src/shared-name" >/dev/null 2>&1
-"${SCRIPT}" -C "$ADHOC_WS" add "${ADHOC_WS}/.agents/skills/shared-name" >/dev/null 2>&1
+"${SKILL_CMD[@]}" -C "$ADHOC_WS" add "${TMPDIR}/adhoc-src/shared-name" >/dev/null 2>&1
+"${SKILL_CMD[@]}" -C "$ADHOC_WS" add "${ADHOC_WS}/.agents/skills/shared-name" >/dev/null 2>&1
 printf -- '---\nname: shared-name\n---\nlocal-v2\n' >"${TMPDIR}/adhoc-src/shared-name/SKILL.md"
-AGENT_OFFLINE=1 SKILL_CACHE_DIR="$SYM_CACHE" "${SCRIPT}" -C "$ADHOC_WS" update --all >/dev/null 2>&1
+AGENT_OFFLINE=1 SKILL_CACHE_DIR="$SYM_CACHE" "${SKILL_CMD[@]}" -C "$ADHOC_WS" update --all >/dev/null 2>&1
 rm -f "${XDG_CONFIG_HOME}/skill/plugins/98_update_matrix.py"
 if [ "$kept_isolated" -eq 1 ] &&
   grep -q "^alpha-v2$" "${UP_WS}/.agents/skills/shared-name/SKILL.md" &&

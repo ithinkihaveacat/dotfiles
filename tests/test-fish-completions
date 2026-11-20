@@ -68,47 +68,32 @@ help_options() {
   done
 }
 
-# The completions FILE defines for CMD, as fish itself lists them once the file
-# is loaded: one canonical 'complete' command per line.
-fish_completions() {
-  # shellcheck disable=SC2016 # $argv is expanded by fish, not bash
-  fish --no-config -c 'source $argv[1]; and complete -c $argv[2]' "$1" "$2"
-}
-
-# Options a completion file completes for CMD, one per line. Quoted strings
-# (descriptions, conditions, arguments) are removed first so their text is not
-# mistaken for options.
-completion_options() {
-  fish_completions "$1" "$2" |
-    sed -E "s/'([^'\\\\]|\\\\.)*'//g" |
-    grep -oE ' -[lso] [^ ]+' |
-    sed -E 's/^ -l /--/; s/^ -s /-/; s/^ -o /-/'
-}
-
-# Whether fish completes subcommands (conditions on earlier words) for CMD.
-has_subcommands() {
-  [[ "$(fish_completions "$1" "$2")" == *' -n '* ]]
-}
-
+# Completions collected in one fish --no-config invocation into WORK/comp.<idx>.
 check_options() {
-  local name=$1 file=$2 script=$3
+  local name=$1 comp_file=$2 help_file=$3 rc_file=$4
   local help status=0 expected actual missing extra
   local -a details=()
 
-  help=$(NO_COLOR=1 "$script" --help 2>&1 </dev/null) || status=$?
+  read -r status <"$rc_file"
+  help=$(<"$help_file")
   if [[ $status -ne 0 ]]; then
     not_ok "$name: --help exits 0" "exit status $status" "${help%%$'\n'*}"
     return
   fi
 
   expected=$(help_options <<<"$help" | sort -u)
-  actual=$(completion_options "$file" "$name" | sort -u)
+  actual=$(
+    sed -E "s/'([^'\\\\]|\\\\.)*'//g" "$comp_file" |
+      { grep -oE ' -[lso] [^ ]+' || true; } |
+      sed -E 's/^ -l /--/; s/^ -s /-/; s/^ -o /-/' |
+      sort -u
+  )
 
-  missing=$(comm -23 <(printf '%s\n' "$expected") <(printf '%s\n' "$actual") | grep . | tr '\n' ' ')
+  missing=$(comm -23 <(printf '%s\n' "$expected") <(printf '%s\n' "$actual") | { grep . || true; } | tr '\n' ' ')
   [[ -n $missing ]] && details+=("in --help but not completed: $missing")
 
-  if ! has_subcommands "$file" "$name"; then
-    extra=$(comm -13 <(printf '%s\n' "$expected") <(printf '%s\n' "$actual") | grep . | tr '\n' ' ')
+  if ! grep -qF ' -n ' "$comp_file"; then
+    extra=$(comm -13 <(printf '%s\n' "$expected") <(printf '%s\n' "$actual") | { grep . || true; } | tr '\n' ' ')
     [[ -n $extra ]] && details+=("completed but not in --help: $extra")
   fi
 
@@ -119,32 +104,109 @@ check_options() {
   fi
 }
 
+WORK=$(mktemp -d)
+trap 'rm -rf -- "$WORK"' EXIT
+
+declare -a item_kind=() item_arg1=() item_arg2=() item_arg3=()
+declare -a check_indices=() fish_args=()
+
 for file in skills/*/completions/*.fish; do
   [[ -e $file ]] || continue
   name=$(basename "$file" .fish)
   skill_dir=${file%/completions/*}
   script="$skill_dir/scripts/$name"
+  idx=${#item_kind[@]}
   if [[ ! -x $script ]]; then
-    not_ok "$file: completes a script in its skill" "no executable $script"
+    item_kind+=("not_ok")
+    item_arg1+=("$file: completes a script in its skill")
+    item_arg2+=("no executable $script")
+    item_arg3+=("")
     continue
   fi
-  check_options "$name" "$file" "$script"
+  item_kind+=("check")
+  item_arg1+=("$name")
+  item_arg2+=("$file")
+  item_arg3+=("$script")
+  check_indices+=("$idx")
+  fish_args+=("$WORK/comp.$idx" "$file" "$name")
 done
 
 for file in fish/completions/*.fish; do
   [[ -e $file ]] || continue
   name=$(basename "$file" .fish)
+  idx=${#item_kind[@]}
   if [[ -L bin/$name ]]; then
-    not_ok "$file: completes a bin/ script or fish function" \
-      "bin/$name links to $(readlink "bin/$name"); move the completion into that skill's completions/"
+    item_kind+=("not_ok")
+    item_arg1+=("$file: completes a bin/ script or fish function")
+    item_arg2+=("bin/$name links to $(readlink "bin/$name"); move the completion into that skill's completions/")
+    item_arg3+=("")
   elif [[ -f bin/$name && -x bin/$name ]]; then
-    check_options "$name" "$file" "bin/$name"
+    item_kind+=("check")
+    item_arg1+=("$name")
+    item_arg2+=("$file")
+    item_arg3+=("bin/$name")
+    check_indices+=("$idx")
+    fish_args+=("$WORK/comp.$idx" "$file" "$name")
   elif [[ -f fish/functions/$name.fish ]]; then
-    ok "$file: completes a fish function"
+    item_kind+=("ok")
+    item_arg1+=("$file: completes a fish function")
+    item_arg2+=("")
+    item_arg3+=("")
   else
-    not_ok "$file: completes a bin/ script or fish function" \
-      "no bin/$name or fish/functions/$name.fish"
+    item_kind+=("not_ok")
+    item_arg1+=("$file: completes a bin/ script or fish function")
+    item_arg2+=("no bin/$name or fish/functions/$name.fish")
+    item_arg3+=("")
   fi
+done
+
+if [[ ${#check_indices[@]} -gt 0 ]]; then
+  # Collect all completions in a single fish process, clearing prior rules per cmd.
+  # shellcheck disable=SC2016 # $argv and $i are expanded by fish, not bash
+  fish --no-config -c '
+    set -l n (count $argv)
+    for i in (seq 1 3 $n)
+      set -l out $argv[$i]
+      set -l file $argv[(math $i + 1)]
+      set -l cmd $argv[(math $i + 2)]
+      complete -e -c $cmd
+      source $file
+      and complete -c $cmd > $out
+    end
+  ' "${fish_args[@]}"
+
+  JOBS=8
+  declare -a pids=()
+  for idx in "${check_indices[@]}"; do
+    script=${item_arg3[$idx]}
+    (
+      rc=0
+      NO_COLOR=1 "$script" --help >"$WORK/help.$idx" 2>&1 </dev/null || rc=$?
+      printf '%s\n' "$rc" >"$WORK/rc.$idx"
+    ) &
+    pids+=("$!")
+    if [[ ${#pids[@]} -ge $JOBS ]]; then
+      wait "${pids[0]}" || true
+      pids=("${pids[@]:1}")
+    fi
+  done
+  for pid in "${pids[@]}"; do
+    wait "$pid" || true
+  done
+fi
+
+for idx in "${!item_kind[@]}"; do
+  case "${item_kind[$idx]}" in
+    check)
+      check_options "${item_arg1[$idx]}" "$WORK/comp.$idx" "$WORK/help.$idx" "$WORK/rc.$idx"
+      ;;
+    ok)
+      ok "${item_arg1[$idx]}"
+      ;;
+    not_ok)
+      not_ok "${item_arg1[$idx]}" "${item_arg2[$idx]}"
+      ;;
+  esac
 done
 
 echo "1..$test_num"

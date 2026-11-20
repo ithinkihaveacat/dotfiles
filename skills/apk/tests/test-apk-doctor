@@ -15,6 +15,7 @@ TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
 TESTNUM=0
+FAILED=0
 RC=0
 OUT=""
 
@@ -25,6 +26,7 @@ ok() {
 
 not_ok() {
   TESTNUM=$((TESTNUM + 1))
+  FAILED=1
   echo "not ok $TESTNUM - $1"
   if [[ -n "${2:-}" ]]; then
     printf '%s\n' "$2" | sed 's/^/# /'
@@ -56,12 +58,21 @@ else
 fi
 
 # --- Setup mock environments ---
+ALL_TOOLS=(apkanalyzer unzip apktool baksmali uv xmllint xpath aapt2 jadx)
+
+make_mock_bin() {
+  local dir="$1" without="${2:-}"
+  mkdir -p "$dir"
+  local tool
+  for tool in "${ALL_TOOLS[@]}"; do
+    [[ "$tool" == "$without" ]] && continue
+    : >"$dir/$tool"
+    chmod +x "$dir/$tool"
+  done
+}
+
 MOCK_ALL="$TMP/mock_all"
-mkdir -p "$MOCK_ALL"
-for tool in apkanalyzer unzip apktool baksmali uv xmllint xpath aapt2 jadx; do
-  touch "$MOCK_ALL/$tool"
-  chmod +x "$MOCK_ALL/$tool"
-done
+make_mock_bin "$MOCK_ALL"
 
 # Basic system utilities needed for doctor and test assertions
 BASE_BIN="$TMP/base_bin"
@@ -84,11 +95,7 @@ fi
 
 # --- Test 4: Missing core tool (apkanalyzer) emits [FAIL] and exits 1 ---
 MOCK_NO_APKANALYZER="$TMP/mock_no_apkanalyzer"
-mkdir -p "$MOCK_NO_APKANALYZER"
-for tool in unzip apktool baksmali uv xmllint xpath aapt2 jadx; do
-  touch "$MOCK_NO_APKANALYZER/$tool"
-  chmod +x "$MOCK_NO_APKANALYZER/$tool"
-done
+make_mock_bin "$MOCK_NO_APKANALYZER" apkanalyzer
 
 run "$MOCK_NO_APKANALYZER:$BASE_BIN" "$BIN" doctor
 if [[ $RC -eq 1 && "$OUT" == *"[FAIL]  apkanalyzer: not found on PATH"* &&
@@ -101,11 +108,7 @@ fi
 
 # --- Test 5: Missing core tool (unzip) emits [FAIL] and exits 1 ---
 MOCK_NO_UNZIP="$TMP/mock_no_unzip"
-mkdir -p "$MOCK_NO_UNZIP"
-for tool in apkanalyzer apktool baksmali uv xmllint xpath aapt2 jadx; do
-  touch "$MOCK_NO_UNZIP/$tool"
-  chmod +x "$MOCK_NO_UNZIP/$tool"
-done
+make_mock_bin "$MOCK_NO_UNZIP" unzip
 
 run "$MOCK_NO_UNZIP:$BASE_BIN" "$BIN" doctor
 if [[ $RC -eq 1 && "$OUT" == *"[FAIL]  unzip: not found on PATH"* &&
@@ -117,11 +120,7 @@ fi
 
 # --- Test 6: Missing optional tool (apktool) emits [WARN] and exits 1 with remediation ---
 MOCK_NO_APKTOOL="$TMP/mock_no_apktool"
-mkdir -p "$MOCK_NO_APKTOOL"
-for tool in apkanalyzer unzip baksmali uv xmllint xpath aapt2 jadx; do
-  touch "$MOCK_NO_APKTOOL/$tool"
-  chmod +x "$MOCK_NO_APKTOOL/$tool"
-done
+make_mock_bin "$MOCK_NO_APKTOOL" apktool
 
 run "$MOCK_NO_APKTOOL:$BASE_BIN" "$BIN" doctor
 if [[ $RC -eq 1 && "$OUT" == *"[WARN]  apktool: not found on PATH"* &&
@@ -135,11 +134,7 @@ fi
 
 # --- Test 7: Missing xpath emits [INFO] and does not fail doctor on its own ---
 MOCK_NO_XPATH="$TMP/mock_no_xpath"
-mkdir -p "$MOCK_NO_XPATH"
-for tool in apkanalyzer unzip apktool baksmali uv xmllint aapt2 jadx; do
-  touch "$MOCK_NO_XPATH/$tool"
-  chmod +x "$MOCK_NO_XPATH/$tool"
-done
+make_mock_bin "$MOCK_NO_XPATH" xpath
 
 run "$MOCK_NO_XPATH:$BASE_BIN" "$BIN" doctor
 if [[ $RC -eq 0 && "$OUT" == *"[INFO]  xpath: not found on PATH"* &&
@@ -151,11 +146,9 @@ fi
 
 # --- Test 8: aapt fallback when aapt2 is missing ---
 MOCK_AAPT_ONLY="$TMP/mock_aapt_only"
-mkdir -p "$MOCK_AAPT_ONLY"
-for tool in apkanalyzer unzip apktool baksmali uv xmllint xpath aapt jadx; do
-  touch "$MOCK_AAPT_ONLY/$tool"
-  chmod +x "$MOCK_AAPT_ONLY/$tool"
-done
+make_mock_bin "$MOCK_AAPT_ONLY" aapt2
+: >"$MOCK_AAPT_ONLY/aapt"
+chmod +x "$MOCK_AAPT_ONLY/aapt"
 
 run "$MOCK_AAPT_ONLY:$BASE_BIN" "$BIN" doctor
 if [[ $RC -eq 0 && "$OUT" == *"[PASS]  aapt:"* && "$OUT" != *"[INFO]  aapt / aapt2: not found"* ]]; then
@@ -166,10 +159,12 @@ fi
 
 # --- Test 9: Tag formatting contract: all tags are 6 chars followed by 2 spaces ---
 run "$MOCK_NO_APKTOOL:$BASE_BIN" env NO_COLOR=1 "$BIN" doctor
-if printf '%s\n' "$OUT" | grep -E '^\[(PASS|WARN|INFO|FAIL)\]  ' >/dev/null; then
+bad_lines=$(printf '%s\n' "$OUT" | grep -Ev '^(|\[(PASS|WARN|INFO|FAIL)\]  [^[:space:]]|        [^[:space:]]|apk-info doctor: )' || true)
+if [[ -z "$bad_lines" ]] && printf '%s\n' "$OUT" | grep -qE '^\[(PASS|WARN|INFO|FAIL)\]  '; then
   ok "doctor tags strictly adhere to 6-character tag and 2 trailing spaces"
 else
-  not_ok "doctor tags strictly adhere to 6-character tag and 2 trailing spaces" "$OUT"
+  not_ok "doctor tags strictly adhere to 6-character tag and 2 trailing spaces" "${bad_lines:-$OUT}"
 fi
 
 echo "1..$TESTNUM"
+exit "$FAILED"

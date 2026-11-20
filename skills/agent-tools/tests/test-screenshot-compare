@@ -1,84 +1,231 @@
-#!/usr/bin/env bash
-#
-# Tests for screenshot-compare
-#
-# Requirements:
-#   GEMINI_API_KEY - Must be set to a valid Gemini API key
-#
-# These tests call the Gemini API, so they are slow and incur API costs.
-# They are skipped automatically if GEMINI_API_KEY is not set.
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# ///
+"""Consolidated TAP tests for screenshot-compare: CLI/errors, identical exit 2, and gated LLM judge."""
 
-set -u
+import contextlib
+import importlib.machinery
+import importlib.util
+import io
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
 
-# Skip all tests if GEMINI_API_KEY is not set or in offline mode
-if [[ -z "${GEMINI_API_KEY:-}" || "${AGENT_OFFLINE:-}" == "1" ]]; then
-  echo "1..0 # SKIP GEMINI_API_KEY not set or AGENT_OFFLINE=1"
-  exit 0
-fi
+HERE = Path(__file__).resolve().parent
+BIN = HERE.parent / "scripts" / "screenshot-compare"
+FIX = HERE / "fixtures" / "screenshot-compare"
 
-# Setup paths
-SCRIPT_DIR=$(dirname "$0")
-IMG_LARGE="$SCRIPT_DIR/fixtures/screenshot-compare/verify_large.png"
-IMG_SMALL="$SCRIPT_DIR/fixtures/screenshot-compare/verify_small.png"
-IMG_REGULAR="$SCRIPT_DIR/fixtures/screenshot-compare/verify_regular.png"
-IMG_ITALIC="$SCRIPT_DIR/fixtures/screenshot-compare/verify_italic.png"
-IMG_V33="$SCRIPT_DIR/fixtures/screenshot-compare/screenshot_api33_v2.png"
-IMG_V36="$SCRIPT_DIR/fixtures/screenshot-compare/screenshot_api36_v2.png"
 
-# Total number of tests
-TOTAL_TESTS=6
-TEST_NUM=0
+def reexec_with_screenshot_env() -> None:
+    try:
+        from google import genai  # noqa: F401
+    except ImportError:
+        if os.environ.get("SCREENSHOT_COMPARE_REEXEC"):
+            sys.exit("test-screenshot-compare: dependencies are not importable")
+        subprocess.run(
+            ["uv", "sync", "-q", "--script", str(BIN)],
+            stdin=subprocess.DEVNULL,
+            check=True,
+        )
+        py = subprocess.run(
+            ["uv", "python", "find", "--script", str(BIN)],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        os.environ["SCREENSHOT_COMPARE_REEXEC"] = "1"
+        os.execv(py, [py, __file__, *sys.argv[1:]])
 
-echo "1..$TOTAL_TESTS"
 
-run_test() {
-  local description="$1"
-  local img1="$2"
-  local img2="$3"
-  local assertion="$4"
+def load_screenshot_compare():
+    loader = importlib.machinery.SourceFileLoader(
+        "screenshot_compare_under_test", str(BIN)
+    )
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    assert spec is not None
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[loader.name] = mod
+    loader.exec_module(mod)
+    return mod
 
-  TEST_NUM=$((TEST_NUM + 1))
 
-  # Run comparison, capturing stderr to /dev/null to keep TAP output clean
-  OUTPUT=$(screenshot-compare "$img1" "$img2" 2>/dev/null)
+class Tap:
+    def __init__(self, total: int):
+        print(f"1..{total}", flush=True)
+        self.n = 0
+        self.failed = 0
 
-  # Check if output satisfies the condition
-  if echo "$OUTPUT" | satisfies "$assertion"; then
-    echo "ok $TEST_NUM - $description"
-  else
-    echo "not ok $TEST_NUM - $description"
-    echo "# Output was:"
-    printf '%s\n' "$OUTPUT" | sed 's/^/# /'
-    echo "# Failed assertion: $assertion"
-  fi
-}
+    def check(self, desc: str, ok: bool, detail: object = "") -> None:
+        self.n += 1
+        if not ok:
+            self.failed += 1
+        print(f"{'ok' if ok else 'not ok'} {self.n} - {desc}", flush=True)
+        if not ok and detail:
+            for line in str(detail).splitlines()[:15]:
+                print(f"# {line}", flush=True)
 
-# --- Test Set 1: Layout/Size Differences (Large vs Small) ---
+    def skip(self, reason: str) -> None:
+        self.n += 1
+        print(f"ok {self.n} # SKIP {reason}", flush=True)
 
-run_test "Large vs Small: Detects height reduction" \
-  "$IMG_LARGE" "$IMG_SMALL" \
-  "mentions height reduction or size change of the blue container"
 
-run_test "Large vs Small: Detects padding/margin shifts" \
-  "$IMG_LARGE" "$IMG_SMALL" \
-  "mentions changes to vertical padding or margins"
+def run_inproc(mod, argv: list[str], stdin_bytes: bytes = b"") -> tuple[int, str, str]:
+    out = io.StringIO()
+    err = io.StringIO()
+    old_argv = sys.argv
+    old_stdin = sys.stdin
+    rc = 0
+    try:
+        sys.argv = ["screenshot-compare", *argv]
+        sys.stdin = io.TextIOWrapper(io.BytesIO(stdin_bytes))
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            mod.main()
+    except SystemExit as exc:
+        rc = int(exc.code) if exc.code is not None else 0
+    finally:
+        sys.argv = old_argv
+        sys.stdin = old_stdin
+    return rc, out.getvalue(), err.getvalue()
 
-# --- Test Set 2: Font Style Differences (Regular vs Italic) ---
 
-run_test "Regular vs Italic: Detects style change" \
-  "$IMG_REGULAR" "$IMG_ITALIC" \
-  "identifies change from regular to italic font style"
+def main() -> int:
+    reexec_with_screenshot_env()
+    mod = load_screenshot_compare()
+    tap = Tap(9)
 
-run_test "Regular vs Italic: Mentions font weight/style specifics" \
-  "$IMG_REGULAR" "$IMG_ITALIC" \
-  "mentions italic text or font style variation"
+    has_magick = (
+        shutil.which("magick") is not None or shutil.which("convert") is not None
+    )
+    live_judge = (
+        has_magick
+        and os.environ.get("SCREENSHOT_COMPARE_LIVE_TEST") == "1"
+        and bool(os.environ.get("GEMINI_API_KEY"))
+        and os.environ.get("AGENT_OFFLINE") != "1"
+    )
 
-# --- Test Set 3: Circular UI and Background/Wrapping (API 33 vs 36) ---
+    # 1. --help via real CLI subprocess (exercises uv run shebang once)
+    p1 = subprocess.run(
+        [str(BIN), "--help"],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    tap.check(
+        "--help prints usage and exits 0",
+        p1.returncode == 0 and "Usage:" in p1.stdout and "Exit Codes:" in p1.stdout,
+        p1.stdout + p1.stderr,
+    )
 
-run_test "Does not misidentify as square" \
-  "$IMG_V33" "$IMG_V36" \
-  "does not claim one is square"
+    # 2. --version
+    rc2, out2, err2 = run_inproc(mod, ["--version"])
+    tap.check(
+        "--version prints version and exits 0",
+        rc2 == 0 and "1.0.0" in out2,
+        f"rc={rc2}\n{out2}\n{err2}",
+    )
 
-run_test "Detects background and wrapping changes" \
-  "$IMG_V33" "$IMG_V36" \
-  "mentions the background color change from dark gray/charcoal to black, and the change in text wrapping or lines"
+    # 3. Missing operands
+    rc3, out3, err3 = run_inproc(mod, ["only_one"])
+    tap.check(
+        "missing file operands exits 1 with diagnostic",
+        rc3 == 1 and "missing file operands" in err3,
+        f"rc={rc3}\n{out3}\n{err3}",
+    )
+
+    # 4. --model without value
+    rc4, out4, err4 = run_inproc(mod, ["--model"])
+    tap.check(
+        "--model without argument exits 1 with diagnostic",
+        rc4 == 1 and "--model requires an argument" in err4,
+        f"rc={rc4}\n{out4}\n{err4}",
+    )
+
+    # 5 & 6. ImageMagick-dependent checks (identical fail-fast + file/stdin validation)
+    if has_magick:
+        rc5, out5, err5 = run_inproc(
+            mod, [str(FIX / "identical_1.png"), str(FIX / "identical_2.png")]
+        )
+        tap.check(
+            "identical images trigger exit code 2",
+            rc5 == 2,
+            f"rc={rc5}\n{out5}\n{err5}",
+        )
+        with tempfile.TemporaryDirectory(prefix="test-sc-") as tmp:
+            rc6a, _, err6a = run_inproc(
+                mod,
+                [
+                    str(Path(tmp) / "missing1.png"),
+                    str(Path(tmp) / "missing2.png"),
+                ],
+            )
+        rc6b, _, err6b = run_inproc(mod, ["-", "-"])
+        tap.check(
+            "missing files and dual stdin inputs exit 1",
+            rc6a == 1
+            and "No such file or directory" in err6a
+            and rc6b == 1
+            and "Cannot read both images from stdin" in err6b,
+            f"rc=({rc6a},{rc6b})\n{err6a}\n{err6b}",
+        )
+    else:
+        tap.skip("ImageMagick (magick or convert) not available")
+        tap.skip("ImageMagick (magick or convert) not available")
+
+    # 7-9. Gated live LLM-judge comparisons (opt-in via SCREENSHOT_COMPARE_LIVE_TEST=1)
+    live_pairs = [
+        (
+            "Large vs Small: detects height reduction and padding shifts",
+            FIX / "verify_large.png",
+            FIX / "verify_small.png",
+            (
+                "mentions height reduction or size change of the blue container",
+                "mentions changes to vertical padding or margins",
+            ),
+        ),
+        (
+            "Regular vs Italic: detects italic font style change",
+            FIX / "verify_regular.png",
+            FIX / "verify_italic.png",
+            (
+                "identifies change from regular to italic font style",
+                "mentions italic text or font style variation",
+            ),
+        ),
+        (
+            "API 33 vs 36: does not misidentify as square and notes background/wrapping",
+            FIX / "screenshot_api33_v2.png",
+            FIX / "screenshot_api36_v2.png",
+            (
+                "does not claim one is square",
+                "mentions the background color change from dark gray/charcoal to black, and the change in text wrapping or lines",
+            ),
+        ),
+    ]
+    for desc, img1, img2, assertions in live_pairs:
+        if not live_judge:
+            tap.skip("live LLM judge gated behind SCREENSHOT_COMPARE_LIVE_TEST=1")
+            continue
+        rc_l, out_l, err_l = run_inproc(mod, [str(img1), str(img2)])
+        ok_l = rc_l == 0 and all(
+            subprocess.run(
+                ["satisfies", a],
+                input=out_l,
+                text=True,
+                capture_output=True,
+                check=False,
+            ).returncode
+            == 0
+            for a in assertions
+        )
+        tap.check(desc, ok_l, f"rc={rc_l}\n{out_l}\n{err_l}")
+
+    return 1 if tap.failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

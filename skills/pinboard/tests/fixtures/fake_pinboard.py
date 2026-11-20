@@ -26,6 +26,8 @@ class Fake:
     def reset_knobs(self) -> None:
         self.all_mode = ""  # empty, malformed, truncated, error
         self.all_delay = 0.0  # seconds posts/all takes, outside the lock
+        self.all_entered: threading.Event | None = None
+        self.all_release: threading.Event | None = None
         self.hidden: set[str] = set()  # omitted from posts/all only
         self.get_error = False
         self.rate_limit = 0
@@ -117,8 +119,17 @@ class Handler(BaseHTTPRequestHandler):
         }
         if q.pop("auth_token", None) != TOKEN:
             return self.send(401, b"")
-        if endpoint == "posts/all" and FAKE.all_delay:
-            time.sleep(FAKE.all_delay)
+        if endpoint == "posts/all":
+            with FAKE.lock:
+                entered = FAKE.all_entered
+                release = FAKE.all_release
+                delay = FAKE.all_delay
+            if entered is not None:
+                entered.set()
+            if release is not None:
+                release.wait(timeout=30)
+            if delay:
+                time.sleep(delay)
         with FAKE.lock:
             FAKE.calls.append((endpoint, q))
             if FAKE.rate_limit and FAKE.rate_limit_only in ("", endpoint):

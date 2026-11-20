@@ -1,0 +1,290 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "google-genai",
+# ]
+# ///
+"""Consolidated TAP tests for socrates CLI, SQLite database layer, and DB resolution."""
+
+import contextlib
+import importlib.machinery
+import importlib.util
+import io
+import os
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+BIN = Path(__file__).resolve().parent.parent / "scripts" / "socrates"
+
+
+def load_socrates():
+    loader = importlib.machinery.SourceFileLoader("socrates_under_test", str(BIN))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    assert spec is not None
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[loader.name] = mod
+    loader.exec_module(mod)
+    return mod
+
+
+class Tap:
+    def __init__(self, total: int):
+        print(f"1..{total}", flush=True)
+        self.n = 0
+        self.failed = 0
+
+    def eq(self, desc: str, expected: object, actual: object) -> None:
+        self._record(desc, expected == actual, f"Expected {expected!r}, got {actual!r}")
+
+    def contains(self, desc: str, needle: str, haystack: str) -> None:
+        self._record(desc, needle in haystack, f"Expected output to contain {needle!r}")
+
+    def _record(self, desc: str, ok: bool, detail: str) -> None:
+        self.n += 1
+        if not ok:
+            self.failed += 1
+        print(f"{'ok' if ok else 'not ok'} {self.n} - {desc}", flush=True)
+        if not ok and detail:
+            for line in detail.splitlines()[:10]:
+                print(f"# {line}", flush=True)
+
+
+def run_inproc(socrates, args: list[str]) -> tuple[int, str]:
+    out = io.StringIO()
+    old_argv = sys.argv
+    rc = 0
+    try:
+        sys.argv = [os.path.basename(str(BIN)), *args]
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            socrates.main()
+    except SystemExit as exc:
+        rc = int(exc.code) if exc.code is not None else 0
+    finally:
+        sys.argv = old_argv
+    return rc, out.getvalue()
+
+
+def create_test_db(socrates, db_path: Path, questions: list[dict] | None = None):
+    db = socrates.init_db(str(db_path))
+    socrates.add_questions(
+        db,
+        questions
+        or [
+            {
+                "text": "What color is the sky on Mars during sunset?",
+                "ground_truth": "Blue",
+                "rationale": "Martian atmosphere scatters light differently",
+                "topic": "mars",
+            },
+            {
+                "text": "How many moons does Mars have?",
+                "ground_truth": "Two: Phobos and Deimos",
+                "rationale": "Both are small irregular satellites",
+                "topic": "mars",
+            },
+            {
+                "text": "What is the tallest mountain on Mars?",
+                "ground_truth": "Olympus Mons",
+                "rationale": "It is a shield volcano about 21.9 km high",
+                "topic": "mars",
+            },
+        ],
+    )
+    return db
+
+
+def main() -> int:
+    socrates = load_socrates()
+    tap = Tap(46)
+
+    # --- CLI argument parsing, help, and exit codes (16 checks) ---
+    bare = subprocess.run(
+        [sys.executable, str(BIN)],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    tap.eq("bare command: exits 0", 0, bare.returncode)
+    tap.contains("bare command: shows usage", "Usage:", bare.stdout + bare.stderr)
+
+    help_proc = subprocess.run(
+        [str(BIN), "--help"],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    help_out = help_proc.stdout + help_proc.stderr
+    tap.eq("--help: exits 0", 0, help_proc.returncode)
+    tap.contains("--help: shows usage", "Usage:", help_out)
+    tap.contains("--help: lists commands", "generate", help_out)
+    tap.contains("--help: shows examples", "Examples:", help_out)
+
+    rc, out = run_inproc(socrates, ["nonexistent"])
+    tap.eq("unknown command: exits non-zero", 1, rc)
+    tap.contains("unknown command: error message", "unknown command: nonexistent", out)
+
+    for cmd in ("status", "answer", "delete"):
+        rc, out = run_inproc(socrates, [cmd])
+        tap.eq(f"{cmd} without db: exits non-zero", 1, rc)
+        tap.contains(
+            f"{cmd} without db: error message", "requires a database path", out
+        )
+
+    rc, out = run_inproc(socrates, ["--version"])
+    tap.eq("--version: exits 0", 0, rc)
+    tap.contains("--version: shows version string", "socrates", out)
+
+    with tempfile.TemporaryDirectory(prefix="test-socrates-") as tmp:
+        tmp_dir = Path(tmp)
+        xdg_dir = tmp_dir / "xdg-data"
+        fake_data = xdg_dir / "socrates"
+        fake_data.mkdir(parents=True)
+        old_xdg = os.environ.get("XDG_DATA_HOME")
+        os.environ["XDG_DATA_HOME"] = str(xdg_dir)
+        try:
+            # --- SQLite database layer (20 checks) ---
+            db1_path = tmp_dir / "test-status-empty.db"
+            create_test_db(socrates, db1_path).close()
+
+            rc, out = run_inproc(socrates, ["status", str(db1_path)])
+            tap.eq("status: exits 0 on valid DB", 0, rc)
+            tap.contains(
+                "status: shows total question count", "Total Questions: 3", out
+            )
+            tap.contains(
+                "status: shows no answers message", "No answers recorded yet", out
+            )
+
+            rc, out = run_inproc(socrates, ["questions", str(db1_path)])
+            tap.eq("questions: exits 0", 0, rc)
+            tap.contains(
+                "questions: shows Q1 text", "What color is the sky on Mars", out
+            )
+            tap.contains(
+                "questions: shows Q2 text", "How many moons does Mars have", out
+            )
+            tap.contains("questions: shows Q3 ground truth", "Olympus Mons", out)
+
+            db2_path = tmp_dir / "test-status-full.db"
+            db2 = create_test_db(socrates, db2_path)
+            for qid, ans, correct, summary, critique in (
+                (1, "Red", 0, "Said red", "Incorrect, the answer is blue"),
+                (2, "Two", 1, "Said two", "Correct"),
+                (3, "Olympus Mons", 1, "Said Olympus Mons", "Correct"),
+            ):
+                socrates.add_answer(db2, qid, "model:test-model", ans)
+                socrates.add_evaluation(
+                    db2, qid, "model:test-model", correct, summary, critique
+                )
+            db2.close()
+
+            rc, out = run_inproc(socrates, ["status", str(db2_path)])
+            tap.eq("status: exits 0 with populated DB", 0, rc)
+            tap.contains("status: shows responder name", "model:test-model", out)
+
+            rc, out = run_inproc(socrates, ["report", str(db2_path)])
+            tap.eq("report: exits 0 on complete DB", 0, rc)
+            tap.contains("report: includes header", "Knowledge Gap Analysis", out)
+            tap.contains("report: includes responder", "model:test-model", out)
+            tap.contains(
+                "report: includes question text", "What color is the sky on Mars", out
+            )
+
+            db3_path = tmp_dir / "test-delete.db"
+            db3 = create_test_db(socrates, db3_path)
+            socrates.add_answer(db3, 1, "model:alpha", "answer-a")
+            socrates.add_answer(db3, 1, "model:beta", "answer-b")
+            socrates.add_answer(db3, 2, "model:alpha", "answer-a2")
+            socrates.add_evaluation(db3, 1, "model:alpha", 1, "ok", "ok")
+            db3.close()
+
+            rc, _ = run_inproc(socrates, ["delete", str(db3_path), "model:alpha"])
+            tap.eq("delete: exits 0", 0, rc)
+
+            db3_check = socrates.init_db(str(db3_path))
+            try:
+                alpha_count = db3_check.execute(
+                    "SELECT COUNT(*) FROM answers WHERE responder = 'model:alpha'"
+                ).fetchone()[0]
+                beta_count = db3_check.execute(
+                    "SELECT COUNT(*) FROM answers WHERE responder = 'model:beta'"
+                ).fetchone()[0]
+                eval_count = db3_check.execute(
+                    "SELECT COUNT(*) FROM evaluations WHERE responder = 'model:alpha'"
+                ).fetchone()[0]
+            finally:
+                db3_check.close()
+            tap.eq("delete: removes target answers", 0, alpha_count)
+            tap.eq("delete: preserves other responder", 1, beta_count)
+            tap.eq("delete: removes target evaluations", 0, eval_count)
+
+            db4_path = tmp_dir / "test-cleanup.db"
+            db4 = create_test_db(socrates, db4_path)
+            socrates.add_answer(db4, 1, "model:zombie[1]", "[allocating...]")
+            socrates.add_answer(db4, 1, "model:healthy[1]", "A real answer")
+            db4.close()
+
+            rc, _ = run_inproc(socrates, ["delete", str(db4_path), "--cleanup"])
+            tap.eq("cleanup: exits 0", 0, rc)
+
+            db4_check = socrates.init_db(str(db4_path))
+            try:
+                zombie_count = db4_check.execute(
+                    "SELECT COUNT(*) FROM answers WHERE responder = 'model:zombie[1]'"
+                ).fetchone()[0]
+                healthy_count = db4_check.execute(
+                    "SELECT COUNT(*) FROM answers WHERE responder = 'model:healthy[1]'"
+                ).fetchone()[0]
+            finally:
+                db4_check.close()
+            tap.eq("cleanup: removes zombie run", 0, zombie_count)
+            tap.eq("cleanup: preserves healthy run", 1, healthy_count)
+
+            # --- Database path resolution (10 checks) ---
+            seed_q = [{"text": "Q1", "ground_truth": "A1", "rationale": "R1"}]
+            r_db1 = tmp_dir / "direct-path.db"
+            create_test_db(socrates, r_db1, seed_q).close()
+            rc, out = run_inproc(socrates, ["status", str(r_db1)])
+            tap.eq("direct path: resolves correctly", 0, rc)
+            tap.contains("direct path: shows database", "direct-path.db", out)
+
+            missing = tmp_dir / "definitely-does-not-exist.db"
+            rc, out = run_inproc(socrates, ["status", str(missing)])
+            tap.eq("nonexistent path: exits non-zero", 1, rc)
+            tap.contains("nonexistent path: error mentions path", "not found", out)
+
+            r_db2 = fake_data / "abc12345-test-topic.db"
+            create_test_db(socrates, r_db2, seed_q).close()
+            rc, out = run_inproc(socrates, ["status", "abc12345"])
+            tap.eq("prefix resolve: resolves by ID prefix", 0, rc)
+            tap.contains(
+                "prefix resolve: shows database", "abc12345-test-topic.db", out
+            )
+
+            r_db3 = fake_data / "abc12345-second-topic.db"
+            create_test_db(socrates, r_db3, seed_q).close()
+            rc, out = run_inproc(socrates, ["status", "abc12345"])
+            tap.eq("ambiguous prefix: exits non-zero", 1, rc)
+            tap.contains("ambiguous prefix: error mentions ambiguous", "Ambiguous", out)
+
+            rc, out = run_inproc(socrates, ["status", "abc12345-test-topic"])
+            tap.eq("name without .db: resolves correctly", 0, rc)
+            tap.contains(
+                "name without .db: shows database", "abc12345-test-topic.db", out
+            )
+        finally:
+            if old_xdg is None:
+                os.environ.pop("XDG_DATA_HOME", None)
+            else:
+                os.environ["XDG_DATA_HOME"] = old_xdg
+
+    return 1 if tap.failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -8,14 +8,18 @@
 
 from __future__ import annotations
 
+import importlib.util
+import io
 import json
 import os
 import pty
+import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
+from importlib.machinery import SourceFileLoader
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -53,6 +57,35 @@ ENV.update(
     "[init]\n\tdefaultBranch = main\n[advice]\n\tdetachedHead = false\n"
 )
 
+
+def resolve_pb_python() -> str:
+    subprocess.run(
+        ["uv", "sync", "-q", "--script", str(BIN)],
+        stdin=subprocess.DEVNULL,
+        check=True,
+    )
+    return subprocess.run(
+        ["uv", "python", "find", "--script", str(BIN)],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+
+def load_pinboard():
+    loader = SourceFileLoader("pinboard_cli_test", str(BIN))
+    spec = importlib.util.spec_from_loader("pinboard_cli_test", loader)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["pinboard_cli_test"] = module
+    loader.exec_module(module)
+    return module
+
+
+PB_PY = resolve_pb_python()
+PB = load_pinboard()
+PB.GIT_ENV = {**ENV, "GIT_TERMINAL_PROMPT": "0", "LC_ALL": "C"}
+
 n = 0
 failed = 0
 
@@ -70,7 +103,7 @@ def ok(cond: bool, desc: str, diag: str = "") -> None:
 def pb(
     repo: Path | None, *args: str, env: dict | None = None
 ) -> subprocess.CompletedProcess[str]:
-    cmd = [str(BIN)] + (["--repo", str(repo)] if repo else []) + list(args)
+    cmd = [PB_PY, str(BIN)] + (["--repo", str(repo)] if repo else []) + list(args)
     return subprocess.run(
         cmd,
         capture_output=True,
@@ -81,11 +114,43 @@ def pb(
     )
 
 
+def pb_inproc(
+    repo: Path | None, *args: str, env: dict | None = None
+) -> subprocess.CompletedProcess[str]:
+    argv = (["--repo", str(repo)] if repo else []) + list(args)
+    run_env = {**ENV, **(env or {})}
+    old_env = os.environ.copy()
+    old_git_env = PB.GIT_ENV
+    old_cmd = PB._command
+    old_secrets = list(PB._secrets)
+    old_in, old_out, old_err = sys.stdin, sys.stdout, sys.stderr
+    out, err = io.StringIO(), io.StringIO()
+    os.environ.clear()
+    os.environ.update(run_env)
+    PB.GIT_ENV = {**run_env, "GIT_TERMINAL_PROMPT": "0", "LC_ALL": "C"}
+    sys.stdin, sys.stdout, sys.stderr = io.StringIO(""), out, err
+    try:
+        try:
+            rc = PB.main(argv)
+        except SystemExit as exc:
+            rc = exc.code if isinstance(exc.code, int) else (1 if exc.code else 0)
+    finally:
+        sys.stdin, sys.stdout, sys.stderr = old_in, old_out, old_err
+        PB._command = old_cmd
+        PB._secrets[:] = old_secrets
+        PB.GIT_ENV = old_git_env
+        os.environ.clear()
+        os.environ.update(old_env)
+    return subprocess.CompletedProcess(
+        [str(BIN), *argv], rc, out.getvalue(), err.getvalue()
+    )
+
+
 def pb_confirm(repo: Path, answer: str, *args: str) -> subprocess.CompletedProcess[str]:
     """Run pinboard with a pseudo-terminal on stdin so it can ask to confirm."""
     master, slave = pty.openpty()
     proc = subprocess.Popen(
-        [str(BIN), "--repo", str(repo), *args],
+        [PB_PY, str(BIN), "--repo", str(repo), *args],
         stdin=slave,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -178,25 +243,25 @@ def main() -> None:
     git("clone", "-q", str(REMOTE), str(A))
 
     # --- Help and doctor ---
-    p = pb(None, "--help")
+    p = pb_inproc(None, "--help")
     ok(
         p.returncode == 0 and p.stdout.startswith("Usage: pinboard"),
         "--help prints usage",
         diag(p),
     )
-    p = pb(None)
+    p = pb_inproc(None)
     ok(
         p.returncode == 0 and "Commands:" in p.stdout,
         "bare invocation prints help",
         diag(p),
     )
-    p = pb(TMP / "missing", "doctor")
+    p = pb_inproc(TMP / "missing", "doctor")
     ok(
         p.returncode == 1 and "[FAIL]  Clone" in p.stdout,
         "doctor fails without a clone",
         diag(p),
     )
-    p = pb(TMP / "missing", "search", "x")
+    p = pb_inproc(TMP / "missing", "search", "x")
     ok(p.returncode == 2, "search exits 2 on an error", diag(p))
 
     # --- First sync ---
@@ -274,7 +339,7 @@ def main() -> None:
 
     # --- Reads ---
     calls, h = len(FAKE.calls), head(A)
-    p = pb(A, "search", "post", "RUST")
+    p = pb_inproc(A, "search", "post", "RUST")
     ok(
         p.returncode == 0
         and p.stdout.count("example.com/post/") == 10
@@ -282,11 +347,11 @@ def main() -> None:
         "search ANDs terms case-insensitively",
         diag(p),
     )
-    p = pb(A, "search", "zzznomatch")
+    p = pb_inproc(A, "search", "zzznomatch")
     ok(p.returncode == 1 and p.stdout == "", "search exits 1 on no match", diag(p))
-    p = pb(A, "search", "--limit", "0", "x")
+    p = pb_inproc(A, "search", "--limit", "0", "x")
     ok(p.returncode == 2, "search exits 2 on a usage error", diag(p))
-    p = pb(A, "search", "--json", "--limit", "5", "post")
+    p = pb_inproc(A, "search", "--json", "--limit", "5", "post")
     page1 = json.loads(p.stdout)
     times = [r["time"] for r in page1["bookmarks"]]
     ok(
@@ -296,7 +361,7 @@ def main() -> None:
         "search pages newest first",
         diag(p),
     )
-    p = pb(
+    p = pb_inproc(
         A, "search", "--json", "--limit", "5", "--cursor", page1["next_cursor"], "post"
     )
     page2 = json.loads(p.stdout)
@@ -307,7 +372,7 @@ def main() -> None:
         "cursor continues without overlap",
         diag(p),
     )
-    p = pb(A, "search", "--json", "lemon")
+    p = pb_inproc(A, "search", "--json", "lemon")
     hit = json.loads(p.stdout)["bookmarks"][0]
     ok(
         hit.get("notes_truncated")
@@ -316,21 +381,21 @@ def main() -> None:
         "search truncates notes and reports freshness",
         diag(p),
     )
-    p = pb(A, "get", "--json", "https://example.com/post/0")
+    p = pb_inproc(A, "get", "--json", "https://example.com/post/0")
     ok(
         len(json.loads(p.stdout)["bookmark"]["notes"]) > 300,
         "get returns notes in full",
         diag(p),
     )
-    p = pb(A, "get", "https://example.com/café/ü?q=日本")
+    p = pb_inproc(A, "get", "https://example.com/café/ü?q=日本")
     ok(
         p.returncode == 0 and "Non-ASCII" in p.stdout and "mirror synced" in p.stderr,
         "get finds a non-ASCII URL",
         diag(p),
     )
-    p = pb(A, "get", "https://example.com/nope")
+    p = pb_inproc(A, "get", "https://example.com/nope")
     ok(p.returncode == 1, "get exits 1 when absent", diag(p))
-    p = pb(A, "search", "--tag", "boundary")
+    p = pb_inproc(A, "search", "--tag", "boundary")
     ok(
         p.returncode == 0
         and "Eve" in p.stdout
@@ -339,7 +404,7 @@ def main() -> None:
         "search --tag",
         diag(p),
     )
-    p = pb(A, "tags", "--json")
+    p = pb_inproc(A, "tags", "--json")
     tags = {t["tag"]: t["count"] for t in json.loads(p.stdout)["tags"]}
     ok(tags.get("common") == 30 and tags.get("rust") == 10, "tags counts", diag(p))
     ok(
@@ -397,7 +462,7 @@ def main() -> None:
         "https://example.com/new-year"
     }
     refused("eleven missing: refused, nothing changed")
-    p = pb(A, "doctor")
+    p = pb_inproc(A, "doctor")
     ok(
         p.returncode == 1 and "[WARN]  Guard" in p.stdout,
         "doctor reports the refusal",
@@ -416,7 +481,7 @@ def main() -> None:
         "https://example.com/new-year"
     }
     h = head(A)
-    p = pb(A, "sync", "--full", "--dry-run")
+    p = pb_inproc(A, "sync", "--full", "--dry-run")
     ok(
         p.returncode == 1 and head(A) == h,
         "dry run is refused by the guard too",
@@ -437,7 +502,7 @@ def main() -> None:
     )
     FAKE.put("https://example.com/fresh", "Fresh", f"{YEAR}-02-02T00:00:00Z")
     h = head(A)
-    p = pb(A, "sync", "--dry-run")
+    p = pb_inproc(A, "sync", "--dry-run")
     ok(
         p.returncode == 0 and "+1 ~0 -0" in p.stderr and head(A) == h,
         "sync --dry-run changes nothing",
@@ -455,7 +520,7 @@ def main() -> None:
         "a successful sync clears the refusal",
         str(local),
     )
-    p = pb(A, "doctor")
+    p = pb_inproc(A, "doctor")
     ok(
         p.returncode == 0 and "[FAIL]" not in p.stdout and "[WARN]" not in p.stdout,
         "doctor passes after a good sync",
@@ -464,7 +529,7 @@ def main() -> None:
 
     # --- Writes ---
     calls = len(FAKE.calls)
-    p = pb(A, "add", "https://example.org/x", "--title", "X", "--dry-run")
+    p = pb_inproc(A, "add", "https://example.org/x", "--title", "X", "--dry-run")
     ok(
         p.returncode == 0 and len(FAKE.calls) == calls and "replace" in p.stderr,
         "add --dry-run calls nothing",
@@ -513,7 +578,7 @@ def main() -> None:
     FAKE.put(target, "Delete me", "2024-05-05T10:00:00Z", "gone notes", "gone")
     pb(A, "sync")
     deletes = FAKE.count("posts/delete")
-    p = pb(A, "delete", target, "--dry-run")
+    p = pb_inproc(A, "delete", target, "--dry-run")
     ok(
         p.returncode == 0
         and target in p.stdout
@@ -523,7 +588,7 @@ def main() -> None:
         "delete --dry-run shows the bookmark and sends no deletion",
         diag(p),
     )
-    p = pb(A, "delete", target)
+    p = pb_inproc(A, "delete", target)
     ok(
         p.returncode == 1
         and "--yes" in p.stderr
@@ -540,9 +605,9 @@ def main() -> None:
         "delete removes the bookmark from Pinboard and the mirror",
         diag(p),
     )
-    p = pb(A, "search", "delete-me")
-    p2 = pb(A, "get", target)
-    p3 = pb(A, "history", "--json", target)
+    p = pb_inproc(A, "search", "delete-me")
+    p2 = pb_inproc(A, "get", target)
+    p3 = pb_inproc(A, "history", "--json", target)
     ok(
         p.returncode == 1
         and p2.returncode == 1
@@ -684,8 +749,10 @@ def main() -> None:
         diag(p),
     )
     calls = len(FAKE.calls)
-    p = pb(A, "add", "https://example.org/y", "--title", "Y", "--tags", "x" * 256)
-    p2 = pb(A, "add", "https://example.org/y", "--title", "T" * 256)
+    p = pb_inproc(
+        A, "add", "https://example.org/y", "--title", "Y", "--tags", "x" * 256
+    )
+    p2 = pb_inproc(A, "add", "https://example.org/y", "--title", "T" * 256)
     ok(
         p.returncode == 1 and p2.returncode == 1 and len(FAKE.calls) == calls,
         "documented limits are validated before any call",
@@ -750,7 +817,7 @@ def main() -> None:
     FAKE.reset_knobs()
     calls = len(FAKE.calls)
     p = pb(A, "sync", env={"AGENT_OFFLINE": "1"})
-    p2 = pb(A, "search", "post", env={"AGENT_OFFLINE": "1"})
+    p2 = pb_inproc(A, "search", "post", env={"AGENT_OFFLINE": "1"})
     ok(
         p.returncode == 1
         and "AGENT_OFFLINE" in p.stderr
@@ -759,7 +826,8 @@ def main() -> None:
         "AGENT_OFFLINE refuses API calls; reads still work",
         diag(p),
     )
-    p2 = pb(A, "sync", "--full", env={"PINBOARD_TIME_SCALE": "1"})
+    # 0.05 gives a 15s posts/all gate window while trimming the 2x3s 'any' sleep to 0.3s.
+    p2 = pb(A, "sync", "--full", env={"PINBOARD_TIME_SCALE": "0.05"})
     ok(
         p2.returncode == 1 and "next allowed" in p2.stderr,
         "posts/all is gated to once every 5 minutes",
@@ -795,14 +863,14 @@ def main() -> None:
     gone = "https://example.com/café/ü?q=日本"
     FAKE.delete(gone)
     pb(A, "sync")
-    p = pb(A, "history", "--json", gone)
+    p = pb_inproc(A, "history", "--json", gone)
     versions = json.loads(p.stdout)
     ok(
         p.returncode == 0 and [v["status"] for v in versions] == ["deleted", "added"],
         "history lists the deletion and the import",
         diag(p),
     )
-    p = pb(A, "restore", gone, "--dry-run")
+    p = pb_inproc(A, "restore", gone, "--dry-run")
     ok(
         p.returncode == 0 and gone not in FAKE.posts,
         "restore --dry-run sends nothing",
@@ -834,7 +902,7 @@ def main() -> None:
     git("clone", "-q", str(REMOTE), str(C))
     procs = [
         subprocess.Popen(
-            [str(BIN), "--repo", str(repo), "add", url, "--title", "Concurrent"],
+            [PB_PY, str(BIN), "--repo", str(repo), "add", url, "--title", "Concurrent"],
             env=ENV,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -852,6 +920,8 @@ def main() -> None:
         "\n".join(r[1] for r in results),
     )
 
+    pb_cmd = f"{shlex.quote(PB_PY)} {shlex.quote(str(BIN))}"
+
     def hook(repo: Path, body: str) -> Path:
         path = repo / ".git" / "hooks" / "pre-push"
         path.write_text(
@@ -865,7 +935,7 @@ def main() -> None:
     marker = TMP / "once-c"
     h = hook(
         B,
-        f'[ -e "{marker}" ] || {{ touch "{marker}"; "{BIN}" --repo "{C}" add https://example.net/race --title Race >/dev/null 2>&1; }}\n',
+        f'[ -e "{marker}" ] || {{ touch "{marker}"; {pb_cmd} --repo "{C}" add https://example.net/race --title Race >/dev/null 2>&1; }}\n',
     )
     p = pb(B, "add", "https://example.net/b2", "--title", "B2")
     tree = git("--git-dir", str(REMOTE), "show", f"main:bookmarks/{YEAR}.jsonl")
@@ -880,7 +950,7 @@ def main() -> None:
     marker2 = TMP / "once-sync"
     hook(
         B,
-        f'[ -e "{marker2}" ] || {{ touch "{marker2}"; "{BIN}" --repo "{C}" sync --full >/dev/null 2>&1; }}\n',
+        f'[ -e "{marker2}" ] || {{ touch "{marker2}"; {pb_cmd} --repo "{C}" sync --full >/dev/null 2>&1; }}\n',
     )
     p = pb(B, "add", "https://example.net/b3", "--title", "B3")
     tree = git("--git-dir", str(REMOTE), "show", f"main:bookmarks/{YEAR}.jsonl")
@@ -899,7 +969,7 @@ def main() -> None:
         "an unpushable commit is reported",
         diag(p),
     )
-    p = pb(B, "doctor")
+    p = pb_inproc(B, "doctor")
     ok(
         p.returncode == 1 and "[WARN]  Push" in p.stdout,
         "doctor reports unpushed commits",
@@ -943,7 +1013,7 @@ def main() -> None:
     )
     refs = git("-C", str(C), "for-each-ref")
     fetch_head = (C / ".git" / "FETCH_HEAD").read_text()
-    p = pb(C, "doctor")
+    p = pb_inproc(C, "doctor")
     ok(
         p.returncode == 1
         and "[WARN]  Pull: origin has some commit(s)" in p.stdout
@@ -953,7 +1023,7 @@ def main() -> None:
         diag(p),
     )
     git("-C", str(C), "fetch", "-q")
-    p = pb(C, "doctor")
+    p = pb_inproc(C, "doctor")
     ok(
         "[WARN]  Pull: origin has 1 commit(s)" in p.stdout,
         "doctor counts the commits once fetched",
@@ -962,7 +1032,7 @@ def main() -> None:
     files = sorted((C / "bookmarks").glob("*.jsonl"))
     saved = files[0].read_text()
     files[0].write_text(saved + files[-1].read_text())
-    p = pb(C, "search", "Same", "second")
+    p = pb_inproc(C, "search", "Same", "second")
     files[0].write_text(saved)
     ok(
         p.returncode == 0 and "damaged" not in p.stderr,
@@ -970,7 +1040,7 @@ def main() -> None:
         diag(p),
     )
     pb(C, "sync")
-    p = pb(C, "doctor")
+    p = pb_inproc(C, "doctor")
     ok(
         "[PASS]  Pull" in p.stdout,
         "doctor passes a clone level with origin",
@@ -979,7 +1049,7 @@ def main() -> None:
     marker_delete = TMP / "once-delete"
     hook(
         B,
-        f'[ -e "{marker_delete}" ] || {{ touch "{marker_delete}"; "{BIN}" --repo "{C}" add https://example.net/race-delete --title Race >/dev/null 2>&1; }}\n',
+        f'[ -e "{marker_delete}" ] || {{ touch "{marker_delete}"; {pb_cmd} --repo "{C}" add https://example.net/race-delete --title Race >/dev/null 2>&1; }}\n',
     )
     p = pb(B, "delete", "https://example.net/b5", "--yes")
     tree = git("--git-dir", str(REMOTE), "show", f"main:bookmarks/{YEAR}.jsonl")
@@ -994,7 +1064,7 @@ def main() -> None:
     (B / ".git" / "hooks" / "pre-push").unlink()
     (B / "bookmarks" / f"{YEAR}.jsonl").write_text("{}\n")
     p = pb(B, "add", "https://example.net/b6", "--title", "B6")
-    p2 = pb(B, "doctor")
+    p2 = pb_inproc(B, "doctor")
     ok(
         p.returncode == 1
         and "uncommitted changes" in p.stderr
@@ -1024,7 +1094,7 @@ def main() -> None:
     git("-C", str(damaged), "commit", "-q", "-m", "old")
     blob = git("-C", str(damaged), "rev-parse", "HEAD:bookmarks/1999.jsonl")
     (damaged / ".git" / "objects" / blob[:2] / blob[2:]).unlink()
-    p = pb(damaged, "search", "Old")
+    p = pb_inproc(damaged, "search", "Old")
     ok(
         p.returncode == 2
         and "cannot read bookmarks/1999.jsonl" in p.stderr
@@ -1040,5 +1110,6 @@ try:
     main()
 finally:
     SERVER.shutdown()
+    SERVER.server_close()
     shutil.rmtree(TMP, ignore_errors=True)
 sys.exit(1 if failed else 0)

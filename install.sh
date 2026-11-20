@@ -2,7 +2,7 @@
 # bash 3.2+ compatible (macOS default). Do not use bash 4+ features
 # (declare -A, readarray, ${var,,}, |&).
 
-# Tests: tests/test-install-only (--only), tests/test-install-prune (--prune),
+# Tests: tests/test-install-prune (--prune),
 # tests/test-install-profiles (--profile, --with, --without, --dry-run),
 # tests/test-install-git-pull (git_up, interactive gating, self-reexec),
 # tests/test-install-node (the per-user default Node.js),

@@ -1,1924 +1,2068 @@
-#!/usr/bin/env bash
-
-# Tests: skills/agent-tools/tests/test-caxton
-
-set -euo pipefail
-
-DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
-BIN="$DIR/../scripts/caxton"
-
-OUTPUT=$(mktemp)
-WORK=$(cd "$(mktemp -d)" && pwd -P)
-trap 'rm -rf "$OUTPUT" "$WORK"' EXIT
-
-# Content hash of a directory tree, for asserting a run changed nothing.
-snapshot() {
-  (cd "$1" && find . -path ./.git -prune -o -type f -exec cksum {} + | sort)
-}
-
-# Builds a repository fixture and prints its path. Global ignore rules are
-# neutralized: a developer's core.excludesFile commonly carries patterns like
-# '*~', which would silently exclude a fixture's files and make the run under
-# test disagree with what the test believes it set up.
-make_repo() {
-  local repo="$WORK/$1"
-  mkdir -p "$repo"
-  (
-    cd "$repo"
-    git init -q .
-    git config user.email "test@example.com"
-    git config user.name "Test"
-    git config commit.gpgsign false
-    git config core.excludesFile /dev/null
-  ) >/dev/null 2>&1
-  echo "$repo"
-}
-
-# A fixture that cannot be committed is a broken test, not a failing one: bail
-# out loudly rather than letting 'set -e' truncate the plan without a word.
-commit_all() {
-  if ! (
-    cd "$1"
-    git add -A
-    git commit -q --no-gpg-sign -m "${2:-init}"
-  ) >"$WORK/commit.err" 2>&1; then
-    echo "Bail out! fixture '$1' could not be committed"
-    sed 's/^/# /' "$WORK/commit.err"
-    exit 1
-  fi
-}
-
-echo "1..78"
-
-# Test 1: caxton --help outputs valid GNU-style help and exits 0
-if "$BIN" --help >"$OUTPUT" 2>&1; then
-  if grep -q "Usage: caxton" "$OUTPUT" && grep -q "Arguments:" "$OUTPUT" && grep -q "Options:" "$OUTPUT"; then
-    echo "ok 1 - Help output is formatted correctly"
-  else
-    echo "not ok 1 - Help output missing expected sections"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-else
-  echo "not ok 1 - caxton --help exited non-zero"
-fi
-
-# Test 2: caxton with no arguments prints short usage (with an example) and exits 1
-if "$BIN" >"$OUTPUT" 2>&1; then
-  echo "not ok 2 - Expected caxton without arguments to fail"
-else
-  if grep -q "Usage: caxton" "$OUTPUT" && grep -q "Examples:" "$OUTPUT" && grep -q "Try 'caxton --help'" "$OUTPUT"; then
-    echo "ok 2 - Bare caxton prints concise usage with an example to stderr"
-  else
-    echo "not ok 2 - Bare caxton output missing short usage, example, or help pointer"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-fi
-
-# The main fixture: a repository holding tracked sources, an ignored build
-# directory, project dotfiles, and credential paths.
-REPO=$(make_repo repo)
-mkdir -p "$REPO/docs" "$REPO/src" "$REPO/build" "$REPO/.github" "$REPO/.ssh"
-printf 'build/\n*.log\n' >"$REPO/.gitignore"
-printf '# Guide\n' >"$REPO/docs/guide.md"
-printf '# Architecture\n' >"$REPO/docs/architecture.md"
-printf 'print(1)\n' >"$REPO/src/a.py"
-printf 'print(2)\n' >"$REPO/src/b.py"
-printf 'ci\n' >"$REPO/.github/ci.yml"
-printf 'junk\n' >"$REPO/build/out.md"
-printf 'noise\n' >"$REPO/debug.log"
-printf 'TOKEN=abc\n' >"$REPO/.env"
-printf 'KEYMATERIAL\n' >"$REPO/.ssh/id_rsa"
-printf 'KEYMATERIAL\n' >"$REPO/server.pem"
-commit_all "$REPO"
-
-# Resolved capability tags from a dry run, as "REL TAG" lines.
-resolved() {
-  sed -n 's/^  \[\([RW I-]*\)\]  \(.*\) (.*)$/\2 \1/p' "$1"
-}
-
-# Test 3: Offline policy rejection
-if (cd "$REPO" && AGENT_OFFLINE=1 "$BIN" "prompt") >"$OUTPUT" 2>&1; then
-  echo "not ok 3 - Expected AGENT_OFFLINE to fail"
-else
-  if grep -q "caxton: offline (AGENT_OFFLINE=1)" "$OUTPUT"; then
-    echo "ok 3 - Honors AGENT_OFFLINE switch"
-  else
-    echo "not ok 3 - AGENT_OFFLINE output missing expected text"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-fi
-
-# Test 4: a missing explicit path is an error. Argument validation must run
-# before the GEMINI_API_KEY check, so this reports the real problem with no key.
-if (cd "$REPO" && "$BIN" "prompt" --read nonexistent.md) >"$OUTPUT" 2>&1; then
-  echo "not ok 4 - Expected a nonexistent path to fail"
-else
-  if grep -q "path not found: nonexistent.md" "$OUTPUT"; then
-    echo "ok 4 - Rejects a nonexistent explicit path before checking credentials"
-  else
-    echo "not ok 4 - Nonexistent path output missing expected text"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-fi
-
-# Test 5: outside a git worktree caxton refuses to run
-PLAIN="$WORK/plain"
-mkdir -p "$PLAIN"
-printf 'hello\n' >"$PLAIN/a.md"
-if (cd "$PLAIN" && "$BIN" --dry-run "prompt") >"$OUTPUT" 2>&1; then
-  echo "not ok 5 - Expected a non-repository directory to be refused"
-else
-  if grep -q "not inside a git worktree" "$OUTPUT"; then
-    echo "ok 5 - Refuses to run outside a git worktree"
-  else
-    echo "not ok 5 - Non-repository rejection missing expected error"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-fi
-
-# Test 6: PROMPT after a path option is consumed as a path, and caxton says so
-if (cd "$REPO" && "$BIN" --dry-run --read docs/ "audit this") >"$OUTPUT" 2>&1; then
-  echo "not ok 6 - Expected a prompt after --read to fail"
-else
-  if grep -q "PROMPT is required" "$OUTPUT" && grep -q "must come before" "$OUTPUT"; then
-    echo "ok 6 - Explains that PROMPT must precede the path options"
-  else
-    echo "not ok 6 - Missing prompt was not explained"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-fi
-
-# Test 7: the default selection is the current directory, read-only, and a dry
-# run reports it without touching a single file
-BEFORE=$(snapshot "$REPO")
-if (cd "$REPO" && "$BIN" --dry-run "prompt") >"$OUTPUT" 2>&1; then
-  if grep -q "read-only (no files are modified)" "$OUTPUT" &&
-    [[ "$(resolved "$OUTPUT")" == *"docs/guide.md R-I"* ]] &&
-    [[ "$(resolved "$OUTPUT")" != *W* ]] &&
-    [[ "$BEFORE" == "$(snapshot "$REPO")" ]]; then
-    echo "ok 7 - Defaults to a read-only selection of the current directory"
-  else
-    echo "not ok 7 - Default selection was not read-only over the cwd"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-else
-  echo "not ok 7 - Default dry run exited non-zero"
-  sed 's/^/# /' "$OUTPUT"
-fi
-
-# Test 8: running from a subdirectory keeps repository-relative paths but
-# selects only the current directory
-if (cd "$REPO/docs" && "$BIN" --dry-run "prompt") >"$OUTPUT" 2>&1; then
-  if grep -q "Repository:    $REPO" "$OUTPUT" && grep -q "docs/guide.md" "$OUTPUT" &&
-    ! grep -q "src/a.py" "$OUTPUT"; then
-    echo "ok 8 - Names paths from the repository root while selecting the cwd"
-  else
-    echo "not ok 8 - Subdirectory run resolved the wrong namespace or selection"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-else
-  echo "not ok 8 - Subdirectory dry run exited non-zero"
-  sed 's/^/# /' "$OUTPUT"
-fi
-
-# Test 9: --edit grants write access and a creation root; --read does not
-if (cd "$REPO" && "$BIN" --dry-run "prompt" --edit docs/ --read src/) >"$OUTPUT" 2>&1; then
-  TAGS=$(resolved "$OUTPUT")
-  if [[ "$TAGS" == *"docs/guide.md RWI"* && "$TAGS" == *"src/a.py R-I"* ]] &&
-    grep -q "Creation Roots" "$OUTPUT" && grep -q "\[ W \]  docs/" "$OUTPUT"; then
-    echo "ok 9 - --edit is writable with a creation root, --read is not"
-  else
-    echo "not ok 9 - Access levels were not applied as expected"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-else
-  echo "not ok 9 - Mixed --edit/--read dry run exited non-zero"
-  sed 's/^/# /' "$OUTPUT"
-fi
-
-# Test 10: a more specific --read carves a file out of a writable directory
-if (cd "$REPO" && "$BIN" --dry-run "prompt" --edit docs/ --read docs/architecture.md) >"$OUTPUT" 2>&1; then
-  TAGS=$(resolved "$OUTPUT")
-  if [[ "$TAGS" == *"docs/guide.md RWI"* && "$TAGS" == *"docs/architecture.md R-I"* ]]; then
-    echo "ok 10 - The most specific selection wins, restriction breaking ties"
-  else
-    echo "not ok 10 - Carve-out did not take precedence over the directory"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-else
-  echo "not ok 10 - Carve-out dry run exited non-zero"
-  sed 's/^/# /' "$OUTPUT"
-fi
-
-# Test 11: --edit FILE authorizes that file only, with no creation root
-if (cd "$REPO" && "$BIN" --dry-run "prompt" --edit docs/guide.md) >"$OUTPUT" 2>&1; then
-  if [[ "$(resolved "$OUTPUT")" == "docs/guide.md RWI" ]] &&
-    ! grep -q "Creation Roots" "$OUTPUT"; then
-    echo "ok 11 - A file selection grants no authority to create siblings"
-  else
-    echo "not ok 11 - File selection granted more than the file"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-else
-  echo "not ok 11 - File selection dry run exited non-zero"
-  sed 's/^/# /' "$OUTPUT"
-fi
-
-# Test 12: unselected paths are invisible, not merely un-inlined
-if (cd "$REPO" && "$BIN" --dry-run "prompt" --read docs/guide.md) >"$OUTPUT" 2>&1; then
-  if grep -q "docs/guide.md" "$OUTPUT" && ! grep -q "src/a.py" "$OUTPUT" &&
-    ! grep -q "docs/architecture.md" "$OUTPUT" && grep -q "Visible:       1 file" "$OUTPUT"; then
-    echo "ok 12 - Everything outside the selection is invisible"
-  else
-    echo "not ok 12 - Unselected paths leaked into the payload"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-else
-  echo "not ok 12 - Narrow selection dry run exited non-zero"
-  sed 's/^/# /' "$OUTPUT"
-fi
-
-# Test 13: mutation tools appear only when something is writable
-(cd "$REPO" && "$BIN" --dry-run "prompt") >"$OUTPUT" 2>&1 || true
-RO_TOOLS=$(grep "Tools:" "$OUTPUT" || true)
-(cd "$REPO" && "$BIN" --dry-run "prompt" --edit docs/) >"$OUTPUT" 2>&1 || true
-RW_TOOLS=$(grep "Tools:" "$OUTPUT" || true)
-if [[ "$RO_TOOLS" != *write_file* && "$RO_TOOLS" != *delete_file* &&
-  "$RW_TOOLS" == *write_file* && "$RW_TOOLS" == *delete_file* ]]; then
-  echo "ok 13 - Mutation tools are offered only when --edit names something"
-else
-  echo "not ok 13 - Unexpected tool surface"
-  echo "# read-only: $RO_TOOLS"
-  echo "# mutation:  $RW_TOOLS"
-fi
-
-# Test 14: git decides what is ignored, and dotfiles stay visible
-if (cd "$REPO" && "$BIN" --dry-run "prompt") >"$OUTPUT" 2>&1; then
-  if grep -q ".github/ci.yml" "$OUTPUT" && ! grep -q "build/out.md" "$OUTPUT" &&
-    ! grep -q "debug.log" "$OUTPUT"; then
-    echo "ok 14 - Honors .gitignore while keeping project dotfiles visible"
-  else
-    echo "not ok 14 - Resolved file list did not match the expected filter"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-else
-  echo "not ok 14 - Dry run exited non-zero"
-  sed 's/^/# /' "$OUTPUT"
-fi
-
-# Test 15: a tracked path a vendor list would have hidden stays visible, because
-# git is the only authority on what is ignored
-VENDOR_REPO=$(make_repo vendor-repo)
-mkdir -p "$VENDOR_REPO/node_modules" "$VENDOR_REPO/dist"
-printf 'vendored\n' >"$VENDOR_REPO/node_modules/dep.js"
-printf 'built\n' >"$VENDOR_REPO/dist/app.js"
-commit_all "$VENDOR_REPO"
-if (cd "$VENDOR_REPO" && "$BIN" --dry-run "prompt") >"$OUTPUT" 2>&1; then
-  if grep -q "node_modules/dep.js" "$OUTPUT" && grep -q "dist/app.js" "$OUTPUT"; then
-    echo "ok 15 - Deliberately tracked vendor paths are not second-guessed"
-  else
-    echo "not ok 15 - A tracked path was hidden by a built-in vendor list"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-else
-  echo "not ok 15 - Vendor fixture dry run exited non-zero"
-  sed 's/^/# /' "$OUTPUT"
-fi
-
-# Test 16: credential paths are excluded from the payload but still reported
-if (cd "$REPO" && "$BIN" --dry-run "prompt") >"$OUTPUT" 2>&1; then
-  RESOLVED=$(sed -n '/^Resolved Files:/,/^Excluded/p' "$OUTPUT")
-  if [[ "$RESOLVED" == *.github/ci.yml* && "$RESOLVED" != *.env* &&
-    "$RESOLVED" != *server.pem* && "$RESOLVED" != *id_rsa* ]] &&
-    grep -q "Excluded (credential patterns" "$OUTPUT"; then
-    echo "ok 16 - Excludes credential paths while keeping project dotfiles"
-  else
-    echo "not ok 16 - Credential paths were not excluded from the payload"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-else
-  echo "not ok 16 - Dry run over the credential fixture exited non-zero"
-  sed 's/^/# /' "$OUTPUT"
-fi
-
-# Test 17: a credential path named explicitly is a hard error, not a silent skip
-if (cd "$REPO" && "$BIN" --dry-run "prompt" --read .env) >"$OUTPUT" 2>&1; then
-  echo "not ok 17 - Expected an explicit credential path to be refused"
-else
-  if grep -q "matches a credential pattern" "$OUTPUT"; then
-    echo "ok 17 - Refuses an explicitly named credential path"
-  else
-    echo "not ok 17 - Explicit credential path was not reported"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-fi
-
-# Test 18: an explicitly named ignored file overrides the ignore rules
-if (cd "$REPO" && "$BIN" --dry-run "prompt" --read build/out.md) >"$OUTPUT" 2>&1; then
-  if grep -q "build/out.md" "$OUTPUT" && grep -q "Explicit Overrides" "$OUTPUT"; then
-    echo "ok 18 - An explicitly named ignored path overrides the ignore rules"
-  else
-    echo "not ok 18 - Explicit ignored path was not admitted or not reported"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-else
-  echo "not ok 18 - Explicit ignored path dry run exited non-zero"
-  sed 's/^/# /' "$OUTPUT"
-fi
-
-# Test 19: the same path arriving from a list is filtered normally
-if (cd "$REPO" && printf 'build/out.md\ndocs/guide.md\n' |
-  "$BIN" --dry-run "prompt" --read-from -) >"$OUTPUT" 2>&1; then
-  if grep -q "docs/guide.md" "$OUTPUT" &&
-    [[ "$(resolved "$OUTPUT")" != *"build/out.md"* ]] &&
-    grep -q "Skipped (listed paths" "$OUTPUT"; then
-    echo "ok 19 - Listed paths are implicit and stay subject to ignore rules"
-  else
-    echo "not ok 19 - A listed ignored path was treated as explicit"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-else
-  echo "not ok 19 - Path-list dry run exited non-zero"
-  sed 's/^/# /' "$OUTPUT"
-fi
-
-# Test 20: a NUL-delimited list handles paths verbatim
-if (cd "$REPO" && printf 'docs/guide.md\0src/a.py\0' |
-  "$BIN" --dry-run "prompt" --read-from - --null) >"$OUTPUT" 2>&1; then
-  if [[ "$(resolved "$OUTPUT" | wc -l | tr -d ' ')" == "2" ]] &&
-    grep -q "docs/guide.md" "$OUTPUT" && grep -q "src/a.py" "$OUTPUT"; then
-    echo "ok 20 - Reads a NUL-delimited path list"
-  else
-    echo "not ok 20 - NUL-delimited list was not read correctly"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-else
-  echo "not ok 20 - NUL-delimited dry run exited non-zero"
-  sed 's/^/# /' "$OUTPUT"
-fi
-
-# Test 21: an explicitly empty path list selects nothing and exits 0
-if (cd "$REPO" && printf '' | "$BIN" --dry-run "prompt" --read-from - --null) >"$OUTPUT" 2>&1; then
-  if grep -q "path list is empty" "$OUTPUT" && ! grep -q "Resolved Files" "$OUTPUT"; then
-    echo "ok 21 - An empty path list is a selection of nothing, not of everything"
-  else
-    echo "not ok 21 - Empty path list did not stop the run"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-else
-  echo "not ok 21 - Empty path list exited non-zero"
-  sed 's/^/# /' "$OUTPUT"
-fi
-
-# Test 22: an ignored path cannot be made writable, because git cannot restore it
-if (cd "$REPO" && "$BIN" --dry-run "prompt" --edit build/out.md) >"$OUTPUT" 2>&1; then
-  echo "not ok 22 - Expected an ignored --edit path to be refused"
-else
-  if grep -q "ignored by git, which cannot restore them" "$OUTPUT"; then
-    echo "ok 22 - Refuses to make a git-ignored path writable"
-  else
-    echo "not ok 22 - Unrestorable path rejection missing expected error"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-fi
-
-# Test 23: --force accepts that risk
-if (cd "$REPO" && "$BIN" --dry-run --force "prompt" --edit build/out.md) >"$OUTPUT" 2>&1; then
-  if [[ "$(resolved "$OUTPUT")" == *"build/out.md RWI"* ]]; then
-    echo "ok 23 - --force permits writing a path git cannot restore"
-  else
-    echo "not ok 23 - --force did not grant write access"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-else
-  echo "not ok 23 - --force dry run exited non-zero"
-  sed 's/^/# /' "$OUTPUT"
-fi
-
-# Test 24: a mutation run refuses a dirty worktree; a read-only run does not
-DIRTY=$(make_repo dirty)
-printf 'committed\n' >"$DIRTY/tracked.md"
-commit_all "$DIRTY"
-printf 'uncommitted\n' >>"$DIRTY/tracked.md"
-if (cd "$DIRTY" && AGENT_OFFLINE=0 "$BIN" "prompt" --edit tracked.md) >"$OUTPUT" 2>&1; then
-  echo "not ok 24 - Expected a mutation run on a dirty worktree to be refused"
-else
-  (cd "$DIRTY" && AGENT_OFFLINE=1 "$BIN" "prompt") >"$WORK/dirty-read.out" 2>&1 || true
-  if grep -q "has uncommitted changes" "$OUTPUT" &&
-    grep -q "caxton: offline" "$WORK/dirty-read.out"; then
-    echo "ok 24 - Refuses a dirty worktree for mutation but not for reading"
-  else
-    echo "not ok 24 - Dirty worktree guard applied incorrectly"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-fi
-
-# Test 25: --force overrides the dirty worktree guard (reaching the offline check)
-if (cd "$DIRTY" && AGENT_OFFLINE=1 "$BIN" --force "prompt" --edit tracked.md) >"$OUTPUT" 2>&1; then
-  echo "not ok 25 - Expected offline rejection after passing the dirty guard"
-else
-  if grep -q "caxton: offline" "$OUTPUT"; then
-    echo "ok 25 - --force overrides the dirty worktree guard"
-  else
-    echo "not ok 25 - --force did not get past the dirty worktree guard"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-fi
-
-# Test 26: --inline narrows the inlined set within the visible set
-if (cd "$REPO" && "$BIN" --dry-run "prompt" --read . --inline docs/) >"$OUTPUT" 2>&1; then
-  TAGS=$(resolved "$OUTPUT")
-  if [[ "$TAGS" == *"docs/guide.md R-I"* && "$TAGS" == *"src/a.py R--"* ]] &&
-    grep -q "Inlined:       2 file" "$OUTPUT"; then
-    echo "ok 26 - --inline narrows the initial context without narrowing access"
-  else
-    echo "not ok 26 - --inline did not narrow the inlined set correctly"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-else
-  echo "not ok 26 - --inline dry run exited non-zero"
-  sed 's/^/# /' "$OUTPUT"
-fi
-
-# Test 27: --inline cannot widen access
-if (cd "$REPO" && "$BIN" --dry-run "prompt" --read docs/ --inline src/a.py) >"$OUTPUT" 2>&1; then
-  echo "not ok 27 - Expected --inline outside the visible set to be refused"
-else
-  if grep -q "is not visible" "$OUTPUT" && grep -q "cannot widen access" "$OUTPUT"; then
-    echo "ok 27 - --inline is refused for a path that is not visible"
-  else
-    echo "not ok 27 - Out-of-scope --inline was not reported"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-fi
-
-# Test 28: --no-inline keeps the tree but sends no file contents
-if (cd "$REPO" && "$BIN" --dry-run "prompt" --no-inline) >"$OUTPUT" 2>&1; then
-  if grep -q "Inlined:       nothing" "$OUTPUT" && grep -q "docs/guide.md" "$OUTPUT" &&
-    [[ "$(resolved "$OUTPUT")" == *"docs/guide.md R--"* ]]; then
-    echo "ok 28 - --no-inline keeps files visible while inlining nothing"
-  else
-    echo "not ok 28 - --no-inline output was wrong"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-else
-  echo "not ok 28 - --no-inline dry run exited non-zero"
-  sed 's/^/# /' "$OUTPUT"
-fi
-
-# Test 29: an over-threshold dry run still reports the payload before failing
-BIG=$(make_repo big)
-printf '# Small\n' >"$BIG/small.md"
-head -c 1200000 /dev/zero | tr '\0' 'a' >"$BIG/big.md"
-commit_all "$BIG"
-if (cd "$BIG" && "$BIN" --dry-run "prompt") >"$OUTPUT" 2>&1; then
-  echo "not ok 29 - Expected an over-threshold dry run to exit non-zero"
-else
-  if grep -q "Caxton Dry Run Summary" "$OUTPUT" && grep -q "big.md" "$OUTPUT" &&
-    grep -q "exceeds 1MB threshold" "$OUTPUT"; then
-    echo "ok 29 - Over-threshold dry run reports the payload before failing"
-  else
-    echo "not ok 29 - Over-threshold dry run did not report the payload"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-fi
-
-# Test 30: the threshold counts inlined bytes, so narrowing the inline set clears it
-if (cd "$BIG" && "$BIN" --dry-run "prompt" --read . --inline small.md) >"$OUTPUT" 2>&1; then
-  if ! grep -q "exceeds 1MB threshold" "$OUTPUT" && grep -q "big.md" "$OUTPUT"; then
-    echo "ok 30 - The context threshold counts only what is inlined"
-  else
-    echo "not ok 30 - Threshold was applied to the visible set, not the inlined set"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-else
-  echo "not ok 30 - Narrowed-inline dry run exited non-zero"
-  sed 's/^/# /' "$OUTPUT"
-fi
-
-# Test 31: symlinks are excluded, and naming one explicitly is an error
-SYMLINK_REPO=$(make_repo symlinks)
-OUTSIDE="$WORK/outside"
-mkdir -p "$OUTSIDE/docs"
-printf 'outside\n' >"$OUTSIDE/docs/outside.md"
-printf 'safe\n' >"$SYMLINK_REPO/real.md"
-ln -s "real.md" "$SYMLINK_REPO/inside-link.md"
-ln -s "$OUTSIDE/docs" "$SYMLINK_REPO/outside-dir"
-commit_all "$SYMLINK_REPO"
-if (cd "$SYMLINK_REPO" && "$BIN" --dry-run "prompt") >"$OUTPUT" 2>&1; then
-  if grep -q "real.md" "$OUTPUT" &&
-    [[ "$(resolved "$OUTPUT")" != *"inside-link.md"* ]] &&
-    grep -q "Excluded (symlinks, never followed)" "$OUTPUT" &&
-    ! (cd "$SYMLINK_REPO" && "$BIN" --dry-run "prompt" --read inside-link.md >/dev/null 2>&1); then
-    echo "ok 31 - Excludes symlinks and refuses to select one explicitly"
-  else
-    echo "not ok 31 - Symlink handling was wrong"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-else
-  echo "not ok 31 - Dry run over a tree containing symlinks failed"
-  sed 's/^/# /' "$OUTPUT"
-fi
-
-# Test 32: a FIFO neither hangs discovery nor reaches the payload
-FIFO_REPO=$(make_repo fifo)
-printf 'content\n' >"$FIFO_REPO/real.md"
-commit_all "$FIFO_REPO"
-if mkfifo "$FIFO_REPO/pipe" 2>/dev/null; then
-  if (cd "$FIFO_REPO" && "$BIN" --dry-run --timeout 10 "prompt") >"$OUTPUT" 2>&1; then
-    if grep -q "real.md" "$OUTPUT" && [[ "$(resolved "$OUTPUT")" != *pipe* ]]; then
-      echo "ok 32 - Skips non-regular files instead of blocking on them"
-    else
-      echo "not ok 32 - FIFO handling was wrong"
-      sed 's/^/# /' "$OUTPUT"
-    fi
-  else
-    echo "not ok 32 - Dry run over a tree containing a FIFO failed"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-else
-  echo "ok 32 # SKIP mkfifo not available"
-fi
-
-# Test 33: a submodule is refused rather than half-managed
-SUB_PARENT=$(make_repo submodule-parent)
-printf 'top\n' >"$SUB_PARENT/top.md"
-mkdir -p "$SUB_PARENT/vendor/lib"
-(cd "$SUB_PARENT/vendor/lib" && git init -q . &&
-  git config core.excludesFile /dev/null) >/dev/null 2>&1
-printf 'inner\n' >"$SUB_PARENT/vendor/lib/inner.md"
-if (cd "$SUB_PARENT" && "$BIN" --dry-run "prompt" --read vendor/lib) >"$OUTPUT" 2>&1; then
-  echo "not ok 33 - Expected a submodule path to be refused"
-else
-  if grep -q "is a submodule" "$OUTPUT"; then
-    echo "ok 33 - Refuses a submodule path and says where to run instead"
-  else
-    echo "not ok 33 - Submodule rejection missing expected error"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-fi
-
-# Test 34: negated, anchored and nested ignore rules follow git exactly
-GI=$(make_repo gitignore-repo)
-mkdir -p "$GI/sub" "$GI/docs"
-printf '*.log\n!important.log\n/root-only.txt\n' >"$GI/.gitignore"
-printf 'nested-secret.md\n' >"$GI/sub/.gitignore"
-touch "$GI/important.log" "$GI/noise.log" "$GI/root-only.txt" \
-  "$GI/sub/root-only.txt" "$GI/sub/nested-secret.md" \
-  "$GI/sub/keep.md" "$GI/docs/a.md"
-if (cd "$GI" && "$BIN" --dry-run "prompt") >"$OUTPUT" 2>&1; then
-  EXPECTED=$(git -C "$GI" ls-files --cached --others --exclude-standard | sort)
-  ACTUAL=$(resolved "$OUTPUT" | cut -d' ' -f1 | sort)
-  if [[ "$EXPECTED" == "$ACTUAL" ]]; then
-    echo "ok 34 - Ignore filtering matches git exactly"
-  else
-    echo "not ok 34 - Ignore filtering diverged from git"
-    diff <(echo "$EXPECTED") <(echo "$ACTUAL") | sed 's/^/# /'
-  fi
-else
-  echo "not ok 34 - Dry run over the gitignore fixture exited non-zero"
-  sed 's/^/# /' "$OUTPUT"
-fi
-
-# Test 35: a selection that resolves to nothing is an error, not an empty run
-EMPTY=$(make_repo all-ignored)
-printf '*\n' >"$EMPTY/.gitignore"
-printf 'ignored\n' >"$EMPTY/thing.md"
-if (cd "$EMPTY" && "$BIN" --dry-run "prompt") >"$OUTPUT" 2>&1; then
-  echo "not ok 35 - Expected an empty payload to be rejected"
-else
-  if grep -q "no files to work with" "$OUTPUT"; then
-    echo "ok 35 - Refuses to run when the selection leaves no files"
-  else
-    echo "not ok 35 - Empty payload rejection missing expected error"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-fi
-
-# Test 36: a closed stdout exits cleanly instead of dumping a traceback. Two
-# distinct paths: a large listing raises inside the write, while a small one is
-# buffered and only fails at the interpreter's final flush. PYTHONUNBUFFERED
-# would hide the second, so it is cleared for both.
-PIPE_REPO=$(make_repo pipe-src)
-(cd "$PIPE_REPO" && touch file{0001..4000}.md)
-SMALL_REPO=$(make_repo pipe-small)
-printf 'x\n' >"$SMALL_REPO/only.md"
-
-# pipefail would turn the expected SIGPIPE exit into an errexit abort.
-set +o pipefail
-(cd "$PIPE_REPO" && env -u PYTHONUNBUFFERED "$BIN" --dry-run "prompt" \
-  2>"$WORK/pipe.err") | head -2 >/dev/null
-LARGE_STATUS=${PIPESTATUS[0]}
-# 'true' never reads, so the whole (small) payload is still buffered when the
-# reader goes away.
-(cd "$SMALL_REPO" && env -u PYTHONUNBUFFERED "$BIN" --dry-run "prompt" \
-  2>"$WORK/pipe-small.err") | true
-SMALL_STATUS=${PIPESTATUS[0]}
-set -o pipefail
-if [[ "$LARGE_STATUS" -eq 141 && "$SMALL_STATUS" -eq 141 ]] &&
-  ! grep -q "Exception ignored" "$WORK/pipe.err" "$WORK/pipe-small.err"; then
-  echo "ok 36 - Exits 141 without a traceback when stdout closes early"
-else
-  echo "not ok 36 - Broken pipe mishandled (large=$LARGE_STATUS small=$SMALL_STATUS)"
-  sed 's/^/# /' "$WORK/pipe.err" "$WORK/pipe-small.err"
-fi
-
-# Unit checks against caxton's helpers and its capability policy. The google
-# and httpx imports are stripped so the helpers load with no third-party
-# dependencies, but the file still needs the Python version caxton declares: the
-# system python3 is 3.9 on macOS, which cannot even parse its "X | None"
-# annotations.
-# Run it through uv, as the script itself is run.
-UNIT_OUT="$WORK/unit.out"
-cat >"$WORK/unit.py" <<'PYEOF'
+#!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.11"
-# dependencies = []
+# dependencies = [
+#     "google-genai>=2.31.0",
+#     "httpx",
+#     "httpx2",
+# ]
 # ///
+"""TAP tests for skills/agent-tools/scripts/caxton."""
+
+import contextlib
+import fcntl
+import http.server
+import importlib.machinery
+import importlib.util
+import io
+import json
 import os
-import sys
-from pathlib import Path
-
-source = Path(sys.argv[1]).read_text()
-stripped = "\n".join(
-    line
-    for line in source.splitlines()
-    if not line.startswith(("from google", "import httpx"))
-)
-cx = {"__name__": "caxton_helpers"}
-exec(compile(stripped, "caxton", "exec"), cx)
-
-root = Path(sys.argv[2])
-root.mkdir(parents=True, exist_ok=True)
-
-
-def report(name, ok, detail=""):
-    print(f"check:{name}:{'pass' if ok else 'fail'} {detail}".rstrip())
-
-
-# Sandbox containment
-resolve = cx["resolve_sandboxed_path"]
-(root / "inside.txt").write_text("x\n")
-os.symlink("/etc/passwd", root / "escape-link")
-(root / "target.txt").write_text("y\n")
-os.symlink("target.txt", root / "inside-link")
-
-blocked = []
-for candidate in ("../outside.txt", "/etc/passwd", "escape-link", "a/../../b"):
-    try:
-        resolve(root, candidate)
-        blocked.append(f"{candidate} NOT blocked")
-    except PermissionError:
-        pass
-report("sandbox-escape", not blocked, "; ".join(blocked))
-
-resolved_ok = resolve(root, "inside.txt") == (root / "inside.txt").resolve()
-# A symlink inside the sandbox resolves to its target, so edits go through the
-# link instead of replacing it.
-link_ok = resolve(root, "inside-link").name == "target.txt"
-report("sandbox-inside", resolved_ok and link_ok)
-
-# Permission bits survive an edit
-script = root / "s.sh"
-script.write_text("#!/bin/sh\necho hi\n")
-os.chmod(script, 0o755)
-cx["atomic_write_text"](script, "#!/bin/sh\necho bye\n")
-mode = oct(script.stat().st_mode & 0o777)
-report("preserve-mode", mode == "0o755", mode)
-
-# CRLF files stay CRLF
-crlf = root / "crlf.txt"
-crlf.write_bytes(b"alpha\r\nbeta\r\n")
-raw = cx["read_text_verbatim"](crlf)
-body = raw.replace("\r\n", "\n").replace("beta", "BETA")
-cx["atomic_write_text"](crlf, body.replace("\n", "\r\n") if "\r\n" in raw else body)
-report("preserve-crlf", crlf.read_bytes() == b"alpha\r\nBETA\r\n", str(crlf.read_bytes()))
-
-# Non-UTF-8 text is refused for mutation but readable for display
-latin = root / "latin.txt"
-latin.write_bytes("café price\n".encode("latin-1"))
-try:
-    cx["read_text_verbatim"](latin)
-    strict_refused = False
-except UnicodeDecodeError:
-    strict_refused = True
-lossy_ok = "price" in cx["read_text_verbatim"](latin, lossy=True)
-report("refuse-non-utf8", strict_refused and lossy_ok)
-
-# Tree discovery and direct reads both reject symlinks
-safe_entry = cx["is_safe_tree_entry"]
-entries_ok = (
-    safe_entry(root / "inside.txt")
-    and not safe_entry(root / "escape-link")
-    and not safe_entry(root / "inside-link")
-)
-try:
-    cx["read_text_verbatim"](root / "escape-link", lossy=True)
-    read_blocked = False
-except OSError:
-    read_blocked = True
-report("reject-symlinks", entries_ok and read_blocked)
-
-# Credential rules: reading is refused broadly, creation only in credential
-# directories, so '.env.example' stays writable while '.ssh/config' does not.
-secret = cx["is_secret_path"]
-secret_dir = cx["is_secret_dir_path"]
-secret_cases = {
-    ".github/ci.yml": False,
-    ".gitignore": False,
-    ".env": True,
-    ".env.example": True,
-    ".ssh/config": True,
-    "src/a.py": False,
-}
-wrong = [
-    rel for rel, want in secret_cases.items() if secret(root / rel, root) is not want
-]
-create_cases = {".env.example": False, ".ssh/config": True, "docs/a.md": False}
-wrong += [
-    rel
-    for rel, want in create_cases.items()
-    if secret_dir(root / rel, root) is not want
-]
-report("credential-rules", not wrong, "; ".join(wrong))
-
-# The policy answers every access question, including for paths created mid-run
-Policy = cx["Policy"]
-policy = Policy(
-    root,
-    visible={"docs/guide.md", "docs/arch.md", "src/a.py"},
-    writable={"docs/guide.md"},
-    dir_selectors={"docs": "edit"},
-    inlined=["docs/guide.md"],
-)
-policy_wrong = []
-if not policy.is_visible("src/a.py"):
-    policy_wrong.append("selected file not visible")
-if policy.is_visible("secret.txt"):
-    policy_wrong.append("unselected file visible")
-if policy.is_writable("docs/arch.md"):
-    policy_wrong.append("carve-out is writable")
-if not policy.can_create("docs/new.md"):
-    policy_wrong.append("cannot create under a writable directory")
-if policy.can_create("src/new.py"):
-    policy_wrong.append("can create outside a writable directory")
-# A read carve-out inside a writable directory must block creation too.
-carved = Policy(
-    root,
-    visible={"docs/guide.md", "docs/private/secret.md"},
-    writable={"docs/guide.md"},
-    dir_selectors={"docs": "edit", "docs/private": "read"},
-    inlined=[],
-)
-if not carved.can_create("docs/new.md"):
-    policy_wrong.append("cannot create beside a carve-out")
-if carved.can_create("docs/private/new.md") or carved.can_create("docs/private/a/b.md"):
-    policy_wrong.append("can create inside a read-only carve-out")
-policy.note_created("docs/new.md")
-if not (policy.is_visible("docs/new.md") and policy.is_writable("docs/new.md")):
-    policy_wrong.append("created file is not readable back")
-policy.note_deleted("docs/guide.md")
-if policy.is_visible("docs/guide.md") or policy.is_writable("docs/guide.md"):
-    policy_wrong.append("deleted file still in scope")
-if not policy.is_visible_dir("docs"):
-    policy_wrong.append("directory holding visible files is not listable")
-report("policy", not policy_wrong, "; ".join(policy_wrong))
-
-# An unanswerable check-ignore is indeterminate, not "not ignored": a creation
-# that cannot be classified must be refused rather than assumed restorable.
-broken = root / "not-a-repo"
-broken.mkdir(exist_ok=True)
-report("check-ignore-closed", cx["git_ignored_subset"](broken, ["a.md"]) is None)
-
-# NUL-delimited lists are verbatim; line-delimited lists only lose the newline
-list_wrong = []
-nul = root / "list.nul"
-nul.write_bytes(b"trailing.md\n\0\nleading.md\0")
-if cx["read_path_list"](str(nul), True, "caxton") != ["trailing.md\n", "\nleading.md"]:
-    list_wrong.append("NUL list mangled a newline")
-lines = root / "list.txt"
-lines.write_text("a.md\r\nb.md\n")
-if cx["read_path_list"](str(lines), False, "caxton") != ["a.md", "b.md"]:
-    list_wrong.append("line list mishandled CRLF")
-report("path-lists", not list_wrong, "; ".join(list_wrong))
-
-# Help detection skips single values and whole path lists, and stops at '--'
-wants_help = cx["wants_help"]
-help_cases = {
-    ("-h",): True,
-    ("--help",): True,
-    ("prompt", "--edit", "docs/", "--help"): True,
-    ("--model", "-h", "prompt"): False,
-    ("--read", "-h"): False,
-    ("--read", "a.md", "b.md", "-h"): False,
-    ("--", "-h"): False,
-    ("prompt",): False,
-}
-bad = [str(a) for a, want in help_cases.items() if wants_help(list(a)) is not want]
-report("wants-help", not bad, "; ".join(bad))
-
-# Retry delay extraction
-extract_delay = cx["extract_retry_delay"]
-
-
-class MockAPIError(Exception):
-
-    def __init__(self, message="", code=429):
-        super().__init__(message)
-        self.message = message
-        self.code = code
-
-
-e_msg1 = MockAPIError(
-    message=(
-        "You exceeded your current quota. * Quota exceeded for metric:"
-        " generativelanguage.googleapis.com/generate_content_paid_tier_2_input_token_count,"
-        " limit: 3000000, model: gemini-3.7-flash Please retry in"
-        " 51.940658776s.)."
-    )
-)
-e_msg2 = MockAPIError(
-    message="Resource exhausted. Please retry in 43.925798488s."
-)
-e_msg3 = MockAPIError(message="Please retry in 10s.")
-e_msg_hard_quota = MockAPIError(
-    message=(
-        "You exceeded your current quota, please check your plan and billing"
-        " details. For more information on this error, head to:"
-        " https://ai.google.dev/gemini-api/docs/rate-limits."
-    )
-)
-e_fallback = MockAPIError(message="Server error", code=500)
-
-retry_delay_ok = (
-    extract_delay(e_msg1) == 51.940658776
-    and extract_delay(e_msg2) == 43.925798488
-    and extract_delay(e_msg3) == 10.0
-    and extract_delay(e_msg_hard_quota) is None
-    and extract_delay(e_fallback) is None
-)
-report("extract-retry-delay", retry_delay_ok)
-PYEOF
-
-PYTHONDONTWRITEBYTECODE=1 uv run --quiet --script "$WORK/unit.py" \
-  "$BIN" "$WORK/unit" >"$UNIT_OUT" 2>&1 || true
-
-unit_check() {
-  if grep -q "^check:$1:pass" "$UNIT_OUT"; then
-    echo "ok $2 - $3"
-  else
-    echo "not ok $2 - $3"
-    sed 's/^/# /' "$UNIT_OUT"
-  fi
-}
-
-unit_check sandbox-escape 37 "Blocks path traversal, absolute paths and escaping symlinks"
-unit_check sandbox-inside 38 "Resolves in-sandbox paths and follows in-sandbox symlinks"
-unit_check preserve-mode 39 "Preserves permission bits when rewriting a file"
-unit_check preserve-crlf 40 "Preserves CRLF line endings when rewriting a file"
-unit_check refuse-non-utf8 41 "Refuses to mutate non-UTF-8 files but still reads them"
-unit_check reject-symlinks 42 "Rejects symlinks during discovery and direct reads"
-unit_check credential-rules 43 "Blocks credential reads without blocking ordinary creates"
-unit_check policy 44 "Enforces visibility, writability, creation roots and created files"
-unit_check check-ignore-closed 45 "Reports an unanswerable check-ignore as indeterminate"
-unit_check path-lists 46 "Reads NUL lists verbatim and line lists without their newline"
-unit_check extract-retry-delay 47 "Extracts suggested retry delays from structured details, headers, and error messages"
-
-# Test 48: a selector reached through a symlinked ancestor is refused, whether
-# or not its final component is an ordinary file. lstat and O_NOFOLLOW resolve
-# leading components, so admitting one would read a file outside the repository.
-ESCAPE_OUTSIDE="$WORK/escape-outside"
-mkdir -p "$ESCAPE_OUTSIDE"
-printf 'OUTSIDE-CONTENT\n' >"$ESCAPE_OUTSIDE/notes.txt"
-ESCAPE_REPO=$(make_repo escape)
-printf 'inside\n' >"$ESCAPE_REPO/real.md"
-ln -s "$ESCAPE_OUTSIDE" "$ESCAPE_REPO/alias"
-commit_all "$ESCAPE_REPO"
-if (cd "$ESCAPE_REPO" && "$BIN" --dry-run "prompt" --read alias/notes.txt) >"$OUTPUT" 2>&1; then
-  echo "not ok 48 - Expected a path through a symlinked ancestor to be refused"
-else
-  if grep -q "reached through 'alias'" "$OUTPUT"; then
-    echo "ok 48 - Refuses a selector that traverses a symlinked ancestor"
-  else
-    echo "not ok 48 - Symlinked-ancestor rejection missing expected error"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-fi
-
-# Test 49: the same path arriving from a list is skipped, not admitted
-if (cd "$ESCAPE_REPO" && printf 'alias/notes.txt\nreal.md\n' |
-  "$BIN" --dry-run "prompt" --read-from -) >"$OUTPUT" 2>&1; then
-  if [[ "$(resolved "$OUTPUT")" == "real.md R-I" ]] &&
-    grep -q "Excluded (symlinks, never followed)" "$OUTPUT"; then
-    echo "ok 49 - Drops a listed path that traverses a symlinked ancestor"
-  else
-    echo "not ok 49 - A listed path escaped the repository through a symlink"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-else
-  echo "not ok 49 - Symlinked-ancestor list dry run exited non-zero"
-  sed 's/^/# /' "$OUTPUT"
-fi
-
-# Test 50: a read carve-out inside a writable directory blocks creation there
-CARVE=$(make_repo carve)
-mkdir -p "$CARVE/docs/private"
-printf 'guide\n' >"$CARVE/docs/guide.md"
-printf 'secret\n' >"$CARVE/docs/private/secret.md"
-commit_all "$CARVE"
-if (cd "$CARVE" && "$BIN" --dry-run "prompt" --edit docs/ --read docs/private/) >"$OUTPUT" 2>&1; then
-  if grep -q "\[ W \]  docs/" "$OUTPUT" &&
-    grep -q "\[ R \]  docs/private/ (read-only; no new files here)" "$OUTPUT" &&
-    [[ "$(resolved "$OUTPUT")" == *"docs/private/secret.md R-I"* ]]; then
-    echo "ok 50 - A read carve-out is reported as accepting no new files"
-  else
-    echo "not ok 50 - Creation carve-out was not reported"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-else
-  echo "not ok 50 - Carve-out dry run exited non-zero"
-  sed 's/^/# /' "$OUTPUT"
-fi
-
-# Test 51: NUL-delimited lists keep filenames verbatim. A name ending in a
-# newline is the case NUL delimiters exist for, and the one that stripping
-# silently turns into a different (nonexistent) path.
-NL_REPO=$(make_repo newline-names)
-NL_NAME=$'trail.md\n'
-printf 'plain\n' >"$NL_REPO/plain.md"
-if printf 'odd\n' >"$NL_REPO/$NL_NAME" 2>/dev/null && [[ -f "$NL_REPO/$NL_NAME" ]]; then
-  commit_all "$NL_REPO"
-  if (cd "$NL_REPO" && git ls-files -z |
-    "$BIN" --dry-run "prompt" --read-from - --null) >"$OUTPUT" 2>&1; then
-    if grep -q "Visible:       2 file" "$OUTPUT" &&
-      ! grep -q "Skipped (listed paths" "$OUTPUT"; then
-      echo "ok 51 - A NUL-delimited list preserves newlines inside filenames"
-    else
-      echo "not ok 51 - A filename ending in a newline was mangled"
-      sed 's/^/# /' "$OUTPUT"
-    fi
-  else
-    echo "not ok 51 - NUL-delimited newline dry run exited non-zero"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-else
-  echo "ok 51 # SKIP filesystem rejects newlines in filenames"
-fi
-
-# A repository whose ignored directory holds a force-tracked file: git declines
-# to call such a directory ignored, which is the case that used to slip through.
-FORCED=$(make_repo forced)
-mkdir -p "$FORCED/build" "$FORCED/empty-build" "$FORCED/docs"
-printf 'build/\nempty-build/\n' >"$FORCED/.gitignore"
-printf 'kept\n' >"$FORCED/build/tracked.md"
-printf 'sibling\n' >"$FORCED/build/sibling.md"
-printf 'doc\n' >"$FORCED/docs/a.md"
-printf 'top\n' >"$FORCED/top.md"
-(
-  cd "$FORCED"
-  git add -A
-  git add -f build/tracked.md
-  git commit -q --no-gpg-sign -m init
-) >/dev/null 2>&1
-
-# Test 52: naming an ignored directory admits its ignored files too, even when
-# a force-tracked descendant makes git report the directory as not ignored
-if (cd "$FORCED" && "$BIN" --dry-run "prompt" --read build/) >"$OUTPUT" 2>&1; then
-  TAGS=$(resolved "$OUTPUT")
-  if [[ "$TAGS" == *"build/sibling.md R-I"* && "$TAGS" == *"build/tracked.md R-I"* ]]; then
-    echo "ok 52 - An explicit ignored directory admits ignored and tracked files alike"
-  else
-    echo "not ok 52 - Ignored siblings were hidden beside a force-tracked file"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-else
-  echo "not ok 52 - Explicit ignored directory dry run exited non-zero"
-  sed 's/^/# /' "$OUTPUT"
-fi
-
-# Test 53: naming it with --edit rejects the unrestorable files rather than
-# silently narrowing the selection to the tracked one
-if (cd "$FORCED" && "$BIN" --dry-run "prompt" --edit build/) >"$OUTPUT" 2>&1; then
-  echo "not ok 53 - Expected the ignored contents of build/ to be refused"
-else
-  if grep -q "ignored by git, which cannot restore them" "$OUTPUT" &&
-    grep -q "build/sibling.md" "$OUTPUT"; then
-    echo "ok 53 - Refuses an ignored directory's files instead of narrowing scope"
-  else
-    echo "not ok 53 - Unrestorable rejection did not name the ignored sibling"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-fi
-
-# Test 54: an ignored directory is not a usable creation root either, even when
-# it is empty and nothing lands in the unrestorable file list
-if (cd "$FORCED" && "$BIN" --dry-run "prompt" --edit empty-build/) >"$OUTPUT" 2>&1; then
-  echo "not ok 54 - Expected an ignored creation root to be refused"
-else
-  if grep -q "ignored by git, which cannot restore them" "$OUTPUT" &&
-    grep -q "empty-build/" "$OUTPUT"; then
-    echo "ok 54 - Refuses a creation root whose every creation would be rejected"
-  else
-    echo "not ok 54 - Ignored creation root was advertised rather than refused"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-fi
-
-# Test 55: a filename containing a carriage return survives the git listing and
-# a NUL path list. Text-mode reads translate it to a newline, which points at a
-# path that does not exist, so the file silently vanishes.
-CR_REPO=$(make_repo carriage)
-CR_NAME=$'carriage\r.md'
-printf 'plain\n' >"$CR_REPO/plain.md"
-if printf 'cr\n' >"$CR_REPO/$CR_NAME" 2>/dev/null && [[ -f "$CR_REPO/$CR_NAME" ]]; then
-  commit_all "$CR_REPO"
-  (cd "$CR_REPO" && "$BIN" --dry-run "prompt") >"$OUTPUT" 2>&1 || true
-  (cd "$CR_REPO" && printf 'carriage\r.md\0' |
-    "$BIN" --dry-run "prompt" --read-from - --null) >"$WORK/cr-list.out" 2>&1 || true
-  if grep -q "Visible:       2 file" "$OUTPUT" &&
-    grep -q "Visible:       1 file" "$WORK/cr-list.out" &&
-    ! grep -q "Skipped (listed paths" "$WORK/cr-list.out"; then
-    echo "ok 55 - A carriage return in a filename survives git output and path lists"
-  else
-    echo "not ok 55 - A filename containing a carriage return was rewritten"
-    sed 's/^/# /' "$OUTPUT" "$WORK/cr-list.out"
-  fi
-else
-  echo "ok 55 # SKIP filesystem rejects carriage returns in filenames"
-fi
-
-# Test 56: a tilde is shell syntax, so a listed path keeps it literal; only a
-# typed path is expanded
-TILDE_REPO=$(make_repo tilde)
-mkdir -p "$TILDE_REPO/~"
-printf 'note\n' >"$TILDE_REPO/~/note.md"
-commit_all "$TILDE_REPO"
-# The tilde is the fixture: this test asserts that a listed path keeps it
-# literal while a typed one expands, so quoting it is the point.
-# shellcheck disable=SC2088
-if (cd "$TILDE_REPO" && printf '~/note.md\n' |
-  "$BIN" --dry-run "prompt" --read-from -) >"$OUTPUT" 2>&1; then
-  if [[ "$(resolved "$OUTPUT")" == "~/note.md R-I" ]] &&
-    ! (cd "$TILDE_REPO" && "$BIN" --dry-run "prompt" --read '~/note.md' >/dev/null 2>&1); then
-    echo "ok 56 - Listed paths keep a literal tilde while typed paths expand it"
-  else
-    echo "not ok 56 - Tilde handling did not distinguish listed from typed paths"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-else
-  echo "not ok 56 - Literal-tilde dry run exited non-zero"
-  sed 's/^/# /' "$OUTPUT"
-fi
-
-# Test 57: an unignored directory stays unignored however the ignore rules
-# would judge a name invented inside it. A '.*' rule matches any sentinel a
-# probe could use, which would turn every directory into an explicit override
-# and expose its genuinely ignored contents.
-DOTGLOB=$(make_repo dotglob)
-mkdir -p "$DOTGLOB/docs"
-printf '.*\n!.gitignore\n*.log\n' >"$DOTGLOB/.gitignore"
-printf 'guide\n' >"$DOTGLOB/docs/guide.md"
-printf 'LOCAL\n' >"$DOTGLOB/docs/local.log"
-commit_all "$DOTGLOB"
-if (cd "$DOTGLOB" && "$BIN" --dry-run "prompt" --read docs/) >"$OUTPUT" 2>&1; then
-  if [[ "$(resolved "$OUTPUT")" == "docs/guide.md R-I" ]] &&
-    ! grep -q "Explicit Overrides" "$OUTPUT"; then
-    echo "ok 57 - An unignored directory is not treated as an override"
-  else
-    echo "not ok 57 - Ignored descendants were exposed by a filename-sensitive probe"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-else
-  echo "not ok 57 - Dotglob dry run exited non-zero"
-  sed 's/^/# /' "$OUTPUT"
-fi
-
-# A repository containing an initialized submodule.
-SUB_HOST=$(make_repo submodule-host)
-printf 'top\n' >"$SUB_HOST/top.md"
-mkdir -p "$SUB_HOST/sub"
-(
-  cd "$SUB_HOST/sub"
-  git init -q .
-  git config user.email "test@example.com"
-  git config user.name "Test"
-  git config commit.gpgsign false
-  git config core.excludesFile /dev/null
-  printf 'SUBMODULE CONTENT\n' >child.txt
-  git add -A
-  git commit -q --no-gpg-sign -m sub
-) >/dev/null 2>&1
-
-# Test 58: a file inside a submodule is refused, not just the submodule root.
-# Its contents belong to another repository's index and restorability.
-if (cd "$SUB_HOST" && "$BIN" --dry-run "prompt" --read sub/child.txt) >"$OUTPUT" 2>&1; then
-  echo "not ok 58 - Expected a path inside a submodule to be refused"
-else
-  if grep -q "reached through 'sub'" "$OUTPUT" && grep -q "is a submodule" "$OUTPUT"; then
-    echo "ok 58 - Refuses a file beneath a submodule boundary"
-  else
-    echo "not ok 58 - Submodule ancestor rejection missing expected error"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-fi
-
-# Test 59: the same path from a list is skipped rather than aborting the run
-if (cd "$SUB_HOST" && printf 'sub/child.txt\ntop.md\n' |
-  "$BIN" --dry-run "prompt" --read-from -) >"$OUTPUT" 2>&1; then
-  if [[ "$(resolved "$OUTPUT")" == "top.md R-I" ]] &&
-    grep -q "Skipped (listed paths" "$OUTPUT"; then
-    echo "ok 59 - Drops a listed path beneath a submodule boundary"
-  else
-    echo "not ok 59 - A listed submodule path was admitted"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-else
-  echo "not ok 59 - Submodule list dry run exited non-zero"
-  sed 's/^/# /' "$OUTPUT"
-fi
-
-# Test 60: a backslash is an ordinary filename character here, so it must not
-# be rewritten into a separator: the file would be listed under one key and
-# then denied under another by every tool call.
-BS_REPO=$(make_repo backslash)
-BS_NAME='back\slash.md'
-printf 'plain\n' >"$BS_REPO/plain.md"
-if printf 'bs\n' >"$BS_REPO/$BS_NAME" 2>/dev/null && [[ -f "$BS_REPO/$BS_NAME" ]]; then
-  commit_all "$BS_REPO"
-  (cd "$BS_REPO" && "$BIN" --dry-run "prompt" --read "$BS_NAME") >"$OUTPUT" 2>&1 || true
-  if [[ "$(resolved "$OUTPUT")" == "$BS_NAME R-I" ]]; then
-    echo "ok 60 - A backslash in a filename survives as itself"
-  else
-    echo "not ok 60 - A backslash was rewritten into a path separator"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-else
-  echo "ok 60 # SKIP filesystem rejects backslashes in filenames"
-fi
-
-# Test 61: a submodule that has been deinitialized keeps its gitlink in the
-# index but loses its .git marker, and git still refuses to clean inside it,
-# so anything written there would outlive the run's undo.
-DEINIT=$(make_repo deinit-host)
-printf 'top\n' >"$DEINIT/top.md"
-mkdir -p "$DEINIT/sub"
-(
-  cd "$DEINIT/sub"
-  git init -q .
-  git config user.email "test@example.com"
-  git config user.name "Test"
-  git config commit.gpgsign false
-  git config core.excludesFile /dev/null
-  printf 'inner\n' >child.txt
-  git add -A
-  git commit -q --no-gpg-sign -m sub
-) >/dev/null 2>&1
-(cd "$DEINIT" && git add top.md sub && git commit -q --no-gpg-sign -m init) >/dev/null 2>&1
-rm -rf "$DEINIT/sub/.git"
-printf 'STRAY\n' >"$DEINIT/sub/child.txt"
-if (cd "$DEINIT" && "$BIN" --dry-run "prompt" --read sub/child.txt) >"$OUTPUT" 2>&1; then
-  echo "not ok 61 - Expected a deinitialized submodule path to be refused"
-else
-  if grep -q "which is a submodule" "$OUTPUT"; then
-    echo "ok 61 - Detects a submodule boundary from the index, not just .git"
-  else
-    echo "not ok 61 - Deinitialized submodule was not recognized"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-fi
-
-# Test 62: the repository root is whatever git printed, minus its line
-# terminator. Stripping whitespace would name a directory that does not exist.
-SPACED="$WORK/spaced dir "
-mkdir -p "$SPACED"
-(
-  cd "$SPACED"
-  git init -q .
-  git config user.email "test@example.com"
-  git config user.name "Test"
-  git config commit.gpgsign false
-  git config core.excludesFile /dev/null
-) >/dev/null 2>&1
-printf 'a\n' >"$SPACED/a.md"
-if (cd "$SPACED" && "$BIN" --dry-run "prompt") >"$OUTPUT" 2>&1; then
-  if grep -q "Repository:    $SPACED" "$OUTPUT" &&
-    [[ "$(resolved "$OUTPUT")" == "a.md R-I" ]]; then
-    echo "ok 62 - A repository whose name ends in a space still resolves"
-  else
-    echo "not ok 62 - Trailing whitespace was stripped from the repository root"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-else
-  echo "not ok 62 - Spaced-root dry run exited non-zero"
-  sed 's/^/# /' "$OUTPUT"
-fi
-
-# Test 63: a run may edit the ignore rules, stranding files it created earlier
-# beyond the reach of its own undo. Those are named rather than forbidden.
-STRAND=$(make_repo stranded)
-printf 'keep\n' >"$STRAND/keep.md"
-commit_all "$STRAND"
-printf 'residue\n' >"$STRAND/residue.tmp"
-printf 'plain\n' >"$STRAND/plain.md"
-printf 'residue.tmp\n' >"$STRAND/.gitignore"
-cat >"$WORK/strand.py" <<'PYEOF'
-# /// script
-# requires-python = ">=3.11"
-# dependencies = []
-# ///
-import sys
-from pathlib import Path
-
-source = Path(sys.argv[1]).read_text()
-stripped = "\n".join(
-    line
-    for line in source.splitlines()
-    if not line.startswith(("from google", "import httpx"))
-)
-cx = {"__name__": "caxton_helpers"}
-exec(compile(stripped, "caxton", "exec"), cx)
-print(cx["unrestorable_creations"](Path(sys.argv[2]), ["residue.tmp", "plain.md"]))
-PYEOF
-if PYTHONDONTWRITEBYTECODE=1 uv run --quiet --script "$WORK/strand.py" \
-  "$BIN" "$STRAND" >"$OUTPUT" 2>&1; then
-  if grep -q "^\['residue.tmp'\]$" "$OUTPUT"; then
-    echo "ok 63 - Names a creation stranded by an ignore rule the run added"
-  else
-    echo "not ok 63 - Stranded creations were not identified"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-else
-  echo "not ok 63 - Stranded-creation check exited non-zero"
-  sed 's/^/# /' "$OUTPUT"
-fi
-
-# Test 64: git's own metadata is not project content. It sits outside every
-# listing, 'git clean -fd' never touches it, and a file dropped into it can
-# execute on the next git command, so naming it explicitly is refused rather
-# than quietly admitted.
-META=$(make_repo metadata)
-printf 'a\n' >"$META/a.md"
-commit_all "$META"
-if (cd "$META" && "$BIN" --dry-run "prompt" --read .git/config) >"$OUTPUT" 2>&1; then
-  echo "not ok 64 - Expected an explicit .git path to be refused"
-else
-  if grep -q "git's own metadata" "$OUTPUT" &&
-    cmd_out=$(cd "$META" && "$BIN" --dry-run "prompt" --read . 2>&1) &&
-    [[ -n "$cmd_out" && "$cmd_out" != *'.git/'* ]]; then
-    echo "ok 64 - Refuses git metadata as a selection"
-  else
-    echo "not ok 64 - Metadata rejection missing expected error"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-fi
-
-# Test 65: the same rule guards creation, which never consults the listing and
-# which git's ignore rules do not cover.
-cat >"$WORK/meta.py" <<'PYEOF'
-# /// script
-# requires-python = ">=3.11"
-# dependencies = []
-# ///
-import sys
-from pathlib import Path
-
-source = Path(sys.argv[1]).read_text()
-stripped = "\n".join(
-    line
-    for line in source.splitlines()
-    if not line.startswith(("from google", "import httpx"))
-)
-cx = {"__name__": "caxton_helpers"}
-exec(compile(stripped, "caxton", "exec"), cx)
-
-blocks = cx["in_repository_metadata"]
-cases = {
-    ".git/hooks/pre-commit": True,
-    ".GIT/config": True,
-    ".git": True,
-    "sub/.Git/hooks/post-checkout": True,
-    "sub/.git/config": True,
-    ".github/ci.yml": False,
-    ".gitignore": False,
-    "docs/guide.md": False,
-    "": False,
-}
-wrong = [rel for rel, want in cases.items() if blocks(rel) is not want]
-print("WRONG" if wrong else "OK", "; ".join(wrong))
-PYEOF
-if PYTHONDONTWRITEBYTECODE=1 uv run --quiet --script "$WORK/meta.py" "$BIN" >"$OUTPUT" 2>&1; then
-  if grep -q "^OK" "$OUTPUT"; then
-    echo "ok 65 - Creation is barred from git metadata without touching dotfiles"
-  else
-    echo "not ok 65 - Metadata guard misclassified a path"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-else
-  echo "not ok 65 - Metadata guard check exited non-zero"
-  sed 's/^/# /' "$OUTPUT"
-fi
-
-# Test 66: Tool response budget enrichment correctly computes remaining steps,
-# remaining time, and warning escalation tiers.
-cat >"$WORK/budget.py" <<'PYEOF'
-# /// script
-# requires-python = ">=3.11"
-# dependencies = []
-# ///
-import sys
-import time
-from pathlib import Path
-
-source = Path(sys.argv[1]).read_text()
-stripped = "\n".join(
-    line
-    for line in source.splitlines()
-    if not line.startswith(("from google", "import httpx"))
-)
-cx = {"__name__": "caxton_helpers"}
-exec(compile(stripped, "caxton", "exec"), cx)
-
-enrich = cx["enrich_tool_result_with_budget"]
-now = time.perf_counter()
-
-# Case 1: Normal budget (plenty of turns and time)
-r1 = enrich({"status": "success", "file_lines": 50}, current_step=1, max_steps=10, session_start=now, timeout_sec=600)
-assert r1["status"] == "success"
-assert r1["file_lines"] == 50
-assert r1["remaining_steps"] == 9
-assert r1["remaining_seconds"] > 590.0
-assert "budget_warning" not in r1
-
-# Case 2: Low turn budget (2 steps remaining)
-r2 = enrich({"status": "success"}, current_step=8, max_steps=10, session_start=now, timeout_sec=0)
-assert r2["remaining_steps"] == 2
-assert "remaining_seconds" not in r2
-assert "LOW BUDGET" in r2.get("budget_warning", "")
-
-# Case 3: Critical turn budget (1 step remaining, on error response)
-r3 = enrich({"status": "error", "message": "not found"}, current_step=9, max_steps=10, session_start=now, timeout_sec=0)
-assert r3["status"] == "error"
-assert r3["message"] == "not found"
-assert r3["remaining_steps"] == 1
-assert "CRITICAL BUDGET LIMIT" in r3.get("budget_warning", "")
-
-# Case 4: Critical time budget (<= 20s remaining)
-r4 = enrich({"status": "success"}, current_step=1, max_steps=100, session_start=now - 585.0, timeout_sec=600)
-assert r4["remaining_steps"] == 99
-assert r4["remaining_seconds"] <= 16.0
-assert "CRITICAL BUDGET LIMIT" in r4.get("budget_warning", "")
-
-print("OK")
-PYEOF
-if PYTHONDONTWRITEBYTECODE=1 uv run --quiet --script "$WORK/budget.py" "$BIN" >"$OUTPUT" 2>&1; then
-  if grep -q "^OK" "$OUTPUT"; then
-    echo "ok 66 - Enriches tool responses with remaining turns, time, and urgency signaling"
-  else
-    echo "not ok 66 - Budget enrichment assertions failed"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-else
-  echo "not ok 66 - Budget enrichment test exited non-zero"
-  sed 's/^/# /' "$OUTPUT"
-fi
-
-# Test 67: Session serialization saves payload_<id>.md and response_<id>.md with private permissions
-cat >"$WORK/serialize_test.py" <<'PYEOF'
-# /// script
-# requires-python = ">=3.11"
-# dependencies = []
-# ///
-import os
+import re
+import shutil
+import signal
 import stat
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import uuid
 from pathlib import Path
+from unittest import mock
 
-source = Path(sys.argv[1]).read_text()
-stripped = "\n".join(
-    line
-    for line in source.splitlines()
-    if not line.startswith(("from google", "import httpx"))
-)
-cx = {"__name__": "caxton_helpers"}
-exec(compile(stripped, "caxton", "exec"), cx)
+import httpx
 
-with tempfile.TemporaryDirectory() as tmp:
-    custom_state = os.path.join(tmp, "custom_caxton_state")
-    session_id = uuid.uuid4()
-    
-    # 1. Test save_session_payload
-    payload_file = cx["save_session_payload"](
-        state_dir=custom_state,
-        session_id=session_id,
-        system_instruction="System instruction content",
-        initial_prompt="User prompt content",
+BIN = Path(__file__).resolve().parent.parent / "scripts" / "caxton"
+
+
+def load_caxton():
+    loader = importlib.machinery.SourceFileLoader("caxton_under_test", str(BIN))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    assert spec is not None
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[loader.name] = mod
+    loader.exec_module(mod)
+    return mod
+
+
+class Tap:
+    def __init__(self, total: int):
+        print(f"1..{total}", flush=True)
+        self.n = 0
+        self.failed = 0
+
+    def check(self, desc: str, ok: bool, detail: object = "") -> None:
+        self.n += 1
+        if not ok:
+            self.failed += 1
+        print(f"{'ok' if ok else 'not ok'} {self.n} - {desc}", flush=True)
+        if not ok and detail:
+            for line in str(detail).splitlines()[:25]:
+                print(f"# {line}", file=sys.stderr, flush=True)
+
+    def skip(self, reason: str) -> None:
+        self.n += 1
+        print(f"ok {self.n} # SKIP {reason}", flush=True)
+
+
+def run_cli(
+    args: list[str],
+    *,
+    use_shebang: bool = False,
+    cwd: Path | None = None,
+    env: dict[str, str | None] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    cmd = [str(BIN), *args] if use_shebang else [sys.executable, str(BIN), *args]
+    run_env = os.environ.copy()
+    if env:
+        for k, v in env.items():
+            if v is None:
+                run_env.pop(k, None)
+            else:
+                run_env[k] = v
+    return subprocess.run(
+        cmd,
+        cwd=cwd,
+        env=run_env,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        check=False,
     )
-    assert os.path.exists(payload_file)
-    assert os.path.samefile(payload_file, os.path.join(custom_state, f"payload_{session_id}.md"))
-    
-    # Check permissions (0600 file, 0700 dir on POSIX)
-    dir_mode = stat.S_IMODE(os.stat(custom_state).st_mode)
-    file_mode = stat.S_IMODE(os.stat(payload_file).st_mode)
-    assert dir_mode == 0o700, f"Expected 0700 dir mode, got {oct(dir_mode)}"
-    assert file_mode == 0o600, f"Expected 0600 file mode, got {oct(file_mode)}"
-    
-    payload_text = Path(payload_file).read_text(encoding="utf-8")
-    assert f"Session ID: {session_id}" in payload_text
-    assert "System instruction content" in payload_text
-    assert "User prompt content" in payload_text
 
-    # 2. Test save_session_response with real git diff
-    repo_dir = Path(tmp) / "repo"
-    repo_dir.mkdir()
-    subprocess.run(["git", "init", "-q", str(repo_dir)], check=True)
-    subprocess.run(["git", "-C", str(repo_dir), "config", "user.name", "Test"], check=True)
-    subprocess.run(["git", "-C", str(repo_dir), "config", "user.email", "test@test.com"], check=True)
-    tracked_file = repo_dir / "sample.txt"
-    tracked_file.write_text("initial\n", encoding="utf-8")
-    subprocess.run(["git", "-C", str(repo_dir), "add", "."], check=True)
-    subprocess.run(["git", "-C", str(repo_dir), "commit", "-q", "-m", "init"], check=True)
-    tracked_file.write_text("modified content\n", encoding="utf-8")
 
-    telemetry = cx["Telemetry"](
-        steps=5,
-        tool_calls=8,
-        modified_files={"sample.txt"},
-        created_files=set(),
-        deleted_files=set(),
-        prompt_tokens=1200,
-        candidate_tokens=350,
+def run_inproc(
+    caxton,
+    argv: list[str],
+    *,
+    cwd: Path,
+    env: dict[str, str | None] | None = None,
+    stdin_bytes: bytes = b"",
+) -> tuple[int, str, str]:
+    stdout_buf = io.StringIO()
+    stderr_buf = io.StringIO()
+    old_argv = sys.argv
+    old_cwd = Path.cwd()
+    old_stdin = sys.stdin
+    old_sigalrm = (
+        signal.getsignal(signal.SIGALRM) if hasattr(signal, "SIGALRM") else None
     )
+    old_sigterm = signal.getsignal(signal.SIGTERM)
+    old_sigint = signal.getsignal(signal.SIGINT)
+    old_help_defaults = caxton.print_help.__defaults__
+    old_usage_defaults = caxton.print_short_usage.__defaults__
+    saved_env: dict[str, str | None] = {}
+    if env:
+        for k, v in env.items():
+            saved_env[k] = os.environ.get(k)
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    rc = 0
+    try:
+        os.chdir(cwd)
+        sys.argv = ["caxton", *argv]
+        sys.stdin = io.TextIOWrapper(
+            io.BytesIO(stdin_bytes),
+            encoding="utf-8",
+            errors="surrogateescape",
+            newline="",
+        )
+        caxton.print_help.__defaults__ = (stdout_buf,)
+        caxton.print_short_usage.__defaults__ = (stderr_buf,)
+        with (
+            contextlib.redirect_stdout(stdout_buf),
+            contextlib.redirect_stderr(stderr_buf),
+        ):
+            caxton.main()
+    except SystemExit as exc:
+        rc = int(exc.code) if exc.code is not None else 0
+    finally:
+        caxton.print_help.__defaults__ = old_help_defaults
+        caxton.print_short_usage.__defaults__ = old_usage_defaults
+        if hasattr(signal, "SIGALRM"):
+            signal.alarm(0)
+            if old_sigalrm is not None:
+                signal.signal(signal.SIGALRM, old_sigalrm)
+        signal.signal(signal.SIGTERM, old_sigterm)
+        signal.signal(signal.SIGINT, old_sigint)
+        os.chdir(old_cwd)
+        sys.argv = old_argv
+        sys.stdin = old_stdin
+        for k, orig in saved_env.items():
+            if orig is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = orig
+    return rc, stdout_buf.getvalue(), stderr_buf.getvalue()
 
-    response_file = cx["save_session_response"](
-        state_dir=custom_state,
-        session_id=session_id,
-        status_str="Succeeded",
-        report_text="All modifications completed cleanly.",
-        telemetry=telemetry,
-        max_steps=100,
-        total_elapsed=4.25,
-        root=repo_dir,
+
+def resolved_tags(output: str) -> list[str]:
+    return [
+        f"{m.group(2)} {m.group(1)}"
+        for m in re.finditer(r"^  \[([RW I-]*)\]  (.*) \(.*\)$", output, re.MULTILINE)
+    ]
+
+
+def resolved_block(output: str) -> str:
+    lines = output.splitlines()
+    collecting = False
+    out = []
+    for line in lines:
+        if line.startswith("Resolved Files:"):
+            collecting = True
+        if collecting:
+            out.append(line)
+            if line.startswith("Excluded"):
+                break
+    return "\n".join(out)
+
+
+def snapshot(repo: Path) -> list[tuple[str, bytes]]:
+    items: list[tuple[str, bytes]] = []
+    for root, dirs, files in os.walk(repo):
+        dirs[:] = sorted(d for d in dirs if d != ".git")
+        for f in sorted(files):
+            p = Path(root) / f
+            items.append((str(p.relative_to(repo)), p.read_bytes()))
+    return sorted(items)
+
+
+def init_base_repo(path: Path) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    for cmd in (
+        ["git", "init", "-q", "."],
+        ["git", "config", "user.email", "test@example.com"],
+        ["git", "config", "user.name", "Test"],
+        ["git", "config", "commit.gpgsign", "false"],
+        ["git", "config", "core.excludesFile", "/dev/null"],
+    ):
+        subprocess.run(cmd, cwd=path, check=True, capture_output=True)
+    return path
+
+
+def commit_all(repo: Path, msg: str = "init") -> None:
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True, capture_output=True)
+    res = subprocess.run(
+        ["git", "commit", "-q", "--no-gpg-sign", "-m", msg],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
     )
-    assert os.path.exists(response_file)
-    assert os.path.samefile(response_file, os.path.join(custom_state, f"response_{session_id}.md"))
-    
-    resp_file_mode = stat.S_IMODE(os.stat(response_file).st_mode)
-    assert resp_file_mode == 0o600, f"Expected 0600 file mode, got {oct(resp_file_mode)}"
-
-    response_text = Path(response_file).read_text(encoding="utf-8")
-    assert f"Session ID: {session_id}" in response_text
-    assert "Status: Succeeded" in response_text
-    assert "All modifications completed cleanly." in response_text
-    assert "- **Steps:** 5/100" in response_text
-    assert "- **Tool Calls:** 8" in response_text
-    assert "sample.txt | 2 +-" in response_text
-
-print("OK")
-PYEOF
-if PYTHONDONTWRITEBYTECODE=1 uv run --quiet --script "$WORK/serialize_test.py" "$BIN" >"$OUTPUT" 2>&1; then
-  if grep -q "^OK" "$OUTPUT"; then
-    echo "ok 67 - Serializes session payload and response with private permissions"
-  else
-    echo "not ok 67 - Session serialization assertion failed"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-else
-  echo "not ok 67 - Session serialization test exited non-zero"
-  sed 's/^/# /' "$OUTPUT"
-fi
-
-# Tests 68-72: tool-argument validation, rate-limit pacing arithmetic and the
-# input-token budget, checked as plain functions.
-cat >"$WORK/pacing.py" <<'PYEOF'
-# /// script
-# requires-python = ">=3.11"
-# dependencies = []
-# ///
-import sys
-from pathlib import Path
-
-source = Path(sys.argv[1]).read_text()
-stripped = "\n".join(
-    line
-    for line in source.splitlines()
-    if not line.startswith(("from google", "import httpx"))
-)
-cx = {"__name__": "caxton_helpers"}
-exec(compile(stripped, "caxton", "exec"), cx)
+    if res.returncode != 0:
+        print(f"Bail out! fixture '{repo}' could not be committed", flush=True)
+        for line in (res.stdout + res.stderr).splitlines():
+            print(f"# {line}", flush=True)
+        sys.exit(1)
 
 
-def report(name, ok, detail=""):
-    print(f"check:{name}:{'pass' if ok else 'fail'} {detail}".rstrip())
+@contextlib.contextmanager
+def serve_http(handler_cls):
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler_cls)
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server, f"http://127.0.0.1:{server.server_address[1]}"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)
 
 
-coerce = cx["coerce_tool_args"]
+def main() -> int:
+    caxton = load_caxton()
+    tap = Tap(79)
 
+    with tempfile.TemporaryDirectory(prefix="test-caxton-") as tmp:
+        work = Path(tmp).resolve()
+        base_repo = init_base_repo(work / "_base_template")
 
-# Same signature as caxton's read_file, which Gemini has called with
-# start_line={} and end_line={}.
-def read_file(path: str, start_line: int | None = None, end_line: int | None = None):
-    return {}
+        def make_repo(name: str, dst_parent: Path | None = None) -> Path:
+            dst = (dst_parent or work) / name
+            shutil.copytree(base_repo, dst)
+            return dst
 
+        # Test 1: caxton --help (real CLI subprocess exercising uv run shebang)
+        p1 = run_cli(["--help"], use_shebang=True)
+        out1 = p1.stdout + p1.stderr
+        tap.check(
+            "Help output is formatted correctly",
+            p1.returncode == 0
+            and "Usage: caxton" in out1
+            and "Arguments:" in out1
+            and "Options:" in out1,
+            f"rc={p1.returncode}\n{out1}",
+        )
 
-bad = []
-cases = {
-    "empty objects": ({"path": "a.md", "start_line": {}, "end_line": {}}, {"path": "a.md"}),
-    "nulls": ({"path": "a.md", "start_line": None}, {"path": "a.md"}),
-    "float": ({"path": "a.md", "start_line": 3.0, "end_line": 9}, {"path": "a.md", "start_line": 3, "end_line": 9}),
-    "string": ({"path": "a.md", "start_line": " 12 "}, {"path": "a.md", "start_line": 12}),
-}
-for label, (raw, want) in cases.items():
-    got, err = coerce(read_file, raw)
-    if err or got != want:
-        bad.append(f"{label}: {got!r} {err!r}")
-for label, raw, needle in (
-    ("fractional", {"path": "a.md", "start_line": 2.5}, "'start_line' must be an integer"),
-    ("word", {"path": "a.md", "end_line": "ten"}, "'end_line' must be an integer"),
-    ("object", {"path": "a.md", "start_line": {"n": 1}}, "'start_line' must be an integer"),
-    ("bool", {"path": "a.md", "start_line": True}, "'start_line' must be an integer"),
-    ("missing path", {"start_line": 1}, "'path'"),
-    ("empty path", {"path": {}}, "'path' is required"),
-    ("unknown", {"path": "a.md", "lines": 3}, "unexpected argument 'lines'"),
-):
-    _, err = coerce(read_file, raw)
-    if not err or needle not in err or "not supported" in err:
-        bad.append(f"{label}: {err!r}")
-report("coerce-args", not bad, "; ".join(bad))
+        # Test 2: bare caxton prints short usage and exits 1 (real CLI smoke)
+        p2 = run_cli([])
+        out2 = p2.stdout + p2.stderr
+        tap.check(
+            "Bare caxton prints concise usage with an example to stderr",
+            p2.returncode != 0
+            and "Usage: caxton" in out2
+            and "Examples:" in out2
+            and "Try 'caxton --help'" in out2,
+            f"rc={p2.returncode}\n{out2}",
+        )
 
+        # Main read-only fixture reused across policy/filter/flag tests
+        repo = make_repo("repo")
+        for d in ("docs", "src", "build", ".github", ".ssh"):
+            (repo / d).mkdir()
+        (repo / ".gitignore").write_text("build/\n*.log\n", encoding="utf-8")
+        (repo / "docs" / "guide.md").write_text("# Guide\n", encoding="utf-8")
+        (repo / "docs" / "architecture.md").write_text(
+            "# Architecture\n", encoding="utf-8"
+        )
+        (repo / "src" / "a.py").write_text("print(1)\n", encoding="utf-8")
+        (repo / "src" / "b.py").write_text("print(2)\n", encoding="utf-8")
+        (repo / ".github" / "ci.yml").write_text("ci\n", encoding="utf-8")
+        (repo / "build" / "out.md").write_text("junk\n", encoding="utf-8")
+        (repo / "debug.log").write_text("noise\n", encoding="utf-8")
+        (repo / ".env").write_text("TOKEN=abc\n", encoding="utf-8")
+        (repo / ".ssh" / "id_rsa").write_text("KEYMATERIAL\n", encoding="utf-8")
+        (repo / "server.pem").write_text("KEYMATERIAL\n", encoding="utf-8")
+        commit_all(repo)
 
-def grep_search(query: str, path: str = "", case_insensitive: bool = False):
-    return {}
+        # Test 3: Offline policy rejection
+        rc, out, err = run_inproc(
+            caxton, ["prompt"], cwd=repo, env={"AGENT_OFFLINE": "1"}
+        )
+        tap.check(
+            "Honors AGENT_OFFLINE switch",
+            rc != 0 and "caxton: offline (AGENT_OFFLINE=1)" in (out + err),
+            f"rc={rc}\n{out}\n{err}",
+        )
 
+        # Test 4: Missing explicit path fails before credential check
+        rc, out, err = run_inproc(
+            caxton, ["prompt", "--read", "nonexistent.md"], cwd=repo
+        )
+        tap.check(
+            "Rejects a nonexistent explicit path before checking credentials",
+            rc != 0 and "path not found: nonexistent.md" in (out + err),
+            f"rc={rc}\n{out}\n{err}",
+        )
 
-got, err = coerce(grep_search, {"query": "x", "case_insensitive": "true", "path": {}})
-_, bad_bool = coerce(grep_search, {"query": "x", "case_insensitive": 2})
-report(
-    "coerce-bool",
-    err is None
-    and got == {"query": "x", "case_insensitive": True}
-    and "must be true or false" in (bad_bool or ""),
-    f"{got!r} {err!r} {bad_bool!r}",
-)
+        # Test 5: Outside a git worktree caxton refuses to run
+        plain = work / "plain"
+        plain.mkdir()
+        (plain / "a.md").write_text("hello\n", encoding="utf-8")
+        rc, out, err = run_inproc(caxton, ["--dry-run", "prompt"], cwd=plain)
+        tap.check(
+            "Refuses to run outside a git worktree",
+            rc != 0 and "not inside a git worktree" in (out + err),
+            f"rc={rc}\n{out}\n{err}",
+        )
 
-# Pacing against a known limit: wait only until the oldest calls leave the
-# rolling window, and never forever for a call larger than the limit.
-RL = cx["RateLimiter"]
-rl = RL(tpm=1000)
-ok = rl.delay(400, 0.0) == 0.0
-rl.record(400, 0.0)
-rl.record(400, 10.0)
-ok = ok and rl.delay(200, 20.0) == 0.0
-ok = ok and abs(rl.delay(300, 20.0) - 40.0) < 1e-9
-ok = ok and abs(rl.delay(700, 20.0) - 50.0) < 1e-9
-ok = ok and abs(rl.delay(5000, 20.0) - 50.0) < 1e-9
-ok = ok and rl.delay(300, 61.0) == 0.0
-report("pacing-window", ok)
+        # Test 6: PROMPT after a path option is explained
+        rc, out, err = run_inproc(
+            caxton, ["--dry-run", "--read", "docs/", "audit this"], cwd=repo
+        )
+        combined = out + err
+        tap.check(
+            "Explains that PROMPT must precede the path options",
+            rc != 0
+            and "PROMPT is required" in combined
+            and "must come before" in combined,
+            f"rc={rc}\n{combined}",
+        )
 
-# Without a known limit: unpaced until a 429, then halve (multiplicative
-# decrease) and climb back by a tenth per success (additive increase).
-rl = RL()
-ok = rl.delay(10**6, 0.0) == 0.0
-rl.record(300, 0.0)
-rl.record(300, 10.0)
-rl.throttled(400, 20.0)
-ok = ok and rl.limit() == 500.0 and rl.delay(400, 20.0) == 50.0
-for t in (80.0, 140.0):
-    rl.record(100, t)
-ok = ok and abs(rl.limit() - 600.0) < 1e-9
-rl.throttled(100, 141.0)
-ok = ok and abs(rl.limit() - 100.0) < 1e-9
-capped = RL(tpm=50)
-capped.throttled(1000, 0.0)
-ok = ok and capped.limit() == 50
-backoff = cx["backoff_delay"]
-ok = ok and backoff(0, 15, 120, 1.0) == 15 and backoff(0, 15, 120, 0.0) == 7.5
-ok = ok and backoff(5, 15, 120, 1.0) == 120 and backoff(5, 15, 120, 0.0) == 60
-report("pacing-aimd", ok, f"limit={rl.limit()}")
+        # Test 7: Default selection is cwd read-only, dry run leaves files untouched
+        before_snap = snapshot(repo)
+        rc7, out7, err7 = run_inproc(caxton, ["--dry-run", "prompt"], cwd=repo)
+        tags7 = resolved_tags(out7)
+        tap.check(
+            "Defaults to a read-only selection of the current directory",
+            rc7 == 0
+            and "read-only (no files are modified)" in out7
+            and "docs/guide.md R-I" in tags7
+            and all("W" not in t.split(" ")[1] for t in tags7)
+            and before_snap == snapshot(repo),
+            f"rc={rc7}\n{out7}\n{err7}",
+        )
 
-# A 429's quota details tell a per-minute limit from a daily one.
-class FakeError(Exception):
-    def __init__(self, details):
-        self.details = details
+        # Test 8: Subdirectory run keeps repo-relative paths while selecting cwd
+        rc, out, err = run_inproc(caxton, ["--dry-run", "prompt"], cwd=repo / "docs")
+        tap.check(
+            "Names paths from the repository root while selecting the cwd",
+            rc == 0
+            and f"Repository:    {repo}" in out
+            and "docs/guide.md" in out
+            and "src/a.py" not in out,
+            f"rc={rc}\n{out}\n{err}",
+        )
 
+        # Test 9: --edit grants write access + creation root; --read does not
+        rc9, out9, err9 = run_inproc(
+            caxton,
+            ["--dry-run", "prompt", "--edit", "docs/", "--read", "src/"],
+            cwd=repo,
+        )
+        tags9 = resolved_tags(out9)
+        tap.check(
+            "--edit is writable with a creation root, --read is not",
+            rc9 == 0
+            and "docs/guide.md RWI" in tags9
+            and "src/a.py R-I" in tags9
+            and "Creation Roots" in out9
+            and "[ W ]  docs/" in out9,
+            f"rc={rc9}\n{out9}\n{err9}",
+        )
 
-minute = FakeError({"error": {"details": [{"violations": [{"quotaMetric": "generativelanguage.googleapis.com/generate_content_paid_tier_input_token_count", "quotaId": "GenerateContentPaidTierInputTokensPerModelPerMinute"}]}]}})
-daily = FakeError({"error": {"details": [{"violations": [{"quotaId": "GenerateRequestsPerDayPerProjectPerModel-FreeTier"}]}]}})
-ids = cx["quota_ids"]
-report(
-    "quota-kind",
-    not cx["is_daily_quota"](ids(minute))
-    and cx["is_daily_quota"](ids(daily))
-    and ids(FakeError(None)) == []
-    and len(ids(minute)) == 2,
-)
+        # Test 10: More specific --read carves file out of writable directory
+        rc, out, err = run_inproc(
+            caxton,
+            [
+                "--dry-run",
+                "prompt",
+                "--edit",
+                "docs/",
+                "--read",
+                "docs/architecture.md",
+            ],
+            cwd=repo,
+        )
+        tags10 = resolved_tags(out)
+        tap.check(
+            "The most specific selection wins, restriction breaking ties",
+            rc == 0
+            and "docs/guide.md RWI" in tags10
+            and "docs/architecture.md R-I" in tags10,
+            f"rc={rc}\n{out}\n{err}",
+        )
 
-# The input-token budget reaches the model, with a warning as it runs out.
-enrich = cx["enrich_tool_result_with_budget"]
-plenty = enrich({"status": "success"}, 1, 100, 0.0, 0, 1_000_000, 100_000)
-low = enrich({"status": "success"}, 1, 100, 0.0, 0, 250_000, 100_000)
-last = enrich({"status": "success"}, 1, 100, 0.0, 0, 150_000, 100_000)
-unset = enrich({"status": "success"}, 1, 100, 0.0, 0)
-parse = cx["parse_token_count"]
-parsed = [parse(v) for v in ("250000", "250k", "1.5M")]
-try:
-    parse("lots")
-    rejected = False
-except ValueError:
-    rejected = True
-report(
-    "input-budget",
-    plenty["remaining_input_tokens"] == 1_000_000
-    and "budget_warning" not in plenty
-    and "about 2 call(s)" in low.get("budget_warning", "")
-    and "CRITICAL" in last.get("budget_warning", "")
-    and "remaining_input_tokens" not in unset
-    and parsed == [250_000, 250_000, 1_500_000]
-    and rejected,
-    f"{low.get('budget_warning')!r} {parsed}",
-)
+        # Test 11: --edit FILE authorizes that file only, no creation root
+        rc, out, err = run_inproc(
+            caxton, ["--dry-run", "prompt", "--edit", "docs/guide.md"], cwd=repo
+        )
+        tap.check(
+            "A file selection grants no authority to create siblings",
+            rc == 0
+            and resolved_tags(out) == ["docs/guide.md RWI"]
+            and "Creation Roots" not in out,
+            f"rc={rc}\n{out}\n{err}",
+        )
 
-# A request's timeout scales with its input; an override wins and 0 disables.
-bound = cx["request_timeout"]
-srv_hdrs = cx["server_timeout_headers"]
-report(
-    "request-timeout",
-    bound(0) == 180.0
-    and bound(240_000) == 420.0
-    and bound(240_000, 30) == 30.0
-    and bound(240_000, 0) is None
-    and srv_hdrs(180.0) == {"X-Server-Timeout": "1800"}
-    and srv_hdrs(2400.0) == {"X-Server-Timeout": "2400"}
-    and srv_hdrs(None) is None,
-    f"{bound(0)} {bound(240_000)} {srv_hdrs(180.0)}",
-)
-PYEOF
+        # Test 12: Unselected paths are invisible
+        rc, out, err = run_inproc(
+            caxton, ["--dry-run", "prompt", "--read", "docs/guide.md"], cwd=repo
+        )
+        tap.check(
+            "Everything outside the selection is invisible",
+            rc == 0
+            and "docs/guide.md" in out
+            and "src/a.py" not in out
+            and "docs/architecture.md" not in out
+            and "Visible:       1 file" in out,
+            f"rc={rc}\n{out}\n{err}",
+        )
 
-PACING_OUT="$WORK/pacing.out"
-PYTHONDONTWRITEBYTECODE=1 uv run --quiet --script "$WORK/pacing.py" \
-  "$BIN" >"$PACING_OUT" 2>&1 || true
+        # Test 13: Mutation tools offered only when --edit names something (reuse out7 + out9!)
+        ro_tools = next((ln for ln in out7.splitlines() if "Tools:" in ln), "")
+        rw_tools = next((ln for ln in out9.splitlines() if "Tools:" in ln), "")
+        tap.check(
+            "Mutation tools are offered only when --edit names something",
+            "write_file" not in ro_tools
+            and "delete_file" not in ro_tools
+            and "write_file" in rw_tools
+            and "delete_file" in rw_tools,
+            f"ro={ro_tools!r} rw={rw_tools!r}",
+        )
 
-pacing_check() {
-  if grep -q "^check:$1:pass" "$PACING_OUT"; then
-    echo "ok $2 - $3"
-  else
-    echo "not ok $2 - $3"
-    sed 's/^/# /' "$PACING_OUT"
-  fi
-}
+        # Test 14: Honors .gitignore while keeping project dotfiles visible (reuse out7)
+        tap.check(
+            "Honors .gitignore while keeping project dotfiles visible",
+            rc7 == 0
+            and ".github/ci.yml" in out7
+            and "build/out.md" not in out7
+            and "debug.log" not in out7,
+            out7,
+        )
 
-pacing_check coerce-args 68 "Treats empty optional arguments as unset and rejects mistyped ones by name"
-pacing_check coerce-bool 69 "Coerces boolean arguments and rejects non-boolean ones"
-pacing_check pacing-window 70 "Paces calls to keep a rolling minute of input tokens under the limit"
-pacing_check pacing-aimd 71 "Learns a limit from 429s, backs off with jitter and speeds up again"
+        # Test 15: Tracked vendor paths are not second-guessed
+        vendor_repo = make_repo("vendor-repo")
+        (vendor_repo / "node_modules").mkdir()
+        (vendor_repo / "dist").mkdir()
+        (vendor_repo / "node_modules" / "dep.js").write_text(
+            "vendored\n", encoding="utf-8"
+        )
+        (vendor_repo / "dist" / "app.js").write_text("built\n", encoding="utf-8")
+        commit_all(vendor_repo)
+        rc, out, err = run_inproc(caxton, ["--dry-run", "prompt"], cwd=vendor_repo)
+        tap.check(
+            "Deliberately tracked vendor paths are not second-guessed",
+            rc == 0 and "node_modules/dep.js" in out and "dist/app.js" in out,
+            f"rc={rc}\n{out}\n{err}",
+        )
 
-# Test 72: quota kind and input budget, folded into one line of the plan
-if grep -q "^check:quota-kind:pass" "$PACING_OUT" && grep -q "^check:input-budget:pass" "$PACING_OUT"; then
-  echo "ok 72 - Tells daily quotas from per-minute ones and reports the input-token budget"
-else
-  echo "not ok 72 - Quota classification or input-token budget check failed"
-  sed 's/^/# /' "$PACING_OUT"
-fi
+        # Test 16: Credential paths excluded from payload but reported (reuse out7)
+        res_blk = resolved_block(out7)
+        tap.check(
+            "Excludes credential paths while keeping project dotfiles",
+            ".github/ci.yml" in res_blk
+            and ".env" not in res_blk
+            and "server.pem" not in res_blk
+            and "id_rsa" not in res_blk
+            and "Excluded (credential patterns" in out7,
+            out7,
+        )
 
-# Test 73: a malformed token count is a usage error, reported before any work
-if (cd "$REPO" && "$BIN" --dry-run "prompt" --tpm lots) >"$OUTPUT" 2>&1; then
-  echo "not ok 73 - Expected an invalid --tpm to fail"
-else
-  if grep -q "caxton: error: --tpm: invalid token count: 'lots'" "$OUTPUT"; then
-    echo "ok 73 - Rejects a malformed --tpm value"
-  else
-    echo "not ok 73 - Invalid --tpm error missing expected text"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-fi
+        # Test 17: Explicit credential path is a hard error
+        rc, out, err = run_inproc(
+            caxton, ["--dry-run", "prompt", "--read", ".env"], cwd=repo
+        )
+        tap.check(
+            "Refuses an explicitly named credential path",
+            rc != 0 and "matches a credential pattern" in (out + err),
+            f"rc={rc}\n{out}\n{err}",
+        )
 
-# Test 74: the request timeout bound, and a malformed --request-timeout
-if grep -q "^check:request-timeout:pass" "$PACING_OUT" &&
-  ! (cd "$REPO" && "$BIN" --dry-run "prompt" --request-timeout soon) >"$OUTPUT" 2>&1 &&
-  grep -q "caxton: error: --request-timeout: invalid number of seconds: 'soon'" "$OUTPUT"; then
-  echo "ok 74 - Scales the request timeout with input and rejects a malformed one"
-else
-  echo "not ok 74 - Request timeout bound or --request-timeout validation failed"
-  sed 's/^/# /' "$PACING_OUT" "$OUTPUT"
-fi
+        # Test 18: Explicitly named ignored file overrides ignore rules
+        rc, out, err = run_inproc(
+            caxton, ["--dry-run", "prompt", "--read", "build/out.md"], cwd=repo
+        )
+        tap.check(
+            "An explicitly named ignored path overrides the ignore rules",
+            rc == 0 and "build/out.md" in out and "Explicit Overrides" in out,
+            f"rc={rc}\n{out}\n{err}",
+        )
 
-# Test 75: a request that never returns is abandoned, logged and retried. The
-# stub answers the model lookup with a 404 and holds every generate call open.
-STALL_PORT_FILE="$WORK/stall.port"
-STALL_POSTS="$WORK/stall.posts"
-cat >"$WORK/stall.py" <<'PYEOF'
-import http.server
-import sys
-import time
+        # Test 19: Listed paths stay subject to ignore rules
+        rc, out, err = run_inproc(
+            caxton,
+            ["--dry-run", "prompt", "--read-from", "-"],
+            cwd=repo,
+            stdin_bytes=b"build/out.md\ndocs/guide.md\n",
+        )
+        tap.check(
+            "Listed paths are implicit and stay subject to ignore rules",
+            rc == 0
+            and "docs/guide.md" in out
+            and all("build/out.md" not in t for t in resolved_tags(out))
+            and "Skipped (listed paths" in out,
+            f"rc={rc}\n{out}\n{err}",
+        )
 
+        # Test 20: NUL-delimited path list
+        rc, out, err = run_inproc(
+            caxton,
+            ["--dry-run", "prompt", "--read-from", "-", "--null"],
+            cwd=repo,
+            stdin_bytes=b"docs/guide.md\0src/a.py\0",
+        )
+        tags20 = resolved_tags(out)
+        tap.check(
+            "Reads a NUL-delimited path list",
+            rc == 0
+            and len(tags20) == 2
+            and "docs/guide.md" in out
+            and "src/a.py" in out,
+            f"rc={rc}\n{out}\n{err}",
+        )
 
-class Stall(http.server.BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(404)
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(b'{"error": {"code": 404, "message": "stub"}}')
+        # Test 21: Empty path list selects nothing and exits 0
+        rc, out, err = run_inproc(
+            caxton,
+            ["--dry-run", "prompt", "--read-from", "-", "--null"],
+            cwd=repo,
+            stdin_bytes=b"",
+        )
+        tap.check(
+            "An empty path list is a selection of nothing, not of everything",
+            rc == 0
+            and "path list is empty" in (out + err)
+            and "Resolved Files" not in out,
+            f"rc={rc}\n{out}\n{err}",
+        )
 
-    def do_POST(self):
-        self.rfile.read(int(self.headers.get("Content-Length", 0)))
-        with open(sys.argv[2], "a") as f:
-            f.write("post\n")
-        time.sleep(3600)
+        # Test 22: Ignored path cannot be made writable
+        rc, out, err = run_inproc(
+            caxton, ["--dry-run", "prompt", "--edit", "build/out.md"], cwd=repo
+        )
+        tap.check(
+            "Refuses to make a git-ignored path writable",
+            rc != 0 and "ignored by git, which cannot restore them" in (out + err),
+            f"rc={rc}\n{out}\n{err}",
+        )
 
-    def log_message(self, *args):
-        pass
+        # Test 23: --force permits writing ignored path
+        rc, out, err = run_inproc(
+            caxton,
+            ["--dry-run", "--force", "prompt", "--edit", "build/out.md"],
+            cwd=repo,
+        )
+        tap.check(
+            "--force permits writing a path git cannot restore",
+            rc == 0 and "build/out.md RWI" in resolved_tags(out),
+            f"rc={rc}\n{out}\n{err}",
+        )
 
+        # Test 24: Dirty worktree guard for mutation vs read-only
+        dirty = make_repo("dirty")
+        (dirty / "tracked.md").write_text("committed\n", encoding="utf-8")
+        commit_all(dirty)
+        (dirty / "tracked.md").write_text("committed\nuncommitted\n", encoding="utf-8")
+        rc_mut, out_mut, err_mut = run_inproc(
+            caxton,
+            ["prompt", "--edit", "tracked.md"],
+            cwd=dirty,
+            env={"AGENT_OFFLINE": "0"},
+        )
+        rc_ro, out_ro, err_ro = run_inproc(
+            caxton, ["prompt"], cwd=dirty, env={"AGENT_OFFLINE": "1"}
+        )
+        tap.check(
+            "Refuses a dirty worktree for mutation but not for reading",
+            rc_mut != 0
+            and "has uncommitted changes" in (out_mut + err_mut)
+            and rc_ro != 0
+            and "caxton: offline" in (out_ro + err_ro),
+            f"mut=({rc_mut},{err_mut}) ro=({rc_ro},{err_ro})",
+        )
 
-server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Stall)
-server.daemon_threads = True
-with open(sys.argv[1], "w") as f:
-    f.write(str(server.server_address[1]))
-server.serve_forever()
-PYEOF
-python3 "$WORK/stall.py" "$STALL_PORT_FILE" "$STALL_POSTS" &
-STALL_PID=$!
-for _ in 1 2 3 4 5 6 7 8 9 10; do
-  [[ -s "$STALL_PORT_FILE" ]] && break
-  sleep 0.5
-done
-STALL_REPO=$(make_repo stall)
-printf '# Notes\n' >"$STALL_REPO/notes.md"
-commit_all "$STALL_REPO"
-stall_status=0
-(cd "$STALL_REPO" && AGENT_OFFLINE=0 GEMINI_API_KEY=stub \
-  GOOGLE_GEMINI_BASE_URL="http://127.0.0.1:$(cat "$STALL_PORT_FILE" 2>/dev/null)" \
-  CAXTON_STATE_DIR="$WORK/stall-state" \
-  "$BIN" "Summarize" --no-search --request-timeout 1 --timeout 12) \
-  >"$OUTPUT" 2>&1 || stall_status=$?
-kill "$STALL_PID" 2>/dev/null || true
-wait "$STALL_PID" 2>/dev/null || true
-stall_logs=$(grep -c "API request timed out after 1s" "$OUTPUT" || true)
-stall_posts=$(wc -l <"$STALL_POSTS" 2>/dev/null || echo 0)
-if [[ $stall_status -eq 2 && $stall_logs -ge 2 && $stall_posts -ge 2 ]] &&
-  grep -q "request timeouts: [0-9]" "$OUTPUT"; then
-  echo "ok 75 - Abandons a stalled request, logs it and retries"
-else
-  echo "not ok 75 - Stalled request was not timed out and retried (exit $stall_status, $stall_logs logged, $stall_posts sent)"
-  sed 's/^/# /' "$OUTPUT"
-fi
+        # Test 25: --force overrides dirty worktree guard
+        rc, out, err = run_inproc(
+            caxton,
+            ["--force", "prompt", "--edit", "tracked.md"],
+            cwd=dirty,
+            env={"AGENT_OFFLINE": "1"},
+        )
+        tap.check(
+            "--force overrides the dirty worktree guard",
+            rc != 0 and "caxton: offline" in (out + err),
+            f"rc={rc}\n{out}\n{err}",
+        )
 
-# Tests 76-77 share a stub that answers the model lookup with a 404 and each
-# generate call with the next line of a response script, logging every
-# request body. A line is a JSON candidate; the last line repeats.
-LIMIT_PORT_FILE="$WORK/limit.port"
-LIMIT_LOG="$WORK/limit.jsonl"
-LIMIT_SCRIPT="$WORK/limit.script"
-cat >"$WORK/limit.py" <<'PYEOF'
-import http.server
-import json
-import sys
+        # Test 26: --inline narrows inlined set within visible set
+        rc, out, err = run_inproc(
+            caxton,
+            ["--dry-run", "prompt", "--read", ".", "--inline", "docs/"],
+            cwd=repo,
+        )
+        tags26 = resolved_tags(out)
+        tap.check(
+            "--inline narrows the initial context without narrowing access",
+            rc == 0
+            and "docs/guide.md R-I" in tags26
+            and "src/a.py R--" in tags26
+            and "Inlined:       2 file" in out,
+            f"rc={rc}\n{out}\n{err}",
+        )
 
+        # Test 27: --inline cannot widen access
+        rc, out, err = run_inproc(
+            caxton,
+            ["--dry-run", "prompt", "--read", "docs/", "--inline", "src/a.py"],
+            cwd=repo,
+        )
+        combined = out + err
+        tap.check(
+            "--inline is refused for a path that is not visible",
+            rc != 0
+            and "is not visible" in combined
+            and "cannot widen access" in combined,
+            f"rc={rc}\n{combined}",
+        )
 
-class Scripted(http.server.BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(404)
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(b'{"error": {"code": 404, "message": "stub"}}')
+        # Test 28: --no-inline keeps tree visible while inlining nothing
+        rc, out, err = run_inproc(
+            caxton, ["--dry-run", "prompt", "--no-inline"], cwd=repo
+        )
+        tap.check(
+            "--no-inline keeps files visible while inlining nothing",
+            rc == 0
+            and "Inlined:       nothing" in out
+            and "docs/guide.md" in out
+            and "docs/guide.md R--" in resolved_tags(out),
+            f"rc={rc}\n{out}\n{err}",
+        )
 
-    def do_POST(self):
-        body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
-        obj = json.loads(body)
-        obj["_x_server_timeout"] = self.headers.get("X-Server-Timeout")
-        with open(sys.argv[2], "a", encoding="utf-8") as f:
-            f.write(json.dumps(obj) + "\n")
-        with open(sys.argv[2], encoding="utf-8") as f:
-            count = sum(1 for _ in f)
-        with open(sys.argv[3], encoding="utf-8") as f:
-            script = f.read().splitlines()
-        candidate = json.loads(script[min(count, len(script)) - 1])
-        payload = {
-            "candidates": [candidate],
-            "usageMetadata": {"promptTokenCount": 100, "candidatesTokenCount": 10},
+        # Test 29: Over-threshold dry run reports payload before failing
+        big = make_repo("big")
+        (big / "small.md").write_text("# Small\n", encoding="utf-8")
+        (big / "big.md").write_text("a" * 1_200_000, encoding="utf-8")
+        commit_all(big)
+        rc, out, err = run_inproc(caxton, ["--dry-run", "prompt"], cwd=big)
+        combined = out + err
+        tap.check(
+            "Over-threshold dry run reports the payload before failing",
+            rc != 0
+            and "Caxton Dry Run Summary" in combined
+            and "big.md" in combined
+            and "exceeds 1MB threshold" in combined,
+            f"rc={rc}\n{combined[:1000]}",
+        )
+
+        # Test 30: Threshold counts only what is inlined
+        rc, out, err = run_inproc(
+            caxton,
+            ["--dry-run", "prompt", "--read", ".", "--inline", "small.md"],
+            cwd=big,
+        )
+        combined = out + err
+        tap.check(
+            "The context threshold counts only what is inlined",
+            rc == 0
+            and "exceeds 1MB threshold" not in combined
+            and "big.md" in combined,
+            f"rc={rc}\n{combined}",
+        )
+
+        # Test 31: Excludes symlinks and refuses to select one explicitly
+        sym_repo = make_repo("symlinks")
+        outside = work / "outside"
+        (outside / "docs").mkdir(parents=True)
+        (outside / "docs" / "outside.md").write_text("outside\n", encoding="utf-8")
+        (sym_repo / "real.md").write_text("safe\n", encoding="utf-8")
+        os.symlink("real.md", sym_repo / "inside-link.md")
+        os.symlink(outside / "docs", sym_repo / "outside-dir")
+        commit_all(sym_repo)
+        rc31a, out31a, err31a = run_inproc(
+            caxton, ["--dry-run", "prompt"], cwd=sym_repo
+        )
+        rc31b, _, _ = run_inproc(
+            caxton, ["--dry-run", "prompt", "--read", "inside-link.md"], cwd=sym_repo
+        )
+        tap.check(
+            "Excludes symlinks and refuses to select one explicitly",
+            rc31a == 0
+            and "real.md" in out31a
+            and all("inside-link.md" not in t for t in resolved_tags(out31a))
+            and "Excluded (symlinks, never followed)" in out31a
+            and rc31b != 0,
+            f"rc=({rc31a},{rc31b})\n{out31a}\n{err31a}",
+        )
+
+        # Test 32: Skips non-regular files (FIFO) instead of blocking
+        fifo_repo = make_repo("fifo")
+        (fifo_repo / "real.md").write_text("content\n", encoding="utf-8")
+        commit_all(fifo_repo)
+        try:
+            os.mkfifo(fifo_repo / "pipe")
+            has_fifo = True
+        except OSError:
+            has_fifo = False
+        if has_fifo:
+            rc, out, err = run_inproc(
+                caxton, ["--dry-run", "--timeout", "10", "prompt"], cwd=fifo_repo
+            )
+            tap.check(
+                "Skips non-regular files instead of blocking on them",
+                rc == 0
+                and "real.md" in out
+                and all("pipe" not in t for t in resolved_tags(out)),
+                f"rc={rc}\n{out}\n{err}",
+            )
+        else:
+            tap.skip("mkfifo not available")
+
+        # Shared submodule host repo for T33, T58, T59
+        sub_host = make_repo("submodule-host")
+        (sub_host / "top.md").write_text("top\n", encoding="utf-8")
+        sub_child = make_repo("sub", dst_parent=sub_host)
+        (sub_child / "child.txt").write_text("SUBMODULE CONTENT\n", encoding="utf-8")
+        commit_all(sub_child, "sub")
+
+        # Test 33: Submodule root path refused
+        rc, out, err = run_inproc(
+            caxton, ["--dry-run", "prompt", "--read", "sub"], cwd=sub_host
+        )
+        tap.check(
+            "Refuses a submodule path and says where to run instead",
+            rc != 0 and "is a submodule" in (out + err),
+            f"rc={rc}\n{out}\n{err}",
+        )
+
+        # Test 34: Negated, anchored and nested ignore rules match git exactly
+        gi = make_repo("gitignore-repo")
+        (gi / "sub").mkdir()
+        (gi / "docs").mkdir()
+        (gi / ".gitignore").write_text(
+            "*.log\n!important.log\n/root-only.txt\n", encoding="utf-8"
+        )
+        (gi / "sub" / ".gitignore").write_text("nested-secret.md\n", encoding="utf-8")
+        for p in (
+            gi / "important.log",
+            gi / "noise.log",
+            gi / "root-only.txt",
+            gi / "sub" / "root-only.txt",
+            gi / "sub" / "nested-secret.md",
+            gi / "sub" / "keep.md",
+            gi / "docs" / "a.md",
+        ):
+            p.write_text("", encoding="utf-8")
+        rc, out, err = run_inproc(caxton, ["--dry-run", "prompt"], cwd=gi)
+        git_listed = sorted(
+            x
+            for x in subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(gi),
+                    "ls-files",
+                    "--cached",
+                    "--others",
+                    "--exclude-standard",
+                ],
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.splitlines()
+            if x
+        )
+        caxton_listed = sorted(t.split(" ")[0] for t in resolved_tags(out))
+        tap.check(
+            "Ignore filtering matches git exactly",
+            rc == 0 and git_listed == caxton_listed,
+            f"git={git_listed}\ncaxton={caxton_listed}\n{err}",
+        )
+
+        # Test 35: Selection resolving to nothing is an error
+        empty_repo = make_repo("all-ignored")
+        (empty_repo / ".gitignore").write_text("*\n", encoding="utf-8")
+        (empty_repo / "thing.md").write_text("ignored\n", encoding="utf-8")
+        rc, out, err = run_inproc(caxton, ["--dry-run", "prompt"], cwd=empty_repo)
+        tap.check(
+            "Refuses to run when the selection leaves no files",
+            rc != 0 and "no files to work with" in (out + err),
+            f"rc={rc}\n{out}\n{err}",
+        )
+
+        # Minimal 1-file repo reused for T36 (SIGPIPE), T75 (stall), T76-T77 (wire protocol)
+        single_repo = make_repo("single-repo")
+        (single_repo / "notes.md").write_text("# Notes\n", encoding="utf-8")
+        commit_all(single_repo)
+
+        # Test 36: Broken pipe exits 141 without traceback on both large (in-write)
+        # and small (at-flush) outputs, using a 4 KB pipe + 80 KB prompt instead of 4,000 files
+        pipe_env = os.environ.copy()
+        pipe_env.pop("PYTHONUNBUFFERED", None)
+
+        r_fd, w_fd = os.pipe()
+        with contextlib.suppress(OSError):
+            fcntl.fcntl(r_fd, 1031, 4096)  # F_SETPIPE_SZ on Linux
+        large_proc = subprocess.Popen(
+            [sys.executable, str(BIN), "--dry-run", "line\n" * 16_000],
+            cwd=single_repo,
+            env=pipe_env,
+            stdin=subprocess.DEVNULL,
+            stdout=w_fd,
+            stderr=subprocess.PIPE,
+        )
+        os.close(w_fd)
+        with os.fdopen(r_fd, "rb") as rf:
+            rf.readline()
+            rf.readline()
+        assert large_proc.stderr is not None
+        large_err = large_proc.stderr.read().decode("utf-8", "replace")
+        large_proc.stderr.close()
+        large_rc = large_proc.wait()
+
+        small_proc = subprocess.Popen(
+            [sys.executable, str(BIN), "--dry-run", "prompt"],
+            cwd=single_repo,
+            env=pipe_env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        assert small_proc.stdout is not None
+        assert small_proc.stderr is not None
+        small_proc.stdout.close()
+        small_err = small_proc.stderr.read().decode("utf-8", "replace")
+        small_proc.stderr.close()
+        small_rc = small_proc.wait()
+
+        tap.check(
+            "Exits 141 without a traceback when stdout closes early",
+            large_rc == 141
+            and small_rc == 141
+            and "Exception ignored" not in large_err
+            and "Exception ignored" not in small_err,
+            f"large=({large_rc},{large_err!r}) small=({small_rc},{small_err!r})",
+        )
+
+        # Unit checks on caxton helpers loaded in-process (Tests 37-47 + wired wants-help)
+        unit_root = work / "unit"
+        unit_root.mkdir()
+        (unit_root / "inside.txt").write_text("x\n", encoding="utf-8")
+        os.symlink("/etc/passwd", unit_root / "escape-link")
+        (unit_root / "target.txt").write_text("y\n", encoding="utf-8")
+        os.symlink("target.txt", unit_root / "inside-link")
+
+        # Test 37: Sandbox containment (escape blocked)
+        blocked_errs = []
+        for candidate in ("../outside.txt", "/etc/passwd", "escape-link", "a/../../b"):
+            try:
+                caxton.resolve_sandboxed_path(unit_root, candidate)
+                blocked_errs.append(f"{candidate} NOT blocked")
+            except PermissionError:
+                pass
+        tap.check(
+            "Blocks path traversal, absolute paths and escaping symlinks",
+            not blocked_errs,
+            "; ".join(blocked_errs),
+        )
+
+        # Test 38: Sandbox containment (inside resolved)
+        resolved_ok = (
+            caxton.resolve_sandboxed_path(unit_root, "inside.txt")
+            == (unit_root / "inside.txt").resolve()
+        )
+        link_ok = (
+            caxton.resolve_sandboxed_path(unit_root, "inside-link").name == "target.txt"
+        )
+        tap.check(
+            "Resolves in-sandbox paths and follows in-sandbox symlinks",
+            resolved_ok and link_ok,
+        )
+
+        # Test 39: Preserve mode
+        sh_file = unit_root / "s.sh"
+        sh_file.write_text("#!/bin/sh\necho hi\n", encoding="utf-8")
+        sh_file.chmod(0o755)
+        caxton.atomic_write_text(sh_file, "#!/bin/sh\necho bye\n")
+        mode_str = oct(sh_file.stat().st_mode & 0o777)
+        tap.check(
+            "Preserves permission bits when rewriting a file",
+            mode_str == "0o755",
+            mode_str,
+        )
+
+        # Test 40: Preserve CRLF
+        crlf = unit_root / "crlf.txt"
+        crlf.write_bytes(b"alpha\r\nbeta\r\n")
+        raw_crlf = caxton.read_text_verbatim(crlf)
+        body_crlf = raw_crlf.replace("\r\n", "\n").replace("beta", "BETA")
+        caxton.atomic_write_text(
+            crlf, body_crlf.replace("\n", "\r\n") if "\r\n" in raw_crlf else body_crlf
+        )
+        tap.check(
+            "Preserves CRLF line endings when rewriting a file",
+            crlf.read_bytes() == b"alpha\r\nBETA\r\n",
+            repr(crlf.read_bytes()),
+        )
+
+        # Test 41: Refuse non-UTF-8 for mutation, read lossy for display
+        latin = unit_root / "latin.txt"
+        latin.write_bytes("café price\n".encode("latin-1"))
+        try:
+            caxton.read_text_verbatim(latin)
+            strict_refused = False
+        except UnicodeDecodeError:
+            strict_refused = True
+        lossy_ok = "price" in caxton.read_text_verbatim(latin, lossy=True)
+        tap.check(
+            "Refuses to mutate non-UTF-8 files but still reads them",
+            strict_refused and lossy_ok,
+        )
+
+        # Test 42: Tree discovery and direct reads both reject symlinks
+        entries_ok = (
+            caxton.is_safe_tree_entry(unit_root / "inside.txt")
+            and not caxton.is_safe_tree_entry(unit_root / "escape-link")
+            and not caxton.is_safe_tree_entry(unit_root / "inside-link")
+        )
+        try:
+            caxton.read_text_verbatim(unit_root / "escape-link", lossy=True)
+            read_blocked = False
+        except OSError:
+            read_blocked = True
+        tap.check(
+            "Rejects symlinks during discovery and direct reads",
+            entries_ok and read_blocked,
+        )
+
+        # Test 43: Credential rules
+        secret_cases = {
+            ".github/ci.yml": False,
+            ".gitignore": False,
+            ".env": True,
+            ".env.example": True,
+            ".ssh/config": True,
+            "src/a.py": False,
         }
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(json.dumps(payload).encode())
+        wrong_cred = [
+            rel
+            for rel, want in secret_cases.items()
+            if caxton.is_secret_path(unit_root / rel, unit_root) is not want
+        ]
+        create_cases = {".env.example": False, ".ssh/config": True, "docs/a.md": False}
+        wrong_cred += [
+            rel
+            for rel, want in create_cases.items()
+            if caxton.is_secret_dir_path(unit_root / rel, unit_root) is not want
+        ]
+        tap.check(
+            "Blocks credential reads without blocking ordinary creates",
+            not wrong_cred,
+            "; ".join(wrong_cred),
+        )
 
-    def log_message(self, *args):
-        pass
+        # Test 44: Policy
+        policy = caxton.Policy(
+            unit_root,
+            visible={"docs/guide.md", "docs/arch.md", "src/a.py"},
+            writable={"docs/guide.md"},
+            dir_selectors={"docs": "edit"},
+            inlined=["docs/guide.md"],
+        )
+        policy_wrong = []
+        if not policy.is_visible("src/a.py"):
+            policy_wrong.append("selected file not visible")
+        if policy.is_visible("secret.txt"):
+            policy_wrong.append("unselected file visible")
+        if policy.is_writable("docs/arch.md"):
+            policy_wrong.append("carve-out is writable")
+        if not policy.can_create("docs/new.md"):
+            policy_wrong.append("cannot create under a writable directory")
+        if policy.can_create("src/new.py"):
+            policy_wrong.append("can create outside a writable directory")
+        carved = caxton.Policy(
+            unit_root,
+            visible={"docs/guide.md", "docs/private/secret.md"},
+            writable={"docs/guide.md"},
+            dir_selectors={"docs": "edit", "docs/private": "read"},
+            inlined=[],
+        )
+        if not carved.can_create("docs/new.md"):
+            policy_wrong.append("cannot create beside a carve-out")
+        if carved.can_create("docs/private/new.md") or carved.can_create(
+            "docs/private/a/b.md"
+        ):
+            policy_wrong.append("can create inside a read-only carve-out")
+        policy.note_created("docs/new.md")
+        if not (policy.is_visible("docs/new.md") and policy.is_writable("docs/new.md")):
+            policy_wrong.append("created file is not readable back")
+        policy.note_deleted("docs/guide.md")
+        if policy.is_visible("docs/guide.md") or policy.is_writable("docs/guide.md"):
+            policy_wrong.append("deleted file still in scope")
+        if not policy.is_visible_dir("docs"):
+            policy_wrong.append("directory holding visible files is not listable")
+        tap.check(
+            "Enforces visibility, writability, creation roots and created files",
+            not policy_wrong,
+            "; ".join(policy_wrong),
+        )
+
+        # Test 45: check-ignore indeterminate on non-repo
+        not_a_repo = unit_root / "not-a-repo"
+        not_a_repo.mkdir()
+        tap.check(
+            "Reports an unanswerable check-ignore as indeterminate",
+            caxton.git_ignored_subset(not_a_repo, ["a.md"]) is None,
+        )
+
+        # Test 46: Path lists
+        list_wrong = []
+        nul_f = unit_root / "list.nul"
+        nul_f.write_bytes(b"trailing.md\n\0\nleading.md\0")
+        if caxton.read_path_list(str(nul_f), True, "caxton") != [
+            "trailing.md\n",
+            "\nleading.md",
+        ]:
+            list_wrong.append("NUL list mangled a newline")
+        lines_f = unit_root / "list.txt"
+        lines_f.write_text("a.md\r\nb.md\n", encoding="utf-8")
+        if caxton.read_path_list(str(lines_f), False, "caxton") != ["a.md", "b.md"]:
+            list_wrong.append("line list mishandled CRLF")
+        tap.check(
+            "Reads NUL lists verbatim and line lists without their newline",
+            not list_wrong,
+            "; ".join(list_wrong),
+        )
+
+        # Test 47: Retry delay extraction
+        class MockAPIError(Exception):
+            def __init__(self, message: str = "", code: int = 429):
+                super().__init__(message)
+                self.message = message
+                self.code = code
+
+        e_msg1 = MockAPIError(
+            message=(
+                "You exceeded your current quota. * Quota exceeded for metric:"
+                " generativelanguage.googleapis.com/generate_content_paid_tier_2_input_token_count,"
+                " limit: 3000000, model: gemini-3.7-flash Please retry in"
+                " 51.940658776s.)."
+            )
+        )
+        e_msg2 = MockAPIError(
+            message="Resource exhausted. Please retry in 43.925798488s."
+        )
+        e_msg3 = MockAPIError(message="Please retry in 10s.")
+        e_hard = MockAPIError(
+            message=(
+                "You exceeded your current quota, please check your plan and billing"
+                " details. For more information on this error, head to:"
+                " https://ai.google.dev/gemini-api/docs/rate-limits."
+            )
+        )
+        e_500 = MockAPIError(message="Server error", code=500)
+        tap.check(
+            "Extracts suggested retry delays from structured details, headers, and error messages",
+            caxton.extract_retry_delay(e_msg1) == 51.940658776
+            and caxton.extract_retry_delay(e_msg2) == 43.925798488
+            and caxton.extract_retry_delay(e_msg3) == 10.0
+            and caxton.extract_retry_delay(e_hard) is None
+            and caxton.extract_retry_delay(e_500) is None,
+        )
+
+        # Test 48: Wired-up wants-help unit check (previously orphaned in baseline).
+        # Path list options (--read/--edit) stop consuming values at the next '-' flag.
+        help_cases = {
+            ("-h",): True,
+            ("--help",): True,
+            ("prompt", "--edit", "docs/", "--help"): True,
+            ("--read", "a.md", "b.md", "-h"): True,
+            ("--model", "-h", "prompt"): False,
+            ("--", "-h"): False,
+            ("prompt",): False,
+        }
+        bad_help = [
+            str(a)
+            for a, want in help_cases.items()
+            if caxton.wants_help(list(a)) is not want
+        ]
+        tap.check(
+            "Help flag detection skips option values and stops at '--'",
+            not bad_help,
+            "; ".join(bad_help),
+        )
+
+        # Test 49 (was T48): Selector through symlinked ancestor refused
+        escape_outside = work / "escape-outside"
+        escape_outside.mkdir()
+        (escape_outside / "notes.txt").write_text("OUTSIDE-CONTENT\n", encoding="utf-8")
+        escape_repo = make_repo("escape")
+        (escape_repo / "real.md").write_text("inside\n", encoding="utf-8")
+        os.symlink(escape_outside, escape_repo / "alias")
+        commit_all(escape_repo)
+        rc, out, err = run_inproc(
+            caxton,
+            ["--dry-run", "prompt", "--read", "alias/notes.txt"],
+            cwd=escape_repo,
+        )
+        tap.check(
+            "Refuses a selector that traverses a symlinked ancestor",
+            rc != 0 and "reached through 'alias'" in (out + err),
+            f"rc={rc}\n{out}\n{err}",
+        )
+
+        # Test 50 (was T49): Listed path through symlinked ancestor dropped
+        rc, out, err = run_inproc(
+            caxton,
+            ["--dry-run", "prompt", "--read-from", "-"],
+            cwd=escape_repo,
+            stdin_bytes=b"alias/notes.txt\nreal.md\n",
+        )
+        tap.check(
+            "Drops a listed path that traverses a symlinked ancestor",
+            rc == 0
+            and resolved_tags(out) == ["real.md R-I"]
+            and "Excluded (symlinks, never followed)" in out,
+            f"rc={rc}\n{out}\n{err}",
+        )
+
+        # Test 51 (was T50): Read carve-out inside writable dir blocks creation
+        carve = make_repo("carve")
+        (carve / "docs" / "private").mkdir(parents=True)
+        (carve / "docs" / "guide.md").write_text("guide\n", encoding="utf-8")
+        (carve / "docs" / "private" / "secret.md").write_text(
+            "secret\n", encoding="utf-8"
+        )
+        commit_all(carve)
+        rc, out, err = run_inproc(
+            caxton,
+            ["--dry-run", "prompt", "--edit", "docs/", "--read", "docs/private/"],
+            cwd=carve,
+        )
+        tap.check(
+            "A read carve-out is reported as accepting no new files",
+            rc == 0
+            and "[ W ]  docs/" in out
+            and "[ R ]  docs/private/ (read-only; no new files here)" in out
+            and "docs/private/secret.md R-I" in resolved_tags(out),
+            f"rc={rc}\n{out}\n{err}",
+        )
+
+        # Test 52 (was T51): NUL-delimited list preserves newlines inside filenames
+        nl_repo = make_repo("newline-names")
+        (nl_repo / "plain.md").write_text("plain\n", encoding="utf-8")
+        try:
+            (nl_repo / "trail.md\n").write_text("odd\n", encoding="utf-8")
+            nl_ok = (nl_repo / "trail.md\n").is_file()
+        except OSError:
+            nl_ok = False
+        if nl_ok:
+            commit_all(nl_repo)
+            ls_z = subprocess.run(
+                ["git", "-C", str(nl_repo), "ls-files", "-z"],
+                capture_output=True,
+                check=True,
+            ).stdout
+            rc, out, err = run_inproc(
+                caxton,
+                ["--dry-run", "prompt", "--read-from", "-", "--null"],
+                cwd=nl_repo,
+                stdin_bytes=ls_z,
+            )
+            tap.check(
+                "A NUL-delimited list preserves newlines inside filenames",
+                rc == 0
+                and "Visible:       2 file" in out
+                and "Skipped (listed paths" not in out,
+                f"rc={rc}\n{out}\n{err}",
+            )
+        else:
+            tap.skip("filesystem rejects newlines in filenames")
+
+        # Tests 53-55 (was T52-T54): Force-tracked file inside ignored directory
+        forced = make_repo("forced")
+        for d in ("build", "empty-build", "docs"):
+            (forced / d).mkdir()
+        (forced / ".gitignore").write_text("build/\nempty-build/\n", encoding="utf-8")
+        (forced / "build" / "tracked.md").write_text("kept\n", encoding="utf-8")
+        (forced / "build" / "sibling.md").write_text("sibling\n", encoding="utf-8")
+        (forced / "docs" / "a.md").write_text("doc\n", encoding="utf-8")
+        (forced / "top.md").write_text("top\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "add", "-A"], cwd=forced, check=True, capture_output=True
+        )
+        subprocess.run(
+            ["git", "add", "-f", "build/tracked.md"],
+            cwd=forced,
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "commit", "-q", "--no-gpg-sign", "-m", "init"],
+            cwd=forced,
+            check=True,
+            capture_output=True,
+        )
+
+        rc, out, err = run_inproc(
+            caxton, ["--dry-run", "prompt", "--read", "build/"], cwd=forced
+        )
+        tags53 = resolved_tags(out)
+        tap.check(
+            "An explicit ignored directory admits ignored and tracked files alike",
+            rc == 0
+            and "build/sibling.md R-I" in tags53
+            and "build/tracked.md R-I" in tags53,
+            f"rc={rc}\n{out}\n{err}",
+        )
+
+        rc, out, err = run_inproc(
+            caxton, ["--dry-run", "prompt", "--edit", "build/"], cwd=forced
+        )
+        combined = out + err
+        tap.check(
+            "Refuses an ignored directory's files instead of narrowing scope",
+            rc != 0
+            and "ignored by git, which cannot restore them" in combined
+            and "build/sibling.md" in combined,
+            f"rc={rc}\n{combined}",
+        )
+
+        rc, out, err = run_inproc(
+            caxton, ["--dry-run", "prompt", "--edit", "empty-build/"], cwd=forced
+        )
+        combined = out + err
+        tap.check(
+            "Refuses a creation root whose every creation would be rejected",
+            rc != 0
+            and "ignored by git, which cannot restore them" in combined
+            and "empty-build/" in combined,
+            f"rc={rc}\n{combined}",
+        )
+
+        # Test 56 (was T55): Carriage return in filename survives git output & path lists
+        cr_repo = make_repo("carriage")
+        (cr_repo / "plain.md").write_text("plain\n", encoding="utf-8")
+        try:
+            (cr_repo / "carriage\r.md").write_text("cr\n", encoding="utf-8")
+            cr_ok = (cr_repo / "carriage\r.md").is_file()
+        except OSError:
+            cr_ok = False
+        if cr_ok:
+            commit_all(cr_repo)
+            rc_cr1, out_cr1, _ = run_inproc(
+                caxton, ["--dry-run", "prompt"], cwd=cr_repo
+            )
+            rc_cr2, out_cr2, _ = run_inproc(
+                caxton,
+                ["--dry-run", "prompt", "--read-from", "-", "--null"],
+                cwd=cr_repo,
+                stdin_bytes=b"carriage\r.md\0",
+            )
+            tap.check(
+                "A carriage return in a filename survives git output and path lists",
+                rc_cr1 == 0
+                and rc_cr2 == 0
+                and "Visible:       2 file" in out_cr1
+                and "Visible:       1 file" in out_cr2
+                and "Skipped (listed paths" not in out_cr2,
+                f"cr1={out_cr1}\ncr2={out_cr2}",
+            )
+        else:
+            tap.skip("filesystem rejects carriage returns in filenames")
+
+        # Test 57 (was T56): Listed paths keep literal tilde; typed paths expand it
+        tilde_repo = make_repo("tilde")
+        (tilde_repo / "~").mkdir()
+        (tilde_repo / "~" / "note.md").write_text("note\n", encoding="utf-8")
+        commit_all(tilde_repo)
+        rc_t1, out_t1, err_t1 = run_inproc(
+            caxton,
+            ["--dry-run", "prompt", "--read-from", "-"],
+            cwd=tilde_repo,
+            stdin_bytes=b"~/note.md\n",
+        )
+        rc_t2, _, _ = run_inproc(
+            caxton, ["--dry-run", "prompt", "--read", "~/note.md"], cwd=tilde_repo
+        )
+        tap.check(
+            "Listed paths keep a literal tilde while typed paths expand it",
+            rc_t1 == 0 and resolved_tags(out_t1) == ["~/note.md R-I"] and rc_t2 != 0,
+            f"rc=({rc_t1},{rc_t2})\n{out_t1}\n{err_t1}",
+        )
+
+        # Test 58 (was T57): Unignored directory not treated as override under '.*'
+        dotglob = make_repo("dotglob")
+        (dotglob / "docs").mkdir()
+        (dotglob / ".gitignore").write_text(
+            ".*\n!.gitignore\n*.log\n", encoding="utf-8"
+        )
+        (dotglob / "docs" / "guide.md").write_text("guide\n", encoding="utf-8")
+        (dotglob / "docs" / "local.log").write_text("LOCAL\n", encoding="utf-8")
+        commit_all(dotglob)
+        rc, out, err = run_inproc(
+            caxton, ["--dry-run", "prompt", "--read", "docs/"], cwd=dotglob
+        )
+        tap.check(
+            "An unignored directory is not treated as an override",
+            rc == 0
+            and resolved_tags(out) == ["docs/guide.md R-I"]
+            and "Explicit Overrides" not in out,
+            f"rc={rc}\n{out}\n{err}",
+        )
+
+        # Test 59 (was T58): File inside submodule boundary refused
+        rc, out, err = run_inproc(
+            caxton, ["--dry-run", "prompt", "--read", "sub/child.txt"], cwd=sub_host
+        )
+        combined = out + err
+        tap.check(
+            "Refuses a file beneath a submodule boundary",
+            rc != 0
+            and "reached through 'sub'" in combined
+            and "is a submodule" in combined,
+            f"rc={rc}\n{combined}",
+        )
+
+        # Test 60 (was T59): Listed path inside submodule dropped
+        rc, out, err = run_inproc(
+            caxton,
+            ["--dry-run", "prompt", "--read-from", "-"],
+            cwd=sub_host,
+            stdin_bytes=b"sub/child.txt\ntop.md\n",
+        )
+        tap.check(
+            "Drops a listed path beneath a submodule boundary",
+            rc == 0
+            and resolved_tags(out) == ["top.md R-I"]
+            and "Skipped (listed paths" in out,
+            f"rc={rc}\n{out}\n{err}",
+        )
+
+        # Test 61 (was T60): Backslash in filename survives as itself
+        bs_repo = make_repo("backslash")
+        (bs_repo / "plain.md").write_text("plain\n", encoding="utf-8")
+        bs_name = "back\\slash.md"
+        try:
+            (bs_repo / bs_name).write_text("bs\n", encoding="utf-8")
+            bs_ok = (bs_repo / bs_name).is_file()
+        except OSError:
+            bs_ok = False
+        if bs_ok:
+            commit_all(bs_repo)
+            rc, out, err = run_inproc(
+                caxton, ["--dry-run", "prompt", "--read", bs_name], cwd=bs_repo
+            )
+            tap.check(
+                "A backslash in a filename survives as itself",
+                rc == 0 and resolved_tags(out) == [f"{bs_name} R-I"],
+                f"rc={rc}\n{out}\n{err}",
+            )
+        else:
+            tap.skip("filesystem rejects backslashes in filenames")
+
+        # Test 62 (was T61): Deinitialized submodule detected from index
+        deinit = make_repo("deinit-host")
+        (deinit / "top.md").write_text("top\n", encoding="utf-8")
+        deinit_sub = make_repo("sub", dst_parent=deinit)
+        (deinit_sub / "child.txt").write_text("inner\n", encoding="utf-8")
+        commit_all(deinit_sub, "sub")
+        subprocess.run(
+            ["git", "add", "top.md", "sub"], cwd=deinit, check=True, capture_output=True
+        )
+        subprocess.run(
+            ["git", "commit", "-q", "--no-gpg-sign", "-m", "init"],
+            cwd=deinit,
+            check=True,
+            capture_output=True,
+        )
+        shutil.rmtree(deinit_sub / ".git")
+        (deinit_sub / "child.txt").write_text("STRAY\n", encoding="utf-8")
+        rc, out, err = run_inproc(
+            caxton, ["--dry-run", "prompt", "--read", "sub/child.txt"], cwd=deinit
+        )
+        tap.check(
+            "Detects a submodule boundary from the index, not just .git",
+            rc != 0 and "which is a submodule" in (out + err),
+            f"rc={rc}\n{out}\n{err}",
+        )
+
+        # Test 63 (was T62): Repo name ending in space still resolves
+        spaced = make_repo("spaced dir ")
+        (spaced / "a.md").write_text("a\n", encoding="utf-8")
+        rc, out, err = run_inproc(caxton, ["--dry-run", "prompt"], cwd=spaced)
+        tap.check(
+            "A repository whose name ends in a space still resolves",
+            rc == 0
+            and f"Repository:    {spaced}" in out
+            and resolved_tags(out) == ["a.md R-I"],
+            f"rc={rc}\n{out}\n{err}",
+        )
+
+        # Test 64 (was T63): Stranded creation named when ignore rule added mid-run
+        strand = make_repo("stranded")
+        (strand / "keep.md").write_text("keep\n", encoding="utf-8")
+        commit_all(strand)
+        (strand / "residue.tmp").write_text("residue\n", encoding="utf-8")
+        (strand / "plain.md").write_text("plain\n", encoding="utf-8")
+        (strand / ".gitignore").write_text("residue.tmp\n", encoding="utf-8")
+        tap.check(
+            "Names a creation stranded by an ignore rule the run added",
+            caxton.unrestorable_creations(strand, ["residue.tmp", "plain.md"])
+            == ["residue.tmp"],
+        )
+
+        # Test 65 (was T64): Refuses git metadata as selection (reuse REPO!)
+        rc_m1, out_m1, err_m1 = run_inproc(
+            caxton, ["--dry-run", "prompt", "--read", ".git/config"], cwd=repo
+        )
+        rc_m2, out_m2, _ = run_inproc(
+            caxton, ["--dry-run", "prompt", "--read", "."], cwd=repo
+        )
+        tap.check(
+            "Refuses git metadata as a selection",
+            rc_m1 != 0
+            and "git's own metadata" in (out_m1 + err_m1)
+            and rc_m2 == 0
+            and ".git/" not in out_m2,
+            f"rc=({rc_m1},{rc_m2})\n{err_m1}",
+        )
+
+        # Test 66 (was T65): Creation barred from git metadata without touching dotfiles
+        meta_cases = {
+            ".git/hooks/pre-commit": True,
+            ".GIT/config": True,
+            ".git": True,
+            "sub/.Git/hooks/post-checkout": True,
+            "sub/.git/config": True,
+            ".github/ci.yml": False,
+            ".gitignore": False,
+            "docs/guide.md": False,
+            "": False,
+        }
+        wrong_meta = [
+            rel
+            for rel, want in meta_cases.items()
+            if caxton.in_repository_metadata(rel) is not want
+        ]
+        tap.check(
+            "Creation is barred from git metadata without touching dotfiles",
+            not wrong_meta,
+            "; ".join(wrong_meta),
+        )
+
+        # Test 67 (was T66): Tool response budget enrichment
+        enrich = caxton.enrich_tool_result_with_budget
+        now_pc = time.perf_counter()
+        r1 = enrich(
+            {"status": "success", "file_lines": 50},
+            current_step=1,
+            max_steps=10,
+            session_start=now_pc,
+            timeout_sec=600,
+        )
+        r2 = enrich(
+            {"status": "success"},
+            current_step=8,
+            max_steps=10,
+            session_start=now_pc,
+            timeout_sec=0,
+        )
+        r3 = enrich(
+            {"status": "error", "message": "not found"},
+            current_step=9,
+            max_steps=10,
+            session_start=now_pc,
+            timeout_sec=0,
+        )
+        r4 = enrich(
+            {"status": "success"},
+            current_step=1,
+            max_steps=100,
+            session_start=now_pc - 585.0,
+            timeout_sec=600,
+        )
+        tap.check(
+            "Enriches tool responses with remaining turns, time, and urgency signaling",
+            r1["status"] == "success"
+            and r1["file_lines"] == 50
+            and r1["remaining_steps"] == 9
+            and r1["remaining_seconds"] > 590.0
+            and "budget_warning" not in r1
+            and r2["remaining_steps"] == 2
+            and "remaining_seconds" not in r2
+            and "LOW BUDGET" in r2.get("budget_warning", "")
+            and r3["status"] == "error"
+            and r3["message"] == "not found"
+            and r3["remaining_steps"] == 1
+            and "CRITICAL BUDGET LIMIT" in r3.get("budget_warning", "")
+            and r4["remaining_steps"] == 99
+            and r4["remaining_seconds"] <= 16.0
+            and "CRITICAL BUDGET LIMIT" in r4.get("budget_warning", ""),
+        )
+
+        # Test 68 (was T67): Session payload & response serialization with private permissions
+        ser_dir = work / "serialize_tmp"
+        custom_state = ser_dir / "custom_caxton_state"
+        sid = uuid.uuid4()
+        payload_file = caxton.save_session_payload(
+            state_dir=str(custom_state),
+            session_id=sid,
+            system_instruction="System instruction content",
+            initial_prompt="User prompt content",
+        )
+        ser_repo = make_repo("serialize_repo", dst_parent=ser_dir)
+        sample_txt = ser_repo / "sample.txt"
+        sample_txt.write_text("initial\n", encoding="utf-8")
+        commit_all(ser_repo)
+        sample_txt.write_text("modified content\n", encoding="utf-8")
+
+        tel_obj = caxton.Telemetry(
+            steps=5,
+            tool_calls=8,
+            modified_files={"sample.txt"},
+            created_files=set(),
+            deleted_files=set(),
+            prompt_tokens=1200,
+            candidate_tokens=350,
+        )
+        response_file = caxton.save_session_response(
+            state_dir=str(custom_state),
+            session_id=sid,
+            status_str="Succeeded",
+            report_text="All modifications completed cleanly.",
+            telemetry=tel_obj,
+            max_steps=100,
+            total_elapsed=4.25,
+            root=ser_repo,
+        )
+        payload_txt = Path(payload_file).read_text(encoding="utf-8")
+        response_txt = Path(response_file).read_text(encoding="utf-8")
+        tap.check(
+            "Serializes session payload and response with private permissions",
+            os.path.samefile(payload_file, custom_state / f"payload_{sid}.md")
+            and stat.S_IMODE(custom_state.stat().st_mode) == 0o700
+            and stat.S_IMODE(Path(payload_file).stat().st_mode) == 0o600
+            and f"Session ID: {sid}" in payload_txt
+            and "System instruction content" in payload_txt
+            and "User prompt content" in payload_txt
+            and os.path.samefile(response_file, custom_state / f"response_{sid}.md")
+            and stat.S_IMODE(Path(response_file).stat().st_mode) == 0o600
+            and f"Session ID: {sid}" in response_txt
+            and "Status: Succeeded" in response_txt
+            and "All modifications completed cleanly." in response_txt
+            and "- **Steps:** 5/100" in response_txt
+            and "- **Tool Calls:** 8" in response_txt
+            and "sample.txt | 2 +-" in response_txt,
+        )
+
+        # Test 69 (was T68): Coerce tool args
+        def fake_read_file(
+            path: str, start_line: int | None = None, end_line: int | None = None
+        ):
+            return {}
+
+        coerce = caxton.coerce_tool_args
+        bad_coerce = []
+        for label, (raw, want) in {
+            "empty objects": (
+                {"path": "a.md", "start_line": {}, "end_line": {}},
+                {"path": "a.md"},
+            ),
+            "nulls": ({"path": "a.md", "start_line": None}, {"path": "a.md"}),
+            "float": (
+                {"path": "a.md", "start_line": 3.0, "end_line": 9},
+                {"path": "a.md", "start_line": 3, "end_line": 9},
+            ),
+            "string": (
+                {"path": "a.md", "start_line": " 12 "},
+                {"path": "a.md", "start_line": 12},
+            ),
+        }.items():
+            got, cerr = coerce(fake_read_file, raw)
+            if cerr or got != want:
+                bad_coerce.append(f"{label}: {got!r} {cerr!r}")
+        for label, raw, needle in (
+            (
+                "fractional",
+                {"path": "a.md", "start_line": 2.5},
+                "'start_line' must be an integer",
+            ),
+            (
+                "word",
+                {"path": "a.md", "end_line": "ten"},
+                "'end_line' must be an integer",
+            ),
+            (
+                "object",
+                {"path": "a.md", "start_line": {"n": 1}},
+                "'start_line' must be an integer",
+            ),
+            (
+                "bool",
+                {"path": "a.md", "start_line": True},
+                "'start_line' must be an integer",
+            ),
+            ("missing path", {"start_line": 1}, "'path'"),
+            ("empty path", {"path": {}}, "'path' is required"),
+            ("unknown", {"path": "a.md", "lines": 3}, "unexpected argument 'lines'"),
+        ):
+            _, cerr = coerce(fake_read_file, raw)
+            if not cerr or needle not in cerr or "not supported" in cerr:
+                bad_coerce.append(f"{label}: {cerr!r}")
+        tap.check(
+            "Treats empty optional arguments as unset and rejects mistyped ones by name",
+            not bad_coerce,
+            "; ".join(bad_coerce),
+        )
+
+        # Test 70 (was T69): Coerce booleans
+        def fake_grep(query: str, path: str = "", case_insensitive: bool = False):
+            return {}
+
+        got_b, err_b = coerce(
+            fake_grep, {"query": "x", "case_insensitive": "true", "path": {}}
+        )
+        _, bad_bool = coerce(fake_grep, {"query": "x", "case_insensitive": 2})
+        tap.check(
+            "Coerces boolean arguments and rejects non-boolean ones",
+            err_b is None
+            and got_b == {"query": "x", "case_insensitive": True}
+            and "must be true or false" in (bad_bool or ""),
+            f"{got_b!r} {err_b!r} {bad_bool!r}",
+        )
+
+        # Test 71 (was T70): RateLimiter rolling minute pacing
+        rl = caxton.RateLimiter(tpm=1000)
+        ok_win = rl.delay(400, 0.0) == 0.0
+        rl.record(400, 0.0)
+        rl.record(400, 10.0)
+        ok_win = (
+            ok_win
+            and rl.delay(200, 20.0) == 0.0
+            and abs(rl.delay(300, 20.0) - 40.0) < 1e-9
+            and abs(rl.delay(700, 20.0) - 50.0) < 1e-9
+            and abs(rl.delay(5000, 20.0) - 50.0) < 1e-9
+            and rl.delay(300, 61.0) == 0.0
+        )
+        tap.check(
+            "Paces calls to keep a rolling minute of input tokens under the limit",
+            ok_win,
+        )
+
+        # Test 72 (was T71): RateLimiter AIMD + backoff_delay
+        rl2 = caxton.RateLimiter()
+        ok_aimd = rl2.delay(10**6, 0.0) == 0.0
+        rl2.record(300, 0.0)
+        rl2.record(300, 10.0)
+        rl2.throttled(400, 20.0)
+        ok_aimd = ok_aimd and rl2.limit() == 500.0 and rl2.delay(400, 20.0) == 50.0
+        for t in (80.0, 140.0):
+            rl2.record(100, t)
+        ok_aimd = ok_aimd and abs(rl2.limit() - 600.0) < 1e-9
+        rl2.throttled(100, 141.0)
+        ok_aimd = ok_aimd and abs(rl2.limit() - 100.0) < 1e-9
+        capped = caxton.RateLimiter(tpm=50)
+        capped.throttled(1000, 0.0)
+        backoff = caxton.backoff_delay
+        ok_aimd = (
+            ok_aimd
+            and capped.limit() == 50
+            and backoff(0, 15, 120, 1.0) == 15
+            and backoff(0, 15, 120, 0.0) == 7.5
+            and backoff(5, 15, 120, 1.0) == 120
+            and backoff(5, 15, 120, 0.0) == 60
+        )
+        tap.check(
+            "Learns a limit from 429s, backs off with jitter and speeds up again",
+            ok_aimd,
+            f"limit={rl2.limit()}",
+        )
+
+        # Test 73 (was T72): Quota kind + input token budget + parse_token_count
+        class FakeError(Exception):
+            def __init__(self, details):
+                self.details = details
+
+        minute_err = FakeError(
+            {
+                "error": {
+                    "details": [
+                        {
+                            "violations": [
+                                {
+                                    "quotaMetric": "generativelanguage.googleapis.com/generate_content_paid_tier_input_token_count",
+                                    "quotaId": "GenerateContentPaidTierInputTokensPerModelPerMinute",
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        )
+        daily_err = FakeError(
+            {
+                "error": {
+                    "details": [
+                        {
+                            "violations": [
+                                {
+                                    "quotaId": "GenerateRequestsPerDayPerProjectPerModel-FreeTier"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        )
+        plenty = enrich({"status": "success"}, 1, 100, 0.0, 0, 1_000_000, 100_000)
+        low_b = enrich({"status": "success"}, 1, 100, 0.0, 0, 250_000, 100_000)
+        last_b = enrich({"status": "success"}, 1, 100, 0.0, 0, 150_000, 100_000)
+        unset_b = enrich({"status": "success"}, 1, 100, 0.0, 0)
+        parsed_tok = [caxton.parse_token_count(v) for v in ("250000", "250k", "1.5M")]
+        try:
+            caxton.parse_token_count("lots")
+            tok_rejected = False
+        except ValueError:
+            tok_rejected = True
+        tap.check(
+            "Tells daily quotas from per-minute ones and reports the input-token budget",
+            not caxton.is_daily_quota(caxton.quota_ids(minute_err))
+            and caxton.is_daily_quota(caxton.quota_ids(daily_err))
+            and caxton.quota_ids(FakeError(None)) == []
+            and len(caxton.quota_ids(minute_err)) == 2
+            and plenty["remaining_input_tokens"] == 1_000_000
+            and "budget_warning" not in plenty
+            and "about 2 call(s)" in low_b.get("budget_warning", "")
+            and "CRITICAL" in last_b.get("budget_warning", "")
+            and "remaining_input_tokens" not in unset_b
+            and parsed_tok == [250_000, 250_000, 1_500_000]
+            and tok_rejected,
+        )
+
+        # Test 74 (was T73): Malformed --tpm rejected
+        rc, out, err = run_inproc(
+            caxton, ["--dry-run", "prompt", "--tpm", "lots"], cwd=repo
+        )
+        tap.check(
+            "Rejects a malformed --tpm value",
+            rc != 0
+            and "caxton: error: --tpm: invalid token count: 'lots'" in (out + err),
+            f"rc={rc}\n{out}\n{err}",
+        )
+
+        # Test 75 (was T74): Request timeout scaling and malformed --request-timeout
+        bound = caxton.request_timeout
+        srv_hdrs = caxton.server_timeout_headers
+        rc_rto, out_rto, err_rto = run_inproc(
+            caxton, ["--dry-run", "prompt", "--request-timeout", "soon"], cwd=repo
+        )
+        tap.check(
+            "Scales the request timeout with input and rejects a malformed one",
+            bound(0) == 180.0
+            and bound(240_000) == 420.0
+            and bound(240_000, 30) == 30.0
+            and bound(240_000, 0) is None
+            and srv_hdrs(180.0) == {"X-Server-Timeout": "1800"}
+            and srv_hdrs(2400.0) == {"X-Server-Timeout": "2400"}
+            and srv_hdrs(None) is None
+            and rc_rto != 0
+            and "caxton: error: --request-timeout: invalid number of seconds: 'soon'"
+            in (out_rto + err_rto),
+            f"rc={rc_rto}\n{out_rto}\n{err_rto}",
+        )
+
+        # Test 76 (was T75): Retry-budget/backoff math with mocked clock/sleep in-process
+        # PLUS short ~2s live HTTP stall/timeout CLI smoke check
+        sleep_log: list[float] = []
+        exhaust_tel = work / "exhaust_stall.json"
+
+        class FakeStallChat:
+            def __init__(self):
+                self.calls = 0
+
+            def send_message(self, message, config=None):
+                self.calls += 1
+                raise httpx.ReadTimeout("stalled")
+
+        class FakeStallClient:
+            def __init__(self, api_key=None):
+                self.models = self
+                self.chats = self
+
+            def get(self, **kwargs):
+                raise RuntimeError("404 stub")
+
+            def create(self, **kwargs):
+                return FakeStallChat()
+
+        real_sleep = time.sleep
+
+        def record_backoff_sleep(seconds: float) -> None:
+            if seconds >= 1.0:
+                sleep_log.append(seconds)
+            else:
+                real_sleep(seconds)
+
+        with (
+            mock.patch.object(caxton.genai, "Client", FakeStallClient),
+            mock.patch.object(caxton.time, "sleep", side_effect=record_backoff_sleep),
+            mock.patch.object(caxton.random, "random", return_value=1.0),
+        ):
+            ex_rc, ex_out, ex_err = run_inproc(
+                caxton,
+                [
+                    "Summarize",
+                    "--no-search",
+                    "--no-serialize",
+                    "--request-timeout",
+                    "1",
+                ],
+                cwd=single_repo,
+                env={
+                    "AGENT_OFFLINE": "0",
+                    "GEMINI_API_KEY": "stub",
+                    "AGENT_TELEMETRY_JSON": str(exhaust_tel),
+                },
+            )
+        ex_tel = (
+            json.loads(exhaust_tel.read_text(encoding="utf-8"))
+            if exhaust_tel.is_file()
+            else {}
+        )
+
+        # Live ~2s HTTP stall smoke test via real CLI subprocess
+        stall_posts = 0
+        stall_lock = threading.Lock()
+        stall_wake = threading.Event()
+
+        class StallHandler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(404)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"error": {"code": 404, "message": "stub"}}')
+
+            def do_POST(self):
+                nonlocal stall_posts
+                self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                with stall_lock:
+                    stall_posts += 1
+                stall_wake.wait(timeout=10.0)
+
+            def log_message(self, *args):
+                pass
+
+        try:
+            with serve_http(StallHandler) as (_, stall_url):
+                p_stall = run_cli(
+                    [
+                        "Summarize",
+                        "--no-search",
+                        "--request-timeout",
+                        "1",
+                        "--timeout",
+                        "6",
+                    ],
+                    cwd=single_repo,
+                    env={
+                        "AGENT_OFFLINE": "0",
+                        "GEMINI_API_KEY": "stub",
+                        "GOOGLE_GEMINI_BASE_URL": stall_url,
+                        "CAXTON_STATE_DIR": str(work / "stall-state"),
+                    },
+                )
+        finally:
+            stall_wake.set()
+
+        stall_combined = p_stall.stdout + p_stall.stderr
+        tap.check(
+            "Abandons a stalled request, logs it and retries",
+            ex_rc != 0
+            and sleep_log == [2.0, 4.0, 8.0]
+            and len(ex_tel.get("request_timeouts", [])) == 4
+            and ex_tel["request_timeouts"][-1].get("action")
+            == "failed: retries exhausted"
+            and ex_tel.get("wait_seconds") == 14.0
+            and "4 attempt(s)" in (ex_out + ex_err)
+            and p_stall.returncode == 2
+            and stall_posts >= 1
+            and "API request timed out after 1s" in stall_combined
+            and "request timeouts:" in stall_combined,
+            f"inproc=({ex_rc},{sleep_log},{ex_tel})\n"
+            f"live=({p_stall.returncode},posts={stall_posts})\n{stall_combined}",
+        )
+
+        # Tests 77-78 (was T76-T77): Wire CONTINUATION + MAX_TOKENS against shared local HTTP server
+        limit_script: list[str] = []
+        limit_reqs: list[dict] = []
+        limit_lock = threading.Lock()
+
+        class ScriptedHandler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(404)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"error": {"code": 404, "message": "stub"}}')
+
+            def do_POST(self):
+                body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                obj = json.loads(body)
+                obj["_x_server_timeout"] = self.headers.get("X-Server-Timeout")
+                with limit_lock:
+                    limit_reqs.append(obj)
+                    idx = min(len(limit_reqs), len(limit_script)) - 1
+                    candidate = json.loads(limit_script[idx])
+                payload = {
+                    "candidates": [candidate],
+                    "usageMetadata": {
+                        "promptTokenCount": 100,
+                        "candidatesTokenCount": 10,
+                    },
+                }
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps(payload).encode())
+
+            def log_message(self, *args):
+                pass
+
+        limit_state = work / "limit-state"
+        limit_tel = work / "limit.tel"
+
+        with serve_http(ScriptedHandler) as (_, limit_url):
+
+            def run_limited(lines: list[str]):
+                with limit_lock:
+                    limit_script[:] = lines
+                    limit_reqs.clear()
+                if limit_tel.exists():
+                    limit_tel.unlink()
+                if limit_state.exists():
+                    shutil.rmtree(limit_state)
+                return run_inproc(
+                    caxton,
+                    ["Audit the notes", "--no-search", "--timeout", "60"],
+                    cwd=single_repo,
+                    env={
+                        "CAXTON_MAX_OUTPUT_TOKENS": None,
+                        "AGENT_OFFLINE": "0",
+                        "GEMINI_API_KEY": "stub",
+                        "GOOGLE_GEMINI_BASE_URL": limit_url,
+                        "CAXTON_STATE_DIR": str(limit_state),
+                        "AGENT_TELEMETRY_JSON": str(limit_tel),
+                    },
+                )
+
+            # Test 77 (was T76): max_output_tokens + CONTINUATION hops merged
+            rc77, out77, err77 = run_limited(
+                [
+                    '{"content": {"role": "model", "parts": [{"text": "Planning.", "thought": true}]}, "finishReason": "CONTINUATION", "continuationToken": "dG9rZW4tMQ=="}',
+                    '{"content": {"role": "model", "parts": [{"functionCall": {"name": "complete_task", "args": {"success": true, "report": "Long report."}}}]}, "finishReason": "STOP"}',
+                ]
+            )
+            tel77 = (
+                json.loads(limit_tel.read_text(encoding="utf-8"))
+                if limit_tel.is_file()
+                else {}
+            )
+            reqs77 = list(limit_reqs)
+            tap.check(
+                "Sends max_output_tokens and merges CONTINUATION hops into one turn",
+                rc77 == 0
+                and len(reqs77) == 2
+                and all(
+                    r["generationConfig"]["maxOutputTokens"] == 131072
+                    and r.get("_x_server_timeout") == "1800"
+                    for r in reqs77
+                )
+                and "continuationToken" not in reqs77[0]
+                and reqs77[1].get("continuationToken") == "dG9rZW4tMQ=="
+                and reqs77[1]["contents"] == reqs77[0]["contents"]
+                and tel77.get("status") == "Succeeded"
+                and tel77.get("max_output_tokens") == 131072
+                and tel77.get("long_decode_turns") == 1
+                and tel77.get("finish_reason") == "STOP"
+                and tel77.get("prompt_tokens") == 100
+                and tel77.get("input_tokens_total") == 200
+                and tel77.get("partial_report") is None
+                and "Long report." in out77.splitlines()
+                and "complete_task(success=True) -> OK" in err77,
+                f"rc={rc77} reqs={len(reqs77)} tel={tel77!r}\n{out77}\n{err77}",
+            )
+
+            # Test 78 (was T77): MAX_TOKENS without tool call exits 1 and keeps partial text
+            rc78, out78, err78 = run_limited(
+                [
+                    '{"content": {"role": "model", "parts": [{"text": "Thinking.", "thought": true}, {"text": "## Partial findings"}]}, "finishReason": "MAX_TOKENS"}'
+                ]
+            )
+            resp_files = list(limit_state.glob("response_*.md"))
+            resp78_txt = resp_files[0].read_text(encoding="utf-8") if resp_files else ""
+            tel78 = (
+                json.loads(limit_tel.read_text(encoding="utf-8"))
+                if limit_tel.is_file()
+                else {}
+            )
+            tap.check(
+                "Reports an output-ceiling stop and keeps the partial text",
+                rc78 == 1
+                and "## Partial findings" in out78.splitlines()
+                and "Thinking." not in out78
+                and re.search(
+                    r"Error: model returned no tool call \(finish_reason: .*MAX_TOKENS\)",
+                    err78,
+                )
+                is not None
+                and "The turn reached --max-output-tokens (131072, thinking included); raise it or lower --thinking"
+                in err78
+                and "## Partial findings" in resp78_txt.splitlines()
+                and "Status: Incomplete" in resp78_txt
+                and tel78.get("partial_report") == "## Partial findings"
+                and tel78.get("finish_reason") == "MAX_TOKENS",
+                f"rc={rc78} tel={tel78!r}\n{out78}\n{err78}",
+            )
+
+        # Test 79 (was T78): --max-output-tokens default, env, precedence, validation (reuse REPO!)
+        r79_def = run_inproc(
+            caxton,
+            ["--dry-run", "Audit"],
+            cwd=repo,
+            env={"CAXTON_MAX_OUTPUT_TOKENS": None},
+        )
+        r79_env = run_inproc(
+            caxton,
+            ["--dry-run", "Audit"],
+            cwd=repo,
+            env={"CAXTON_MAX_OUTPUT_TOKENS": "256k"},
+        )
+        r79_flag = run_inproc(
+            caxton,
+            ["--dry-run", "Audit", "--max-output-tokens", "65536"],
+            cwd=repo,
+            env={"CAXTON_MAX_OUTPUT_TOKENS": "256k"},
+        )
+        r79_bad = run_inproc(
+            caxton,
+            ["--dry-run", "Audit", "--max-output-tokens", "lots"],
+            cwd=repo,
+        )
+        tap.check(
+            "--max-output-tokens default, environment, precedence, and validation",
+            "Max output:    131072 tokens per turn" in r79_def[1]
+            and "Max output:    256000 tokens per turn" in r79_env[1]
+            and "Max output:    65536 tokens per turn" in r79_flag[1]
+            and r79_bad[0] == 1
+            and "error: --max-output-tokens: invalid token count: 'lots'" in r79_bad[2],
+            f"bad_rc={r79_bad[0]}\n{r79_bad[2]}",
+        )
+
+    return 1 if tap.failed else 0
 
 
-server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Scripted)
-server.daemon_threads = True
-with open(sys.argv[1], "w") as f:
-    f.write(str(server.server_address[1]))
-server.serve_forever()
-PYEOF
-: >"$LIMIT_SCRIPT"
-python3 "$WORK/limit.py" "$LIMIT_PORT_FILE" "$LIMIT_LOG" "$LIMIT_SCRIPT" &
-LIMIT_PID=$!
-for _ in 1 2 3 4 5 6 7 8 9 10; do
-  [[ -s "$LIMIT_PORT_FILE" ]] && break
-  sleep 0.5
-done
-LIMIT_REPO=$(make_repo limit)
-printf '# Notes\n' >"$LIMIT_REPO/notes.md"
-commit_all "$LIMIT_REPO"
-
-# Runs caxton read-only against the stub with the given response script
-# lines; sets limit_status and leaves output and telemetry in $WORK/limit.*.
-run_limited() {
-  printf '%s\n' "$@" >"$LIMIT_SCRIPT"
-  : >"$LIMIT_LOG"
-  rm -rf "$WORK/limit.tel" "$WORK/limit-state"
-  limit_status=0
-  (cd "$LIMIT_REPO" && env -u CAXTON_MAX_OUTPUT_TOKENS AGENT_OFFLINE=0 \
-    GEMINI_API_KEY=stub \
-    GOOGLE_GEMINI_BASE_URL="http://127.0.0.1:$(cat "$LIMIT_PORT_FILE" 2>/dev/null)" \
-    CAXTON_STATE_DIR="$WORK/limit-state" AGENT_TELEMETRY_JSON="$WORK/limit.tel" \
-    "$BIN" "Audit the notes" --no-search --timeout 60) \
-    >"$WORK/limit.out" 2>"$WORK/limit.err" || limit_status=$?
-}
-
-# Test 76: max_output_tokens is sent (131072 by default), and a turn the API
-# ends with CONTINUATION is resumed with its continuation token and merged
-# into one response, so a complete_task call in the second hop finishes the
-# run. Usage counts the conversation once but bills both hops.
-run_limited \
-  '{"content": {"role": "model", "parts": [{"text": "Planning.", "thought": true}]}, "finishReason": "CONTINUATION", "continuationToken": "dG9rZW4tMQ=="}' \
-  '{"content": {"role": "model", "parts": [{"functionCall": {"name": "complete_task", "args": {"success": true, "report": "Long report."}}}]}, "finishReason": "STOP"}'
-VERIFY_LIMIT="$WORK/verify_limit.out"
-python3 - "$LIMIT_LOG" "$WORK/limit.tel" >"$VERIFY_LIMIT" 2>&1 <<'PYEOF' || true
-import json
-import sys
-from pathlib import Path
-
-reqs = [json.loads(x) for x in Path(sys.argv[1]).read_text().splitlines()]
-assert len(reqs) == 2, f"expected 2 requests, got {len(reqs)}"
-for req in reqs:
-    assert req["generationConfig"]["maxOutputTokens"] == 131072, req["generationConfig"]
-    assert req.get("_x_server_timeout") == "1800", req.get("_x_server_timeout")
-assert "continuationToken" not in reqs[0], reqs[0].keys()
-assert reqs[1].get("continuationToken") == "dG9rZW4tMQ==", reqs[1].keys()
-assert reqs[1]["contents"] == reqs[0]["contents"], "a hop must resend the same turn"
-tel = json.loads(Path(sys.argv[2]).read_text())
-assert tel["status"] == "Succeeded", tel
-assert tel["max_output_tokens"] == 131072, tel
-assert tel["long_decode_turns"] == 1, tel
-assert tel["finish_reason"] == "STOP", tel
-assert tel["prompt_tokens"] == 100 and tel["input_tokens_total"] == 200, tel
-assert tel["partial_report"] is None, tel
-print("LIMIT_OK")
-PYEOF
-if [[ $limit_status -eq 0 ]] &&
-  grep -q "^LIMIT_OK$" "$VERIFY_LIMIT" &&
-  grep -q "^Long report\.$" "$WORK/limit.out" &&
-  grep -q "complete_task(success=True) -> OK" "$WORK/limit.err"; then
-  echo "ok 76 - Sends max_output_tokens and merges CONTINUATION hops into one turn"
-else
-  echo "not ok 76 - Long-decode continuation was not followed (exit $limit_status)"
-  sed 's/^/# /' "$VERIFY_LIMIT" "$WORK/limit.out" "$WORK/limit.err"
-fi
-
-# Test 77: a turn that reaches the output ceiling without a tool call ends
-# the run with exit 1 and says so, but the text it wrote is kept: printed on
-# stdout, saved in the response file, and in telemetry.
-run_limited \
-  '{"content": {"role": "model", "parts": [{"text": "Thinking.", "thought": true}, {"text": "## Partial findings"}]}, "finishReason": "MAX_TOKENS"}'
-LIMIT_RESPONSE=$(find "$WORK/limit-state" -name 'response_*.md' 2>/dev/null | head -n 1)
-if [[ $limit_status -eq 1 ]] &&
-  grep -q "^## Partial findings$" "$WORK/limit.out" &&
-  ! grep -q "Thinking\." "$WORK/limit.out" &&
-  grep -q "Error: model returned no tool call (finish_reason: .*MAX_TOKENS)" "$WORK/limit.err" &&
-  grep -q "The turn reached --max-output-tokens (131072, thinking included); raise it or lower --thinking" "$WORK/limit.err" &&
-  [[ -n "$LIMIT_RESPONSE" ]] && grep -q "^## Partial findings$" "$LIMIT_RESPONSE" &&
-  grep -q "Status: Incomplete" "$LIMIT_RESPONSE" &&
-  grep -q '"partial_report": "## Partial findings"' "$WORK/limit.tel" &&
-  grep -q '"finish_reason": "MAX_TOKENS"' "$WORK/limit.tel"; then
-  echo "ok 77 - Reports an output-ceiling stop and keeps the partial text"
-else
-  echo "not ok 77 - Output-ceiling stop was not reported or its text was lost (exit $limit_status)"
-  sed 's/^/# /' "$WORK/limit.out" "$WORK/limit.err"
-fi
-kill "$LIMIT_PID" 2>/dev/null || true
-wait "$LIMIT_PID" 2>/dev/null || true
-
-# Test 78: --max-output-tokens accepts token counts like 256k and its
-# environment default, the flag wins, and a malformed count is a usage error
-MO_REPO=$(make_repo max-output)
-printf '# Notes\n' >"$MO_REPO/notes.md"
-commit_all "$MO_REPO"
-mo_default=$(cd "$MO_REPO" && env -u CAXTON_MAX_OUTPUT_TOKENS "$BIN" --dry-run "Audit" 2>&1 || true)
-mo_env=$(cd "$MO_REPO" && CAXTON_MAX_OUTPUT_TOKENS=256k "$BIN" --dry-run "Audit" 2>&1 || true)
-mo_flag=$(cd "$MO_REPO" && CAXTON_MAX_OUTPUT_TOKENS=256k "$BIN" --dry-run "Audit" --max-output-tokens 65536 2>&1 || true)
-mo_bad_status=0
-mo_bad=$(cd "$MO_REPO" && "$BIN" --dry-run "Audit" --max-output-tokens lots 2>&1) || mo_bad_status=$?
-if grep -q "Max output:    131072 tokens per turn" <<<"$mo_default" &&
-  grep -q "Max output:    256000 tokens per turn" <<<"$mo_env" &&
-  grep -q "Max output:    65536 tokens per turn" <<<"$mo_flag" &&
-  [[ $mo_bad_status -eq 1 ]] &&
-  grep -q "error: --max-output-tokens: invalid token count: 'lots'" <<<"$mo_bad"; then
-  echo "ok 78 - --max-output-tokens default, environment, precedence, and validation"
-else
-  echo "not ok 78 - --max-output-tokens handling did not match expectations"
-  printf '%s\n' "$mo_default" "$mo_env" "$mo_flag" "$mo_bad" | sed 's/^/# /'
-fi
+if __name__ == "__main__":
+    sys.exit(main())

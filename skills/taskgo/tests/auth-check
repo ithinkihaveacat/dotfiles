@@ -26,6 +26,7 @@ start without Access settings. Prints TAP.
 
 import base64
 import http.server
+import importlib.util
 import json
 import os
 import socket
@@ -37,12 +38,13 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any
 
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
 CLI = Path(__file__).resolve().parent.parent / "scripts" / "taskgo"
+MCP_BIN = Path(__file__).resolve().parent.parent / "scripts" / "taskgo-mcp"
+USE_DIRECT_MCP = importlib.util.find_spec("uvicorn") is not None
 TEAM, AUD = "test.invalid", "test-aud"
 
 
@@ -118,24 +120,6 @@ def status(
         return e.code
 
 
-def fetch(
-    url: str, tok: str | None = None, method: str = "GET", host: str | None = None
-) -> tuple[int, Any, bytes]:
-    """(status, headers, body) of a request without a JSON-RPC body."""
-    headers = {}
-    if tok:
-        headers["cf-access-jwt-assertion"] = tok
-    if host:
-        headers["host"] = host
-    data = b"" if method == "POST" else None
-    req = urllib.request.Request(url, data, headers, method=method)
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            return resp.status, resp.headers, resp.read()
-    except urllib.error.HTTPError as e:
-        return e.code, e.headers, e.read()
-
-
 def get_status(url: str) -> int:
     try:
         with urllib.request.urlopen(url, timeout=30) as resp:
@@ -153,7 +137,7 @@ def free_port() -> int:
 def logged(log: Path, count: int) -> str:
     """The COUNT-th request line in LOG, waiting for the server to write it,
     or "" if it never does."""
-    for _ in range(100):
+    for _ in range(500):
         lines = [
             line
             for line in log.read_text().splitlines()
@@ -161,37 +145,40 @@ def logged(log: Path, count: int) -> str:
         ]
         if len(lines) >= count:
             return lines[count - 1]
-        time.sleep(0.05)
+        time.sleep(0.01)
     return ""
 
 
+def mcp_cmd(repo: Path, *args: str) -> list[str]:
+    base = [sys.executable, str(MCP_BIN)] if USE_DIRECT_MCP else [str(CLI)]
+    return [*base, "--root", str(repo), "mcp", *args]
+
+
 def serve(repo: Path, port: int, log: Path, *args: str, env: dict | None = None):
-    proc = subprocess.Popen(
-        [
-            str(CLI),
-            "--root",
-            str(repo),
-            "mcp",
-            "--no-fetch",
-            "--port",
-            str(port),
-            "--log",
-            str(log.with_suffix(".jsonl")),
-            *args,
-        ],
-        stdout=subprocess.DEVNULL,
-        stderr=log.open("w"),
-        env=env,
-    )
+    with log.open("w") as err:
+        proc = subprocess.Popen(
+            mcp_cmd(
+                repo,
+                "--no-fetch",
+                "--port",
+                str(port),
+                "--log",
+                str(log.with_suffix(".jsonl")),
+                *args,
+            ),
+            stdout=subprocess.DEVNULL,
+            stderr=err,
+            env=env,
+        )
     url = f"http://127.0.0.1:{port}/mcp"
-    for _ in range(300):
+    for _ in range(1500):
         try:
             with socket.create_connection(("127.0.0.1", port), timeout=1):
                 return proc, url
         except OSError:
             if proc.poll() is not None:
                 break
-            time.sleep(0.1)
+            time.sleep(0.02)
     proc.kill()
     sys.exit(f"auth-check: taskgo mcp did not start on port {port}")
 
@@ -412,7 +399,7 @@ def main() -> None:
 
         n += 1
         res = subprocess.run(
-            [str(CLI), "--root", str(repo), "mcp", "--no-fetch", "--host", "0.0.0.0"],
+            mcp_cmd(repo, "--no-fetch", "--host", "0.0.0.0"),
             capture_output=True,
             text=True,
             env={k: v for k, v in os.environ.items() if not k.startswith("TASKGO_MCP")},

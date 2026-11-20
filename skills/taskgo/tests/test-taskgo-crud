@@ -72,7 +72,7 @@ post_create_sha=$(git -C "$README_REPO" rev-parse HEAD)
 if [[ -n "$created_id" ]] &&
   [[ "$pre_create_sha" != "$post_create_sha" ]] &&
   { cmd_out=$(tg --root "$README_REPO" list proj1) && grep -q "$created_id" <<<"$cmd_out"; } &&
-  grep -q "TASK-.*New created task" "$README_REPO/proj1/STATUS.md" 2>/dev/null || grep -q "Todo: " "$README_REPO/proj1/STATUS.md"; then
+  { grep -q "TASK-.*New created task" "$README_REPO/proj1/STATUS.md" 2>/dev/null || grep -q "Todo: " "$README_REPO/proj1/STATUS.md"; }; then
   echo 'ok 4 - create and list commands function cleanly'
 else
   echo 'not ok 4 - create or list command failed'
@@ -106,7 +106,7 @@ else
 fi
 
 # Test 21: create normalizes status aliases
-wip_id=$(tg --root "$README_REPO" create proj1 'WIP task' --status wip | cut -f1)
+wip_id=$(tg --root "$README_REPO" create proj1 'WIP task' --status wip --no-commit | cut -f1)
 wip_file=$(tg --root "$README_REPO" list proj1 | grep "$wip_id" | cut -f5)
 if grep -q '^status: in-progress$' "$README_REPO/$wip_file"; then
   echo 'ok 7 - create normalizes status aliases'
@@ -138,99 +138,174 @@ else
   git -C "$README_REPO" status --porcelain
 fi
 
-# Test 24: list --json and status --json output valid JSON
-list_json=$(tg --root "$README_REPO" list --json)
-status_json=$(tg --root "$README_REPO" status --json)
-if python3 -c "import json, sys; json.loads(sys.argv[1]); json.loads(sys.argv[2])" "$list_json" "$status_json" >/dev/null 2>&1; then
-  echo 'ok 10 - list --json and status --json emit valid JSON'
-else
-  echo 'not ok 10 - JSON output formatting failed'
-fi
+# Tests 24-31: JSON output, checkpoint delete, dry-run, fix --no-commit/custom fields, list scoping
+"$TASKGO_PY" - "$BIN" "$README_REPO" "$newproj_id" <<'PY'
+import contextlib
+import importlib.machinery
+import importlib.util
+import io
+import json
+from pathlib import Path
+import shutil
+import subprocess
+import sys
 
-# Test 25: list handles flexible flag ordering and status alias filtering
-alias_list=$(tg --root "$README_REPO" list --json --state inprogress proj1)
-if python3 -c "import json, sys; d = json.loads(sys.argv[1]); sys.exit(0 if len(d) >= 1 and d[0]['status'] == 'in-progress' else 1)" "$alias_list" >/dev/null 2>&1; then
-  echo 'ok 11 - list handles flexible flag ordering and alias filtering'
-else
-  echo 'not ok 11 - list failed with flexible flag order or alias filter'
-fi
+bin_path = sys.argv[1]
+readme_repo = Path(sys.argv[2])
+newproj_id = sys.argv[3]
 
-# Test 26: checkpoint handles staging deleted files via --path
-rm "$README_REPO/brandnew/PLAN.md"
-del_cp_out=$(tg --root "$README_REPO" checkpoint "$newproj_id" "brandnew: remove plan" --path brandnew/PLAN.md 2>&1)
-if [[ "$(git -C "$README_REPO" status --porcelain)" != *'brandnew'* ]] &&
-  (tg --root "$README_REPO" doctor brandnew) >/dev/null 2>&1; then
-  echo 'ok 12 - checkpoint stages deleted project files via --path'
-else
-  echo 'not ok 12 - checkpoint failed to stage deleted file'
-  printf '# %s\n' "$del_cp_out"
-  git -C "$README_REPO" status --porcelain
-fi
+loader = importlib.machinery.SourceFileLoader("taskgo_under_test", bin_path)
+tg = importlib.util.module_from_spec(
+    importlib.util.spec_from_loader(loader.name, loader)
+)
+loader.exec_module(tg)
 
-# Test 27: create --dry-run previews allocation without writing files
-dry_out=$(tg --root "$README_REPO" create brandnew 'Dry run task' --dry-run)
-dry_path=$(printf '%s\n' "$dry_out" | cut -f2)
-if [[ -n "$dry_path" ]] && [[ ! -e "$README_REPO/$dry_path" ]]; then
-  echo 'ok 13 - create --dry-run previews path without writing files'
-else
-  echo 'not ok 13 - create --dry-run wrote files or returned empty'
-fi
 
-# Test 28: fix --no-commit applies repairs on disk without committing
-printf '# Bad Task No Commit\n' >"$README_REPO/brandnew/tasks/bad-uncommitted.md"
-head_before=$(git -C "$README_REPO" rev-parse HEAD)
-fix_nc_out=$(tg --root "$README_REPO" fix brandnew --no-commit 2>&1)
-head_after=$(git -C "$README_REPO" rev-parse HEAD)
-if [[ "$head_before" == "$head_after" ]] &&
-  { cmd_out=$(git -C "$README_REPO" status --porcelain) && [[ "$cmd_out" == *'brandnew'* ]]; } &&
-  (tg --root "$README_REPO" doctor brandnew) >/dev/null 2>&1; then
-  echo 'ok 14 - fix --no-commit applies repairs without committing'
-else
-  echo 'not ok 14 - fix --no-commit failed or unexpectedly committed'
-  printf '# %s\n' "$fix_nc_out"
-fi
+def run_tg(*argv: str) -> tuple[int, str, str]:
+    tg._REPO_ROOT_CACHE = None
+    tg._EXPLICIT_ROOT = None
+    tg._ACTIVE_COMMAND = None
+    tg._OFFLINE_FLAG = False
+    out, err = io.StringIO(), io.StringIO()
+    rc = 0
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        try:
+            tg.main(list(argv))
+        except SystemExit as exc:
+            rc = exc.code if isinstance(exc.code, int) else (1 if exc.code else 0)
+    return rc, out.getvalue(), err.getvalue()
 
-# Test 29: fix preserves custom frontmatter fields
-printf '%s\n' \
-  '---' \
-  'id: TASK-OLD01' \
-  'status: wip' \
-  'priority: high' \
-  'owner: alice' \
-  '---' \
-  '' \
-  '# Custom fields task' \
-  >"$README_REPO/brandnew/tasks/TASK-OLD01-custom.md"
-(tg --root "$README_REPO" fix brandnew >/dev/null 2>&1)
-remediated_file=$(tg --root "$README_REPO" list brandnew | grep 'Custom fields task' | cut -f5)
-if grep -q '^priority: high$' "$README_REPO/$remediated_file" &&
-  grep -q '^owner: alice$' "$README_REPO/$remediated_file" &&
-  grep -q '^status: in-progress$' "$README_REPO/$remediated_file"; then
-  echo 'ok 15 - fix preserves custom frontmatter keys'
-else
-  echo 'not ok 15 - fix stripped custom frontmatter fields'
-  cat "$README_REPO/$remediated_file"
-fi
 
-# Test 30: create handles flags preceding positional arguments
-flag_first_out=$(tg --root "$README_REPO" create --dry-run --status wip brandnew 'Flag first task')
-if [[ "$flag_first_out" == *'brandnew/tasks/TASK-'* ]]; then
-  echo 'ok 16 - create handles flags placed before positional arguments'
-else
-  echo 'not ok 16 - create failed with flags before positional arguments'
-  printf '# %s\n' "$flag_first_out"
-fi
+def run_cli(*args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, bin_path, *args], capture_output=True, text=True, check=False
+    )
 
-# Test 31: get_task_files ignores non-project directories with tasks subfolder
-mkdir -p "$README_REPO/nonproject_dir/tasks"
-printf '# Fake task\n' >"$README_REPO/nonproject_dir/tasks/TASK-FAKE1-fake.md"
-all_tasks=$(tg --root "$README_REPO" list)
-rm -rf "$README_REPO/nonproject_dir"
-if ! [[ "$all_tasks" == *'nonproject_dir'* ]]; then
-  echo 'ok 17 - list ignores non-project directories lacking README.md'
-else
-  echo 'not ok 17 - list included tasks from non-project directory'
-fi
+
+def git_out(*args: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(readme_repo), *args], capture_output=True, text=True, check=True
+    ).stdout
+
+
+def report(num: int, desc: str, ok: bool, detail: str = "") -> None:
+    print(f"{'ok' if ok else 'not ok'} {num} - {desc}", flush=True)
+    if not ok and detail:
+        for line in detail.splitlines():
+            print(f"# {line}", flush=True)
+
+
+# 10: list --json and status --json
+rc_l, list_js, err_l = run_tg("--root", str(readme_repo), "list", "--json")
+rc_s, status_js, err_s = run_tg("--root", str(readme_repo), "status", "--json")
+try:
+    json.loads(list_js)
+    json.loads(status_js)
+    ok10 = rc_l == 0 and rc_s == 0
+except Exception:
+    ok10 = False
+report(10, "list --json and status --json emit valid JSON", ok10, err_l + err_s)
+
+# 11: list flexible flag ordering and alias filtering
+rc11, alias_js, err11 = run_tg(
+    "--root", str(readme_repo), "list", "--json", "--state", "inprogress", "proj1"
+)
+try:
+    d11 = json.loads(alias_js)
+    ok11 = rc11 == 0 and len(d11) >= 1 and d11[0]["status"] == "in-progress"
+except Exception:
+    ok11 = False
+report(11, "list handles flexible flag ordering and alias filtering", ok11, err11)
+
+# 12: real CLI checkpoint stages deleted project files via --path
+(readme_repo / "brandnew/PLAN.md").unlink()
+cp_res = run_cli(
+    "--root", str(readme_repo), "checkpoint", newproj_id,
+    "brandnew: remove plan", "--path", "brandnew/PLAN.md",
+)
+rc_dr12, _, _ = run_tg("--root", str(readme_repo), "doctor", "brandnew")
+report(
+    12,
+    "checkpoint stages deleted project files via --path",
+    cp_res.returncode == 0
+    and "brandnew" not in git_out("status", "--porcelain")
+    and rc_dr12 == 0,
+    cp_res.stdout + cp_res.stderr,
+)
+
+# 13: create --dry-run
+rc13, dry_out, err13 = run_tg(
+    "--root", str(readme_repo), "create", "brandnew", "Dry run task", "--dry-run"
+)
+dry_path = dry_out.strip().split("\t")[1] if "\t" in dry_out else ""
+report(
+    13,
+    "create --dry-run previews path without writing files",
+    rc13 == 0 and bool(dry_path) and not (readme_repo / dry_path).exists(),
+    err13,
+)
+
+# 14: fix --no-commit
+(readme_repo / "brandnew/tasks/bad-uncommitted.md").write_text("# Bad Task No Commit\n")
+head_before = git_out("rev-parse", "HEAD").strip()
+rc14, out14, err14 = run_tg("--root", str(readme_repo), "fix", "brandnew", "--no-commit")
+head_after = git_out("rev-parse", "HEAD").strip()
+rc_dr14, _, _ = run_tg("--root", str(readme_repo), "doctor", "brandnew")
+report(
+    14,
+    "fix --no-commit applies repairs without committing",
+    rc14 == 0
+    and head_before == head_after
+    and "brandnew" in git_out("status", "--porcelain")
+    and rc_dr14 == 0,
+    out14 + err14,
+)
+
+# 15: fix preserves custom frontmatter fields (real CLI commit)
+(readme_repo / "brandnew/tasks/TASK-OLD01-custom.md").write_text(
+    "---\nid: TASK-OLD01\nstatus: wip\npriority: high\nowner: alice\n---\n\n# Custom fields task\n"
+)
+run_cli("--root", str(readme_repo), "fix", "brandnew")
+_, list15, _ = run_tg("--root", str(readme_repo), "list", "brandnew")
+rem_rel = next(
+    ln.split("\t")[4] for ln in list15.splitlines() if "Custom fields task" in ln
+)
+rem_txt = (readme_repo / rem_rel).read_text()
+report(
+    15,
+    "fix preserves custom frontmatter keys",
+    "\npriority: high\n" in rem_txt
+    and "\nowner: alice\n" in rem_txt
+    and "\nstatus: in-progress\n" in rem_txt,
+    rem_txt,
+)
+
+# 16: create handles flags before positional arguments
+rc16, out16, err16 = run_tg(
+    "--root", str(readme_repo), "create", "--dry-run", "--status", "wip",
+    "brandnew", "Flag first task",
+)
+report(
+    16,
+    "create handles flags placed before positional arguments",
+    rc16 == 0 and "brandnew/tasks/TASK-" in out16,
+    out16 + err16,
+)
+
+# 17: list ignores non-project directories lacking README.md
+nonproj = readme_repo / "nonproject_dir/tasks"
+nonproj.mkdir(parents=True)
+(nonproj / "TASK-FAKE1-fake.md").write_text("# Fake task\n")
+try:
+    _, all_tasks, _ = run_tg("--root", str(readme_repo), "list")
+finally:
+    shutil.rmtree(readme_repo / "nonproject_dir")
+report(
+    17,
+    "list ignores non-project directories lacking README.md",
+    "nonproject_dir" not in all_tasks,
+)
+PY
 
 printf "\nExtra unformatted trailing text   \n" >>"$README_REPO/proj1/tasks/TASK-C3D4E-task.md"
 
@@ -273,7 +348,7 @@ init_base_repo "$REPO"
 
 # 71: help reports the resolved control repository root and its source
 HELP_DEFAULT="$(cd "$TEST_ROOT" && "$BIN" --help)"
-HELP_ENV="$(TASKGO_ROOT="$REPO" "$BIN" --help)"
+HELP_ENV="$(TASKGO_ROOT="$REPO" tg --help)"
 HELP_ROOT="$(tg --root "$REPO" --help)"
 HELP_MISSING="$(tg --root "$TEST_ROOT/missing-help-root" --help)"
 if [[ "$HELP_DEFAULT" == *"Environment:"* ]] &&
@@ -288,285 +363,398 @@ else
   echo "not ok 20 - help reports resolved control repository root and source"
 fi
 
-# 73: create derives a word-boundary slug and warns when it shortens the title
-LONG_TITLE='Generate readable task filename slugs with clean length limits'
-SLUG_OUT="$(tg --root "$README_REPO" create proj1 "$LONG_TITLE" 2>"$TEST_ROOT/slug-warn.txt")"
-SLUG_PATH="$(printf '%s' "$SLUG_OUT" | cut -f2)"
-SLUG_WARN="$(cat "$TEST_ROOT/slug-warn.txt")"
-SLUG_NAME="$(basename "$SLUG_PATH")"
-if [[ "$SLUG_NAME" == "$(printf '%s' "$SLUG_OUT" | cut -f1)-generate-readable-task-filename.md" ]] &&
-  [[ -f "$README_REPO/$SLUG_PATH" ]] &&
-  [[ "$SLUG_WARN" == *"[WARN]"*"Title too long for a filename"* ]] &&
-  [[ "$SLUG_WARN" == *"--slug SLUG (<= 32 chars)"* ]]; then
-  echo 'ok 21 - create truncates slugs at word boundaries and warns'
-else
-  echo 'not ok 21 - create truncates slugs at word boundaries and warns'
-  echo "# name=$SLUG_NAME warn=$SLUG_WARN"
-fi
+# 73-90: slugs, Conventional Commits subjects/bodies, and NO_COLOR/FORCE_COLOR
+"$TASKGO_PY" - "$BIN" "$README_REPO" "$REPO" "$newproj_id" <<'PY'
+import contextlib
+import importlib.machinery
+import importlib.util
+import io
+import os
+from pathlib import Path
+import subprocess
+import sys
 
-# 74: --slug overrides the derived slug, is normalized, and suppresses the warning
-EXPLICIT_OUT="$(tg --root "$README_REPO" create proj1 "$LONG_TITLE" --slug 'Filename Slugs!' 2>"$TEST_ROOT/slug-quiet.txt")"
-EXPLICIT_ID="$(printf '%s' "$EXPLICIT_OUT" | cut -f1)"
-EXPLICIT_PATH="$(printf '%s' "$EXPLICIT_OUT" | cut -f2)"
-if [[ "$(basename "$EXPLICIT_PATH")" == "$EXPLICIT_ID-filename-slugs.md" ]] &&
-  [[ -f "$README_REPO/$EXPLICIT_PATH" ]] &&
-  ! grep -q '\[WARN\]' "$TEST_ROOT/slug-quiet.txt"; then
-  echo 'ok 22 - create honours and normalizes an explicit --slug'
-else
-  echo 'not ok 22 - create honours and normalizes an explicit --slug'
-  echo "# path=$EXPLICIT_PATH warn=$(cat "$TEST_ROOT/slug-quiet.txt")"
-fi
+bin_path = sys.argv[1]
+readme_repo = Path(sys.argv[2])
+repo = Path(sys.argv[3])
+newproj_id = sys.argv[4]
 
-# 75: short titles produce untruncated slugs without a warning
-SHORT_OUT="$(tg --root "$README_REPO" create proj1 'Fix cache eviction' 2>"$TEST_ROOT/slug-short.txt")"
-SHORT_ID="$(printf '%s' "$SHORT_OUT" | cut -f1)"
-if [[ "$(basename "$(printf '%s' "$SHORT_OUT" | cut -f2)")" == "$SHORT_ID-fix-cache-eviction.md" ]] &&
-  ! grep -q '\[WARN\]' "$TEST_ROOT/slug-short.txt"; then
-  echo 'ok 23 - create leaves short titles unshortened and unwarned'
-else
-  echo 'not ok 23 - create leaves short titles unshortened and unwarned'
-fi
+loader = importlib.machinery.SourceFileLoader("taskgo_under_test", bin_path)
+tg = importlib.util.module_from_spec(
+    importlib.util.spec_from_loader(loader.name, loader)
+)
+loader.exec_module(tg)
 
-# 76: over-long and unusable --slug values are rejected with actionable errors
-LONG_SLUG_ERR="$(tg --root "$README_REPO" create proj1 'Rejected' --slug 'aaaaaaaaaa-bbbbbbbbbb-cccccccccc-dddddddddd' 2>&1 || true)"
-LONG_SLUG_CODE=0
-tg --root "$README_REPO" create proj1 'Rejected' --slug 'aaaaaaaaaa-bbbbbbbbbb-cccccccccc-dddddddddd' >/dev/null 2>&1 || LONG_SLUG_CODE=$?
-EMPTY_SLUG_ERR="$(tg --root "$README_REPO" create proj1 'Rejected' --slug '###' 2>&1 || true)"
-if [[ "$LONG_SLUG_CODE" -eq 1 ]] &&
-  [[ "$LONG_SLUG_ERR" == *"taskgo create: --slug too long (43 > 32 chars)"* ]] &&
-  [[ "$EMPTY_SLUG_ERR" == *"taskgo create: --slug contains no usable characters"* ]] &&
-  [[ "$LONG_SLUG_ERR" != *"Traceback"* ]] &&
-  [[ "$(find "$README_REPO/proj1/tasks" -name '*rejected*' | wc -l)" -eq 0 ]]; then
-  echo 'ok 24 - create rejects unusable --slug values without creating files'
-else
-  echo 'not ok 24 - create rejects unusable --slug values without creating files'
-  echo "# code=$LONG_SLUG_CODE err=$LONG_SLUG_ERR"
-fi
 
-# 77: titles with no slug-able characters fall back to a warned default
-UNICODE_OUT="$(tg --root "$README_REPO" create proj1 '日本語のタイトル' 2>"$TEST_ROOT/slug-unicode.txt")"
-UNICODE_ID="$(printf '%s' "$UNICODE_OUT" | cut -f1)"
-if [[ "$(basename "$(printf '%s' "$UNICODE_OUT" | cut -f2)")" == "$UNICODE_ID-task.md" ]] &&
-  grep -q 'Title yields no usable filename slug' "$TEST_ROOT/slug-unicode.txt"; then
-  echo 'ok 25 - create falls back to a default slug and warns'
-else
-  echo 'not ok 25 - create falls back to a default slug and warns'
-fi
+def run_tg(*argv: str, env_over: dict[str, str] | None = None) -> tuple[int, str, str]:
+    tg._REPO_ROOT_CACHE = None
+    tg._EXPLICIT_ROOT = None
+    tg._ACTIVE_COMMAND = None
+    tg._OFFLINE_FLAG = False
+    saved = {}
+    if env_over:
+        for k, v in env_over.items():
+            saved[k] = os.environ.get(k)
+            os.environ[k] = v
+    out, err = io.StringIO(), io.StringIO()
+    rc = 0
+    try:
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                tg.main(list(argv))
+            except SystemExit as exc:
+                rc = exc.code if isinstance(exc.code, int) else (1 if exc.code else 0)
+    finally:
+        for k, prev in saved.items():
+            if prev is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = prev
+    return rc, out.getvalue(), err.getvalue()
 
-# 78: update --slug renames the task file in place and keeps the ID prefix
-RENAME_OUT="$(tg --root "$README_REPO" update "$SHORT_ID" --slug 'Cache eviction' 2>&1)"
-BAD_RENAME="$(tg --root "$README_REPO" update "$SHORT_ID" --slug 'aaaaaaaaaa-bbbbbbbbbb-cccccccccc-dddddddddd' 2>&1 || true)"
-if [[ -f "$README_REPO/proj1/tasks/$SHORT_ID-cache-eviction.md" ]] &&
-  [[ ! -f "$README_REPO/proj1/tasks/$SHORT_ID-fix-cache-eviction.md" ]] &&
-  [[ "$RENAME_OUT" == *"[INFO]  Renamed"*"$SHORT_ID-cache-eviction.md"* ]] &&
-  [[ "$BAD_RENAME" == *"taskgo update: --slug too long"* ]] &&
-  grep -q "^# Fix cache eviction$" "$README_REPO/proj1/tasks/$SHORT_ID-cache-eviction.md"; then
-  echo 'ok 26 - update --slug renames the task file and keeps the ID prefix'
-else
-  echo 'not ok 26 - update --slug renames the task file and keeps the ID prefix'
-  echo "# out=$RENAME_OUT"
-fi
 
-# 79: fix preserves a chosen slug while repairing a mismatched filename ID
-SLUG_FIX_REPO="$TEST_ROOT/slug-fix-repo"
-mkdir -p "$SLUG_FIX_REPO/proj/tasks"
-git -C "$SLUG_FIX_REPO" init -q
-printf '%s\n' \
-  '# Agent instructions' \
-  '' \
-  'This repository follows taskgo:' \
-  '<https://github.com/ithinkihaveacat/dotfiles/tree/main/skills/taskgo>.' \
-  >"$SLUG_FIX_REPO/AGENTS.md"
-printf '# Inbox\n' >"$SLUG_FIX_REPO/INBOX.md"
-printf '# Proj\n' >"$SLUG_FIX_REPO/proj/README.md"
-printf '%s\n' \
-  '---' \
-  'id: TASK-11111' \
-  'status: todo' \
-  '---' \
-  '' \
-  '# Generate readable task filename slugs with clean length limits' \
-  >"$SLUG_FIX_REPO/proj/tasks/TASK-22222-filename-slugs.md"
-tg --root "$SLUG_FIX_REPO" fix proj --no-commit >/dev/null 2>&1 || true
-if [[ -f "$SLUG_FIX_REPO/proj/tasks/TASK-11111-filename-slugs.md" ]] &&
-  [[ ! -f "$SLUG_FIX_REPO/proj/tasks/TASK-22222-filename-slugs.md" ]]; then
-  echo 'ok 27 - fix preserves a chosen slug while repairing the filename ID'
-else
-  echo 'not ok 27 - fix preserves a chosen slug while repairing the filename ID'
-  echo "# $(find "$SLUG_FIX_REPO/proj/tasks" -name '*.md')"
-fi
+def run_cli(*args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, bin_path, *args], capture_output=True, text=True, check=False
+    )
 
-# 80: create commits a Conventional Commits subject with the title in the body
-CC_CREATE_WARN="$TEST_ROOT/cc-create-warn.txt"
-CC_OUT="$(tg --root "$README_REPO" create proj1 'Conventional subject coverage' 2>"$CC_CREATE_WARN")"
-CC_ID="$(printf '%s' "$CC_OUT" | cut -f1)"
-CC_SUBJECT="$(git -C "$README_REPO" log -1 --format=%s)"
-if [[ "$CC_SUBJECT" == "chore(proj1): create $CC_ID" ]] &&
-  { cmd_out=$(git -C "$README_REPO" log -1 --format=%B) && grep -qx 'Conventional subject coverage' <<<"$cmd_out"; } &&
-  ! grep -q '\[WARN\]' "$CC_CREATE_WARN"; then
-  echo 'ok 28 - create commits a conventional subject with the title in the body'
-else
-  echo 'not ok 28 - create commits a conventional subject with the title in the body'
-  echo "# subject=$CC_SUBJECT id=$CC_ID"
-fi
 
-# 81: checkpoint rewrites nonconforming subjects deterministically and warns
-printf '# Plan notes\n' >"$README_REPO/brandnew/PLAN.md"
-RW_ERR="$TEST_ROOT/cc-rewrite.txt"
-tg --root "$README_REPO" checkpoint "$newproj_id" 'update plan with more notes' \
-  --path brandnew/PLAN.md 2>"$RW_ERR" >/dev/null ||
-  echo "# checkpoint rewrite run failed"
-RW_SUBJECT="$(git -C "$README_REPO" log -1 --format=%s)"
-if [[ "$RW_SUBJECT" == 'chore(brandnew): update plan with more notes' ]] &&
-  grep -q '\[WARN\].*Rewrote nonconforming commit subject' "$RW_ERR"; then
-  echo 'ok 29 - checkpoint rewrites nonconforming subjects with a warning'
-else
-  echo 'not ok 29 - checkpoint rewrites nonconforming subjects with a warning'
-  echo "# subject=$RW_SUBJECT err=$(cat "$RW_ERR")"
-fi
+def git_out(target: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(target), *args], capture_output=True, text=True, check=True
+    ).stdout
 
-# 82: checkpoint leaves conforming subjects untouched
-printf '# More plan notes\n' >>"$README_REPO/brandnew/PLAN.md"
-OK_ERR="$TEST_ROOT/cc-conforming.txt"
-tg --root "$README_REPO" checkpoint "$newproj_id" 'docs(brandnew): annotate plan' \
-  --path brandnew/PLAN.md 2>"$OK_ERR" >/dev/null ||
-  echo "# checkpoint conforming run failed"
-OK_SUBJECT="$(git -C "$README_REPO" log -1 --format=%s)"
-if [[ "$OK_SUBJECT" == 'docs(brandnew): annotate plan' ]] &&
-  ! grep -q '\[WARN\]' "$OK_ERR"; then
-  echo 'ok 30 - checkpoint leaves conforming subjects untouched'
-else
-  echo 'not ok 30 - checkpoint leaves conforming subjects untouched'
-  echo "# subject=$OK_SUBJECT err=$(cat "$OK_ERR")"
-fi
 
-# 83: over-long subjects are refused before any Git work, never truncated
-printf '# Long subject notes\n' >>"$README_REPO/brandnew/PLAN.md"
-LONG_HEAD="$(git -C "$README_REPO" rev-parse HEAD)"
-LONG_SUBJECT='fix(brandnew): a very long drawn out subject line that goes well past fifty characters'
-if ! LONG_ERR=$(tg --root "$README_REPO" checkpoint "$newproj_id" "$LONG_SUBJECT" \
-  --path brandnew/PLAN.md 2>&1 >/dev/null) &&
-  [[ "$LONG_ERR" == *"checkpoint: commit subject is ${#LONG_SUBJECT} characters, over the 50-character limit"* ]] &&
-  [[ "$LONG_ERR" == *"The prefix 'fix(brandnew): ' uses 15, so shorten the description to 35 characters or fewer"* ]] &&
-  [[ "$(git -C "$README_REPO" rev-parse HEAD)" == "$LONG_HEAD" ]] &&
-  [[ -z "$(git -C "$README_REPO" diff --cached --name-only)" ]] &&
-  ! RW_LONG_ERR=$(tg --root "$README_REPO" checkpoint "$newproj_id" \
-    'refresh the plan notes with everything we learned today' \
-    --path brandnew/PLAN.md 2>&1 >/dev/null) &&
-  [[ "$RW_LONG_ERR" == *"'chore: refresh the plan notes"*"(rewritten from 'refresh the plan notes"*"shorten the description to 43 characters"* ]] &&
-  [[ "$(git -C "$README_REPO" rev-parse HEAD)" == "$LONG_HEAD" ]]; then
-  echo 'ok 31 - checkpoint refuses over-long subjects with the length and prefix share'
-else
-  echo 'not ok 31 - checkpoint refuses over-long subjects with the length and prefix share'
-  echo "# err=$LONG_ERR rw=${RW_LONG_ERR:-}"
-fi
-git -C "$README_REPO" checkout -q -- brandnew/PLAN.md
+def report(num: int, desc: str, ok: bool, detail: str = "") -> None:
+    print(f"{'ok' if ok else 'not ok'} {num} - {desc}", flush=True)
+    if not ok and detail:
+        for line in detail.splitlines():
+            print(f"# {line}", flush=True)
 
-# 84: fix auto-commits use a conventional subject too
-printf '# Bare task for fix subject\n' >"$README_REPO/proj1/tasks/bare-fix-subject.md"
-tg --root "$README_REPO" fix proj1 >/dev/null 2>&1 || true
-FIX_SUBJECT="$(git -C "$README_REPO" log -1 --format=%s)"
-if [[ "$FIX_SUBJECT" == 'chore(proj1): fix metadata and status' ]]; then
-  echo 'ok 32 - fix commits use a conventional subject'
-else
-  echo 'not ok 32 - fix commits use a conventional subject'
-  echo "# subject=$FIX_SUBJECT"
-fi
 
-# 85: checkpoint hard-wraps over-long plain-text bodies to 72 columns
-printf '# Wrap notes\n' >>"$README_REPO/brandnew/PLAN.md"
-WRAP_ERR="$TEST_ROOT/cc-wrap.txt"
-WRAP_BODY='The freeze review confronted the one-category-per-reading assumption against spike-live-002 and it fell because at both named institutions the categories are true of the same act.'
-tg --root "$README_REPO" checkpoint "$newproj_id" 'docs(brandnew): wrap plan' \
-  --path brandnew/PLAN.md --body "$WRAP_BODY" 2>"$WRAP_ERR" >/dev/null ||
-  echo "# checkpoint wrap run failed"
-LONG_LINE="$(git -C "$README_REPO" log -1 --format=%B | awk 'NR>2 && length($0)>72 {print; exit}')"
-if [[ -z "$LONG_LINE" ]] &&
-  { cmd_out=$(git -C "$README_REPO" log -1 --format=%B) && [[ "$cmd_out" == *'one-category-per-reading'* ]]; } &&
-  grep -q '\[WARN\].*Rewrapped commit body' "$WRAP_ERR"; then
-  echo 'ok 33 - checkpoint hard-wraps bodies to 72 columns'
-else
-  echo 'not ok 33 - checkpoint hard-wraps bodies to 72 columns'
-  echo "# long=$LONG_LINE err=$(cat "$WRAP_ERR")"
-fi
+# 21: truncated word-boundary slug and warning
+long_title = "Generate readable task filename slugs with clean length limits"
+rc, out, err = run_tg(
+    "--root", str(readme_repo), "create", "proj1", long_title, "--no-commit"
+)
+slug_id, slug_rel = out.strip().split("\t")
+report(
+    21,
+    "create truncates slugs at word boundaries and warns",
+    rc == 0
+    and Path(slug_rel).name == f"{slug_id}-generate-readable-task-filename.md"
+    and (readme_repo / slug_rel).is_file()
+    and "[WARN]" in err
+    and "Title too long for a filename" in err
+    and "--slug SLUG (<= 32 chars)" in err,
+    err,
+)
 
-# 86: URLs are never split even when they exceed the wrap width alone
-printf '# URL notes\n' >>"$README_REPO/brandnew/PLAN.md"
-URL_BODY='See https://example.invalid/very/long/path/segment/that/exceeds/the/seventy/two/column/wrap/limit entirely.'
-tg --root "$README_REPO" checkpoint "$newproj_id" 'docs(brandnew): record link' \
-  --path brandnew/PLAN.md --body "$URL_BODY" 2>/dev/null >/dev/null ||
-  echo "# checkpoint url run failed"
-URL_LINE="$(git -C "$README_REPO" log -1 --format=%B | grep -o 'https://[^ ]*')"
-if [[ "$URL_LINE" == 'https://example.invalid/very/long/path/segment/that/exceeds/the/seventy/two/column/wrap/limit' ]]; then
-  echo 'ok 34 - urls survive body wrapping intact'
-else
-  echo 'not ok 34 - urls survive body wrapping intact'
-  echo "# url=$URL_LINE"
-fi
+# 22: explicit --slug normalized without warning
+rc, out, err = run_tg(
+    "--root", str(readme_repo), "create", "proj1", long_title,
+    "--slug", "Filename Slugs!", "--no-commit",
+)
+exp_id, exp_rel = out.strip().split("\t")
+report(
+    22,
+    "create honours and normalizes an explicit --slug",
+    rc == 0
+    and Path(exp_rel).name == f"{exp_id}-filename-slugs.md"
+    and (readme_repo / exp_rel).is_file()
+    and "[WARN]" not in err,
+    err,
+)
 
-# 87: indented and fenced body lines pass through verbatim
-printf '# Verbatim notes\n' >>"$README_REPO/brandnew/PLAN.md"
-VERB_ERR="$TEST_ROOT/cc-verbatim.txt"
-VERB_BODY='Before the block.
-    indented code stays put
-After the block.'
-tg --root "$README_REPO" checkpoint "$newproj_id" 'docs(brandnew): keep blocks' \
-  --path brandnew/PLAN.md --body "$VERB_BODY" 2>"$VERB_ERR" >/dev/null ||
-  echo "# checkpoint verbatim run failed"
-if { cmd_out=$(git -C "$README_REPO" log -1 --format=%B) && [[ "$cmd_out" == *'    indented code stays put'* ]]; }; then
-  echo 'ok 35 - indented body lines pass through unwrapped'
-else
-  echo 'not ok 35 - indented body lines pass through unwrapped'
-  echo "# err=$(cat "$VERB_ERR")"
-fi
+# 23: short title untruncated without warning
+rc, out, err = run_tg(
+    "--root", str(readme_repo), "create", "proj1", "Fix cache eviction", "--no-commit"
+)
+short_id, short_rel = out.strip().split("\t")
+report(
+    23,
+    "create leaves short titles unshortened and unwarned",
+    rc == 0
+    and Path(short_rel).name == f"{short_id}-fix-cache-eviction.md"
+    and "[WARN]" not in err,
+    err,
+)
 
-# Test 88: piped doctor output carries plain ASCII tags, no escapes
-DR_OUT=$(tg --root "$REPO" doctor 2>&1) || true
-if grep -q $'\033' <<<"$DR_OUT"; then
-  echo 'not ok 36 - piped doctor output unexpectedly contains escape sequences'
-elif ! grep -q '^\[PASS\]' <<<"$DR_OUT"; then
-  echo 'not ok 36 - piped doctor output missing canonical PASS tag'
-else
-  echo 'ok 36 - piped doctor output is plain ASCII tags'
-fi
+# 24: over-long and unusable --slug rejected once without creating files
+rc_l, out_l, err_l = run_tg(
+    "--root", str(readme_repo), "create", "proj1", "Rejected",
+    "--slug", "aaaaaaaaaa-bbbbbbbbbb-cccccccccc-dddddddddd", "--no-commit",
+)
+rc_e, out_e, err_e = run_tg(
+    "--root", str(readme_repo), "create", "proj1", "Rejected",
+    "--slug", "###", "--no-commit",
+)
+report(
+    24,
+    "create rejects unusable --slug values without creating files",
+    rc_l == 1
+    and "taskgo create: --slug too long (43 > 32 chars)" in (out_l + err_l)
+    and rc_e != 0
+    and "taskgo create: --slug contains no usable characters" in (out_e + err_e)
+    and "Traceback" not in (out_l + err_l)
+    and not list((readme_repo / "proj1/tasks").glob("*rejected*")),
+    err_l + err_e,
+)
 
-# Test 89: FORCE_COLOR styles diagnostic tags even when piped
-DR_OUT=$(FORCE_COLOR=1 tg --root "$REPO" doctor 2>&1) || true
-if grep -q $'\033\[32m\[PASS\]' <<<"$DR_OUT"; then
-  echo 'ok 37 - FORCE_COLOR styles PASS tags'
-else
-  echo 'not ok 37 - FORCE_COLOR did not style PASS tags'
-fi
+# 25: non-ASCII title falls back to default slug with warning
+rc, out, err = run_tg(
+    "--root", str(readme_repo), "create", "proj1", "日本語のタイトル", "--no-commit"
+)
+uni_id, uni_rel = out.strip().split("\t")
+report(
+    25,
+    "create falls back to a default slug and warns",
+    rc == 0
+    and Path(uni_rel).name == f"{uni_id}-task.md"
+    and "Title yields no usable filename slug" in err,
+    err,
+)
 
-# Test 90: NO_COLOR suppresses styling even when FORCE_COLOR is set
-DR_OUT=$(NO_COLOR=1 FORCE_COLOR=1 tg --root "$REPO" doctor 2>&1) || true
-if grep -q $'\033' <<<"$DR_OUT"; then
-  echo 'not ok 38 - NO_COLOR did not suppress styling'
-else
-  echo 'ok 38 - NO_COLOR suppresses styling despite FORCE_COLOR'
-fi
+# 26: update --slug renames file in place and keeps ID prefix
+rc_r, out_r, err_r = run_tg(
+    "--root", str(readme_repo), "update", short_id, "--slug", "Cache eviction"
+)
+rc_b, out_b, err_b = run_tg(
+    "--root", str(readme_repo), "update", short_id,
+    "--slug", "aaaaaaaaaa-bbbbbbbbbb-cccccccccc-dddddddddd",
+)
+renamed_p = readme_repo / f"proj1/tasks/{short_id}-cache-eviction.md"
+old_p = readme_repo / f"proj1/tasks/{short_id}-fix-cache-eviction.md"
+report(
+    26,
+    "update --slug renames the task file and keeps the ID prefix",
+    rc_r == 0
+    and renamed_p.is_file()
+    and not old_p.exists()
+    and "[INFO]  Renamed" in (out_r + err_r)
+    and f"{short_id}-cache-eviction.md" in (out_r + err_r)
+    and rc_b != 0
+    and "taskgo update: --slug too long" in (out_b + err_b)
+    and "\n# Fix cache eviction\n" in renamed_p.read_text(),
+    err_r + err_b,
+)
 
-# Test 91: update clears optional sections with '' and refuses clearing a done task's Outcome
-CLR_ID=$(tg --root "$README_REPO" create proj1 'Clearable sections' \
-  --slug clear-sec --goal 'Keep Goal' --sketch 'Drop sketch' \
-  --constraints 'Drop constraints' --findings 'Temp note' --no-commit | cut -f1)
-CLR_FILE="$README_REPO/proj1/tasks/${CLR_ID}-clear-sec.md"
-tg --root "$README_REPO" update "$CLR_ID" --status 'done' --outcome 'Shipped.' \
-  --sketch '' --constraints '' --findings '' >/dev/null
-CLR_BODY=$(cat "$CLR_FILE")
-set +e
-tg --root "$README_REPO" update "$CLR_ID" --outcome '' >/dev/null 2>&1
-CLR_DONE_RC=$?
-set -e
-if [[ "$CLR_BODY" == *'**Goal:** Keep Goal'* ]] &&
-  [[ "$CLR_BODY" == *'## Outcome'* ]] &&
-  [[ "$CLR_BODY" != *'**Sketch:**'* ]] &&
-  [[ "$CLR_BODY" != *'**Constraints:**'* ]] &&
-  [[ "$CLR_BODY" != *'## Findings'* ]] &&
-  [[ "$CLR_DONE_RC" -ne 0 ]] &&
-  grep -q '## Outcome' "$CLR_FILE"; then
-  echo 'ok 39 - update clears optional sections with empty string and protects done Outcome'
-else
-  echo 'not ok 39 - update clears optional sections with empty string and protects done Outcome'
-  printf '# %s\n' "$CLR_BODY"
-fi
+# 27: fix preserves chosen slug while repairing mismatched filename ID
+slug_fix_repo = readme_repo.parent / "slug-fix-repo"
+(slug_fix_repo / "proj/tasks").mkdir(parents=True)
+subprocess.run(["git", "-C", str(slug_fix_repo), "init", "-q"], check=True)
+(slug_fix_repo / "AGENTS.md").write_text((readme_repo / "AGENTS.md").read_text())
+(slug_fix_repo / "INBOX.md").write_text("# Inbox\n")
+(slug_fix_repo / "proj/README.md").write_text("# Proj\n")
+(slug_fix_repo / "proj/tasks/TASK-22222-filename-slugs.md").write_text(
+    "---\nid: TASK-11111\nstatus: todo\n---\n\n"
+    "# Generate readable task filename slugs with clean length limits\n"
+)
+run_tg("--root", str(slug_fix_repo), "fix", "proj", "--no-commit")
+report(
+    27,
+    "fix preserves a chosen slug while repairing the filename ID",
+    (slug_fix_repo / "proj/tasks/TASK-11111-filename-slugs.md").is_file()
+    and not (slug_fix_repo / "proj/tasks/TASK-22222-filename-slugs.md").exists(),
+)
+
+# 28: real CLI create commits Conventional Commits subject with title in body
+cc_res = run_cli("--root", str(readme_repo), "create", "proj1", "Conventional subject coverage")
+cc_id = cc_res.stdout.strip().split("\t")[0] if cc_res.returncode == 0 else ""
+cc_subj = git_out(readme_repo, "log", "-1", "--format=%s").strip()
+cc_body = git_out(readme_repo, "log", "-1", "--format=%B").splitlines()
+report(
+    28,
+    "create commits a conventional subject with the title in the body",
+    cc_res.returncode == 0
+    and cc_subj == f"chore(proj1): create {cc_id}"
+    and "Conventional subject coverage" in cc_body
+    and "[WARN]" not in cc_res.stderr,
+    cc_res.stderr,
+)
+
+# 29-31, 33-35: checkpoint subject rewriting, refusal, and body wrapping
+plan_p = readme_repo / "brandnew/PLAN.md"
+plan_p.write_text("# Plan notes\n")
+rc, _, err = run_tg(
+    "--root", str(readme_repo), "checkpoint", newproj_id,
+    "update plan with more notes", "--path", "brandnew/PLAN.md",
+)
+rw_subj = git_out(readme_repo, "log", "-1", "--format=%s").strip()
+report(
+    29,
+    "checkpoint rewrites nonconforming subjects with a warning",
+    rc == 0
+    and rw_subj == "chore(brandnew): update plan with more notes"
+    and "[WARN]" in err
+    and "Rewrote nonconforming commit subject" in err,
+    err,
+)
+
+plan_p.write_text("# Plan notes\n# More plan notes\n")
+rc, _, err = run_tg(
+    "--root", str(readme_repo), "checkpoint", newproj_id,
+    "docs(brandnew): annotate plan", "--path", "brandnew/PLAN.md",
+)
+ok_subj = git_out(readme_repo, "log", "-1", "--format=%s").strip()
+report(
+    30,
+    "checkpoint leaves conforming subjects untouched",
+    rc == 0 and ok_subj == "docs(brandnew): annotate plan" and "[WARN]" not in err,
+    err,
+)
+
+plan_p.write_text("# Plan notes\n# More plan notes\n# Long subject notes\n")
+long_head = git_out(readme_repo, "rev-parse", "HEAD").strip()
+long_subj = "fix(brandnew): a very long drawn out subject line that goes well past fifty characters"
+rc1, out1, err1 = run_tg(
+    "--root", str(readme_repo), "checkpoint", newproj_id,
+    long_subj, "--path", "brandnew/PLAN.md",
+)
+msg1 = out1 + err1
+rc2, out2, err2 = run_tg(
+    "--root", str(readme_repo), "checkpoint", newproj_id,
+    "refresh the plan notes with everything we learned today",
+    "--path", "brandnew/PLAN.md",
+)
+msg2 = out2 + err2
+report(
+    31,
+    "checkpoint refuses over-long subjects with the length and prefix share",
+    rc1 != 0
+    and f"checkpoint: commit subject is {len(long_subj)} characters, over the 50-character limit" in msg1
+    and "The prefix 'fix(brandnew): ' uses 15, so shorten the description to 35 characters or fewer" in msg1
+    and git_out(readme_repo, "rev-parse", "HEAD").strip() == long_head
+    and not git_out(readme_repo, "diff", "--cached", "--name-only").strip()
+    and rc2 != 0
+    and "'chore: refresh the plan notes" in msg2
+    and "(rewritten from 'refresh the plan notes" in msg2
+    and "shorten the description to 43 characters" in msg2
+    and git_out(readme_repo, "rev-parse", "HEAD").strip() == long_head,
+    msg1 + msg2,
+)
+subprocess.run(["git", "-C", str(readme_repo), "checkout", "-q", "--", "brandnew/PLAN.md"], check=True)
+
+# 32: real CLI fix auto-commits use a conventional subject too
+(readme_repo / "proj1/tasks/bare-fix-subject.md").write_text("# Bare task for fix subject\n")
+run_cli("--root", str(readme_repo), "fix", "proj1")
+fix_subj = git_out(readme_repo, "log", "-1", "--format=%s").strip()
+report(32, "fix commits use a conventional subject", fix_subj == "chore(proj1): fix metadata and status", fix_subj)
+
+# 33-35: checkpoint body wrapping
+with plan_p.open("a") as fh:
+    fh.write("# Wrap notes\n")
+wrap_body = (
+    "The freeze review confronted the one-category-per-reading assumption "
+    "against spike-live-002 and it fell because at both named institutions "
+    "the categories are true of the same act."
+)
+rc, _, err = run_tg(
+    "--root", str(readme_repo), "checkpoint", newproj_id,
+    "docs(brandnew): wrap plan", "--path", "brandnew/PLAN.md", "--body", wrap_body,
+)
+msg_lines = git_out(readme_repo, "log", "-1", "--format=%B").splitlines()
+long_lines = [ln for ln in msg_lines[2:] if len(ln) > 72]
+report(
+    33,
+    "checkpoint hard-wraps bodies to 72 columns",
+    rc == 0
+    and not long_lines
+    and "one-category-per-reading" in "\n".join(msg_lines)
+    and "[WARN]" in err
+    and "Rewrapped commit body" in err,
+    f"long={long_lines} err={err}",
+)
+
+with plan_p.open("a") as fh:
+    fh.write("# URL notes\n")
+url_body = (
+    "See https://example.invalid/very/long/path/segment/that/exceeds/the/"
+    "seventy/two/column/wrap/limit entirely."
+)
+rc, _, err = run_tg(
+    "--root", str(readme_repo), "checkpoint", newproj_id,
+    "docs(brandnew): record link", "--path", "brandnew/PLAN.md", "--body", url_body,
+)
+body_txt = git_out(readme_repo, "log", "-1", "--format=%B")
+report(
+    34,
+    "urls survive body wrapping intact",
+    rc == 0
+    and "https://example.invalid/very/long/path/segment/that/exceeds/the/seventy/two/column/wrap/limit" in body_txt,
+    body_txt + err,
+)
+
+with plan_p.open("a") as fh:
+    fh.write("# Verbatim notes\n")
+verb_body = "Before the block.\n    indented code stays put\nAfter the block."
+rc, _, err = run_tg(
+    "--root", str(readme_repo), "checkpoint", newproj_id,
+    "docs(brandnew): keep blocks", "--path", "brandnew/PLAN.md", "--body", verb_body,
+)
+body_txt = git_out(readme_repo, "log", "-1", "--format=%B")
+report(
+    35,
+    "indented body lines pass through unwrapped",
+    rc == 0 and "    indented code stays put" in body_txt,
+    body_txt + err,
+)
+
+# 36-38: NO_COLOR / FORCE_COLOR on doctor
+dr_res = run_cli("--root", str(repo), "doctor")
+dr_plain = dr_res.stdout + dr_res.stderr
+report(
+    36,
+    "piped doctor output is plain ASCII tags",
+    "\033" not in dr_plain and any(ln.startswith("[PASS]") for ln in dr_plain.splitlines()),
+    dr_plain,
+)
+
+_, dr_f_out, dr_f_err = run_tg("--root", str(repo), "doctor", env_over={"FORCE_COLOR": "1"})
+dr_force = dr_f_out + dr_f_err
+report(
+    37,
+    "FORCE_COLOR styles PASS tags",
+    "\033[32m[PASS]" in dr_force,
+    dr_force,
+)
+
+_, dr_n_out, dr_n_err = run_tg(
+    "--root", str(repo), "doctor", env_over={"NO_COLOR": "1", "FORCE_COLOR": "1"}
+)
+dr_no = dr_n_out + dr_n_err
+report(
+    38,
+    "NO_COLOR suppresses styling despite FORCE_COLOR",
+    "\033" not in dr_no,
+    dr_no,
+)
+
+# 39: update clears optional sections with '' and refuses clearing a done task's Outcome
+rc39, out39, err39 = run_tg(
+    "--root", str(readme_repo), "create", "proj1", "Clearable sections",
+    "--slug", "clear-sec", "--goal", "Keep Goal", "--sketch", "Drop sketch",
+    "--constraints", "Drop constraints", "--findings", "Temp note", "--no-commit",
+)
+clr_id = out39.strip().split("\t")[0]
+clr_file = readme_repo / f"proj1/tasks/{clr_id}-clear-sec.md"
+run_tg(
+    "--root", str(readme_repo), "update", clr_id, "--status", "done",
+    "--outcome", "Shipped.", "--sketch", "", "--constraints", "", "--findings", "",
+)
+clr_body = clr_file.read_text()
+rc_done, _, err_done = run_tg("--root", str(readme_repo), "update", clr_id, "--outcome", "")
+report(
+    39,
+    "update clears optional sections with empty string and protects done Outcome",
+    rc39 == 0
+    and "**Goal:** Keep Goal" in clr_body
+    and "## Outcome" in clr_body
+    and "**Sketch:**" not in clr_body
+    and "**Constraints:**" not in clr_body
+    and "## Findings" not in clr_body
+    and rc_done != 0
+    and "## Outcome" in clr_file.read_text(),
+    clr_body + err39 + err_done,
+)
+PY

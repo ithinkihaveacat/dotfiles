@@ -16,6 +16,7 @@ import time
 import traceback
 import unittest
 from pathlib import Path
+from typing import Any
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 READER = SCRIPTS / "mcp-logs"
@@ -248,12 +249,14 @@ class McpLogsTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 130)
         self.assertEqual(err, b"\n")
 
-    def follow_proc(self, out: Path, *args) -> subprocess.Popen:
+    def follow_proc(
+        self, out: Path, *args, stderr: Any = subprocess.PIPE
+    ) -> subprocess.Popen:
         with open(out, "w") as fh:
             return subprocess.Popen(
                 [*RUN, "-f", *args],
                 stdout=fh,
-                stderr=subprocess.PIPE,
+                stderr=stderr,
                 env=self.env,
             )
 
@@ -272,15 +275,15 @@ class McpLogsTests(unittest.TestCase):
             record("2026-11-04T00:00:01.000Z", agent="café-ü"), ensure_ascii=False
         ).encode()
         cut = line.index("é".encode()) + 1
-        proc = self.follow_proc(out, "-n", "0", "--server", "skill")
+        proc = self.follow_proc(out, "-n", "1", "--server", "skill")
         try:
-            time.sleep(1.5)
+            self.wait_for(out, 1)
             with open(skill, "ab") as fh:
                 fh.write(line[:cut])
-            time.sleep(1.5)
+            time.sleep(0.6)
             with open(skill, "ab") as fh:
                 fh.write(line[cut:] + b"\n")
-            self.wait_for(out, 1)
+            self.wait_for(out, 2)
         finally:
             self.stop_follow(proc)
         self.assertIn('agent="café-ü"', out.read_text(encoding="utf-8"))
@@ -291,10 +294,19 @@ class McpLogsTests(unittest.TestCase):
         empty = Path(self.tmpdir.name) / "volume"
         empty.mkdir()
         out = Path(self.tmpdir.name) / "wait.out"
-        proc = self.follow_proc(out, str(empty))
-        other = self.follow_proc(Path(f"{out}.2"), "--server", "taskgo")
+        err1 = Path(self.tmpdir.name) / "wait1.err"
+        err2 = Path(self.tmpdir.name) / "wait2.err"
+        with err1.open("w") as f1, err2.open("w") as f2:
+            proc = self.follow_proc(out, str(empty), stderr=f1)
+            other = self.follow_proc(Path(f"{out}.2"), "--server", "taskgo", stderr=f2)
         try:
-            time.sleep(1.5)
+            for _ in range(500):
+                if (
+                    "waiting for request logs in" in err1.read_text()
+                    and "no request log for server taskgo" in err2.read_text()
+                ):
+                    break
+                time.sleep(0.02)
             write(empty / "taskgo" / "mcp.jsonl", record("2026-11-04T00:00:01.000Z"))
             write(
                 self.state / "taskgo" / "mcp.jsonl",
@@ -303,8 +315,12 @@ class McpLogsTests(unittest.TestCase):
             self.wait_for(out, 1)
             self.wait_for(Path(f"{out}.2"), 1)
         finally:
-            waited = self.stop_follow(proc)
-            err = self.stop_follow(other)
+            for p in (proc, other):
+                p.send_signal(signal.SIGINT)
+                p.communicate(timeout=10)
+                self.assertEqual(p.returncode, 130)
+        waited = err1.read_bytes()
+        err = err2.read_bytes()
         self.assertIn(b"waiting for request logs in", waited)
         self.assertNotIn(b"waiting for request logs", err)
         self.assertIn(" taskgo ", out.read_text())
@@ -312,38 +328,59 @@ class McpLogsTests(unittest.TestCase):
         self.assertIn(b"no request log for server taskgo", err)
 
     def test_sigterm_process_group(self):
-        """A SIGTERM stops the reader cleanly, with no traceback."""
-        for _ in range(3):
-            proc = subprocess.Popen(
-                [*RUN, "-f", "-n", "0"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                env=self.env,
-            )
-            time.sleep(1.5)
-            proc.send_signal(signal.SIGTERM)
+        """A SIGTERM to the process group stops the reader cleanly, with no traceback."""
+        proc = subprocess.Popen(
+            [*RUN, "-f", "-n", "1"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=self.env,
+            start_new_session=True,
+        )
+        try:
+            assert proc.stdout is not None
+            self.assertTrue(proc.stdout.readline())
+            os.killpg(proc.pid, signal.SIGTERM)
             _, err = proc.communicate(timeout=10)
-            self.assertNotIn(b"Traceback", err)
-            self.assertEqual(err.strip(), b"")
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+            if proc.stdout is not None:
+                proc.stdout.close()
+            if proc.stderr is not None:
+                proc.stderr.close()
+        self.assertEqual(proc.returncode, 130)
+        self.assertNotIn(b"Traceback", err)
+        self.assertEqual(err, b"\n")
 
     def test_sigterm(self):
         proc = subprocess.Popen(
-            [*RUN, "-f"],
-            stdout=subprocess.DEVNULL,
+            [*RUN, "-f", "-n", "1"],
+            stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             env=self.env,
         )
-        time.sleep(1.5)
-        proc.terminate()
-        _, err = proc.communicate(timeout=10)
+        try:
+            assert proc.stdout is not None
+            self.assertTrue(proc.stdout.readline())
+            proc.terminate()
+            _, err = proc.communicate(timeout=10)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+            if proc.stdout is not None:
+                proc.stdout.close()
+            if proc.stderr is not None:
+                proc.stderr.close()
         self.assertEqual(proc.returncode, 130)
         self.assertEqual(err, b"\n")
 
     def wait_for(self, path: Path, count: int) -> None:
-        for _ in range(100):
+        for _ in range(500):
             if len(path.read_text().splitlines()) >= count:
                 return
-            time.sleep(0.1)
+            time.sleep(0.02)
         self.fail(f"{count} lines never arrived: {path.read_text()!r}")
 
     def test_broken_pipe(self):
@@ -479,14 +516,12 @@ class McpLogsTests(unittest.TestCase):
         out = self.run_reader("logs", "-n", "1", "--server", "skill", script=MCP)
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertIn("refused", out.stdout)
-        for args in (["logs", "--help"], ["help", "logs"]):
-            with self.subTest(args=args):
-                out = self.run_reader(*args, script=MCP)
-                self.assertEqual(out.returncode, 0)
-                self.assertTrue(out.stdout.startswith("Usage: mcp logs"))
         out = self.run_reader("--help", script=MCP)
         self.assertIn("logs [PATH...]", out.stdout)
-        out = self.run_reader("logs", "--bogus", script=MCP)
+        out = self.run_reader("--help")
+        self.assertEqual(out.returncode, 0)
+        self.assertTrue(out.stdout.startswith("Usage: mcp logs"))
+        out = self.run_reader("--bogus")
         self.assertEqual(out.returncode, 1)
         self.assertIn("Try 'mcp logs --help'", out.stderr)
 

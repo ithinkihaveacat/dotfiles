@@ -15,6 +15,8 @@ opening request logs outcome=ok. Runs under the interpreter of taskgo's own
 script environment, which has the SDK. Prints TAP.
 """
 
+import argparse
+import importlib.util
 import os
 import socket
 import subprocess
@@ -29,6 +31,8 @@ from mcp.client.stdio import StdioServerParameters, stdio_client
 
 HERE = Path(__file__).resolve().parent
 CLI = HERE.parent / "scripts" / "taskgo"
+MCP_BIN = HERE.parent / "scripts" / "taskgo-mcp"
+USE_DIRECT_MCP = importlib.util.find_spec("uvicorn") is not None
 ERAS = (
     ("auto", "2026-07-28", "server/discover"),
     ("legacy", "2025-11-25", "initialize"),
@@ -69,76 +73,105 @@ async def session(connect, mode: str) -> tuple[str, int, bool]:
 
 
 def logged(log: Path, method: str) -> bool:
-    for _ in range(50):
-        if f"method={method} outcome=ok" in log.read_text():
+    for _ in range(250):
+        if log.exists() and f"method={method} outcome=ok" in log.read_text():
             return True
-        time.sleep(0.05)
+        time.sleep(0.01)
     return False
 
 
 def main() -> None:
-    if len(sys.argv) != 2:
-        sys.exit("usage: protocol-check REPO")
-    repo = sys.argv[1]
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--http-url")
+    ap.add_argument("--http-log")
+    ap.add_argument("repo")
+    args = ap.parse_args()
+    repo = args.repo
     bypass_proxy_for_loopback()
     print(f"1..{2 * len(ERAS)}")
     failed = 0
     n = 0
+    cmd = sys.executable if USE_DIRECT_MCP else str(CLI)
+    base_args = [str(MCP_BIN)] if USE_DIRECT_MCP else []
     with tempfile.TemporaryDirectory() as tmp:
-        http_log = Path(tmp) / "http.log"
-        port = free_port()
-        proc = subprocess.Popen(
-            [
-                *(str(CLI), "--root", repo, "mcp", "--no-fetch"),
-                *("--auth", "none", "--port", str(port)),
-                *("--log", str(Path(tmp) / "http.jsonl")),
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=http_log.open("w"),
-        )
+        proc = None
+        if args.http_url:
+            http_url = args.http_url
+            http_log = Path(args.http_log) if args.http_log else Path(tmp) / "http.log"
+        else:
+            http_log = Path(tmp) / "http.log"
+            port = free_port()
+            http_url = f"http://127.0.0.1:{port}/mcp"
+            with http_log.open("w") as http_err:
+                proc = subprocess.Popen(
+                    [
+                        cmd,
+                        *base_args,
+                        "--root",
+                        repo,
+                        "mcp",
+                        "--no-fetch",
+                        "--auth",
+                        "none",
+                        "--port",
+                        str(port),
+                        "--log",
+                        str(Path(tmp) / "http.jsonl"),
+                    ],
+                    stdout=subprocess.DEVNULL,
+                    stderr=http_err,
+                )
         try:
-            for _ in range(300):
-                try:
-                    with socket.create_connection(("127.0.0.1", port), timeout=1):
-                        break
-                except OSError:
-                    if proc.poll() is not None:
-                        sys.exit(
-                            f"protocol-check: server exited: {http_log.read_text()}"
-                        )
-                    time.sleep(0.1)
+            if proc is not None:
+                for _ in range(1500):
+                    try:
+                        with socket.create_connection(("127.0.0.1", port), timeout=1):
+                            break
+                    except OSError:
+                        if proc.poll() is not None:
+                            sys.exit(
+                                f"protocol-check: server exited: {http_log.read_text()}"
+                            )
+                        time.sleep(0.02)
             stdio = StdioServerParameters(
-                command=str(CLI),
+                command=cmd,
                 args=[
-                    *("--root", repo, "mcp", "--no-fetch", "--stdio"),
-                    *("--log", str(Path(tmp) / "stdio.jsonl")),
+                    *base_args,
+                    "--root",
+                    repo,
+                    "mcp",
+                    "--no-fetch",
+                    "--stdio",
+                    "--log",
+                    str(Path(tmp) / "stdio.jsonl"),
                 ],
             )
             stdio_log = Path(tmp) / "stdio.log"
-            errlog = stdio_log.open("w")
-            targets = (
-                ("HTTP", lambda: f"http://127.0.0.1:{port}/mcp", http_log),
-                ("stdio", lambda: stdio_client(stdio, errlog=errlog), stdio_log),
-            )
-            for transport, connect, log in targets:
-                for mode, version, opener in ERAS:
-                    n += 1
-                    try:
-                        got = anyio.run(session, connect, mode)
-                    except Exception as e:
-                        got = (f"{type(e).__name__}: {e}", 0, False)
-                    seen = logged(log, opener)
-                    ok = got == (version, 12, True) and seen
-                    failed += not ok
-                    print(
-                        f"{'ok' if ok else 'not ok'} {n} - a {version} client "
-                        f"over {transport}"
-                    )
-                    if not ok:
-                        print(f"# {got}, {opener} logged: {seen}")
+            with stdio_log.open("w") as errlog:
+                targets = (
+                    ("HTTP", lambda: http_url, http_log),
+                    ("stdio", lambda: stdio_client(stdio, errlog=errlog), stdio_log),
+                )
+                for transport, connect, log in targets:
+                    for mode, version, opener in ERAS:
+                        n += 1
+                        try:
+                            got = anyio.run(session, connect, mode)
+                        except Exception as e:
+                            got = (f"{type(e).__name__}: {e}", 0, False)
+                        seen = logged(log, opener)
+                        ok = got == (version, 12, True) and seen
+                        failed += not ok
+                        print(
+                            f"{'ok' if ok else 'not ok'} {n} - a {version} client "
+                            f"over {transport}"
+                        )
+                        if not ok:
+                            print(f"# {got}, {opener} logged: {seen}")
         finally:
-            proc.terminate()
-            proc.wait()
+            if proc is not None:
+                proc.terminate()
+                proc.wait()
     sys.exit(1 if failed else 0)
 
 

@@ -5,7 +5,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { createCli, cliJson } from "../src/cli.ts";
-import { harness, input } from "./helpers.ts";
+
+let hasPlugin = false;
+try {
+  import.meta.resolve("@opencode/plugin");
+  hasPlugin = true;
+} catch {
+  hasPlugin = false;
+}
 
 async function temporary(run: (directory: string) => Promise<void>) {
   const directory = await mkdtemp(join(tmpdir(), "andon-opencode-"));
@@ -16,52 +23,62 @@ async function temporary(run: (directory: string) => Promise<void>) {
   }
 }
 
-test("native tool writes records readable by the unchanged CLI", async () =>
-  temporary(async (directory) => {
-    const cli = createCli({
-      env: { ...process.env, ANDON_STATE_DIR: directory, ANDON_LEVEL: "3" }
-    });
-    const h = await harness({ cli });
-    await h.context();
-    const pulled = await h.pull();
-    assert.equal(pulled.ok, true);
-    const alert = await cliJson<Record<string, unknown>>(cli, [
-      "show",
-      pulled.id,
-      "--json"
-    ]);
-    assert.equal(alert.harness, "opencode");
-    assert.equal(alert.conversation_id, "one");
-    assert.deepEqual(alert.workspace_paths, ["/sessions/one"]);
-    // Simulate another harness writing the existing payload shape.
-    await cli(["pull", "--json", "-"], {
-      ...input,
-      harness: "claude-code",
-      conversation_id: "claude-session"
-    });
-    const alerts = await cliJson<Record<string, unknown>[]>(cli, [
-      "list",
-      "--json"
-    ]);
-    assert.equal(alerts.length, 2);
-    assert.equal(alerts[0].recurrences, 2);
-    await h.rpc("transition", { id: pulled.id, verb: "resolve" });
-    assert.deepEqual(await cliJson(cli, ["list", "--json"]), []);
-  }));
+test(
+  "native tool writes records readable by the unchanged CLI",
+  { skip: !hasPlugin && "@opencode/plugin not installed" },
+  async () =>
+    temporary(async (directory) => {
+      const { harness, input } = await import("./helpers.ts");
+      const cli = createCli({
+        env: { ...process.env, ANDON_STATE_DIR: directory, ANDON_LEVEL: "3" }
+      });
+      const h = await harness({ cli });
+      await h.context();
+      const pulled = await h.pull();
+      assert.equal(pulled.ok, true);
+      const alert = await cliJson<Record<string, unknown>>(cli, [
+        "show",
+        pulled.id,
+        "--json"
+      ]);
+      assert.equal(alert.harness, "opencode");
+      assert.equal(alert.conversation_id, "one");
+      assert.deepEqual(alert.workspace_paths, ["/sessions/one"]);
+      // Simulate another harness writing the existing payload shape.
+      await cli(["pull", "--json", "-"], {
+        ...input,
+        harness: "claude-code",
+        conversation_id: "claude-session"
+      });
+      const alerts = await cliJson<Record<string, unknown>[]>(cli, [
+        "list",
+        "--json"
+      ]);
+      assert.equal(alerts.length, 2);
+      assert.equal(alerts[0].recurrences, 2);
+      await h.rpc("transition", { id: pulled.id, verb: "resolve" });
+      assert.deepEqual(await cliJson(cli, ["list", "--json"]), []);
+    })
+);
 
-test("saved defaults still yield to ANDON_LEVEL", async () =>
-  temporary(async (directory) => {
-    const cli = createCli({
-      env: { ...process.env, ANDON_STATE_DIR: directory, ANDON_LEVEL: "2" }
-    });
-    const h = await harness({ cli });
-    await h.rpc("command", { text: "level 5", sessionID: "one" });
-    assert.match((await h.context()).system[0].text, /Active trigger level: 2/);
-    assert.equal(
-      JSON.parse(await readFile(join(directory, "config.json"), "utf8")).level,
-      5
-    );
-  }));
+test(
+  "saved defaults still yield to ANDON_LEVEL",
+  { skip: !hasPlugin && "@opencode/plugin not installed" },
+  async () =>
+    temporary(async (directory) => {
+      const { harness } = await import("./helpers.ts");
+      const cli = createCli({
+        env: { ...process.env, ANDON_STATE_DIR: directory, ANDON_LEVEL: "2" }
+      });
+      const h = await harness({ cli });
+      await h.rpc("command", { text: "level 5", sessionID: "one" });
+      assert.match((await h.context()).system[0].text, /Active trigger level: 2/);
+      assert.equal(
+        JSON.parse(await readFile(join(directory, "config.json"), "utf8")).level,
+        5
+      );
+    })
+);
 
 test("missing script interpreter falls back to Python without uv", async () =>
   temporary(async (directory) => {

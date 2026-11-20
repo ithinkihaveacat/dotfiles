@@ -1,847 +1,1122 @@
-#!/usr/bin/env bash
-
-# Tests: skills/agent-tools/tests/test-oracle
-
-set -euo pipefail
-
-DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
-BIN="$DIR/../scripts/oracle"
-
-OUTPUT=$(mktemp)
-WORK=$(cd "$(mktemp -d)" && pwd -P)
-export ORACLE_STATE_DIR="$WORK/state"
-trap 'rm -rf "$OUTPUT" "$WORK"' EXIT
-
-echo "1..27"
-
-# Test 1: oracle --help outputs valid help and exits 0
-if "$BIN" --help >"$OUTPUT" 2>&1; then
-  if grep -q "Usage: oracle" "$OUTPUT" && grep -q "Options:" "$OUTPUT" && grep -q "Best Practices for Context:" "$OUTPUT"; then
-    echo "ok 1 - Help output is formatted correctly"
-  else
-    echo "not ok 1 - Help output missing expected sections"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-else
-  echo "not ok 1 - oracle --help exited non-zero"
-fi
-
-# Test 2: Bare oracle with no arguments exits 1 with error on stderr
-if "$BIN" >"$OUTPUT" 2>&1 </dev/null; then
-  echo "not ok 2 - Expected bare oracle to fail"
-else
-  if grep -q "error: prompt is required" "$OUTPUT" && grep -q "Usage: oracle" "$OUTPUT"; then
-    echo "ok 2 - Bare oracle prints error and usage to stderr"
-  else
-    echo "not ok 2 - Bare oracle output missing expected error message"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-fi
-
-# Test 3: oracle --dry-run "prompt" prints dry run summary on stdout
-if "$BIN" --dry-run "Explain quantum computing" >"$OUTPUT" 2>&1; then
-  if grep -q "Oracle Dry Run Summary" "$OUTPUT" && grep -q "Prompt:" "$OUTPUT" && grep -q "Payload Summary:" "$OUTPUT"; then
-    echo "ok 3 - Dry run summary produces expected sections"
-  else
-    echo "not ok 3 - Dry run summary missing expected headers"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-else
-  echo "not ok 3 - oracle --dry-run failed"
-  sed 's/^/# /' "$OUTPUT"
-fi
-
-# Test 4: Directory traversal filters out secret files and directories
-SAMPLE_DIR="$WORK/sample_project"
-mkdir -p "$SAMPLE_DIR/src" "$SAMPLE_DIR/.ssh" "$SAMPLE_DIR/config"
-echo "console.log('hello');" >"$SAMPLE_DIR/src/index.js"
-echo "SECRET_KEY=12345" >"$SAMPLE_DIR/.env"
-echo "LOCAL_SECRET=abc" >"$SAMPLE_DIR/.env.local"
-echo "-----BEGIN PRIVATE KEY-----" >"$SAMPLE_DIR/config/server.pem"
-echo "id_rsa_content" >"$SAMPLE_DIR/.ssh/id_rsa"
-echo "regular docs" >"$SAMPLE_DIR/README.md"
-
-if "$BIN" --dry-run "Audit this project" "$SAMPLE_DIR" >"$OUTPUT" 2>&1; then
-  if grep -q "index.js" "$OUTPUT" && grep -q "README.md" "$OUTPUT"; then
-    if ! grep -q "\.env" "$OUTPUT" && ! grep -q "server\.pem" "$OUTPUT" && ! grep -q "id_rsa" "$OUTPUT"; then
-      echo "ok 4 - Secret files and credential directories are filtered from directory context"
-    else
-      echo "not ok 4 - Secret files were erroneously included in context"
-      sed 's/^/# /' "$OUTPUT"
-    fi
-  else
-    echo "not ok 4 - Expected files missing from resolved context"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-else
-  echo "not ok 4 - Dry run on sample project failed"
-  sed 's/^/# /' "$OUTPUT"
-fi
-
-# Test 5: Symlinks are skipped and not followed
-SYMLINK_DIR="$WORK/symlink_project"
-mkdir -p "$SYMLINK_DIR/real"
-echo "Real content" >"$SYMLINK_DIR/real/file.txt"
-ln -s "$SYMLINK_DIR/real/file.txt" "$SYMLINK_DIR/symlinked_file.txt"
-ln -s "$SYMLINK_DIR/real" "$SYMLINK_DIR/symlinked_dir"
-
-if "$BIN" --dry-run "Review code" "$SYMLINK_DIR" >"$OUTPUT" 2>&1; then
-  if grep -q "real/file.txt" "$OUTPUT" && ! grep -q "symlinked_file.txt" "$OUTPUT" && ! grep -q "symlinked_dir" "$OUTPUT"; then
-    echo "ok 5 - Symlinks are ignored and skipped during traversal"
-  else
-    echo "not ok 5 - Symlinks were not properly excluded"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-else
-  echo "not ok 5 - Dry run on symlinks failed"
-  sed 's/^/# /' "$OUTPUT"
-fi
-
-# Test 6: Hybrid media classification: small media tagged [MEDIA-INLINE]
-MEDIA_DIR="$WORK/media_project"
-mkdir -p "$MEDIA_DIR"
-head -c 100 /dev/zero >"$MEDIA_DIR/screenshot.png"
-echo "Text documentation" >"$MEDIA_DIR/doc.txt"
-
-if "$BIN" --dry-run "Inspect image and text" "$MEDIA_DIR" >"$OUTPUT" 2>&1; then
-  if grep -q "\[MEDIA-INLINE\]" "$OUTPUT" && grep -q "screenshot.png" "$OUTPUT" && grep -q "\[TEXT\]" "$OUTPUT"; then
-    echo "ok 6 - Small media files are classified as [MEDIA-INLINE]"
-  else
-    echo "not ok 6 - Media file classification output missing expected tags"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-else
-  echo "not ok 6 - Dry run on media project failed"
-  sed 's/^/# /' "$OUTPUT"
-fi
-
-# Test 7: AGENT_TELEMETRY_JSON is populated on dry-run/completion
-TEL_JSON="$WORK/telemetry.json"
-if env AGENT_TELEMETRY_JSON="$TEL_JSON" "$BIN" --dry-run "Test telemetry" "$MEDIA_DIR" >"$OUTPUT" 2>&1; then
-  if [[ -f "$TEL_JSON" ]] && grep -q '"status": "Succeeded"' "$TEL_JSON" && grep -q '"text_files_count"' "$TEL_JSON" && grep -q '"media_inline_count"' "$TEL_JSON"; then
-    echo "ok 7 - AGENT_TELEMETRY_JSON is generated with structured fields"
-  else
-    echo "not ok 7 - AGENT_TELEMETRY_JSON was not written or is missing expected keys"
-    if [[ -f "$TEL_JSON" ]]; then
-      cat "$TEL_JSON" | sed 's/^/# /'
-    fi
-  fi
-else
-  echo "not ok 7 - Failed running with AGENT_TELEMETRY_JSON"
-  sed 's/^/# /' "$OUTPUT"
-fi
-
-# Test 8: Reject paths whose ancestors are symlinks on direct CLI args
-ANCESTOR_DIR="$WORK/ancestor_test"
-mkdir -p "$ANCESTOR_DIR/real_ssh"
-echo "Host github.com" >"$ANCESTOR_DIR/real_ssh/config"
-ln -s "$ANCESTOR_DIR/real_ssh" "$ANCESTOR_DIR/symlink_parent"
-
-if "$BIN" --dry-run "Check config" "$ANCESTOR_DIR/symlink_parent/config" >"$OUTPUT" 2>&1; then
-  echo "not ok 8 - Expected direct path with symlink ancestor to be rejected with exit 1"
-  sed 's/^/# /' "$OUTPUT"
-else
-  if grep -q "error: refusing symlink path" "$OUTPUT" && ! grep -q "\[TEXT\].*real_ssh/config" "$OUTPUT"; then
-    echo "ok 8 - Direct paths with symlink ancestors are rejected"
-  else
-    echo "not ok 8 - Missing expected error message on symlink ancestor rejection"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-fi
-
-# Test 9: Aggregate media budget overflows to [MEDIA-UPLOAD]
-BUDGET_DIR="$WORK/budget_test"
-mkdir -p "$BUDGET_DIR"
-# Two 4MB files (total 8MB <= 10MB limit: both inline)
-# Third 4MB file (total 12MB > 10MB limit: third overflows to upload)
-head -c $((4 * 1024 * 1024)) /dev/zero >"$BUDGET_DIR/img1.png"
-head -c $((4 * 1024 * 1024)) /dev/zero >"$BUDGET_DIR/img2.png"
-head -c $((4 * 1024 * 1024)) /dev/zero >"$BUDGET_DIR/img3.png"
-
-if "$BIN" --dry-run "Check budget" "$BUDGET_DIR" >"$OUTPUT" 2>&1; then
-  if grep -q "Inline Media:   2 file(s)" "$OUTPUT" && grep -q "Uploaded Media: 1 file(s)" "$OUTPUT"; then
-    echo "ok 9 - Aggregate media budget overflows excess files to uploaded media"
-  else
-    echo "not ok 9 - Aggregate media budget did not correctly split inline and upload"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-else
-  echo "not ok 9 - Dry run failed on aggregate media budget test"
-  sed 's/^/# /' "$OUTPUT"
-fi
-
-# Test 10: Error telemetry is preserved and not overwritten on failure
-ERROR_TEL_JSON="$WORK/error_telemetry.json"
-if env -u GEMINI_API_KEY AGENT_TELEMETRY_JSON="$ERROR_TEL_JSON" "$BIN" "Prompt without key" "$SAMPLE_DIR" >"$OUTPUT" 2>&1; then
-  echo "not ok 10 - Expected failure when GEMINI_API_KEY is missing"
-else
-  if [[ -f "$ERROR_TEL_JSON" ]] && grep -q '"status": "Error"' "$ERROR_TEL_JSON" && grep -q '"error": "GEMINI_API_KEY not set"' "$ERROR_TEL_JSON"; then
-    echo "ok 10 - Error telemetry retains error status and message without being overwritten"
-  else
-    echo "not ok 10 - Error telemetry was overwritten or missing error fields"
-    if [[ -f "$ERROR_TEL_JSON" ]]; then
-      cat "$ERROR_TEL_JSON" | sed 's/^/# /'
-    fi
-  fi
-fi
-
-# Test 11: .config/gcloud and application_default_credentials.json are excluded, src/gcloud is kept
-ADC_DIR="$WORK/adc_test"
-mkdir -p "$ADC_DIR/.config/gcloud" "$ADC_DIR/src/gcloud"
-echo '{"client_secret": "xyz", "refresh_token": "abc"}' >"$ADC_DIR/.config/gcloud/application_default_credentials.json"
-echo 'class Client: pass' >"$ADC_DIR/src/gcloud/client.py"
-
-if "$BIN" --dry-run "Audit gcloud config" "$ADC_DIR" >"$OUTPUT" 2>&1; then
-  if grep -q "src/gcloud/client.py" "$OUTPUT" && ! grep -q "application_default_credentials" "$OUTPUT" && ! grep -q "\.config/gcloud" "$OUTPUT"; then
-    echo "ok 11 - .config/gcloud and ADC are filtered while src/gcloud source code is retained"
-  else
-    echo "not ok 11 - gcloud filtering did not correctly separate credentials from source code"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-else
-  echo "not ok 11 - Dry run on gcloud project failed"
-  sed 's/^/# /' "$OUTPUT"
-fi
-
-# Test 12: macOS /tmp system alias paths are supported without false symlink rejection
-TMP_TEST_FILE="/tmp/oracle_test_file_$$.txt"
-echo "Valid temporary notes" >"$TMP_TEST_FILE"
-trap 'rm -f "$TMP_TEST_FILE"; rm -rf "$OUTPUT" "$WORK"' EXIT
-
-if "$BIN" --dry-run "Inspect temp note" "$TMP_TEST_FILE" >"$OUTPUT" 2>&1; then
-  if grep -q "oracle_test_file_" "$OUTPUT" && ! grep -q "skipping symlink" "$OUTPUT"; then
-    echo "ok 12 - macOS /tmp path is canonicalized and accepted without symlink rejection"
-  else
-    echo "not ok 12 - /tmp path was rejected as a symlink"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-else
-  echo "not ok 12 - Dry run failed for /tmp path"
-  sed 's/^/# /' "$OUTPUT"
-fi
-rm -f "$TMP_TEST_FILE"
-
-# Test 13: Preprocessing failure (e.g. text > 1MB) writes error telemetry
-PREPROC_TEL_JSON="$WORK/preproc_telemetry.json"
-LARGE_FILE="$WORK/oversized.txt"
-head -c $((2 * 1024 * 1024)) /dev/zero | tr '\0' 'A' >"$LARGE_FILE"
-
-if env AGENT_TELEMETRY_JSON="$PREPROC_TEL_JSON" "$BIN" "Oversized context" "$LARGE_FILE" >"$OUTPUT" 2>&1; then
-  echo "not ok 13 - Expected failure when text exceeds 1MB threshold without --force"
-else
-  if [[ -f "$PREPROC_TEL_JSON" ]] && grep -q '"status": "Error"' "$PREPROC_TEL_JSON" && grep -q '"error": "text context exceeds 1MB threshold"' "$PREPROC_TEL_JSON"; then
-    echo "ok 13 - Preprocessing failure emits error telemetry to AGENT_TELEMETRY_JSON"
-  else
-    echo "not ok 13 - Preprocessing failure did not record expected telemetry"
-    if [[ -f "$PREPROC_TEL_JSON" ]]; then
-      cat "$PREPROC_TEL_JSON" | sed 's/^/# /'
-    fi
-  fi
-fi
-
-# Test 14: Text-only invocation reaches API generation path and does not exit prematurely
-if [[ -z "${GEMINI_API_KEY:-}" || "${AGENT_OFFLINE:-}" == "1" ]]; then
-  echo "ok 14 # SKIP GEMINI_API_KEY not set (offline test mode)"
-else
-  TEXT_NOTE="$WORK/note.txt"
-  echo "Regular note content" >"$TEXT_NOTE"
-  if "$BIN" "Say hello in one word" "$TEXT_NOTE" >"$OUTPUT" 2>&1; then
-    echo "ok 14 - Text-only invocation successfully streams answer from API"
-  else
-    echo "not ok 14 - Text-only invocation failed against Gemini API"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-fi
-
-# Test 15: Inlined text context natively uses Markdown code fences, directory manifest, and discrete telemetry
-FORMAT_DIR="$WORK/format_test"
-mkdir -p "$FORMAT_DIR/src"
-echo "def hello(): return 'world'" >"$FORMAT_DIR/src/hello.py"
-echo "# Documentation" >"$FORMAT_DIR/README.md"
-TEL_FMT="$WORK/telemetry_fmt.json"
-
-if env AGENT_TELEMETRY_JSON="$TEL_FMT" "$BIN" --dry-run "Test native markdown format" "$FORMAT_DIR" >"$OUTPUT" 2>&1; then
-  PAYLOAD_FILE=$(grep -o '[^ ]*payload_[^ ]*\.xml' "$OUTPUT" 2>/dev/null || true)
-  if grep -q '"context_format": "markdown"' "$TEL_FMT" &&
-    grep -q '"manifest": true' "$TEL_FMT" &&
-    grep -q '"segmentation": "discrete"' "$TEL_FMT" &&
-    [[ -n "$PAYLOAD_FILE" && -f "$PAYLOAD_FILE" ]] &&
-    grep -q '<context format="markdown">' "$PAYLOAD_FILE" &&
-    grep -q '### Directory Manifest' "$PAYLOAD_FILE" &&
-    grep -q 'Directory Structure:' "$PAYLOAD_FILE" &&
-    grep -q '#### File: ' "$PAYLOAD_FILE"; then
-    echo "ok 15 - Inlined context natively generates Markdown code fences, directory manifest, and telemetry"
-  else
-    echo "not ok 15 - Native markdown formatting, manifest, or telemetry was incorrect"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-else
-  echo "not ok 15 - Dry run with native markdown format failed"
-  sed 's/^/# /' "$OUTPUT"
-fi
-
-# Test 16: Request timeout bound scales with input tokens and rejects malformed --request-timeout
-cat >"$WORK/timeout_unit.py" <<'PYEOF'
+#!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.11"
-# dependencies = []
+# dependencies = [
+#     "google-genai>=2.31.0",
+#     "httpx",
+#     "httpx2",
+# ]
 # ///
+"""TAP tests for skills/agent-tools/scripts/oracle."""
+
+import contextlib
+import http.server
+import importlib.machinery
+import importlib.util
+import io
+import json
+import os
+import re
+import signal
+import subprocess
 import sys
+import tempfile
+import threading
 from pathlib import Path
+from unittest import mock
 
-source = Path(sys.argv[1]).read_text()
-stripped = "\n".join(
-    line
-    for line in source.splitlines()
-    if not line.startswith(("from google", "import httpx"))
-)
-ns = {"__name__": "oracle_helpers", "types": type("types", (), {"Part": object})}
-exec(compile(stripped, "oracle", "exec"), ns)
+import httpx
 
-bound = ns["request_timeout"]
-approx = ns["approx_tokens"]
+BIN = Path(__file__).resolve().parent.parent / "scripts" / "oracle"
 
 
-class FakePart:
-    def __init__(self, text=None):
-        self.text = text
+def load_oracle():
+    loader = importlib.machinery.SourceFileLoader("oracle_under_test", str(BIN))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    assert spec is not None
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[loader.name] = mod
+    loader.exec_module(mod)
+    return mod
 
 
-assert bound(0) == 180.0, bound(0)
-assert bound(240_000) == 420.0, bound(240_000)
-assert bound(240_000, 30) == 30.0, bound(240_000, 30)
-assert bound(240_000, 0) is None, bound(240_000, 0)
-assert approx("abcd" * 100) == 101
-# Binary parts (text=None) do not inflate the token estimate
-assert approx([FakePart("abcd" * 100), FakePart(None)]) == 101
-assert ns["MAX_TIMEOUT_RETRIES"] == 3 and ns["SERVER_TIMEOUT_FLOOR"] == 1800
-print("OK")
-PYEOF
+class Tap:
+    def __init__(self, total: int):
+        print(f"1..{total}", flush=True)
+        self.n = 0
+        self.failed = 0
 
-UNIT_OUT="$WORK/timeout_unit.out"
-PYTHONDONTWRITEBYTECODE=1 uv run --quiet --script "$WORK/timeout_unit.py" \
-  "$BIN" >"$UNIT_OUT" 2>&1 || true
+    def check(self, desc: str, ok: bool, detail: object = "") -> None:
+        self.n += 1
+        if not ok:
+            self.failed += 1
+        print(f"{'ok' if ok else 'not ok'} {self.n} - {desc}", flush=True)
+        if not ok and detail:
+            for line in str(detail).splitlines()[:25]:
+                print(f"# {line}", flush=True)
 
-if grep -q "^OK$" "$UNIT_OUT" &&
-  ! "$BIN" --dry-run --request-timeout soon "prompt" >"$OUTPUT" 2>&1 &&
-  grep -q "oracle: error: --request-timeout: invalid number of seconds: 'soon'" "$OUTPUT"; then
-  echo "ok 16 - Scales request timeout with input and rejects a malformed --request-timeout"
-else
-  echo "not ok 16 - Request timeout bound or --request-timeout validation failed"
-  sed 's/^/# /' "$UNIT_OUT" "$OUTPUT"
-fi
-
-# Test 17: A stalled streaming request is abandoned after --request-timeout, logged, and retried
-STALL_PORT_FILE="$WORK/stall.port"
-STALL_POSTS="$WORK/stall.posts"
-cat >"$WORK/stall.py" <<'PYEOF'
-import http.server
-import sys
-import time
+    def skip(self, reason: str) -> None:
+        self.n += 1
+        print(f"ok {self.n} # SKIP {reason}", flush=True)
 
 
-class StallThenRecover(http.server.BaseHTTPRequestHandler):
-    def do_POST(self):
-        self.rfile.read(int(self.headers.get("Content-Length", 0)))
-        with open(sys.argv[2], "a") as f:
-            f.write("post\n")
-        with open(sys.argv[2]) as f:
-            count = sum(1 for _ in f)
-        if count == 1:
-            time.sleep(3600)
-            return
-        self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream")
-        self.end_headers()
-        payload = (
-            b'data: {"candidates": [{"content": {"parts": [{"text":'
-            b' "Recovered oracle answer"}], "role": "model"}}],'
-            b' "usageMetadata": {"promptTokenCount": 12,'
-            b' "candidatesTokenCount": 3}}\r\n\r\n'
+def run_cli(
+    args: list[str],
+    *,
+    use_shebang: bool = False,
+    env: dict[str, str | None] | None = None,
+    stdin_text: str = "",
+) -> subprocess.CompletedProcess[str]:
+    cmd = [str(BIN), *args] if use_shebang else [sys.executable, str(BIN), *args]
+    run_env = os.environ.copy()
+    if env:
+        for k, v in env.items():
+            if v is None:
+                run_env.pop(k, None)
+            else:
+                run_env[k] = v
+    return subprocess.run(
+        cmd,
+        env=run_env,
+        input=stdin_text,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def run_inproc(
+    oracle,
+    argv: list[str],
+    *,
+    env: dict[str, str | None] | None = None,
+    stdin_text: str = "",
+) -> tuple[int, str, str]:
+    stdout_buf = io.StringIO()
+    stderr_buf = io.StringIO()
+    old_argv = sys.argv
+    old_stdin = sys.stdin
+    old_sigint = signal.getsignal(signal.SIGINT)
+    old_sigterm = signal.getsignal(signal.SIGTERM)
+    saved_env: dict[str, str | None] = {}
+    if env:
+        for k, v in env.items():
+            saved_env[k] = os.environ.get(k)
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    rc = 0
+    try:
+        sys.argv = ["oracle", *argv]
+        sys.stdin = io.StringIO(stdin_text)
+        with (
+            contextlib.redirect_stdout(stdout_buf),
+            contextlib.redirect_stderr(stderr_buf),
+        ):
+            oracle.main()
+    except SystemExit as exc:
+        rc = int(exc.code) if exc.code is not None else 0
+    finally:
+        sys.argv = old_argv
+        sys.stdin = old_stdin
+        signal.signal(signal.SIGINT, old_sigint)
+        signal.signal(signal.SIGTERM, old_sigterm)
+        for k, orig in saved_env.items():
+            if orig is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = orig
+    return rc, stdout_buf.getvalue(), stderr_buf.getvalue()
+
+
+def extract_payload_path(output: str) -> Path | None:
+    m = re.search(r"(\S*payload_\S+\.xml)", output)
+    return Path(m.group(1)) if m else None
+
+
+def extract_answer_path(output: str) -> Path | None:
+    m = re.search(r"(\S*answer_\S+\.md)", output)
+    return Path(m.group(1)) if m else None
+
+
+@contextlib.contextmanager
+def serve_http(handler_cls):
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler_cls)
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server, f"http://127.0.0.1:{server.server_address[1]}"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)
+
+
+def main() -> int:
+    oracle = load_oracle()
+    tap = Tap(27)
+
+    with tempfile.TemporaryDirectory(prefix="test-oracle-") as tmp:
+        work = Path(tmp).resolve()
+        state_dir = work / "state"
+        base_env: dict[str, str | None] = {"ORACLE_STATE_DIR": str(state_dir)}
+
+        # Test 1: oracle --help (real CLI subprocess exercising uv run shebang)
+        p1 = run_cli(["--help"], use_shebang=True, env=base_env)
+        out1 = p1.stdout + p1.stderr
+        tap.check(
+            "Help output is formatted correctly",
+            p1.returncode == 0
+            and "Usage: oracle" in out1
+            and "Options:" in out1
+            and "Best Practices for Context:" in out1,
+            f"rc={p1.returncode}\n{out1}",
         )
-        self.wfile.write(payload)
-        self.wfile.flush()
 
-    def log_message(self, *args):
-        pass
-
-
-server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), StallThenRecover)
-server.daemon_threads = True
-with open(sys.argv[1], "w") as f:
-    f.write(str(server.server_address[1]))
-server.serve_forever()
-PYEOF
-python3 "$WORK/stall.py" "$STALL_PORT_FILE" "$STALL_POSTS" &
-STALL_PID=$!
-for _ in 1 2 3 4 5 6 7 8 9 10; do
-  [[ -s "$STALL_PORT_FILE" ]] && break
-  sleep 0.5
-done
-STALL_TEL="$WORK/stall_telemetry.json"
-stall_status=0
-GEMINI_API_KEY=stub \
-  GOOGLE_GEMINI_BASE_URL="http://127.0.0.1:$(cat "$STALL_PORT_FILE" 2>/dev/null)" \
-  AGENT_TELEMETRY_JSON="$STALL_TEL" \
-  "$BIN" --request-timeout 1 "Summarize" >"$OUTPUT" 2>&1 || stall_status=$?
-kill "$STALL_PID" 2>/dev/null || true
-wait "$STALL_PID" 2>/dev/null || true
-stall_posts=$(wc -l <"$STALL_POSTS" 2>/dev/null | tr -d ' ' || echo 0)
-if [[ $stall_status -eq 0 && "$stall_posts" -eq 2 ]] &&
-  grep -q "warning: API request timed out after 1s" "$OUTPUT" &&
-  grep -q "Recovered oracle answer" "$OUTPUT" &&
-  grep -q '"timeout_seconds": 1.0' "$STALL_TEL"; then
-  echo "ok 17 - Abandons a stalled streaming request, logs it, and retries to completion"
-else
-  echo "not ok 17 - Stalled streaming request was not timed out and retried (exit $stall_status, $stall_posts posts)"
-  sed 's/^/# /' "$OUTPUT"
-  if [[ -f "$STALL_TEL" ]]; then
-    sed 's/^/# /' "$STALL_TEL"
-  fi
-fi
-
-# Test 18: --no-search disables Google Search in dry-run, telemetry, and serialized system_instruction
-DEFAULT_OUT="$WORK/default_search.out"
-DEFAULT_TEL="$WORK/default_search.json"
-NOSEARCH_OUT="$WORK/no_search.out"
-NOSEARCH_TEL="$WORK/no_search.json"
-
-if env AGENT_TELEMETRY_JSON="$DEFAULT_TEL" "$BIN" --dry-run "Default search prompt" >"$DEFAULT_OUT" 2>&1 &&
-  env AGENT_TELEMETRY_JSON="$NOSEARCH_TEL" "$BIN" --dry-run --no-search "Closed world prompt" >"$NOSEARCH_OUT" 2>&1; then
-  DEFAULT_PAYLOAD=$(grep -o '[^ ]*payload_[^ ]*\.xml' "$DEFAULT_OUT" 2>/dev/null || true)
-  NOSEARCH_PAYLOAD=$(grep -o '[^ ]*payload_[^ ]*\.xml' "$NOSEARCH_OUT" 2>/dev/null || true)
-  if grep -q "Tools:          search" "$DEFAULT_OUT" &&
-    grep -q '"tools": "search"' "$DEFAULT_TEL" &&
-    [[ -n "$DEFAULT_PAYLOAD" && -f "$DEFAULT_PAYLOAD" ]] &&
-    grep -q "Use the Google Search tool" "$DEFAULT_PAYLOAD" &&
-    grep -q "formulating search queries" "$DEFAULT_PAYLOAD" &&
-    grep -q "Tools:          none" "$NOSEARCH_OUT" &&
-    grep -q '"tools": "none"' "$NOSEARCH_TEL" &&
-    [[ -n "$NOSEARCH_PAYLOAD" && -f "$NOSEARCH_PAYLOAD" ]] &&
-    grep -q "External web grounding is disabled" "$NOSEARCH_PAYLOAD" &&
-    ! grep -q "Google Search" "$NOSEARCH_PAYLOAD" &&
-    ! grep -q "formulating search queries" "$NOSEARCH_PAYLOAD"; then
-    echo "ok 18 - --no-search updates tools summary, telemetry, and serialized system_instruction"
-  else
-    echo "not ok 18 - --no-search vs default payload or summary mismatch"
-    sed 's/^/# /' "$DEFAULT_OUT" "$NOSEARCH_OUT"
-  fi
-else
-  echo "not ok 18 - Dry run failed for default or --no-search"
-  sed 's/^/# /' "$DEFAULT_OUT" "$NOSEARCH_OUT"
-fi
-
-# Test 19: --search / --no-search last-flag-wins precedence, --no-search --code, and --maps --no-search
-REENABLE_OUT="$WORK/reenable_search.out"
-DISABLE_OUT="$WORK/disable_search.out"
-CODE_ONLY_OUT="$WORK/code_only.out"
-CODE_ONLY_TEL="$WORK/code_only.json"
-MAPS_NOSEARCH_OUT="$WORK/maps_nosearch.out"
-
-if "$BIN" --dry-run --no-search --search "Re-enable search" >"$REENABLE_OUT" 2>&1 &&
-  "$BIN" --dry-run --search --no-search "Disable search" >"$DISABLE_OUT" 2>&1 &&
-  env AGENT_TELEMETRY_JSON="$CODE_ONLY_TEL" "$BIN" --dry-run --no-search --code "Compute only" >"$CODE_ONLY_OUT" 2>&1 &&
-  "$BIN" --dry-run --maps --no-search "Maps query" >"$MAPS_NOSEARCH_OUT" 2>&1; then
-  REENABLE_PAYLOAD=$(grep -o '[^ ]*payload_[^ ]*\.xml' "$REENABLE_OUT" 2>/dev/null || true)
-  DISABLE_PAYLOAD=$(grep -o '[^ ]*payload_[^ ]*\.xml' "$DISABLE_OUT" 2>/dev/null || true)
-  MAPS_PAYLOAD=$(grep -o '[^ ]*payload_[^ ]*\.xml' "$MAPS_NOSEARCH_OUT" 2>/dev/null || true)
-  if grep -q "Tools:          search" "$REENABLE_OUT" &&
-    [[ -n "$REENABLE_PAYLOAD" && -f "$REENABLE_PAYLOAD" ]] &&
-    grep -q "Use the Google Search tool" "$REENABLE_PAYLOAD" &&
-    grep -q "Tools:          none" "$DISABLE_OUT" &&
-    [[ -n "$DISABLE_PAYLOAD" && -f "$DISABLE_PAYLOAD" ]] &&
-    ! grep -q "Google Search" "$DISABLE_PAYLOAD" &&
-    grep -q "Tools:          code" "$CODE_ONLY_OUT" &&
-    grep -q '"tools": "code"' "$CODE_ONLY_TEL" &&
-    grep -q "Tools:          maps" "$MAPS_NOSEARCH_OUT" &&
-    [[ -n "$MAPS_PAYLOAD" && -f "$MAPS_PAYLOAD" ]] &&
-    grep -q "Google Maps tool" "$MAPS_PAYLOAD"; then
-    echo "ok 19 - Flag override order (--no-search/--search), --no-search --code, and --maps interaction work"
-  else
-    echo "not ok 19 - Flag precedence or tool combination output did not match expectations"
-    sed 's/^/# /' "$REENABLE_OUT" "$DISABLE_OUT" "$CODE_ONLY_OUT" "$MAPS_NOSEARCH_OUT"
-  fi
-else
-  echo "not ok 19 - Dry run failed during flag precedence test"
-  sed 's/^/# /' "$REENABLE_OUT" "$DISABLE_OUT" "$CODE_ONLY_OUT" "$MAPS_NOSEARCH_OUT"
-fi
-
-# Test 20: '-' positional stdin works with --no-search while unknown '-*' flags are rejected
-STDIN_OUT="$WORK/stdin_nosearch.out"
-UNKNOWN_OUT="$WORK/unknown_flag.out"
-stdin_ok=0
-printf 'Piped stdin reference text\n' |
-  "$BIN" --dry-run --no-search "Summarize stdin only" - >"$STDIN_OUT" 2>&1 || stdin_ok=$?
-STDIN_PAYLOAD=$(grep -o '[^ ]*payload_[^ ]*\.xml' "$STDIN_OUT" 2>/dev/null || true)
-
-if [[ $stdin_ok -eq 0 ]] &&
-  grep -q "<stdin>" "$STDIN_OUT" &&
-  [[ -n "$STDIN_PAYLOAD" && -f "$STDIN_PAYLOAD" ]] &&
-  grep -q "Piped stdin reference text" "$STDIN_PAYLOAD" &&
-  ! "$BIN" --dry-run --unknown-option "Prompt" >"$UNKNOWN_OUT" 2>&1 &&
-  grep -q "oracle: error: unrecognized option: --unknown-option" "$UNKNOWN_OUT"; then
-  echo "ok 20 - Preserves '-' stdin positional argument and rejects unrecognized options"
-else
-  echo "not ok 20 - '-' stdin handling or unknown option rejection failed"
-  sed 's/^/# /' "$STDIN_OUT" "$UNKNOWN_OUT"
-fi
-
-# Test 21: Wire API requests attach exact expected tools and thinking level for default, --no-search, --no-search --code, and --thinking
-CAPTURE_PORT_FILE="$WORK/capture.port"
-CAPTURE_LOG="$WORK/capture.jsonl"
-cat >"$WORK/capture_server.py" <<'PYEOF'
-import http.server
-import json
-import sys
-
-
-class CaptureHandler(http.server.BaseHTTPRequestHandler):
-    def do_POST(self):
-        body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
-        obj = json.loads(body)
-        obj["_x_server_timeout"] = self.headers.get("X-Server-Timeout")
-        with open(sys.argv[2], "a", encoding="utf-8") as f:
-            f.write(json.dumps(obj) + "\n")
-        self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream")
-        self.end_headers()
-        payload = (
-            b'data: {"candidates": [{"content": {"parts": [{"text":'
-            b' "Stub answer"}], "role": "model"}}],'
-            b' "usageMetadata": {"promptTokenCount": 10,'
-            b' "candidatesTokenCount": 2}}\r\n\r\n'
+        # Test 2: Bare oracle exits 1 with error and usage on stderr (real CLI smoke)
+        p2 = run_cli([], env=base_env)
+        out2 = p2.stdout + p2.stderr
+        tap.check(
+            "Bare oracle prints error and usage to stderr",
+            p2.returncode != 0
+            and "error: prompt is required" in out2
+            and "Usage: oracle" in out2,
+            f"rc={p2.returncode}\n{out2}",
         )
-        self.wfile.write(payload)
-        self.wfile.flush()
 
-    def log_message(self, *args):
-        pass
+        # Test 3: oracle --dry-run "prompt" (real CLI smoke)
+        p3 = run_cli(["--dry-run", "Explain quantum computing"], env=base_env)
+        out3 = p3.stdout + p3.stderr
+        tap.check(
+            "Dry run summary produces expected sections",
+            p3.returncode == 0
+            and "Oracle Dry Run Summary" in out3
+            and "Prompt:" in out3
+            and "Payload Summary:" in out3,
+            f"rc={p3.returncode}\n{out3}",
+        )
 
+        # Test 4: Directory traversal filters out secret files and directories
+        sample_dir = work / "sample_project"
+        (sample_dir / "src").mkdir(parents=True)
+        (sample_dir / ".ssh").mkdir()
+        (sample_dir / "config").mkdir()
+        (sample_dir / "src" / "index.js").write_text(
+            "console.log('hello');\n", encoding="utf-8"
+        )
+        (sample_dir / ".env").write_text("SECRET_KEY=12345\n", encoding="utf-8")
+        (sample_dir / ".env.local").write_text("LOCAL_SECRET=abc\n", encoding="utf-8")
+        (sample_dir / "config" / "server.pem").write_text(
+            "-----BEGIN PRIVATE KEY-----\n", encoding="utf-8"
+        )
+        (sample_dir / ".ssh" / "id_rsa").write_text(
+            "id_rsa_content\n", encoding="utf-8"
+        )
+        (sample_dir / "README.md").write_text("regular docs\n", encoding="utf-8")
 
-server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), CaptureHandler)
-server.daemon_threads = True
-with open(sys.argv[1], "w") as f:
-    f.write(str(server.server_address[1]))
-server.serve_forever()
-PYEOF
-python3 "$WORK/capture_server.py" "$CAPTURE_PORT_FILE" "$CAPTURE_LOG" &
-CAPTURE_PID=$!
-for _ in 1 2 3 4 5 6 7 8 9 10; do
-  [[ -s "$CAPTURE_PORT_FILE" ]] && break
-  sleep 0.5
-done
-CAPTURE_URL="http://127.0.0.1:$(cat "$CAPTURE_PORT_FILE" 2>/dev/null)"
-CAP_OUT1="$WORK/cap1.out"
-CAP_OUT2="$WORK/cap2.out"
-CAP_OUT3="$WORK/cap3.out"
-CAP_OUT4="$WORK/cap4.out"
-cap_status=0
-GEMINI_API_KEY=stub GOOGLE_GEMINI_BASE_URL="$CAPTURE_URL" \
-  "$BIN" --no-serialize "Default run" >"$CAP_OUT1" 2>&1 || cap_status=$?
-GEMINI_API_KEY=stub GOOGLE_GEMINI_BASE_URL="$CAPTURE_URL" \
-  "$BIN" --no-serialize --no-search "Closed run" >"$CAP_OUT2" 2>&1 || cap_status=$?
-GEMINI_API_KEY=stub GOOGLE_GEMINI_BASE_URL="$CAPTURE_URL" \
-  "$BIN" --no-serialize --no-search --code "Code run" >"$CAP_OUT3" 2>&1 || cap_status=$?
-GEMINI_API_KEY=stub GOOGLE_GEMINI_BASE_URL="$CAPTURE_URL" \
-  "$BIN" --no-serialize --thinking medium --request-timeout 2400 "Medium run" >"$CAP_OUT4" 2>&1 || cap_status=$?
-kill "$CAPTURE_PID" 2>/dev/null || true
-wait "$CAPTURE_PID" 2>/dev/null || true
+        rc, out, err = run_inproc(
+            oracle, ["--dry-run", "Audit this project", str(sample_dir)], env=base_env
+        )
+        combined = out + err
+        tap.check(
+            "Secret files and credential directories are filtered from directory context",
+            rc == 0
+            and "index.js" in combined
+            and "README.md" in combined
+            and ".env" not in combined
+            and "server.pem" not in combined
+            and "id_rsa" not in combined,
+            f"rc={rc}\n{combined}",
+        )
 
-VERIFY_OUT="$WORK/verify_capture.out"
-python3 - "$CAPTURE_LOG" >"$VERIFY_OUT" 2>&1 <<'PYEOF' || true
-import json
-import sys
-from pathlib import Path
+        # Test 5: Symlinks are skipped and not followed
+        symlink_dir = work / "symlink_project"
+        (symlink_dir / "real").mkdir(parents=True)
+        (symlink_dir / "real" / "file.txt").write_text(
+            "Real content\n", encoding="utf-8"
+        )
+        os.symlink(
+            symlink_dir / "real" / "file.txt", symlink_dir / "symlinked_file.txt"
+        )
+        os.symlink(symlink_dir / "real", symlink_dir / "symlinked_dir")
 
-lines = Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
-assert len(lines) == 4, f"expected 4 requests, got {len(lines)}"
-reqs = [json.loads(line) for line in lines]
+        rc, out, err = run_inproc(
+            oracle, ["--dry-run", "Review code", str(symlink_dir)], env=base_env
+        )
+        combined = out + err
+        tap.check(
+            "Symlinks are ignored and skipped during traversal",
+            rc == 0
+            and "real/file.txt" in combined
+            and "symlinked_file.txt" not in combined
+            and "symlinked_dir" not in combined,
+            f"rc={rc}\n{combined}",
+        )
 
-# 1. Default: googleSearch present, codeExecution absent
-t1 = json.dumps(reqs[0].get("tools"))
-assert "googleSearch" in t1 or "google_search" in t1, t1
-assert "codeExecution" not in t1 and "code_execution" not in t1, t1
+        # Test 6: Small media tagged [MEDIA-INLINE]
+        media_dir = work / "media_project"
+        media_dir.mkdir()
+        (media_dir / "screenshot.png").write_bytes(b"\x00" * 100)
+        (media_dir / "doc.txt").write_text("Text documentation\n", encoding="utf-8")
 
-# 2. --no-search: no tools attached, no Google Search in systemInstruction
-assert not reqs[1].get("tools"), reqs[1].get("tools")
-si2 = json.dumps(reqs[1].get("systemInstruction", ""))
-assert "Google Search" not in si2, si2
+        rc, out, err = run_inproc(
+            oracle,
+            ["--dry-run", "Inspect image and text", str(media_dir)],
+            env=base_env,
+        )
+        combined = out + err
+        tap.check(
+            "Small media files are classified as [MEDIA-INLINE]",
+            rc == 0
+            and "[MEDIA-INLINE]" in combined
+            and "screenshot.png" in combined
+            and "[TEXT]" in combined,
+            f"rc={rc}\n{combined}",
+        )
 
-# 3. --no-search --code: codeExecution present, googleSearch absent
-t3 = json.dumps(reqs[2].get("tools"))
-assert "codeExecution" in t3 or "code_execution" in t3, t3
-assert "googleSearch" not in t3 and "google_search" not in t3, t3
+        # Test 7: AGENT_TELEMETRY_JSON populated on dry-run
+        tel_json = work / "telemetry.json"
+        rc, out, err = run_inproc(
+            oracle,
+            ["--dry-run", "Test telemetry", str(media_dir)],
+            env={**base_env, "AGENT_TELEMETRY_JSON": str(tel_json)},
+        )
+        tel_data = (
+            json.loads(tel_json.read_text(encoding="utf-8"))
+            if tel_json.is_file()
+            else {}
+        )
+        tap.check(
+            "AGENT_TELEMETRY_JSON is generated with structured fields",
+            rc == 0
+            and tel_data.get("status") == "Succeeded"
+            and "text_files_count" in tel_data
+            and "media_inline_count" in tel_data,
+            f"rc={rc}\n{tel_data!r}\n{out}\n{err}",
+        )
 
+        # Test 8: Reject paths whose ancestors are symlinks on direct CLI args
+        ancestor_dir = work / "ancestor_test"
+        (ancestor_dir / "real_ssh").mkdir(parents=True)
+        (ancestor_dir / "real_ssh" / "config").write_text(
+            "Host github.com\n", encoding="utf-8"
+        )
+        os.symlink(ancestor_dir / "real_ssh", ancestor_dir / "symlink_parent")
 
-# 4. Thinking level: high by default, medium with --thinking medium
-def level(req):
-    cfg = req.get("generationConfig", {}).get("thinkingConfig", {})
-    return str(cfg.get("thinkingLevel", cfg.get("thinking_level", ""))).upper()
+        rc, out, err = run_inproc(
+            oracle,
+            [
+                "--dry-run",
+                "Check config",
+                str(ancestor_dir / "symlink_parent" / "config"),
+            ],
+            env=base_env,
+        )
+        combined = out + err
+        tap.check(
+            "Direct paths with symlink ancestors are rejected",
+            rc != 0
+            and "error: refusing symlink path" in combined
+            and not re.search(r"\[TEXT\].*real_ssh/config", combined),
+            f"rc={rc}\n{combined}",
+        )
 
+        # Test 9: Aggregate media budget overflows to [MEDIA-UPLOAD] using sparse files
+        budget_dir = work / "budget_test"
+        budget_dir.mkdir()
+        for name in ("img1.png", "img2.png", "img3.png"):
+            with open(budget_dir / name, "wb") as f:
+                f.truncate(4 * 1024 * 1024)
 
-assert level(reqs[0]) == "HIGH", reqs[0].get("generationConfig")
-assert level(reqs[3]) == "MEDIUM", reqs[3].get("generationConfig")
+        rc, out, err = run_inproc(
+            oracle, ["--dry-run", "Check budget", str(budget_dir)], env=base_env
+        )
+        combined = out + err
+        tap.check(
+            "Aggregate media budget overflows excess files to uploaded media",
+            rc == 0
+            and "Inline Media:   2 file(s)" in combined
+            and "Uploaded Media: 1 file(s)" in combined,
+            f"rc={rc}\n{combined}",
+        )
 
-# 5. X-Server-Timeout uses the 1800s floor by default and scales above 1800s
-assert reqs[0].get("_x_server_timeout") == "1800", reqs[0].get("_x_server_timeout")
-assert reqs[3].get("_x_server_timeout") == "2400", reqs[3].get("_x_server_timeout")
-print("WIRE_OK")
-PYEOF
-
-if [[ $cap_status -eq 0 ]] &&
-  grep -q "^WIRE_OK$" "$VERIFY_OUT" &&
-  grep -q "| search | thinking=high |" "$CAP_OUT1" &&
-  grep -q "| none | thinking=high |" "$CAP_OUT2" &&
-  grep -q "| code | thinking=high |" "$CAP_OUT3" &&
-  grep -q "| search | thinking=medium |" "$CAP_OUT4"; then
-  echo "ok 21 - Sends expected wire tools and thinking config and status lines"
-else
-  echo "not ok 21 - Wire tools config or stderr status lines did not match"
-  sed 's/^/# /' "$VERIFY_OUT" "$CAP_OUT1" "$CAP_OUT2" "$CAP_OUT3" "$CAP_OUT4"
-fi
-
-# Test 22: --thinking defaults to high, honors ORACLE_THINKING, and the flag wins over the env
-THINK_DEFAULT_OUT="$WORK/think_default.out"
-THINK_DEFAULT_TEL="$WORK/think_default.json"
-THINK_FLAG_OUT="$WORK/think_flag.out"
-THINK_FLAG_TEL="$WORK/think_flag.json"
-THINK_ENV_OUT="$WORK/think_env.out"
-THINK_BOTH_OUT="$WORK/think_both.out"
-THINK_EQ_OUT="$WORK/think_eq.out"
-
-if env -u ORACLE_THINKING AGENT_TELEMETRY_JSON="$THINK_DEFAULT_TEL" \
-  "$BIN" --dry-run "Default thinking" >"$THINK_DEFAULT_OUT" 2>&1 &&
-  env -u ORACLE_THINKING AGENT_TELEMETRY_JSON="$THINK_FLAG_TEL" \
-    "$BIN" --dry-run --thinking medium "Medium thinking" >"$THINK_FLAG_OUT" 2>&1 &&
-  ORACLE_THINKING=low "$BIN" --dry-run "Env thinking" >"$THINK_ENV_OUT" 2>&1 &&
-  ORACLE_THINKING=low "$BIN" --dry-run --thinking medium "Flag beats env" >"$THINK_BOTH_OUT" 2>&1 &&
-  env -u ORACLE_THINKING "$BIN" --dry-run --thinking=low "Equals form" >"$THINK_EQ_OUT" 2>&1; then
-  if grep -q "Thinking:       high" "$THINK_DEFAULT_OUT" &&
-    grep -q '"thinking_level": "high"' "$THINK_DEFAULT_TEL" &&
-    grep -q "Thinking:       medium" "$THINK_FLAG_OUT" &&
-    grep -q '"thinking_level": "medium"' "$THINK_FLAG_TEL" &&
-    grep -q "Thinking:       low" "$THINK_ENV_OUT" &&
-    grep -q "Thinking:       medium" "$THINK_BOTH_OUT" &&
-    grep -q "Thinking:       low" "$THINK_EQ_OUT"; then
-    echo "ok 22 - --thinking default, flag, --thinking=LEVEL, ORACLE_THINKING, and flag-over-env precedence"
-  else
-    echo "not ok 22 - --thinking level not reflected in dry-run summary or telemetry"
-    sed 's/^/# /' "$THINK_DEFAULT_OUT" "$THINK_FLAG_OUT" "$THINK_ENV_OUT" "$THINK_BOTH_OUT" "$THINK_EQ_OUT"
-  fi
-else
-  echo "not ok 22 - Dry run failed during --thinking test"
-  sed 's/^/# /' "$THINK_DEFAULT_OUT" "$THINK_FLAG_OUT" "$THINK_ENV_OUT" "$THINK_BOTH_OUT" "$THINK_EQ_OUT"
-fi
-
-# Test 23: --thinking rejects invalid levels (flag and env) and a missing argument, recording error telemetry
-THINK_BAD_OUT="$WORK/think_bad.out"
-THINK_BAD_TEL="$WORK/think_bad.json"
-THINK_BADENV_OUT="$WORK/think_badenv.out"
-THINK_MISSING_OUT="$WORK/think_missing.out"
-THINK_EMPTY_OUT="$WORK/think_empty.out"
-
-if ! env AGENT_TELEMETRY_JSON="$THINK_BAD_TEL" \
-  "$BIN" --dry-run --thinking extreme "Bad level" >"$THINK_BAD_OUT" 2>&1 &&
-  grep -q "oracle: error: --thinking: invalid level: 'extreme' (choose from high, medium, low)" "$THINK_BAD_OUT" &&
-  grep -q '"status": "Error"' "$THINK_BAD_TEL" &&
-  grep -q '"error": "--thinking: invalid level' "$THINK_BAD_TEL" &&
-  ! ORACLE_THINKING=none "$BIN" --dry-run "Bad env level" >"$THINK_BADENV_OUT" 2>&1 &&
-  grep -q "oracle: error: --thinking: invalid level: 'none'" "$THINK_BADENV_OUT" &&
-  ! "$BIN" --dry-run "Missing level" --thinking >"$THINK_MISSING_OUT" 2>&1 &&
-  grep -q "oracle: error: --thinking requires an argument" "$THINK_MISSING_OUT" &&
-  ! "$BIN" --dry-run --thinking= "Empty level" >"$THINK_EMPTY_OUT" 2>&1 &&
-  grep -q "oracle: error: --thinking requires an argument" "$THINK_EMPTY_OUT"; then
-  echo "ok 23 - --thinking rejects invalid levels and missing arguments with error telemetry"
-else
-  echo "not ok 23 - --thinking validation did not fail as expected"
-  sed 's/^/# /' "$THINK_BAD_OUT" "$THINK_BADENV_OUT" "$THINK_MISSING_OUT" "$THINK_EMPTY_OUT"
-fi
-
-# Tests 24-26 share a stub that answers each streamed request from a script,
-# one line per request, and logs every request body. A line is
-# "TEXT|FINISH_REASON|CONTINUATION_TOKEN" (TEXT empty for a thought-only
-# response, token optional and base64).
-LIMIT_PORT_FILE="$WORK/limit.port"
-LIMIT_LOG="$WORK/limit.jsonl"
-LIMIT_SCRIPT="$WORK/limit.script"
-cat >"$WORK/limit_server.py" <<'PYEOF'
-import http.server
-import json
-import sys
-
-
-class ScriptedHandler(http.server.BaseHTTPRequestHandler):
-    def do_POST(self):
-        body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
-        with open(sys.argv[2], "a", encoding="utf-8") as f:
-            f.write(json.dumps(json.loads(body)) + "\n")
-        with open(sys.argv[2], encoding="utf-8") as f:
-            count = sum(1 for _ in f)
-        with open(sys.argv[3], encoding="utf-8") as f:
-            script = f.read().splitlines()
-        text, reason, token = script[min(count, len(script)) - 1].split("|")
-        parts = [{"text": "Planning the answer.", "thought": True}]
-        if text:
-            parts.append({"text": text})
-        candidate = {"content": {"parts": parts, "role": "model"}, "finishReason": reason}
-        if token:
-            candidate["continuationToken"] = token
-        chunk = {
-            "candidates": [candidate],
-            "usageMetadata": {
-                "promptTokenCount": 10,
-                "candidatesTokenCount": 5,
-                "thoughtsTokenCount": 7,
+        # Test 10: Error telemetry preserved when GEMINI_API_KEY is missing
+        error_tel_json = work / "error_telemetry.json"
+        rc, out, err = run_inproc(
+            oracle,
+            ["Prompt without key", str(sample_dir)],
+            env={
+                **base_env,
+                "GEMINI_API_KEY": None,
+                "AGENT_TELEMETRY_JSON": str(error_tel_json),
             },
-        }
-        self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream")
-        self.end_headers()
-        self.wfile.write(b"data: " + json.dumps(chunk).encode() + b"\r\n\r\n")
-        self.wfile.flush()
+        )
+        err_tel = (
+            json.loads(error_tel_json.read_text(encoding="utf-8"))
+            if error_tel_json.is_file()
+            else {}
+        )
+        tap.check(
+            "Error telemetry retains error status and message without being overwritten",
+            rc != 0
+            and err_tel.get("status") == "Error"
+            and err_tel.get("error") == "GEMINI_API_KEY not set",
+            f"rc={rc}\n{err_tel!r}\n{out}\n{err}",
+        )
 
-    def log_message(self, *args):
-        pass
+        # Test 11: .config/gcloud and ADC excluded, src/gcloud kept
+        adc_dir = work / "adc_test"
+        (adc_dir / ".config" / "gcloud").mkdir(parents=True)
+        (adc_dir / "src" / "gcloud").mkdir(parents=True)
+        (
+            adc_dir / ".config" / "gcloud" / "application_default_credentials.json"
+        ).write_text(
+            '{"client_secret": "xyz", "refresh_token": "abc"}\n', encoding="utf-8"
+        )
+        (adc_dir / "src" / "gcloud" / "client.py").write_text(
+            "class Client: pass\n", encoding="utf-8"
+        )
+
+        rc, out, err = run_inproc(
+            oracle, ["--dry-run", "Audit gcloud config", str(adc_dir)], env=base_env
+        )
+        combined = out + err
+        tap.check(
+            ".config/gcloud and ADC are filtered while src/gcloud source code is retained",
+            rc == 0
+            and "src/gcloud/client.py" in combined
+            and "application_default_credentials" not in combined
+            and ".config/gcloud" not in combined,
+            f"rc={rc}\n{combined}",
+        )
+
+        # Test 12: /tmp alias paths accepted without symlink rejection (cleanly unlinked)
+        tmp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir="/tmp",
+                prefix="oracle_test_file_",
+                suffix=".txt",
+                delete=False,
+            ) as tf:
+                tf.write("Valid temporary notes\n")
+                tmp_path = Path(tf.name)
+            rc, out, err = run_inproc(
+                oracle, ["--dry-run", "Inspect temp note", str(tmp_path)], env=base_env
+            )
+            combined = out + err
+            tap.check(
+                "macOS /tmp path is canonicalized and accepted without symlink rejection",
+                rc == 0
+                and "oracle_test_file_" in combined
+                and "skipping symlink" not in combined,
+                f"rc={rc}\n{combined}",
+            )
+        finally:
+            if tmp_path is not None:
+                with contextlib.suppress(OSError):
+                    tmp_path.unlink()
+
+        # Test 13: Preprocessing failure (>1MB text) writes error telemetry
+        preproc_tel = work / "preproc_telemetry.json"
+        oversized = work / "oversized.txt"
+        oversized.write_text("A" * (1024 * 1024 + 64), encoding="utf-8")
+        rc, out, err = run_inproc(
+            oracle,
+            ["Oversized context", str(oversized)],
+            env={**base_env, "AGENT_TELEMETRY_JSON": str(preproc_tel)},
+        )
+        pre_data = (
+            json.loads(preproc_tel.read_text(encoding="utf-8"))
+            if preproc_tel.is_file()
+            else {}
+        )
+        tap.check(
+            "Preprocessing failure emits error telemetry to AGENT_TELEMETRY_JSON",
+            rc != 0
+            and pre_data.get("status") == "Error"
+            and pre_data.get("error") == "text context exceeds 1MB threshold",
+            f"rc={rc}\n{pre_data!r}\n{out}\n{err}",
+        )
+
+        # Test 14: Online API generation path (skips cleanly offline/without key)
+        if (
+            not os.environ.get("GEMINI_API_KEY")
+            or os.environ.get("AGENT_OFFLINE") == "1"
+        ):
+            tap.skip("GEMINI_API_KEY not set (offline test mode)")
+        else:
+            note = work / "note.txt"
+            note.write_text("Regular note content\n", encoding="utf-8")
+            p14 = run_cli(["Say hello in one word", str(note)], env=base_env)
+            tap.check(
+                "Text-only invocation successfully streams answer from API",
+                p14.returncode == 0,
+                f"rc={p14.returncode}\n{p14.stdout}\n{p14.stderr}",
+            )
+
+        # Test 15: Native Markdown fences, directory manifest, discrete telemetry
+        format_dir = work / "format_test"
+        (format_dir / "src").mkdir(parents=True)
+        (format_dir / "src" / "hello.py").write_text(
+            "def hello(): return 'world'\n", encoding="utf-8"
+        )
+        (format_dir / "README.md").write_text("# Documentation\n", encoding="utf-8")
+        tel_fmt = work / "telemetry_fmt.json"
+
+        rc, out, err = run_inproc(
+            oracle,
+            ["--dry-run", "Test native markdown format", str(format_dir)],
+            env={**base_env, "AGENT_TELEMETRY_JSON": str(tel_fmt)},
+        )
+        fmt_data = (
+            json.loads(tel_fmt.read_text(encoding="utf-8")) if tel_fmt.is_file() else {}
+        )
+        payload_path = extract_payload_path(out + err)
+        payload_text = (
+            payload_path.read_text(encoding="utf-8")
+            if payload_path and payload_path.is_file()
+            else ""
+        )
+        tap.check(
+            "Inlined context natively generates Markdown code fences, directory manifest, and telemetry",
+            rc == 0
+            and fmt_data.get("context_format") == "markdown"
+            and fmt_data.get("manifest") is True
+            and fmt_data.get("segmentation") == "discrete"
+            and '<context format="markdown">' in payload_text
+            and "### Directory Manifest" in payload_text
+            and "Directory Structure:" in payload_text
+            and "#### File: " in payload_text,
+            f"rc={rc}\n{fmt_data!r}\n{out}\n{err}",
+        )
+
+        # Test 16: Request timeout bound scaling, token estimation, and malformed --request-timeout
+        # (tautological constant checks dropped; retry exhaustion verified behaviorally below)
+        class FakePart:
+            def __init__(self, text: str | None = None):
+                self.text = text
+
+        rc_bad_to, out_bad_to, err_bad_to = run_inproc(
+            oracle, ["--dry-run", "--request-timeout", "soon", "prompt"], env=base_env
+        )
+        tap.check(
+            "Scales request timeout with input and rejects a malformed --request-timeout",
+            oracle.request_timeout(0) == 180.0
+            and oracle.request_timeout(240_000) == 420.0
+            and oracle.request_timeout(240_000, 30) == 30.0
+            and oracle.request_timeout(240_000, 0) is None
+            and oracle.approx_tokens("abcd" * 100) == 101
+            and oracle.approx_tokens([FakePart("abcd" * 100), FakePart(None)]) == 101
+            and rc_bad_to != 0
+            and "oracle: error: --request-timeout: invalid number of seconds: 'soon'"
+            in (out_bad_to + err_bad_to),
+            f"rc={rc_bad_to}\n{out_bad_to}\n{err_bad_to}",
+        )
+
+        # Test 17: Stalled streaming request abandoned, logged, and retried (mocked sleep cuts 2s backoff)
+        stall_posts = 0
+        stall_lock = threading.Lock()
+        stall_release = threading.Event()
+
+        class StallThenRecover(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                nonlocal stall_posts
+                self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                with stall_lock:
+                    stall_posts += 1
+                    count = stall_posts
+                if count == 1:
+                    stall_release.wait(timeout=10.0)
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.end_headers()
+                payload = (
+                    b'data: {"candidates": [{"content": {"parts": [{"text":'
+                    b' "Recovered oracle answer"}], "role": "model"}}],'
+                    b' "usageMetadata": {"promptTokenCount": 12,'
+                    b' "candidatesTokenCount": 3}}\r\n\r\n'
+                )
+                self.wfile.write(payload)
+                self.wfile.flush()
+
+            def log_message(self, *args):
+                pass
+
+        stall_tel = work / "stall_telemetry.json"
+        sleep_calls: list[float] = []
+        try:
+            with (
+                serve_http(StallThenRecover) as (_, stall_url),
+                mock.patch.object(oracle.time, "sleep", side_effect=sleep_calls.append),
+            ):
+                stall_rc, stall_out, stall_err = run_inproc(
+                    oracle,
+                    ["--request-timeout", "1", "Summarize"],
+                    env={
+                        **base_env,
+                        "GEMINI_API_KEY": "stub",
+                        "GOOGLE_GEMINI_BASE_URL": stall_url,
+                        "AGENT_TELEMETRY_JSON": str(stall_tel),
+                    },
+                )
+        finally:
+            stall_release.set()
+
+        # Also verify behavioral retry-budget exhaustion (MAX_TIMEOUT_RETRIES = 3 -> 4 attempts, [2,4,8]s)
+        exhaust_sleep: list[float] = []
+
+        class AlwaysTimeoutClient:
+            def __init__(self, api_key=None):
+                self.models = self
+
+            def generate_content_stream(self, **kwargs):
+                raise httpx.ReadTimeout("stalled")
+
+        with (
+            mock.patch.object(oracle.genai, "Client", AlwaysTimeoutClient),
+            mock.patch.object(oracle.time, "sleep", side_effect=exhaust_sleep.append),
+        ):
+            ex_rc, ex_out, ex_err = run_inproc(
+                oracle,
+                ["--no-serialize", "--request-timeout", "1", "Summarize"],
+                env={**base_env, "GEMINI_API_KEY": "stub"},
+            )
+
+        stall_tel_data = (
+            json.loads(stall_tel.read_text(encoding="utf-8"))
+            if stall_tel.is_file()
+            else {}
+        )
+        tap.check(
+            "Abandons a stalled streaming request, logs it, and retries to completion",
+            stall_rc == 0
+            and stall_posts == 2
+            and sleep_calls == [2.0]
+            and "warning: API request timed out after 1s" in stall_err
+            and "Recovered oracle answer" in stall_out
+            and stall_tel_data.get("request_timeouts", [{}])[0].get("timeout_seconds")
+            == 1.0
+            and ex_rc != 0
+            and exhaust_sleep == [2.0, 4.0, 8.0]
+            and "4 attempt(s)" in (ex_out + ex_err),
+            f"stall_rc={stall_rc} posts={stall_posts} sleeps={sleep_calls}\n"
+            f"{stall_out}\n{stall_err}\nex_rc={ex_rc} ex_sleeps={exhaust_sleep}\n{ex_err}",
+        )
+
+        # Test 18: --no-search updates tools summary, telemetry, and serialized system_instruction
+        default_tel = work / "default_search.json"
+        nosearch_tel = work / "no_search.json"
+        rc_d, out_d, err_d = run_inproc(
+            oracle,
+            ["--dry-run", "Default search prompt"],
+            env={**base_env, "AGENT_TELEMETRY_JSON": str(default_tel)},
+        )
+        rc_ns, out_ns, err_ns = run_inproc(
+            oracle,
+            ["--dry-run", "--no-search", "Closed world prompt"],
+            env={**base_env, "AGENT_TELEMETRY_JSON": str(nosearch_tel)},
+        )
+        default_p = extract_payload_path(out_d + err_d)
+        nosearch_p = extract_payload_path(out_ns + err_ns)
+        default_xml = default_p.read_text(encoding="utf-8") if default_p else ""
+        nosearch_xml = nosearch_p.read_text(encoding="utf-8") if nosearch_p else ""
+        default_tel_obj = (
+            json.loads(default_tel.read_text(encoding="utf-8"))
+            if default_tel.is_file()
+            else {}
+        )
+        nosearch_tel_obj = (
+            json.loads(nosearch_tel.read_text(encoding="utf-8"))
+            if nosearch_tel.is_file()
+            else {}
+        )
+        tap.check(
+            "--no-search updates tools summary, telemetry, and serialized system_instruction",
+            rc_d == 0
+            and rc_ns == 0
+            and "Tools:          search" in out_d
+            and default_tel_obj.get("tools") == "search"
+            and "Use the Google Search tool" in default_xml
+            and "formulating search queries" in default_xml
+            and "Tools:          none" in out_ns
+            and nosearch_tel_obj.get("tools") == "none"
+            and "External web grounding is disabled" in nosearch_xml
+            and "Google Search" not in nosearch_xml
+            and "formulating search queries" not in nosearch_xml,
+            f"rc=({rc_d},{rc_ns})\n{out_d}\n{out_ns}",
+        )
+
+        # Test 19: --search / --no-search override order, --no-search --code, --maps --no-search
+        rc_re, out_re, err_re = run_inproc(
+            oracle,
+            ["--dry-run", "--no-search", "--search", "Re-enable search"],
+            env=base_env,
+        )
+        rc_dis, out_dis, err_dis = run_inproc(
+            oracle,
+            ["--dry-run", "--search", "--no-search", "Disable search"],
+            env=base_env,
+        )
+        code_tel = work / "code_only.json"
+        rc_co, out_co, _ = run_inproc(
+            oracle,
+            ["--dry-run", "--no-search", "--code", "Compute only"],
+            env={**base_env, "AGENT_TELEMETRY_JSON": str(code_tel)},
+        )
+        rc_mp, out_mp, err_mp = run_inproc(
+            oracle, ["--dry-run", "--maps", "--no-search", "Maps query"], env=base_env
+        )
+        re_p = extract_payload_path(out_re + err_re)
+        dis_p = extract_payload_path(out_dis + err_dis)
+        mp_p = extract_payload_path(out_mp + err_mp)
+        re_xml = re_p.read_text(encoding="utf-8") if re_p else ""
+        dis_xml = dis_p.read_text(encoding="utf-8") if dis_p else ""
+        mp_xml = mp_p.read_text(encoding="utf-8") if mp_p else ""
+        code_tel_obj = (
+            json.loads(code_tel.read_text(encoding="utf-8"))
+            if code_tel.is_file()
+            else {}
+        )
+        tap.check(
+            "Flag override order (--no-search/--search), --no-search --code, and --maps interaction work",
+            rc_re == 0
+            and rc_dis == 0
+            and rc_co == 0
+            and rc_mp == 0
+            and "Tools:          search" in out_re
+            and "Use the Google Search tool" in re_xml
+            and "Tools:          none" in out_dis
+            and "Google Search" not in dis_xml
+            and "Tools:          code" in out_co
+            and code_tel_obj.get("tools") == "code"
+            and "Tools:          maps" in out_mp
+            and "Google Maps tool" in mp_xml,
+            f"rc=({rc_re},{rc_dis},{rc_co},{rc_mp})",
+        )
+
+        # Test 20: '-' stdin positional works with --no-search while unknown '-*' flags are rejected
+        # (kept as real CLI subprocess smoke check for piped stdin handling)
+        p_stdin = run_cli(
+            ["--dry-run", "--no-search", "Summarize stdin only", "-"],
+            env=base_env,
+            stdin_text="Piped stdin reference text\n",
+        )
+        p_unk = run_cli(["--dry-run", "--unknown-option", "Prompt"], env=base_env)
+        stdin_p = extract_payload_path(p_stdin.stdout + p_stdin.stderr)
+        stdin_xml = stdin_p.read_text(encoding="utf-8") if stdin_p else ""
+        tap.check(
+            "Preserves '-' stdin positional argument and rejects unrecognized options",
+            p_stdin.returncode == 0
+            and "<stdin>" in p_stdin.stdout
+            and "Piped stdin reference text" in stdin_xml
+            and p_unk.returncode != 0
+            and "oracle: error: unrecognized option: --unknown-option"
+            in (p_unk.stdout + p_unk.stderr),
+            f"stdin_rc={p_stdin.returncode} unk_rc={p_unk.returncode}\n{p_stdin.stdout}\n{p_unk.stderr}",
+        )
+
+        # Test 21: Wire API requests attach exact expected tools, thinking level, and X-Server-Timeout
+        captured_reqs: list[dict] = []
+        cap_lock = threading.Lock()
+
+        class CaptureHandler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                obj = json.loads(body)
+                obj["_x_server_timeout"] = self.headers.get("X-Server-Timeout")
+                with cap_lock:
+                    captured_reqs.append(obj)
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.end_headers()
+                payload = (
+                    b'data: {"candidates": [{"content": {"parts": [{"text":'
+                    b' "Stub answer"}], "role": "model"}}],'
+                    b' "usageMetadata": {"promptTokenCount": 10,'
+                    b' "candidatesTokenCount": 2}}\r\n\r\n'
+                )
+                self.wfile.write(payload)
+                self.wfile.flush()
+
+            def log_message(self, *args):
+                pass
+
+        with serve_http(CaptureHandler) as (_, cap_url):
+            cap_env = {
+                **base_env,
+                "GEMINI_API_KEY": "stub",
+                "GOOGLE_GEMINI_BASE_URL": cap_url,
+            }
+            c1 = run_inproc(oracle, ["--no-serialize", "Default run"], env=cap_env)
+            c2 = run_inproc(
+                oracle, ["--no-serialize", "--no-search", "Closed run"], env=cap_env
+            )
+            c3 = run_inproc(
+                oracle,
+                ["--no-serialize", "--no-search", "--code", "Code run"],
+                env=cap_env,
+            )
+            c4 = run_inproc(
+                oracle,
+                [
+                    "--no-serialize",
+                    "--thinking",
+                    "medium",
+                    "--request-timeout",
+                    "2400",
+                    "Medium run",
+                ],
+                env=cap_env,
+            )
+
+        def thinking_level_of(req: dict) -> str:
+            cfg = req.get("generationConfig", {}).get("thinkingConfig", {})
+            return str(cfg.get("thinkingLevel", cfg.get("thinking_level", ""))).upper()
+
+        wire_ok = (
+            all(r[0] == 0 for r in (c1, c2, c3, c4))
+            and len(captured_reqs) == 4
+            and (
+                "googleSearch" in json.dumps(captured_reqs[0].get("tools"))
+                or "google_search" in json.dumps(captured_reqs[0].get("tools"))
+            )
+            and "codeExecution" not in json.dumps(captured_reqs[0].get("tools"))
+            and "code_execution" not in json.dumps(captured_reqs[0].get("tools"))
+            and not captured_reqs[1].get("tools")
+            and "Google Search"
+            not in json.dumps(captured_reqs[1].get("systemInstruction", ""))
+            and (
+                "codeExecution" in json.dumps(captured_reqs[2].get("tools"))
+                or "code_execution" in json.dumps(captured_reqs[2].get("tools"))
+            )
+            and "googleSearch" not in json.dumps(captured_reqs[2].get("tools"))
+            and "google_search" not in json.dumps(captured_reqs[2].get("tools"))
+            and thinking_level_of(captured_reqs[0]) == "HIGH"
+            and thinking_level_of(captured_reqs[3]) == "MEDIUM"
+            and captured_reqs[0].get("_x_server_timeout") == "1800"
+            and captured_reqs[3].get("_x_server_timeout") == "2400"
+            and "| search | thinking=high |" in c1[2]
+            and "| none | thinking=high |" in c2[2]
+            and "| code | thinking=high |" in c3[2]
+            and "| search | thinking=medium |" in c4[2]
+        )
+        tap.check(
+            "Sends expected wire tools and thinking config and status lines",
+            wire_ok,
+            f"reqs={len(captured_reqs)}",
+        )
+
+        # Test 22: --thinking defaults to high, honors ORACLE_THINKING, flag wins over env
+        td_tel = work / "think_default.json"
+        tf_tel = work / "think_flag.json"
+        r22a = run_inproc(
+            oracle,
+            ["--dry-run", "Default thinking"],
+            env={
+                **base_env,
+                "ORACLE_THINKING": None,
+                "AGENT_TELEMETRY_JSON": str(td_tel),
+            },
+        )
+        r22b = run_inproc(
+            oracle,
+            ["--dry-run", "--thinking", "medium", "Medium thinking"],
+            env={
+                **base_env,
+                "ORACLE_THINKING": None,
+                "AGENT_TELEMETRY_JSON": str(tf_tel),
+            },
+        )
+        r22c = run_inproc(
+            oracle,
+            ["--dry-run", "Env thinking"],
+            env={**base_env, "ORACLE_THINKING": "low"},
+        )
+        r22d = run_inproc(
+            oracle,
+            ["--dry-run", "--thinking", "medium", "Flag beats env"],
+            env={**base_env, "ORACLE_THINKING": "low"},
+        )
+        r22e = run_inproc(
+            oracle,
+            ["--dry-run", "--thinking=low", "Equals form"],
+            env={**base_env, "ORACLE_THINKING": None},
+        )
+        td_obj = (
+            json.loads(td_tel.read_text(encoding="utf-8")) if td_tel.is_file() else {}
+        )
+        tf_obj = (
+            json.loads(tf_tel.read_text(encoding="utf-8")) if tf_tel.is_file() else {}
+        )
+        tap.check(
+            "--thinking default, flag, --thinking=LEVEL, ORACLE_THINKING, and flag-over-env precedence",
+            all(r[0] == 0 for r in (r22a, r22b, r22c, r22d, r22e))
+            and "Thinking:       high" in r22a[1]
+            and td_obj.get("thinking_level") == "high"
+            and "Thinking:       medium" in r22b[1]
+            and tf_obj.get("thinking_level") == "medium"
+            and "Thinking:       low" in r22c[1]
+            and "Thinking:       medium" in r22d[1]
+            and "Thinking:       low" in r22e[1],
+            f"rcs={[r[0] for r in (r22a, r22b, r22c, r22d, r22e)]}",
+        )
+
+        # Test 23: --thinking rejects invalid levels and missing arguments with error telemetry
+        bad_tel = work / "think_bad.json"
+        r23a = run_inproc(
+            oracle,
+            ["--dry-run", "--thinking", "extreme", "Bad level"],
+            env={**base_env, "AGENT_TELEMETRY_JSON": str(bad_tel)},
+        )
+        r23b = run_inproc(
+            oracle,
+            ["--dry-run", "Bad env level"],
+            env={**base_env, "ORACLE_THINKING": "none"},
+        )
+        r23c = run_inproc(
+            oracle, ["--dry-run", "Missing level", "--thinking"], env=base_env
+        )
+        r23d = run_inproc(
+            oracle, ["--dry-run", "--thinking=", "Empty level"], env=base_env
+        )
+        bad_obj = (
+            json.loads(bad_tel.read_text(encoding="utf-8")) if bad_tel.is_file() else {}
+        )
+        tap.check(
+            "--thinking rejects invalid levels and missing arguments with error telemetry",
+            r23a[0] != 0
+            and "oracle: error: --thinking: invalid level: 'extreme' (choose from high, medium, low)"
+            in r23a[2]
+            and bad_obj.get("status") == "Error"
+            and "--thinking: invalid level" in bad_obj.get("error", "")
+            and r23b[0] != 0
+            and "oracle: error: --thinking: invalid level: 'none'" in r23b[2]
+            and r23c[0] != 0
+            and "oracle: error: --thinking requires an argument" in r23c[2]
+            and r23d[0] != 0
+            and "oracle: error: --thinking requires an argument" in r23d[2],
+            f"rcs={[r[0] for r in (r23a, r23b, r23c, r23d)]}",
+        )
+
+        # Tests 24-26: share one scripted HTTP server cleaned up in finally
+        limit_script: list[str] = []
+        limit_reqs: list[dict] = []
+        limit_lock = threading.Lock()
+
+        class ScriptedHandler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                with limit_lock:
+                    limit_reqs.append(json.loads(body))
+                    idx = min(len(limit_reqs), len(limit_script)) - 1
+                    line = limit_script[idx]
+                text, reason, token = line.split("|")
+                parts = [{"text": "Planning the answer.", "thought": True}]
+                if text:
+                    parts.append({"text": text})
+                candidate: dict = {
+                    "content": {"parts": parts, "role": "model"},
+                    "finishReason": reason,
+                }
+                if token:
+                    candidate["continuationToken"] = token
+                chunk = {
+                    "candidates": [candidate],
+                    "usageMetadata": {
+                        "promptTokenCount": 10,
+                        "candidatesTokenCount": 5,
+                        "thoughtsTokenCount": 7,
+                    },
+                }
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.end_headers()
+                self.wfile.write(b"data: " + json.dumps(chunk).encode() + b"\r\n\r\n")
+                self.wfile.flush()
+
+            def log_message(self, *args):
+                pass
+
+        limit_state = work / "limit-state"
+        limit_tel = work / "limit.tel"
+
+        with serve_http(ScriptedHandler) as (_, limit_url):
+
+            def run_limited(lines: list[str], extra_args: list[str]):
+                with limit_lock:
+                    limit_script[:] = lines
+                    limit_reqs.clear()
+                if limit_tel.exists():
+                    limit_tel.unlink()
+                return run_inproc(
+                    oracle,
+                    [*extra_args, "Write a long report"],
+                    env={
+                        "ORACLE_MAX_OUTPUT_TOKENS": None,
+                        "GEMINI_API_KEY": "stub",
+                        "GOOGLE_GEMINI_BASE_URL": limit_url,
+                        "AGENT_TELEMETRY_JSON": str(limit_tel),
+                        "ORACLE_STATE_DIR": str(limit_state),
+                    },
+                )
+
+            # Test 24: CONTINUATION hops merged into one streamed answer
+            rc24, out24, err24 = run_limited(
+                ["Part one, |CONTINUATION|dG9rZW4tMQ==", "part two.|STOP|"], []
+            )
+            ans24_p = extract_answer_path(err24)
+            tel24 = (
+                json.loads(limit_tel.read_text(encoding="utf-8"))
+                if limit_tel.is_file()
+                else {}
+            )
+            reqs24 = list(limit_reqs)
+            ok24 = (
+                rc24 == 0
+                and len(reqs24) == 2
+                and all(
+                    r["generationConfig"]["maxOutputTokens"] == 131072
+                    and len(r["contents"]) == 1
+                    for r in reqs24
+                )
+                and "continuationToken" not in reqs24[0]
+                and reqs24[1].get("continuationToken") == "dG9rZW4tMQ=="
+                and tel24.get("status") == "Succeeded"
+                and tel24.get("max_output_tokens") == 131072
+                and tel24.get("finish_reason") == "STOP"
+                and tel24.get("continuation_tokens") == 1
+                and tel24.get("truncated") is False
+                and tel24.get("candidate_tokens") == 10
+                and tel24.get("thinking_tokens") == 14
+                and "Part one, part two." in out24.splitlines()
+                and ans24_p is not None
+                and ans24_p.read_text(encoding="utf-8") == "Part one, part two."
+            )
+            tap.check(
+                "Sends max_output_tokens and streams CONTINUATION hops as one answer",
+                ok24,
+                f"rc={rc24} reqs={len(reqs24)} tel={tel24!r}\n{out24}\n{err24}",
+            )
+
+            # Test 25: MAX_TOKENS keeps partial answer, warns, and exits 1
+            rc25, out25, err25 = run_limited(
+                ["Cut off mid-sent|MAX_TOKENS|"], ["--max-output-tokens", "70000"]
+            )
+            ans25_p = extract_answer_path(err25)
+            ans25_txt = ans25_p.read_text(encoding="utf-8") if ans25_p else ""
+            tel25 = (
+                json.loads(limit_tel.read_text(encoding="utf-8"))
+                if limit_tel.is_file()
+                else {}
+            )
+            reqs25 = list(limit_reqs)
+            ok25 = (
+                rc25 == 1
+                and len(reqs25) == 1
+                and reqs25[0]["generationConfig"]["maxOutputTokens"] == 70000
+                and "Cut off mid-sent" in out25.splitlines()
+                and "warning: answer is incomplete: the response reached --max-output-tokens (70000, thinking included)"
+                in err25
+                and tel25.get("truncated") is True
+                and tel25.get("finish_reason") == "MAX_TOKENS"
+                and tel25.get("status") == "Error"
+                and "answer is incomplete" in tel25.get("error", "")
+                and "Cut off mid-sent" in ans25_txt.splitlines()
+                and "<!-- oracle: answer is incomplete" in ans25_txt
+            )
+            tap.check(
+                "Warns, keeps the partial answer, and exits 1 when the output ceiling is reached",
+                ok25,
+                f"rc={rc25} tel={tel25!r}\n{out25}\n{err25}",
+            )
+
+            # Test 26: empty answer exits 1 with a warning
+            rc26a, _, err26a = run_limited(["|MAX_TOKENS|"], [])
+            rc26b, _, err26b = run_limited(["|STOP|"], [])
+            tel26b = (
+                json.loads(limit_tel.read_text(encoding="utf-8"))
+                if limit_tel.is_file()
+                else {}
+            )
+            ok26 = (
+                rc26a == 1
+                and "warning: answer is incomplete" in err26a
+                and "saved answer" not in err26a
+                and rc26b == 1
+                and "warning: the model returned no answer text (finish reason: STOP)"
+                in err26b
+                and "the model returned no answer text" in tel26b.get("error", "")
+            )
+            tap.check(
+                "An empty answer exits 1 with a warning",
+                ok26,
+                f"rc=({rc26a},{rc26b})\n{err26a}\n{err26b}\n{tel26b!r}",
+            )
+
+        # Test 27: --max-output-tokens default, ORACLE_MAX_OUTPUT_TOKENS, precedence, validation
+        mo_tel = work / "mo_default.json"
+        r27_def = run_inproc(
+            oracle,
+            ["--dry-run", "Default"],
+            env={
+                **base_env,
+                "ORACLE_MAX_OUTPUT_TOKENS": None,
+                "AGENT_TELEMETRY_JSON": str(mo_tel),
+            },
+        )
+        r27_env = run_inproc(
+            oracle,
+            ["--dry-run", "Env"],
+            env={**base_env, "ORACLE_MAX_OUTPUT_TOKENS": "262144"},
+        )
+        r27_both = run_inproc(
+            oracle,
+            ["--dry-run", "--max-output-tokens=65536", "Both"],
+            env={**base_env, "ORACLE_MAX_OUTPUT_TOKENS": "262144"},
+        )
+        r27_bad = run_inproc(
+            oracle, ["--dry-run", "--max-output-tokens", "128k", "Bad"], env=base_env
+        )
+        r27_badenv = run_inproc(
+            oracle,
+            ["--dry-run", "Bad env"],
+            env={**base_env, "ORACLE_MAX_OUTPUT_TOKENS": "0"},
+        )
+        r27_miss = run_inproc(
+            oracle, ["--dry-run", "Missing", "--max-output-tokens"], env=base_env
+        )
+        mo_tel_obj = (
+            json.loads(mo_tel.read_text(encoding="utf-8")) if mo_tel.is_file() else {}
+        )
+        tap.check(
+            "--max-output-tokens default, ORACLE_MAX_OUTPUT_TOKENS, precedence, and validation",
+            r27_def[0] == 0
+            and r27_env[0] == 0
+            and r27_both[0] == 0
+            and "Max Output:     131072 tokens" in r27_def[1]
+            and mo_tel_obj.get("max_output_tokens") == 131072
+            and "Max Output:     262144 tokens" in r27_env[1]
+            and "Max Output:     65536 tokens" in r27_both[1]
+            and r27_bad[0] != 0
+            and "oracle: error: --max-output-tokens: invalid token count: '128k'"
+            in r27_bad[2]
+            and r27_badenv[0] != 0
+            and "oracle: error: --max-output-tokens: invalid token count: '0'"
+            in r27_badenv[2]
+            and r27_miss[0] != 0
+            and "oracle: error: --max-output-tokens requires an argument"
+            in r27_miss[2],
+            f"rcs={[r[0] for r in (r27_def, r27_env, r27_both, r27_bad, r27_badenv, r27_miss)]}",
+        )
+
+    return 1 if tap.failed else 0
 
 
-server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), ScriptedHandler)
-server.daemon_threads = True
-with open(sys.argv[1], "w") as f:
-    f.write(str(server.server_address[1]))
-server.serve_forever()
-PYEOF
-: >"$LIMIT_SCRIPT"
-python3 "$WORK/limit_server.py" "$LIMIT_PORT_FILE" "$LIMIT_LOG" "$LIMIT_SCRIPT" &
-LIMIT_PID=$!
-for _ in 1 2 3 4 5 6 7 8 9 10; do
-  [[ -s "$LIMIT_PORT_FILE" ]] && break
-  sleep 0.5
-done
-LIMIT_URL="http://127.0.0.1:$(cat "$LIMIT_PORT_FILE" 2>/dev/null)"
-
-# Runs oracle against the stub with the given response script; sets
-# limit_status and leaves stdout, stderr and telemetry in $WORK/limit.*.
-run_limited() {
-  printf '%s\n' "$1" >"$LIMIT_SCRIPT"
-  shift
-  : >"$LIMIT_LOG"
-  rm -f "$WORK/limit.tel"
-  limit_status=0
-  env -u ORACLE_MAX_OUTPUT_TOKENS GEMINI_API_KEY=stub \
-    GOOGLE_GEMINI_BASE_URL="$LIMIT_URL" \
-    AGENT_TELEMETRY_JSON="$WORK/limit.tel" \
-    ORACLE_STATE_DIR="$WORK/limit-state" \
-    "$BIN" "$@" "Write a long report" >"$WORK/limit.out" 2>"$WORK/limit.err" ||
-    limit_status=$?
-}
-
-# Test 24: max_output_tokens is sent (131072 by default), and a response the
-# API ends with CONTINUATION is resumed with its continuation token and
-# streamed as one answer
-run_limited "$(printf 'Part one, |CONTINUATION|dG9rZW4tMQ==\npart two.|STOP|')"
-LIMIT_ANSWER=$(grep -o '[^ ]*answer_[^ ]*\.md' "$WORK/limit.err" 2>/dev/null || true)
-VERIFY_LIMIT="$WORK/verify_limit.out"
-python3 - "$LIMIT_LOG" "$WORK/limit.tel" >"$VERIFY_LIMIT" 2>&1 <<'PYEOF' || true
-import json
-import sys
-from pathlib import Path
-
-reqs = [json.loads(x) for x in Path(sys.argv[1]).read_text().splitlines()]
-assert len(reqs) == 2, f"expected 2 requests, got {len(reqs)}"
-for req in reqs:
-    assert req["generationConfig"]["maxOutputTokens"] == 131072, req["generationConfig"]
-    assert len(req["contents"]) == 1, req["contents"]
-assert "continuationToken" not in reqs[0], reqs[0].keys()
-assert reqs[1].get("continuationToken") == "dG9rZW4tMQ==", reqs[1].keys()
-tel = json.loads(Path(sys.argv[2]).read_text())
-assert tel["status"] == "Succeeded", tel
-assert tel["max_output_tokens"] == 131072, tel
-assert tel["finish_reason"] == "STOP", tel
-assert tel["continuation_tokens"] == 1, tel
-assert tel["truncated"] is False, tel
-assert tel["candidate_tokens"] == 10 and tel["thinking_tokens"] == 14, tel
-print("LIMIT_OK")
-PYEOF
-if [[ $limit_status -eq 0 ]] &&
-  grep -q "^LIMIT_OK$" "$VERIFY_LIMIT" &&
-  grep -q "^Part one, part two\.$" "$WORK/limit.out" &&
-  [[ -n "$LIMIT_ANSWER" && -f "$LIMIT_ANSWER" ]] &&
-  [[ "$(cat "$LIMIT_ANSWER")" == "Part one, part two." ]]; then
-  echo "ok 24 - Sends max_output_tokens and streams CONTINUATION hops as one answer"
-else
-  echo "not ok 24 - Long-decode continuation was not followed (exit $limit_status)"
-  sed 's/^/# /' "$VERIFY_LIMIT" "$WORK/limit.out" "$WORK/limit.err"
-fi
-
-# Test 25: a response that reaches the output ceiling (MAX_TOKENS) keeps the
-# partial answer on stdout and in the saved answer, warns, records the
-# truncation in telemetry, and exits 1
-run_limited "Cut off mid-sent|MAX_TOKENS|" --max-output-tokens 70000
-LIMIT_ANSWER=$(grep -o '[^ ]*answer_[^ ]*\.md' "$WORK/limit.err" 2>/dev/null || true)
-if [[ $limit_status -eq 1 ]] &&
-  grep -q '"maxOutputTokens": 70000' "$LIMIT_LOG" &&
-  grep -q "^Cut off mid-sent$" "$WORK/limit.out" &&
-  grep -q "warning: answer is incomplete: the response reached --max-output-tokens (70000, thinking included)" "$WORK/limit.err" &&
-  grep -q '"truncated": true' "$WORK/limit.tel" &&
-  grep -q '"finish_reason": "MAX_TOKENS"' "$WORK/limit.tel" &&
-  grep -q '"status": "Error"' "$WORK/limit.tel" &&
-  grep -q '"error": "answer is incomplete' "$WORK/limit.tel" &&
-  [[ -n "$LIMIT_ANSWER" && -f "$LIMIT_ANSWER" ]] &&
-  grep -q "^Cut off mid-sent$" "$LIMIT_ANSWER" &&
-  grep -q "<!-- oracle: answer is incomplete" "$LIMIT_ANSWER"; then
-  echo "ok 25 - Warns, keeps the partial answer, and exits 1 when the output ceiling is reached"
-else
-  echo "not ok 25 - Truncated answer was not reported (exit $limit_status)"
-  sed 's/^/# /' "$WORK/limit.out" "$WORK/limit.err"
-fi
-
-# Test 26: a response with no answer text at all is an error, not an empty
-# success
-empty_ok=0
-run_limited "|MAX_TOKENS|"
-if [[ $limit_status -eq 1 ]] &&
-  grep -q "warning: answer is incomplete" "$WORK/limit.err" &&
-  ! grep -q "saved answer" "$WORK/limit.err"; then
-  empty_ok=1
-fi
-run_limited "|STOP|"
-if [[ $empty_ok -eq 1 && $limit_status -eq 1 ]] &&
-  grep -q "warning: the model returned no answer text (finish reason: STOP)" "$WORK/limit.err" &&
-  grep -q '"error": "the model returned no answer text' "$WORK/limit.tel"; then
-  echo "ok 26 - An empty answer exits 1 with a warning"
-else
-  echo "not ok 26 - Empty answer was not reported (exit $limit_status)"
-  sed 's/^/# /' "$WORK/limit.out" "$WORK/limit.err"
-fi
-kill "$LIMIT_PID" 2>/dev/null || true
-wait "$LIMIT_PID" 2>/dev/null || true
-
-# Test 27: --max-output-tokens defaults to 131072, honors
-# ORACLE_MAX_OUTPUT_TOKENS, the flag wins over the env, and a malformed count
-# is rejected
-MO_DEFAULT_OUT="$WORK/mo_default.out"
-MO_DEFAULT_TEL="$WORK/mo_default.json"
-MO_ENV_OUT="$WORK/mo_env.out"
-MO_BOTH_OUT="$WORK/mo_both.out"
-MO_BAD_OUT="$WORK/mo_bad.out"
-MO_BADENV_OUT="$WORK/mo_badenv.out"
-MO_MISSING_OUT="$WORK/mo_missing.out"
-if env -u ORACLE_MAX_OUTPUT_TOKENS AGENT_TELEMETRY_JSON="$MO_DEFAULT_TEL" \
-  "$BIN" --dry-run "Default" >"$MO_DEFAULT_OUT" 2>&1 &&
-  ORACLE_MAX_OUTPUT_TOKENS=262144 "$BIN" --dry-run "Env" >"$MO_ENV_OUT" 2>&1 &&
-  ORACLE_MAX_OUTPUT_TOKENS=262144 "$BIN" --dry-run --max-output-tokens=65536 "Both" >"$MO_BOTH_OUT" 2>&1 &&
-  grep -q "Max Output:     131072 tokens" "$MO_DEFAULT_OUT" &&
-  grep -q '"max_output_tokens": 131072' "$MO_DEFAULT_TEL" &&
-  grep -q "Max Output:     262144 tokens" "$MO_ENV_OUT" &&
-  grep -q "Max Output:     65536 tokens" "$MO_BOTH_OUT" &&
-  ! "$BIN" --dry-run --max-output-tokens 128k "Bad" >"$MO_BAD_OUT" 2>&1 &&
-  grep -q "oracle: error: --max-output-tokens: invalid token count: '128k'" "$MO_BAD_OUT" &&
-  ! ORACLE_MAX_OUTPUT_TOKENS=0 "$BIN" --dry-run "Bad env" >"$MO_BADENV_OUT" 2>&1 &&
-  grep -q "oracle: error: --max-output-tokens: invalid token count: '0'" "$MO_BADENV_OUT" &&
-  ! "$BIN" --dry-run "Missing" --max-output-tokens >"$MO_MISSING_OUT" 2>&1 &&
-  grep -q "oracle: error: --max-output-tokens requires an argument" "$MO_MISSING_OUT"; then
-  echo "ok 27 - --max-output-tokens default, ORACLE_MAX_OUTPUT_TOKENS, precedence, and validation"
-else
-  echo "not ok 27 - --max-output-tokens handling did not match expectations"
-  sed 's/^/# /' "$MO_DEFAULT_OUT" "$MO_ENV_OUT" "$MO_BOTH_OUT" "$MO_BAD_OUT" "$MO_BADENV_OUT" "$MO_MISSING_OUT"
-fi
+if __name__ == "__main__":
+    sys.exit(main())
