@@ -23,7 +23,9 @@ notes). Know who the report is for before extracting work:
   and drop the scaffolding.
 - **Read Task Outcomes:** Read `## Outcome` and `## Findings` in relevant `done`
   and `cancelled` task records—do not summarize from task titles or `STATUS.md`
-  alone.
+  alone. Distinguish local findings from external actions: if a bug report,
+  review, or partner note was drafted or noticed locally (`todo`) rather than
+  filed or sent, do not phrase it as already reported.
 - **Check Live Blockers:** Before listing `blocked` work, check `wait_for` gates
   (`taskgo check`, plus any external trackers `taskgo check` does not poll) so
   items that already landed are reported as shipped or unblocked rather than
@@ -42,11 +44,20 @@ notes). Know who the report is for before extracting work:
   table schemas, and check codes into clear domain terms, and mention how
   something was tested only when the method itself is the point (such as
   hardware power measurement rather than unit-test assertion counts).
-- **Impact Over Effort:** Report outcomes rather than intermediate steps, dead
-  ends, or routine plumbing. Roll all tasks for one initiative into a single
-  primary bullet (with incidental fixes in a brief clause or `Also, ...`
-  bullet), and track a bug's whole progression in one bullet naming the furthest
-  state it reached (reported, acknowledged, fix in progress, shipped).
+- **Select, Don't Compress:** Treat each bullet as a signpost to the work, not
+  an abstract of every chart, edge case, or file inside it. Write 1–3 short,
+  easy-to-read sentences per bullet with at most one or two headline numbers,
+  and name one or two representative examples rather than full inventories
+  (*"shipped five doc fixes, including ..."* rather than listing all five). Aim
+  for a quick 1–2 minute scan overall (roughly 300–600 words for a weekly or
+  biweekly update, with `Next` trimmed to the few sharpest upcoming moves or
+  blockers), reaching that length by leaving out secondary sub-findings,
+  diagnostic backstory, and minor checks—never by packing more clauses or
+  parenthetical stats into each sentence.
+- **Impact Over Effort:** Roll all tasks for one initiative into a single
+  primary bullet (dropping routine plumbing and dead ends), and track a bug's
+  whole progression in one bullet naming the furthest state it reached
+  (reported, acknowledged, fix in progress, shipped).
 - **Honest, Optional Links:** Link an external artifact (PR, issue, published
   doc, or dashboard) only when the reader can open it and it represents what the
   author produced, changed, or is tracking as a real product or upstream
@@ -78,13 +89,16 @@ report cold:
    only because a project folder had commits—especially enabling queries,
    scripts, or setup left behind after the substantive study they supported was
    merged into another bullet.
-1. **Proportion and precision:** Check that wording stripped of code jargon does
-   not overstate blast radius (for example, saying a release *"breaks"* when
-   only a secondary path fails), and that minor chores do not get equal billing
-   with major deliverables.
-1. **Attribution and link sanity:** Spot-check cited links and issue IDs against
-   their underlying tasks to confirm each is an audience-relevant output or
-   upstream bug rather than input reading material or administrative plumbing.
+1. **Readability and length:** If the draft runs past ~600 words or any bullet
+   stacks more than two numbers, inline lists, or long multi-clause sentences,
+   delete secondary sub-findings, backstory, and minor checks until every
+   sentence reads effortlessly—never compress prose into dense telegraphese to
+   keep extra facts.
+1. **Precision and attribution:** Check that stripped wording does not overstate
+   blast radius or phrase `todo` follow-ups as already sent, and spot-check
+   cited links and issue IDs against their underlying tasks to confirm each is
+   an audience-relevant output or upstream bug rather than input reading
+   material or administrative plumbing.
 
 ## Example Layout
 
@@ -96,11 +110,10 @@ the structure and length to fit the audience and `AGENTS.md`:
     - Last [Week | Two Weeks | Month]
         - **[Domain 1]**
             - **[Stakeholder or Area]**
-                - **[Outcome or Milestone]**: [Plain-English summary of what shipped or was found and why it matters, linking the deliverable when published].
-                - **[Bug or Investigation]**: [Finding, impact, and furthest upstream state reached].
+                - **[Outcome or Milestone]**: [1-3 short plain-English sentences on the main takeaway and why it matters, linking the deliverable when published].
+                - **[Bug or Investigation]**: [Main finding, impact, and furthest upstream state reached].
         - **[Domain 2]**
             - **[Outcome]**: [What changed and who or what it unblocks].
-            - Also [concise secondary fix or upstream bug filed along the way].
     - Next
-        - **[Domain 1]**: [Immediate handoff, review follow-up, or active external dependency].
+        - **[Domain 1]**: [Top upcoming handoff or active external dependency].
 ```
