@@ -629,34 +629,79 @@ fi
 # HTTP and over --stdio, the stdio one while its client holds stdin open.
 MCP_SIGNALS=$(
   "$TASKGO_PY" -c '
-import json, signal, socket, subprocess, sys, time
+import json, signal, socket, subprocess, sys, time, urllib.request
+
 py, mcp_bin, repo, branch, log = sys.argv[1:]
 init = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}}}
-s = socket.socket(); s.bind(("127.0.0.1", 0)); port = s.getsockname()[1]; s.close()
+# Keep the launch-time port probe off any proxy the environment configures.
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 common = [py, mcp_bin, "--root", repo, "mcp", "--no-fetch", "--branch", branch, "--log", log]
-for transport, extra in (("stdio", ["--stdio"]), ("http", ["--auth", "none", "--port", str(port)])):
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        proc = subprocess.Popen(common + extra, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+
+def free_port():
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+def wait_http(proc, port):
+    """A full initialize proves this is our server, not a port squatter, and
+    that its signal handlers are installed."""
+    for _ in range(1500):
+        if proc.poll() is not None:
+            raise RuntimeError(f"server exited {proc.returncode} before initialize")
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{port}/mcp",
+            data=json.dumps(init).encode(),
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/event-stream",
+            },
+        )
         try:
-            if transport == "stdio":
-                proc.stdin.write((json.dumps(init) + "\n").encode())
-                proc.stdin.flush()
-                assert b"serverInfo" in proc.stdout.readline(), transport
-            else:
-                for _ in range(1500):
-                    try:
-                        socket.create_connection(("127.0.0.1", port), 1).close()
-                        break
-                    except OSError:
-                        time.sleep(0.02)
-            proc.send_signal(sig)
-            print(transport, sig.name, proc.wait(timeout=10))
-        except Exception as e:
-            print(transport, sig.name, repr(e))
-        finally:
-            if proc.poll() is None:
-                proc.kill()
-                proc.wait()
+            with opener.open(request, timeout=1) as reply:
+                if b"serverInfo" in reply.read():
+                    return
+        except OSError:
+            pass
+        time.sleep(0.02)
+    raise RuntimeError("server never answered initialize")
+
+def stop(sig, extra, port, name):
+    err = open(f"{log}.{name}.err", "w")
+    proc = subprocess.Popen(common + extra, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=err)
+    try:
+        if port is None:
+            proc.stdin.write((json.dumps(init) + "\n").encode())
+            proc.stdin.flush()
+            if b"serverInfo" not in proc.stdout.readline():
+                raise RuntimeError("server did not answer initialize")
+        else:
+            wait_http(proc, port)
+        proc.send_signal(sig)
+        return proc.wait(timeout=30)
+    except Exception as e:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        err.close()
+        with open(err.name) as fh:
+            raise RuntimeError(f"{e!r}; server stderr: {fh.read().strip()}") from None
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        err.close()
+
+for sig in (signal.SIGINT, signal.SIGTERM):
+    try:
+        print("stdio", sig.name, stop(sig, ["--stdio"], None, f"stdio-{sig.name}"))
+    except Exception as e:
+        print("stdio", sig.name, repr(e))
+for sig in (signal.SIGINT, signal.SIGTERM):
+    port = free_port()
+    try:
+        print("http", sig.name, stop(sig, ["--auth", "none", "--port", str(port)], port, f"http-{sig.name}"))
+    except Exception as e:
+        print("http", sig.name, repr(e))
 ' "$MCP_PY" "$MCP_BIN" "$TREE_REPO" "$(git -C "$TREE_REPO" branch --show-current)" "$TEST_ROOT/mcp-signals.jsonl" 2>&1
 ) || true
 if [[ $MCP_SIGNALS == $'stdio SIGINT 0\nstdio SIGTERM 0\nhttp SIGINT 0\nhttp SIGTERM 0' ]]; then
@@ -664,6 +709,8 @@ if [[ $MCP_SIGNALS == $'stdio SIGINT 0\nstdio SIGTERM 0\nhttp SIGINT 0\nhttp SIG
 else
   echo 'not ok 12 - mcp exits 0 on SIGINT and SIGTERM over both transports'
   printf '# %s\n' "$MCP_SIGNALS"
+  # prove hides a failing test's stdout comment lines unless run verbosely.
+  printf 'taskgo mcp signals: %s\n' "$MCP_SIGNALS" >&2
 fi
 
 # A symlink to either script, or to the skill directory, still finds the server
