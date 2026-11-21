@@ -414,11 +414,12 @@ agent doctor [--quiet]    # check configuration and stale running versions
 ```
 
 - **`install`** runs each vendor's own installer (`curl URL | bash`, downloaded
-  first), with any switch it offers to leave shell startup files alone
-  (OpenCode's `--no-modify-path`) or to skip prompts (`CODEX_NON_INTERACTIVE`).
-  Claude Code, Codex and agy offer no such PATH switch, so their installers may
-  still edit shell profiles; `doctor` then reports where each agent landed and
-  notes when this shell's PATH does not reach it.
+  first) with the switches it offers: OpenCode's `--no-modify-path`, Codex's
+  `CODEX_NON_INTERACTIVE` and `CODEX_INSTALL_DIR`, and agy's `-d`, so agents
+  land in `~/.local/bin` where there is a choice (OpenCode always uses
+  `~/.opencode/bin`). Installers may still edit shell startup files, so
+  `install` prints a note after each one. `doctor` reports where each agent
+  landed and notes when this shell's PATH does not reach it.
 - **`sync`** takes each file from the last of `~/.dotfiles`, `~/.private` and
   `~/.corp` that has it, as `install.sh` does. It never replaces a real file
   with a link; `doctor` reports one instead.

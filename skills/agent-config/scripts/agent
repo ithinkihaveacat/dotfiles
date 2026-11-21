@@ -42,9 +42,10 @@ Context, hooks and plugins come from the dotfiles checkout that holds this
 script and its overlays (.private, .corp) beside it; a file in a later overlay
 wins. sync never replaces a real file or directory with a link; doctor reports
 it instead. install runs each vendor's own installer (downloaded first, then run), with
-any switch it offers to leave shell startup files alone; installers without
-one may still edit them. doctor reports where each agent is and whether this
-shell finds it. install
+the switches it offers to leave shell startup files alone, skip prompts and
+install into ~/.local/bin. Installers may still edit shell startup files, so
+install says so after each one. doctor reports where each agent is and
+whether this shell finds it. install
 skips an agent already installed.
 update ignores install.sh's once-a-day schedule. install and update need the
 network: install refuses, and update skips, when AGENT_OFFLINE is set. Nothing here restarts a running agent: doctor
@@ -308,20 +309,24 @@ sync_names() { # name...
 # install
 
 # Each vendor's own installer, as its site gives it ('curl URL | bash'), plus
-# the switches it supports for a smoother install. Where an installer offers a
-# switch that leaves shell startup files alone, use it; where it offers none,
-# let it do what it does, and doctor reports the result.
+# the switches it supports for a smoother install: leave shell startup files
+# alone, skip prompts, and install into ~/.local/bin. Where an installer offers
+# no such switch, let it do what it does, and doctor reports the result.
 installer() { # name -> "ENV<TAB>INTERPRETER<TAB>URL<TAB>ARGS" ("-" for none)
   case $1 in
-    # No switch: 'claude install' takes only a version.
+    # No switches: 'claude install' takes only a version; it installs into
+    # ~/.local/bin.
     claude) printf -- '-\tbash\thttps://claude.ai/install.sh\t-\n' ;;
     # No PATH switch: it adds a PATH block to .bashrc or .zshrc unless
-    # ~/.local/bin is already on PATH. CODEX_NON_INTERACTIVE skips prompts.
-    codex) printf 'CODEX_NON_INTERACTIVE=1\tsh\thttps://chatgpt.com/codex/install.sh\t-\n' ;;
-    # /install installs OpenCode 1 only; /v2/install is OpenCode 2.
+    # ~/.local/bin is already on PATH.
+    codex)
+      printf 'CODEX_NON_INTERACTIVE=1 CODEX_INSTALL_DIR=%s\tsh\thttps://chatgpt.com/codex/install.sh\t-\n' \
+        "$HOME/.local/bin"
+      ;;
+    # No location switch: it installs into ~/.opencode/bin.
     opencode) printf -- '-\tbash\thttps://opencode.ai/v2/install\t--no-modify-path\n' ;;
     # 'agy install' has --skip-path, but this script does not pass it on.
-    agy) printf -- '-\tbash\thttps://antigravity.google/cli/install.sh\t-\n' ;;
+    agy) printf -- '-\tbash\thttps://antigravity.google/cli/install.sh\t-d %s\n' "$HOME/.local/bin" ;;
   esac
 }
 
@@ -335,7 +340,7 @@ sign_in() { # name -> how to finish setting the agent up
 }
 
 do_install() {
-  local name bin vars interpreter url args script status failed=0
+  local name bin vars interpreter url args script status ran failed=0
   if [ "$explicit" -eq 0 ]; then
     die_sub "NAME required (claude, codex, opencode or agy); e.g. '$cmd install opencode'"
   fi
@@ -359,8 +364,10 @@ do_install() {
     printf '%s install: %s from %s\n' "$cmd" "$name" "$url"
     script=$(mktemp)
     status=0
+    ran=0
     # Download first: a dropped connection must not run half a script.
     if curl --connect-timeout 15 --max-time 300 -fsSL -o "$script" "$url"; then
+      ran=1
       # shellcheck disable=SC2086 # vars and args are word lists
       env $vars "$interpreter" "$script" $args || status=$?
     else
@@ -368,6 +375,11 @@ do_install() {
       status=1
     fi
     rm -f "$script"
+    if [ "$ran" -eq 1 ]; then
+      # Some installers edit shell startup files, switches or not; say so.
+      printf '%s install: note: the %s installer may have changed shell startup files (such as ~/.bashrc, ~/.bash_profile, ~/.profile, ~/.zshrc or fish config); check them if that matters\n' \
+        "$cmd" "$name" >&2
+    fi
     if [ "$status" -ne 0 ]; then
       printf '%s install: %s installer failed (exit %d)\n' "$cmd" "$name" "$status" >&2
       failed=1
