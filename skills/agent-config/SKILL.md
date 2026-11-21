@@ -43,9 +43,9 @@ they see, what they may do, and what they are told. It consists of:
    their own instructions, skills, rules and tools, through harness plugins for
    Claude Code, OpenCode and local Codex (`plugins/andon`).
 1. **`agent`**: The agent CLI manager. Lists and installs the agents (Claude
-   Code, Codex, OpenCode, Antigravity), links shared context, hooks and plugins
-   into their configuration, runs their own updaters, and checks them, including
-   for processes still running a version that an update replaced.
+   Code, Codex, OpenCode, Antigravity) and browse, runs their own updaters, and
+   checks them: the configuration `install.sh` links into them, and processes
+   still running a version that an update replaced.
 
 ______________________________________________________________________
 
@@ -400,34 +400,35 @@ ______________________________________________________________________
 
 ## Managing Agent CLIs (`agent`)
 
-The `agent` tool (symlinked in `bin/`) handles the agent programs themselves, on
-any machine. `install.sh` runs `agent sync` in its `agents` feature,
-`agent update` in its daily `upgrades`, and `agent doctor --quiet` at the end of
-a workstation run.
+The `agent` tool (symlinked in `bin/`) handles installing and maintaining the
+agent programs, and browse, on any machine. Their configuration is
+`install.sh`'s job: its `agents` feature links `etc/agents` context, hooks and
+plugins into each installed agent, and its `browse` feature configures an
+installed browse for OpenCode. `install.sh` does not call `agent`.
 
 ```bash
 agent list                # installed or not, version, path
-agent install NAME...     # vendor installer, then sync
-agent sync [NAME...]      # link etc/agents context, hooks and plugins
+agent install NAME...     # vendor installer
 agent update [NAME...]    # run each installed agent's own updater, now
 agent doctor [--quiet]    # check configuration and stale running versions
 ```
 
 - **`install`** runs each vendor's own installer (`curl URL | bash`, downloaded
   first) with the switches it offers: OpenCode's `--no-modify-path`, Codex's
-  `CODEX_NON_INTERACTIVE` and `CODEX_INSTALL_DIR`, and agy's `-d`, so agents
-  land in `~/.local/bin` where there is a choice (OpenCode always uses
-  `~/.opencode/bin`). Installers may still edit shell startup files, so
-  `install` prints a note after each one. `doctor` reports where each agent
-  landed and notes when this shell's PATH does not reach it.
-- **`sync`** takes each file from the last of `~/.dotfiles`, `~/.private` and
-  `~/.corp` that has it, as `install.sh` does. It never replaces a real file
-  with a link; `doctor` reports one instead.
-- **`doctor`** groups processes still running a replaced executable by systemd
-  unit, so a service with many sessions gives one warning with one restart
-  command. It never restarts anything: restarting a Remote Control service ends
-  every session it runs, including the caller's. `--quiet` prints only warnings
-  and failures, and nothing when healthy.
+  `CODEX_NON_INTERACTIVE` and `CODEX_INSTALL_DIR`, and browse's
+  `-y -a opencode --no-open --no-wait --no-modify-path` (plus `--remote` on a
+  headless machine). Claude Code and agy install into `~/.local/bin` by default;
+  OpenCode always uses `~/.opencode/bin`. Installers may still edit shell
+  startup files, so `install` prints a note after each one, then points to
+  `install.sh --only agents` for the configuration.
+- **`update`** is for running by hand: the agents mostly update themselves or
+  prompt in their own UI, and browse updates itself while OpenCode runs.
+- **`doctor`** reports where each agent landed (and when this shell's PATH does
+  not reach it), checks the links `install.sh` makes, and groups processes still
+  running a replaced executable by systemd unit, so a service with many sessions
+  gives one warning with one restart command. It never restarts anything:
+  restarting a Remote Control service ends every session it runs, including the
+  caller's. `--quiet` prints only warnings and failures.
 - Long-running services that serve agents to other machines are host-specific
   and stay out of this tool; an overlay manages them.
 

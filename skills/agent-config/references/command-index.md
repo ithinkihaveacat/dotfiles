@@ -405,13 +405,11 @@ The block below is `scripts/agent --help`, kept in sync by
 ```text
 Usage: agent COMMAND [NAME...] [OPTIONS]
 
-Install, update, configure and check the coding agent CLIs on this machine.
+Install, update and check the coding agent CLIs on this machine.
 
 Commands:
   list [NAME...]      Table of agents: installed or not, version, path
-  install NAME...     Install agents with their vendors' installers, then sync
-  sync [NAME...]      Link shared context, hooks and plugins into each
-                      installed agent's configuration
+  install NAME...     Install agents with their vendors' installers
   update [NAME...]    Run each installed agent's own updater
   doctor [NAME...]    Check each installed agent: configuration linked, and
                       (on Linux) no process still running an executable that
@@ -422,6 +420,7 @@ Names:
   codex               OpenAI Codex CLI
   opencode            OpenCode
   agy                 Antigravity CLI
+  browse              browse, the browser-control MCP server, for OpenCode
 
 Options:
   --quiet             doctor: print only warnings and failures, with their
@@ -431,23 +430,20 @@ Options:
 Examples:
   agent list
   agent install opencode
-  agent sync
   agent update claude
   agent doctor
   agent doctor --quiet
 
-Context, hooks and plugins come from the dotfiles checkout that holds this
-script and its overlays (.private, .corp) beside it; a file in a later overlay
-wins. sync never replaces a real file or directory with a link; doctor reports
-it instead. install runs each vendor's own installer (downloaded first, then run), with
-the switches it offers to leave shell startup files alone, skip prompts and
-install into ~/.local/bin. Installers may still edit shell startup files, so
-install says so after each one. doctor reports where each agent is and
-whether this shell finds it. install
-skips an agent already installed.
-update ignores install.sh's once-a-day schedule. install and update need the
-network: install refuses, and update skips, when AGENT_OFFLINE is set. Nothing here restarts a running agent: doctor
-says which processes need a restart and how.
+Configuration (shared context, hooks, plugins) is install.sh's job: its
+agents feature links it, and doctor checks it against the dotfiles checkout
+that holds this script and its overlays (.private, .corp). install runs each
+vendor's own installer (downloaded first, then run) with the switches it
+offers to leave shell startup files alone and skip prompts; installers may
+still edit shell startup files, so install says so after each one. Agents
+mostly update themselves; update runs their updaters now. install and update
+need the network: install refuses, and update skips, when AGENT_OFFLINE is
+set. Nothing here restarts a running agent: doctor says which processes need
+a restart and how.
 ```
 
 <!-- /generated -->

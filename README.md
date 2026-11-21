@@ -335,17 +335,17 @@ A failing feature is reported and the rest still run; the exit status is
 non-zero if any failed. Set `AGENT_OFFLINE=1` to skip every feature that needs
 the network.
 
-Agent CLIs are handled by `agent` (from the `agent-config` skill): the `agents`
-feature runs `agent sync`, `upgrades` runs `agent update`, and the default run
-ends with `agent-doctor`, which runs `agent doctor --quiet`. It prints nothing
-when the agents are healthy, and otherwise each problem with its fix, such as a
-service still running a version an update replaced. It never restarts an agent,
-and its findings never fail the run.
+`install.sh` configures the coding agents but does not install or update them:
+the `agents` feature links shared context, hooks and plugins into each installed
+agent (leaving a real file in the way alone unless `--force` is given), and
+`browse` configures an installed browse for OpenCode. Installing, updating and
+checking them is `agent` (from the `agent-config` skill): `agent install NAME`,
+`agent update`, `agent doctor`.
 
-Before that, `overlay-hooks` runs each overlay's `update` script
-(`~/.private/update`, `~/.corp/update`) when it is executable, for host-specific
-checks such as long-running agent services. Keep these hooks read-only, quick,
-and non-fatal.
+The default run ends with `overlay-hooks`, which runs each overlay's `update`
+script (`~/.private/update`, `~/.corp/update`) when it is executable, for
+host-specific checks such as long-running agent services. Keep these hooks
+read-only, quick, and non-fatal.
 
 ### Developing and publishing changes
 

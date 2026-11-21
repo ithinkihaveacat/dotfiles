@@ -92,11 +92,10 @@ FEATURES=(
   'cloudflare|-|Cloudflare'"'"'s cf CLI (beta) from npm, with its telemetry off'
   'app-host|-|cloudflared, for a host serving apps through a Cloudflare Tunnel'
   'skills|workstation cloud|Link skill and permission plugins; apply default skills'
-  'agents|workstation|Link agent context and hooks (agent sync), and synchronize permissions'
-  'browse|workstation|Install browse, the browser-control MCP server, for OpenCode'
+  'agents|workstation|Link agent context, hooks and plugins, and synchronize permissions'
+  'browse|workstation|Configure browse, the browser-control MCP server, for OpenCode'
   'upgrades|workstation|Daily: upgrade packages, uv, ruby-build, Android and agent CLIs'
   'overlay-hooks|workstation|Run each overlay'"'"'s update hook'
-  'agent-doctor|workstation|Report problems with installed coding agents, such as a stale running version'
 )
 PROFILES="workstation cloud ci"
 PACKAGE_FEATURES="base cli-extras services media android ruby"
@@ -1668,9 +1667,8 @@ function feature_upgrades {
       compose-preview update || echo "warning: compose-preview update failed" >&2
   fi
 
-  # The agent CLIs: 'agent update' runs each installed one's own updater.
-  heading "agent CLIs upgrade"
-  x "$SRCDIR/bin/agent" update || echo "warning: agent update failed" >&2
+  # The agent CLIs update themselves (or prompt in their own UI); 'agent update'
+  # updates them by hand.
 }
 
 # uv: installs uv itself, then fetches everything this repository's uv-based
@@ -2323,11 +2321,123 @@ function cleanup_legacy_gemini_skills_json {
   fi
 }
 
-function feature_agents {
-  heading "agents"
+# Link $2 to $1 for an agent's configuration. A real file or directory in the
+# way is left in place with a warning (it may hold the owner's own edits),
+# unless --force is given; the feature then reports a failure.
+function link_agent_file {
+  local src=$1 dst=$2
+  if [ -L "$dst" ] && [ "$(readlink "$dst")" = "$src" ]; then
+    return 0
+  fi
+  if [ -e "$dst" ] && [ ! -L "$dst" ] && [ "$FORCE" -ne 1 ]; then
+    echo "warning: $dst is a real file, not a link to $src; leaving it in place" >&2
+    echo "hint: move it aside, or re-run with --force" >&2
+    AGENT_LINK_FAILED=1
+    return 0
+  fi
+  xmkdir "$(dirname "$dst")"
+  x rm -rf "$dst"
+  x ln -s "$src" "$dst"
+}
 
-  # Link shared context, hooks and plugins into each installed agent.
-  x "$SRCDIR/bin/agent" sync || echo "warning: agent sync failed" >&2
+# link_agent_file for the overlay copy of $1, when an overlay has one.
+function link_agent_path {
+  local src
+  src=$(overlay_path "$1") || return 0
+  link_agent_file "$src" "$2"
+}
+
+# Register an overlay script as a Claude Code PreToolUse command hook in
+# ~/.claude/settings.json, leaving every other setting and hook in place. The
+# file is rewritten only when no hook for MATCHER already runs the script.
+function register_claude_pretooluse_hook {
+  local rel=$1
+  local matcher=$2
+  local settings="$HOME/.claude/settings.json"
+  local cmd tmp
+
+  cmd=$(overlay_path "$rel") || return 0
+  if ! exists jq; then
+    echo "warning: jq not found; Claude Code hook $rel not registered" >&2
+    return 0
+  fi
+
+  xmkdir "$HOME/.claude"
+  if [ ! -s "$settings" ]; then
+    (umask 077 && echo '{}' >"$settings")
+  fi
+  if ! jq -e 'type == "object"' "$settings" >/dev/null 2>&1; then
+    echo "warning: $settings is not a JSON object; Claude Code hook $rel not registered" >&2
+    return 0
+  fi
+
+  if jq -e --arg cmd "$cmd" --arg matcher "$matcher" \
+    'any(.hooks.PreToolUse[]?; .matcher == $matcher and any(.hooks[]?; .command == $cmd))' \
+    "$settings" >/dev/null; then
+    return 0
+  fi
+
+  # Drop stale registrations of the same script (another matcher), then add.
+  tmp="$settings.tmp.$$"
+  if (umask 077 && jq --arg cmd "$cmd" --arg matcher "$matcher" '
+    .hooks.PreToolUse = (
+      ((.hooks.PreToolUse // [])
+        | map(.hooks |= map(select(.command != $cmd)))
+        | map(select((.hooks // []) | length > 0)))
+      + [{matcher: $matcher, hooks: [{type: "command", command: $cmd, timeout: 5}]}]
+    )' "$settings" >"$tmp") && x mv "$tmp" "$settings"; then
+    echo "registered Claude Code PreToolUse hook: $cmd" >&2
+  else
+    rm -f "$tmp"
+    echo "warning: failed to register Claude Code hook in $settings" >&2
+  fi
+}
+
+function feature_agents {
+  local agents_context
+
+  heading "agents"
+  AGENT_LINK_FAILED=0
+
+  # Symlink user-supplied context for all agents
+  agents_context=$(overlay_path "etc/agents/AGENTS.md") || agents_context=""
+  if [ -n "$agents_context" ]; then
+    if is_codex_agent; then
+      xmkdir "$HOME/.codex"
+      link_agent_file "$agents_context" "$HOME/.codex/AGENTS.md"
+    fi
+    if exists agy; then
+      xmkdir "$HOME/.gemini"
+      link_agent_file "$agents_context" "$HOME/.gemini/GEMINI.md"
+    fi
+    if exists claude; then
+      xmkdir "$HOME/.claude"
+      link_agent_file "$agents_context" "$HOME/.claude/CLAUDE.md"
+    fi
+    if is_opencode_agent; then
+      xmkdir "$XDG_CONFIG_HOME/opencode"
+      link_agent_file "$agents_context" "$XDG_CONFIG_HOME/opencode/AGENTS.md"
+    fi
+  fi
+
+  if exists agy; then
+    xmkdir "$HOME/.gemini/config"
+    link_agent_path "etc/agents/agy/hooks.json" "$HOME/.gemini/config/hooks.json"
+    link_agent_path "etc/agents/agy/hooks" "$HOME/.gemini/config/hooks"
+  fi
+
+  if is_opencode_agent; then
+    xmkdir "$XDG_CONFIG_HOME/opencode/plugins"
+    link_agent_path \
+      "etc/agents/opencode/plugins/ensure-commit-hooks.ts" \
+      "$XDG_CONFIG_HOME/opencode/plugins/ensure-commit-hooks.ts"
+    link_agent_path "skills/agent-config/plugins/andon/opencode" \
+      "$XDG_CONFIG_HOME/opencode/plugins/andon"
+  fi
+
+  if exists claude; then
+    register_claude_pretooluse_hook "etc/agents/hooks/ensure-commit-hooks" Bash
+  fi
 
   heading "agent permissions"
 
@@ -2371,6 +2481,7 @@ function feature_agents {
       fi
     done
   fi
+  return "$AGENT_LINK_FAILED"
 }
 
 function feature_browse {
@@ -2378,12 +2489,14 @@ function feature_browse {
   local args=(--no-open --no-wait --no-modify-path -y -a opencode)
   local relay=0
 
-  # browse is useful only to an agent that can call it, and this repository
-  # configures it for OpenCode only. Browsers on other computers reach the
-  # relay when there is no local browser to pair (a headless machine with no
-  # local VNC desktop or explicit loopback browse config), and are paired once
-  # by hand with `browse pair`.
+  # Configuration only: 'agent install browse' installs it. browse is useful
+  # only to an agent that can call it, and this repository configures it for
+  # OpenCode only. Browsers on other computers reach the relay when there is no
+  # local browser to pair (a headless machine with no local VNC desktop or
+  # explicit loopback browse config), and are paired once by hand with
+  # `browse pair`.
   is_opencode_agent || return 0
+  [ -x "$browse_bin" ] || return 0
   heading "browse"
 
   if [ "$PLATFORM" = linux ] && [ -z "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] &&
@@ -2394,23 +2507,13 @@ function feature_browse {
     args=(--remote "${args[@]}")
   fi
 
-  if [ ! -x "$browse_bin" ]; then
-    if is_offline; then
-      skip_offline "browse"
-      return 0
-    fi
-    # -a opencode keeps browse's installer from adding the MCP server to every
-    # agent it detects (Claude Code, Codex, Gemini CLI, Antigravity). --no-open
-    # and --no-wait keep an unattended install from opening a browser or
-    # waiting for the extension; --no-modify-path leaves PATH to the dotfiles.
-    run_installer https://opencode.ai/browse/install "${args[@]}" || return 1
-  fi
-
+  # -a opencode keeps browse from adding its MCP server to every agent it
+  # detects; --no-open and --no-wait keep it from opening a browser or waiting
+  # for the extension; --no-modify-path leaves PATH to the dotfiles.
   # OpenCode's entry carries OPENCODE_BROWSER_RUNTIME=auto-update, so browse
   # updates itself while OpenCode runs; do not run `browse update` here, which
   # reruns the full installer and may reconfigure agents. Add or refresh the
-  # entry when a separately installed browse is present, and open the relay on
-  # a headless machine that was set up before this feature existed.
+  # entry, and open the relay on a headless machine.
   if ! jq -e '.mcp.servers.browse.environment.OPENCODE_BROWSER_RUNTIME == "auto-update"' \
     "$XDG_CONFIG_HOME/opencode/opencode.json" >/dev/null 2>&1; then
     x "$browse_bin" install "${args[@]}" || return 1
@@ -2430,14 +2533,6 @@ function feature_overlay_hooks {
     heading "corp update"
     "$DSTDIR/.corp/update"
   fi
-}
-
-# Report problems with the installed agents, such as a process still running a
-# version that an update replaced; nothing when they are healthy. Findings never
-# fail the run: restarting an agent is the owner's call.
-function feature_agent_doctor {
-  heading "agent doctor"
-  "$SRCDIR/bin/agent" doctor --quiet || true
 }
 
 # Ask for sudo upfront, but only if a selected feature will use it on Linux:
