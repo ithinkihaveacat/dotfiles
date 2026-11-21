@@ -11,6 +11,7 @@ Install, update, configure and check the coding agent CLIs on this machine.
 
 Commands:
   list [NAME...]      Table of agents: installed or not, version, path
+  install NAME...     Install agents with their vendors' installers, then sync
   sync [NAME...]      Link shared context, hooks and plugins into each
                       installed agent's configuration
   update [NAME...]    Run each installed agent's own updater
@@ -31,6 +32,7 @@ Options:
 
 Examples:
   $cmd list
+  $cmd install opencode
   $cmd sync
   $cmd update claude
   $cmd doctor
@@ -39,8 +41,14 @@ Examples:
 Context, hooks and plugins come from the dotfiles checkout that holds this
 script and its overlays (.private, .corp) beside it; a file in a later overlay
 wins. sync never replaces a real file or directory with a link; doctor reports
-it instead. update ignores install.sh's once-a-day schedule and skips every
-agent when AGENT_OFFLINE is set. Nothing here restarts a running agent: doctor
+it instead. install runs each vendor's own installer (downloaded first, then run), with
+the switches it offers to leave shell startup files alone, skip prompts and
+install into ~/.local/bin. Installers may still edit shell startup files, so
+install says so after each one. doctor reports where each agent is and
+whether this shell finds it. install
+skips an agent already installed.
+update ignores install.sh's once-a-day schedule. install and update need the
+network: install refuses, and update skips, when AGENT_OFFLINE is set. Nothing here restarts a running agent: doctor
 says which processes need a restart and how.
 EOF
   exit 0
@@ -90,7 +98,8 @@ for arg in "$@"; do
     *) die "unknown name '$arg' (expected claude, codex, opencode or agy)" ;;
   esac
 done
-if [ ${#names[@]} -eq 0 ]; then
+explicit=${#names[@]}
+if [ "$explicit" -eq 0 ]; then
   read -r -a names <<<"$ALL_NAMES"
 fi
 if [ "$quiet" -eq 1 ] && [ "$command" != doctor ]; then
@@ -98,6 +107,21 @@ if [ "$quiet" -eq 1 ] && [ "$command" != doctor ]; then
 fi
 
 XDG_CONFIG_HOME=${XDG_CONFIG_HOME:-$HOME/.config}
+
+# The vendors' installers put agents in ~/.local/bin, which a non-login shell
+# may not have on PATH. Append it, so callers' own PATH entries still win.
+CALLER_PATH=$PATH
+case ":$PATH:" in
+  *":$HOME/.local/bin:"*) ;;
+  *) PATH="$PATH:$HOME/.local/bin" ;;
+esac
+
+is_offline() {
+  case $(printf '%s' "${AGENT_OFFLINE:-}" | tr '[:upper:]' '[:lower:]') in
+    1 | true | yes | on) return 0 ;;
+  esac
+  return 1
+}
 
 # ---------------------------------------------------------------------------
 # source roots: the dotfiles checkout holding this script, then its overlays
@@ -264,9 +288,11 @@ sync_claude_hook() {
   fi
 }
 
-do_sync() {
+do_sync() { sync_names "${names[@]}"; }
+
+sync_names() { # name...
   local name rel dst src failed=0
-  for name in "${names[@]}"; do
+  for name in "$@"; do
     [ -n "$(agent_bin "$name")" ] || continue
     while IFS=$'\t' read -r rel dst; do
       src=$(overlay_path "$rel") || continue
@@ -280,16 +306,107 @@ do_sync() {
 }
 
 # ---------------------------------------------------------------------------
+# install
+
+# Each vendor's own installer, as its site gives it ('curl URL | bash'), plus
+# the switches it supports for a smoother install: leave shell startup files
+# alone, skip prompts, and install into ~/.local/bin. Where an installer offers
+# no such switch, let it do what it does, and doctor reports the result.
+installer() { # name -> "ENV<TAB>INTERPRETER<TAB>URL<TAB>ARGS" ("-" for none)
+  case $1 in
+    # No switches: 'claude install' takes only a version; it installs into
+    # ~/.local/bin.
+    claude) printf -- '-\tbash\thttps://claude.ai/install.sh\t-\n' ;;
+    # No PATH switch: it adds a PATH block to .bashrc or .zshrc unless
+    # ~/.local/bin is already on PATH.
+    codex)
+      printf 'CODEX_NON_INTERACTIVE=1 CODEX_INSTALL_DIR=%s\tsh\thttps://chatgpt.com/codex/install.sh\t-\n' \
+        "$HOME/.local/bin"
+      ;;
+    # No location switch: it installs into ~/.opencode/bin.
+    opencode) printf -- '-\tbash\thttps://opencode.ai/v2/install\t--no-modify-path\n' ;;
+    # 'agy install' has --skip-path, but this script does not pass it on.
+    agy) printf -- '-\tbash\thttps://antigravity.google/cli/install.sh\t-d %s\n' "$HOME/.local/bin" ;;
+  esac
+}
+
+sign_in() { # name -> how to finish setting the agent up
+  case $1 in
+    claude) printf 'run claude once to sign in' ;;
+    codex) printf 'run codex login' ;;
+    opencode) printf 'run opencode auth login, or opencode to pick a provider' ;;
+    agy) printf 'run agy once to sign in' ;;
+  esac
+}
+
+do_install() {
+  local name bin vars interpreter url args script status ran failed=0
+  if [ "$explicit" -eq 0 ]; then
+    die_sub "NAME required (claude, codex, opencode or agy); e.g. '$cmd install opencode'"
+  fi
+  if is_offline; then
+    die_sub "needs the network, and AGENT_OFFLINE is set"
+  fi
+  command -v curl >/dev/null 2>&1 || {
+    printf '%s: curl not found\n' "$cmd" >&2
+    exit 127
+  }
+  for name in "${names[@]}"; do
+    bin=$(agent_bin "$name")
+    if [ -n "$bin" ]; then
+      printf '%s install: %s is already installed at %s; %s update %s updates it\n' \
+        "$cmd" "$name" "$(tilde "$bin")" "$cmd" "$name"
+      continue
+    fi
+    IFS=$'\t' read -r vars interpreter url args <<<"$(installer "$name")"
+    [ "$vars" != - ] || vars=
+    [ "$args" != - ] || args=
+    printf '%s install: %s from %s\n' "$cmd" "$name" "$url"
+    script=$(mktemp)
+    status=0
+    ran=0
+    # Download first: a dropped connection must not run half a script.
+    if curl --connect-timeout 15 --max-time 300 -fsSL -o "$script" "$url"; then
+      ran=1
+      # shellcheck disable=SC2086 # vars and args are word lists
+      env $vars "$interpreter" "$script" $args || status=$?
+    else
+      printf '%s install: failed to download %s\n' "$cmd" "$url" >&2
+      status=1
+    fi
+    rm -f "$script"
+    if [ "$ran" -eq 1 ]; then
+      # Some installers edit shell startup files, switches or not; say so.
+      printf '%s install: note: the %s installer may have changed shell startup files (such as ~/.bashrc, ~/.bash_profile, ~/.profile, ~/.zshrc or fish config); check them if that matters\n' \
+        "$cmd" "$name" >&2
+    fi
+    if [ "$status" -ne 0 ]; then
+      printf '%s install: %s installer failed (exit %d)\n' "$cmd" "$name" "$status" >&2
+      failed=1
+      continue
+    fi
+    if [ -z "$(agent_bin "$name")" ]; then
+      # The installer may have put it somewhere only a new shell finds.
+      printf '%s install: %s installed, but not found from this shell; open a new shell, then: %s sync %s\n' \
+        "$cmd" "$name" "$cmd" "$name"
+      continue
+    fi
+    names_one=("$name")
+    sync_names "${names_one[@]}" || failed=1
+    printf '%s install: installed %s; next, %s\n' "$cmd" "$name" "$(sign_in "$name")"
+  done
+  return "$failed"
+}
+
+# ---------------------------------------------------------------------------
 # update
 
 do_update() {
   local name bin status failed=0
-  case $(printf '%s' "${AGENT_OFFLINE:-}" | tr '[:upper:]' '[:lower:]') in
-    1 | true | yes | on)
-      printf '%s update: skipped (AGENT_OFFLINE is set)\n' "$cmd" >&2
-      return 0
-      ;;
-  esac
+  if is_offline; then
+    printf '%s update: skipped (AGENT_OFFLINE is set)\n' "$cmd" >&2
+    return 0
+  fi
   for name in "${names[@]}"; do
     bin=$(agent_bin "$name")
     [ -n "$bin" ] || continue
@@ -469,6 +586,13 @@ doctor_agent() { # name
   fi
   printf '%s\n' "$name"
   pass "installed: $(tilde "$bin") ($(agent_version "$name" "$bin"))"
+  case ":$CALLER_PATH:" in
+    *":${bin%/*}:"*) ;;
+    *)
+      info "$(tilde "${bin%/*}") is not on this shell's PATH, so '$name' alone may not run here"
+      hint "its installer may have added it to a shell startup file; a new shell picks that up"
+      ;;
+  esac
   check_links "$name"
   if [ "$name" = claude ]; then
     check_claude_hook
@@ -522,6 +646,7 @@ do_list() {
 
 case $command in
   list) do_list ;;
+  install) do_install ;;
   sync) do_sync ;;
   update) do_update ;;
   doctor) do_doctor ;;

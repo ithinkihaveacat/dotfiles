@@ -409,6 +409,7 @@ Install, update, configure and check the coding agent CLIs on this machine.
 
 Commands:
   list [NAME...]      Table of agents: installed or not, version, path
+  install NAME...     Install agents with their vendors' installers, then sync
   sync [NAME...]      Link shared context, hooks and plugins into each
                       installed agent's configuration
   update [NAME...]    Run each installed agent's own updater
@@ -429,6 +430,7 @@ Options:
 
 Examples:
   agent list
+  agent install opencode
   agent sync
   agent update claude
   agent doctor
@@ -437,8 +439,14 @@ Examples:
 Context, hooks and plugins come from the dotfiles checkout that holds this
 script and its overlays (.private, .corp) beside it; a file in a later overlay
 wins. sync never replaces a real file or directory with a link; doctor reports
-it instead. update ignores install.sh's once-a-day schedule and skips every
-agent when AGENT_OFFLINE is set. Nothing here restarts a running agent: doctor
+it instead. install runs each vendor's own installer (downloaded first, then run), with
+the switches it offers to leave shell startup files alone, skip prompts and
+install into ~/.local/bin. Installers may still edit shell startup files, so
+install says so after each one. doctor reports where each agent is and
+whether this shell finds it. install
+skips an agent already installed.
+update ignores install.sh's once-a-day schedule. install and update need the
+network: install refuses, and update skips, when AGENT_OFFLINE is set. Nothing here restarts a running agent: doctor
 says which processes need a restart and how.
 ```
 

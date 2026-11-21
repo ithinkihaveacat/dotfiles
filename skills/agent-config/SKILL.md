@@ -42,10 +42,10 @@ they see, what they may do, and what they are told. It consists of:
 1. **`andon`**: The Andon cord. Records and triages defects agents report in
    their own instructions, skills, rules and tools, through harness plugins for
    Claude Code, OpenCode and local Codex (`plugins/andon`).
-1. **`agent`**: The agent CLI manager. Lists the installed agents (Claude Code,
-   Codex, OpenCode, Antigravity), links shared context, hooks and plugins into
-   their configuration, runs their own updaters, and checks them, including for
-   processes still running a version that an update replaced.
+1. **`agent`**: The agent CLI manager. Lists and installs the agents (Claude
+   Code, Codex, OpenCode, Antigravity), links shared context, hooks and plugins
+   into their configuration, runs their own updaters, and checks them, including
+   for processes still running a version that an update replaced.
 
 ______________________________________________________________________
 
@@ -407,11 +407,19 @@ a workstation run.
 
 ```bash
 agent list                # installed or not, version, path
+agent install NAME...     # vendor installer, then sync
 agent sync [NAME...]      # link etc/agents context, hooks and plugins
 agent update [NAME...]    # run each installed agent's own updater, now
 agent doctor [--quiet]    # check configuration and stale running versions
 ```
 
+- **`install`** runs each vendor's own installer (`curl URL | bash`, downloaded
+  first) with the switches it offers: OpenCode's `--no-modify-path`, Codex's
+  `CODEX_NON_INTERACTIVE` and `CODEX_INSTALL_DIR`, and agy's `-d`, so agents
+  land in `~/.local/bin` where there is a choice (OpenCode always uses
+  `~/.opencode/bin`). Installers may still edit shell startup files, so
+  `install` prints a note after each one. `doctor` reports where each agent
+  landed and notes when this shell's PATH does not reach it.
 - **`sync`** takes each file from the last of `~/.dotfiles`, `~/.private` and
   `~/.corp` that has it, as `install.sh` does. It never replaces a real file
   with a link; `doctor` reports one instead.
