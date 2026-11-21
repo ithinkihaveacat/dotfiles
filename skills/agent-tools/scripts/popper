@@ -34,6 +34,41 @@ from google.api_core import retry
 from google.genai import errors as genai_errors
 from google.genai import types
 
+DEFAULT_MODEL = "gemini-3.8-flash"
+
+# A window token in `dumpsys window` output: "Window{90c2680 u0 PKG/ACTIVITY}" or,
+# for mFocusedApp, "ActivityRecord{113077881 u0 PKG/ACTIVITY t21}". System windows
+# such as "Window{... u0 NotificationShade}" have no "/" and do not match.
+_FOCUS_RE = re.compile(r"\bu\d+ ([A-Za-z0-9_.]+)/")
+
+
+def foreground_package(d) -> str:
+    """Return the package of the foreground app, or "" if it cannot be found.
+
+    uiautomator2's d.app_current() returns stale packages on some devices (for
+    example, the Play Store while Chrome is in front on a Pixel 6 Pro, SDK 37),
+    so this reads the window manager's state directly. The focused window
+    (mCurrentFocus) wins, so that a dialog from another package counts as
+    leaving the app; when focus is on a system window that belongs to no app
+    (the notification shade, the lock screen), the focused app's activity
+    (mFocusedApp) is used instead.
+    """
+    try:
+        output = d.shell("dumpsys window").output
+    except Exception:
+        output = ""
+    for key in ("mCurrentFocus=", "mFocusedApp="):
+        for line in output.splitlines():
+            line = line.strip()
+            if line.startswith(key):
+                m = _FOCUS_RE.search(line)
+                if m:
+                    return m.group(1)
+    try:
+        return d.app_current().get("package", "")
+    except Exception:
+        return ""
+
 
 def offline_switch() -> tuple[bool, str]:
     """Whether network access is forbidden here, and which switch says so."""
@@ -125,9 +160,9 @@ Environment:
     parser.add_argument(
         "--model",
         type=str,
-        default=os.environ.get("GEMINI_MODEL", "gemini-flash-latest"),
+        default=os.environ.get("GEMINI_MODEL", DEFAULT_MODEL),
         metavar="MODEL",
-        help="Gemini model to use (default: $GEMINI_MODEL if set, else gemini-flash-latest)",
+        help=f"Gemini model to use (default: $GEMINI_MODEL if set, else {DEFAULT_MODEL})",
     )
     parser.add_argument(
         "-h",
@@ -326,25 +361,18 @@ Environment:
 
     # Screen wake and unlock now handled dynamically during startup
 
-    launch_success = False
     if args.launch:
         print(f"[local] Launching {args.launch}", file=sys.stderr)
         try:
             d.app_start(args.launch)
 
-            # Polling via ADB is used because d.app_current() and d.app_wait() were
-            # unreliable/stale on some devices. Fixed sleep and polling app_current() failed.
+            # Polling the window manager is used because d.app_current() and
+            # d.app_wait() were unreliable/stale on some devices.
             timeout_seconds = 10.0
             start_time = time.perf_counter()
             while time.perf_counter() - start_time < timeout_seconds:
-                try:
-                    output = d.shell("dumpsys window | grep mCurrentFocus").output
-                    if args.launch in output:
-                        launch_success = True
-                        break
-                except Exception:
-                    # Fallback or ignore errors during polling
-                    pass
+                if foreground_package(d) == args.launch:
+                    break
                 time.sleep(0.5)
             else:
                 print(
@@ -362,19 +390,10 @@ Environment:
 
     # Get device metadata to help the agent
     try:
-        device_info = d.app_current()
-        initial_package = device_info.get("package", "")
-
-        # If we successfully verified launch via ADB but app_current is stale, override it
-        if args.launch and launch_success and initial_package != args.launch:
-            print(
-                f"[local] Overriding stale package '{initial_package}' with launched package '{args.launch}'",
-                file=sys.stderr,
-            )
-            initial_package = args.launch
-            device_info["package"] = args.launch
-            if "activity" in device_info:
-                del device_info["activity"]
+        # d.app_current() is not used: it can report a stale package (see
+        # foreground_package). Its activity name is not needed either.
+        initial_package = foreground_package(d)
+        device_info = {"package": initial_package}
 
         # Fallback to shell commands because uiautomator2's d.info crashes on SDK 37+ with
         # "IllegalStateException: ApplicationSharedMemory not initialized". To check if this
@@ -870,7 +889,7 @@ Constraints:
     config = types.GenerateContentConfig(
         tools=ui_tools,
         system_instruction=system_instruction,
-        # temperature=1.0 is required by gemini-3.6-flash. The model was
+        # temperature=1.0 is required by Gemini 3 and later models, which were
         # trained at this temperature; lower values degrade output quality.
         temperature=1.0,
         tool_config=types.ToolConfig(
@@ -1052,10 +1071,7 @@ What is your first action?"""
                         emit(step_emit_data)
 
                         if restricted_package:
-                            try:
-                                current_package = d.app_current().get("package", "")
-                            except Exception:
-                                current_package = ""
+                            current_package = foreground_package(d)
 
                             if current_package != restricted_package:
                                 task_result = {
