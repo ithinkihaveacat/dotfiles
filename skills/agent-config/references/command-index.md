@@ -439,9 +439,10 @@ Examples:
 Context, hooks and plugins come from the dotfiles checkout that holds this
 script and its overlays (.private, .corp) beside it; a file in a later overlay
 wins. sync never replaces a real file or directory with a link; doctor reports
-it instead. install downloads each vendor's installer before running it and lets it
-set itself up its own way (some add their directory to a shell startup file);
-doctor reports where each agent is and whether this shell finds it. install
+it instead. install runs each vendor's own installer (downloaded first, then run), with
+any switch it offers to leave shell startup files alone; installers without
+one may still edit them. doctor reports where each agent is and whether this
+shell finds it. install
 skips an agent already installed.
 update ignores install.sh's once-a-day schedule. install and update need the
 network: install refuses, and update skips, when AGENT_OFFLINE is set. Nothing here restarts a running agent: doctor

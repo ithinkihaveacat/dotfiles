@@ -41,9 +41,10 @@ Examples:
 Context, hooks and plugins come from the dotfiles checkout that holds this
 script and its overlays (.private, .corp) beside it; a file in a later overlay
 wins. sync never replaces a real file or directory with a link; doctor reports
-it instead. install downloads each vendor's installer before running it and lets it
-set itself up its own way (some add their directory to a shell startup file);
-doctor reports where each agent is and whether this shell finds it. install
+it instead. install runs each vendor's own installer (downloaded first, then run), with
+any switch it offers to leave shell startup files alone; installers without
+one may still edit them. doctor reports where each agent is and whether this
+shell finds it. install
 skips an agent already installed.
 update ignores install.sh's once-a-day schedule. install and update need the
 network: install refuses, and update skips, when AGENT_OFFLINE is set. Nothing here restarts a running agent: doctor
@@ -306,13 +307,21 @@ sync_names() { # name...
 # ---------------------------------------------------------------------------
 # install
 
-installer() { # name -> "INTERPRETER<TAB>URL" for the vendor's installer
+# Each vendor's own installer, as its site gives it ('curl URL | bash'), plus
+# the switches it supports for a smoother install. Where an installer offers a
+# switch that leaves shell startup files alone, use it; where it offers none,
+# let it do what it does, and doctor reports the result.
+installer() { # name -> "ENV<TAB>INTERPRETER<TAB>URL<TAB>ARGS" ("-" for none)
   case $1 in
-    claude) printf 'bash\thttps://claude.ai/install.sh\n' ;;
-    codex) printf 'sh\thttps://chatgpt.com/codex/install.sh\n' ;;
+    # No switch: 'claude install' takes only a version.
+    claude) printf -- '-\tbash\thttps://claude.ai/install.sh\t-\n' ;;
+    # No PATH switch: it adds a PATH block to .bashrc or .zshrc unless
+    # ~/.local/bin is already on PATH. CODEX_NON_INTERACTIVE skips prompts.
+    codex) printf 'CODEX_NON_INTERACTIVE=1\tsh\thttps://chatgpt.com/codex/install.sh\t-\n' ;;
     # /install installs OpenCode 1 only; /v2/install is OpenCode 2.
-    opencode) printf 'bash\thttps://opencode.ai/v2/install\n' ;;
-    agy) printf 'bash\thttps://antigravity.google/cli/install.sh\n' ;;
+    opencode) printf -- '-\tbash\thttps://opencode.ai/v2/install\t--no-modify-path\n' ;;
+    # 'agy install' has --skip-path, but this script does not pass it on.
+    agy) printf -- '-\tbash\thttps://antigravity.google/cli/install.sh\t-\n' ;;
   esac
 }
 
@@ -326,7 +335,7 @@ sign_in() { # name -> how to finish setting the agent up
 }
 
 do_install() {
-  local name bin interpreter url script status failed=0
+  local name bin vars interpreter url args script status failed=0
   if [ "$explicit" -eq 0 ]; then
     die_sub "NAME required (claude, codex, opencode or agy); e.g. '$cmd install opencode'"
   fi
@@ -344,13 +353,16 @@ do_install() {
         "$cmd" "$name" "$(tilde "$bin")" "$cmd" "$name"
       continue
     fi
-    IFS=$'\t' read -r interpreter url <<<"$(installer "$name")"
+    IFS=$'\t' read -r vars interpreter url args <<<"$(installer "$name")"
+    [ "$vars" != - ] || vars=
+    [ "$args" != - ] || args=
     printf '%s install: %s from %s\n' "$cmd" "$name" "$url"
     script=$(mktemp)
     status=0
     # Download first: a dropped connection must not run half a script.
     if curl --connect-timeout 15 --max-time 300 -fsSL -o "$script" "$url"; then
-      "$interpreter" "$script" || status=$?
+      # shellcheck disable=SC2086 # vars and args are word lists
+      env $vars "$interpreter" "$script" $args || status=$?
     else
       printf '%s install: failed to download %s\n' "$cmd" "$url" >&2
       status=1

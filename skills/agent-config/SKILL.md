@@ -413,9 +413,11 @@ agent update [NAME...]    # run each installed agent's own updater, now
 agent doctor [--quiet]    # check configuration and stale running versions
 ```
 
-- **`install`** downloads each vendor's installer and runs it as the vendor
-  intended, including any shell startup edits it makes; it does not try to make
-  the agents install the same way. `doctor` then reports where each landed, and
+- **`install`** runs each vendor's own installer (`curl URL | bash`, downloaded
+  first), with any switch it offers to leave shell startup files alone
+  (OpenCode's `--no-modify-path`) or to skip prompts (`CODEX_NON_INTERACTIVE`).
+  Claude Code, Codex and agy offer no such PATH switch, so their installers may
+  still edit shell profiles; `doctor` then reports where each agent landed and
   notes when this shell's PATH does not reach it.
 - **`sync`** takes each file from the last of `~/.dotfiles`, `~/.private` and
   `~/.corp` that has it, as `install.sh` does. It never replaces a real file
