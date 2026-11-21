@@ -42,10 +42,10 @@ they see, what they may do, and what they are told. It consists of:
 1. **`andon`**: The Andon cord. Records and triages defects agents report in
    their own instructions, skills, rules and tools, through harness plugins for
    Claude Code, OpenCode and local Codex (`plugins/andon`).
-1. **`agent`**: The agent CLI manager. Lists the installed agents (Claude Code,
-   Codex, OpenCode, Antigravity), links shared context, hooks and plugins into
-   their configuration, runs their own updaters, and checks them, including for
-   processes still running a version that an update replaced.
+1. **`agent`**: The agent CLI manager. Lists and installs the agents (Claude
+   Code, Codex, OpenCode, Antigravity), links shared context, hooks and plugins
+   into their configuration, runs their own updaters, and checks them, including
+   for processes still running a version that an update replaced.
 
 ______________________________________________________________________
 
@@ -407,11 +407,16 @@ a workstation run.
 
 ```bash
 agent list                # installed or not, version, path
+agent install NAME...     # vendor installer, then sync
 agent sync [NAME...]      # link etc/agents context, hooks and plugins
 agent update [NAME...]    # run each installed agent's own updater, now
 agent doctor [--quiet]    # check configuration and stale running versions
 ```
 
+- **`install`** downloads each vendor's installer and runs it as the vendor
+  intended, including any shell startup edits it makes; it does not try to make
+  the agents install the same way. `doctor` then reports where each landed, and
+  notes when this shell's PATH does not reach it.
 - **`sync`** takes each file from the last of `~/.dotfiles`, `~/.private` and
   `~/.corp` that has it, as `install.sh` does. It never replaces a real file
   with a link; `doctor` reports one instead.

@@ -65,7 +65,7 @@ setup() {
   echo plugin >"$d/etc/agents/opencode/plugins/ensure-commit-hooks.ts"
   : >"$WORK/calls"
   for tool in bash env awk grep sed tr head cat sort wc dirname basename mktemp \
-    readlink ln rm mkdir mv jq; do
+    readlink ln rm mkdir mv jq sh chmod; do
     ln -s "$(type -P "$tool")" "$WORK/bin/$tool"
   done
   mock claude '
@@ -77,18 +77,37 @@ esac'
   mock agy '[ "$1" = --version ] && echo 1.5.14 || echo "agy $*" >>"$CALLS"'
   mock opencode '[ "$1" = --version ] && echo "opencode v2.3.2" || echo "opencode $*" >>"$CALLS"'
   echo '[{"id":"andon@agent-config","enabled":true,"scope":"user"}]' >"$WORK/home/plugins.json"
+  # curl serves a fake installer that records its run and installs a mock
+  # agent in ~/.local/bin (unless NO_BIN is set); CURL_FAIL fails the download.
+  mock curl '
+out=; prev=
+for a; do [ "$prev" = -o ] && out=$a; prev=$a; done
+url=${!#}
+echo "curl $url" >>"$CALLS"
+[ -z "${CURL_FAIL:-}" ] || exit 22
+case $url in
+  *claude*) n=claude ;; *codex*) n=codex ;; *opencode*) n=opencode ;; *antigravity*) n=agy ;;
+esac
+cat >"$out" <<EOS
+echo "installer $n \$*" >>"\$CALLS"
+[ -z "\${NO_BIN:-}" ] || exit 0
+mkdir -p "\$HOME/.local/bin"
+printf "#!/bin/sh\\necho 1.0\\n" >"\$HOME/.local/bin/$n"
+chmod +x "\$HOME/.local/bin/$n"
+EOS'
 }
 
 agent() {
   out=$(env -i HOME="$WORK/home" PATH="$WORK/bin" CALLS="$WORK/calls" NO_COLOR=1 \
     ${AGENT_OFFLINE:+AGENT_OFFLINE="$AGENT_OFFLINE"} ${CLAUDE_EXIT:+CLAUDE_EXIT="$CLAUDE_EXIT"} \
+    ${NO_BIN:+NO_BIN=1} ${CURL_FAIL:+CURL_FAIL=1} \
     "$WORK/bin/bash" "$WORK/home/.dotfiles/skills/agent-config/scripts/agent" "$@" 2>&1)
   rc=$?
 }
 
 H="$WORK/home"
 
-echo "1..25"
+echo "1..34"
 
 setup
 agent --help
@@ -158,6 +177,36 @@ ok "a failed update is reported, the rest still run, and the exit is non-zero" "
 AGENT_OFFLINE=1 agent update
 ok "update does nothing offline" "$([[ $rc -eq 0 && "$out" == *"skipped (AGENT_OFFLINE is set)"* && ! -s "$WORK/calls" ]] && echo 0 || echo 1)"
 
+setup
+agent install
+ok "install needs a name" "$([[ $rc -eq 1 && "$out" == *"NAME required"* && ! -s "$WORK/calls" ]] && echo 0 || echo 1)"
+
+AGENT_OFFLINE=1 agent install codex
+ok "install refuses offline" "$([[ $rc -eq 1 && "$out" == *"AGENT_OFFLINE is set"* && ! -s "$WORK/calls" ]] && echo 0 || echo 1)"
+
+agent install claude
+ok "install skips an agent already installed" "$([[ $rc -eq 0 && "$out" == *"claude is already installed"* && ! -s "$WORK/calls" ]] && echo 0 || echo 1)"
+
+agent install codex
+ok "install runs the vendor installer as downloaded" "$([[ $rc -eq 0 && "$(cat "$WORK/calls")" == $'curl https://chatgpt.com/codex/install.sh\ninstaller codex ' ]] && echo 0 || echo 1)"
+ok "install syncs the new agent and says how to sign in" "$([[ "$(readlink "$H/.codex/AGENTS.md")" == "$H/.dotfiles/etc/agents/AGENTS.md" && "$out" == *"installed codex; next, run codex login"* ]] && echo 0 || echo 1)"
+
+agent doctor codex
+ok "doctor notes an agent whose directory is not on PATH" "$([[ $rc -eq 0 && "$out" == *"[INFO]  ~/.local/bin is not on this shell's PATH"* ]] && echo 0 || echo 1)"
+
+setup
+rm "$WORK/bin/opencode"
+agent install opencode
+ok "install uses OpenCode's v2 installer without extra arguments" "$([[ $rc -eq 0 && "$(cat "$WORK/calls")" == $'curl https://opencode.ai/v2/install\ninstaller opencode ' ]] && echo 0 || echo 1)"
+
+setup
+CURL_FAIL=1 agent install codex
+ok "a failed download is reported and nothing runs" "$([[ $rc -eq 1 && "$out" == *"failed to download https://chatgpt.com/codex/install.sh"* && "$(cat "$WORK/calls")" != *installer* ]] && echo 0 || echo 1)"
+
+setup
+NO_BIN=1 agent install codex
+ok "an agent the installer put out of reach is reported, not failed" "$([[ $rc -eq 0 && "$out" == *"not found from this shell; open a new shell, then: agent sync codex"* ]] && echo 0 || echo 1)"
+
 # Stale executables: claude on PATH is versions/1.0.1 while a copy of bash
 # runs as versions/1.0.0, as after an update replaced the running version.
 # bash, not sleep: a multi-call coreutils (Ubuntu 26.04's) runs as whatever
@@ -184,8 +233,8 @@ if [ -d /proc/self ]; then
   ok "doctor passes a process on the installed version" "$([[ "$out" == *"1 claude process(es) run the installed executable"* && "$out" != *"is installed"* ]] && echo 0 || echo 1)"
   stop_sleeper
 else
-  echo "ok 24 # SKIP no /proc"
-  echo "ok 25 # SKIP no /proc"
+  echo "ok 33 # SKIP no /proc"
+  echo "ok 34 # SKIP no /proc"
   n=$((n + 2))
 fi
 
