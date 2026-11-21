@@ -8,6 +8,8 @@
 # its configuration, or the network.
 
 set -uo pipefail
+# CI sets AGENT_OFFLINE for every test; these cases set it themselves.
+unset AGENT_OFFLINE
 
 DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT="$DIR/../scripts/agent"
@@ -15,8 +17,14 @@ SCRIPT="$DIR/../scripts/agent"
 WORK=$(mktemp -d)
 WORK=$(cd -P "$WORK" && pwd)
 SLEEP_PID=
+stop_sleeper() { # end the sleep, so the renamed bash waiting on it exits
+  [ -n "$SLEEP_PID" ] || return 0
+  pkill -P "$SLEEP_PID" 2>/dev/null || kill "$SLEEP_PID" 2>/dev/null || true
+  wait "$SLEEP_PID" 2>/dev/null || true
+  SLEEP_PID=
+}
 cleanup() {
-  [ -z "$SLEEP_PID" ] || kill "$SLEEP_PID" 2>/dev/null || true
+  stop_sleeper
   wait 2>/dev/null || true
   rm -rf "$WORK"
 }
@@ -150,32 +158,31 @@ ok "a failed update is reported, the rest still run, and the exit is non-zero" "
 AGENT_OFFLINE=1 agent update
 ok "update does nothing offline" "$([[ $rc -eq 0 && "$out" == *"skipped (AGENT_OFFLINE is set)"* && ! -s "$WORK/calls" ]] && echo 0 || echo 1)"
 
-# Stale executables: claude on PATH is versions/1.0.1 while a copy of sleep
+# Stale executables: claude on PATH is versions/1.0.1 while a copy of bash
 # runs as versions/1.0.0, as after an update replaced the running version.
+# bash, not sleep: a multi-call coreutils (Ubuntu 26.04's) runs as whatever
+# its file is named. The trailing ':' keeps bash from exec-ing sleep.
 if [ -d /proc/self ]; then
   setup
   versions="$H/.local/share/claude/versions"
   mkdir -p "$versions"
   mv "$WORK/bin/claude" "$versions/1.0.1"
   ln -s "$versions/1.0.1" "$WORK/bin/claude"
-  cp "$(type -P sleep)" "$versions/1.0.0"
-  "$versions/1.0.0" 60 &
+  cp "$(type -P bash)" "$versions/1.0.0"
+  "$versions/1.0.0" -c 'sleep 60; :' &
   SLEEP_PID=$!
   agent sync claude
   agent doctor claude
   ok "doctor warns about a process running a replaced version" "$([[ $rc -eq 1 && "$out" == *"1 of 1 claude process(es) in "*" run 1.0.0; 1.0.1 is installed"* ]] && echo 0 || echo 1)"
-  kill "$SLEEP_PID" 2>/dev/null
-  wait "$SLEEP_PID" 2>/dev/null
-  cp "$(type -P sleep)" "$versions/1.0.2"
+  stop_sleeper
+  cp "$(type -P bash)" "$versions/1.0.2"
   rm "$WORK/bin/claude"
   ln -s "$versions/1.0.2" "$WORK/bin/claude"
-  "$versions/1.0.2" 60 &
+  "$versions/1.0.2" -c 'sleep 60; :' &
   SLEEP_PID=$!
   agent doctor claude
   ok "doctor passes a process on the installed version" "$([[ "$out" == *"1 claude process(es) run the installed executable"* && "$out" != *"is installed"* ]] && echo 0 || echo 1)"
-  kill "$SLEEP_PID" 2>/dev/null
-  wait "$SLEEP_PID" 2>/dev/null
-  SLEEP_PID=
+  stop_sleeper
 else
   echo "ok 24 # SKIP no /proc"
   echo "ok 25 # SKIP no /proc"
