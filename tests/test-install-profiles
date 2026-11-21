@@ -94,7 +94,7 @@ no_calls() {
   done
 }
 
-echo "1..40"
+echo "1..43"
 
 # Selection, without running anything.
 run -- --profile cloud --dry-run
@@ -102,11 +102,11 @@ check "cloud profile selects links, uv, skills" is "$output" $'links\nuv\nskills
 run -- --dry-run
 check "default profile selects every feature, in order" \
   is "$(printf '%s\n' "$output" | paste -sd ' ' -)" \
-  "git-pull links macos fish-completions base cli-extras uv vscode npm skills agents browse upgrades overlay-hooks agent-doctor"
+  "git-pull links macos fish-completions base cli-extras uv vscode npm skills agents browse upgrades overlay-hooks"
 run -- --without agents,npm,upgrades -n
 check "--without removes features" \
   is "$(printf '%s\n' "$output" | paste -sd ' ' -)" \
-  "git-pull links macos fish-completions base cli-extras uv vscode skills browse overlay-hooks agent-doctor"
+  "git-pull links macos fish-completions base cli-extras uv vscode skills browse overlay-hooks"
 run -- --profile=cloud --with android -n
 check "--with adds a feature in its usual place" is "$output" $'links\nandroid\nuv\nskills'
 run -- --only uv,links --dry-run
@@ -182,15 +182,14 @@ else
   done
 fi
 
-# browse is configured for OpenCode only, and needs the network only when its
-# binary is missing. The test machine has no display, so the installer should
-# open the relay for a browser on another computer.
+# browse is configured for OpenCode only, and only once installed ('agent
+# install browse' installs it). The test machine has no display, so the
+# relay should open for a browser on another computer.
 printf '#!/bin/sh\nexit 0\n' >"$STUBS/opencode"
 chmod +x "$STUBS/opencode"
-run AGENT_OFFLINE=1 -- --only browse
-check "offline browse install is skipped and says so" \
-  has "$output" "skipped: browse (AGENT_OFFLINE is set)"
-check "offline browse install makes no request" no_calls curl
+run -- --only browse
+check "browse is not installed by install.sh" lacks "$output" "# browse"
+check "an absent browse makes no request" no_calls curl
 
 mkdir -p "$TMP/home/.local/bin"
 # shellcheck disable=SC2016 # expands in the generated stub
@@ -224,11 +223,39 @@ mkdir -p "$TMP/home/.config/tigervnc"
 : >"$TMP/home/.config/tigervnc/passwd"
 run -- --only browse
 if [ "$(uname -s)" = Linux ]; then
-  check "a headless host with a local TigerVNC desktop installs browse without --remote" \
+  check "a headless host with a local TigerVNC desktop configures browse without --remote" \
     has "$calls" "browse install --no-open --no-wait --no-modify-path -y -a opencode"
 else
-  check "non-Linux installs browse without --remote" \
+  check "non-Linux configures browse without --remote" \
     has "$calls" "browse install --no-open --no-wait --no-modify-path -y -a opencode"
+fi
+
+# The agents feature installs Claude Code's Andon plugin at user scope from
+# agent-config's marketplace, or enables it, and leaves an enabled one alone.
+if command -v jq >/dev/null 2>&1; then
+  mkdir -p "$REPO/skills/agent-config/plugins"
+  cat >"$STUBS/claude" <<'EOF'
+#!/bin/sh
+if [ "$*" = "plugin list --json" ]; then
+  printf '%s\n' "${CLAUDE_PLUGINS:-[]}"
+else
+  echo "claude $*" >>"$CALLS"
+fi
+EOF
+  chmod +x "$STUBS/claude"
+  run -- --only agents
+  check "agents installs the Andon plugin for Claude Code" \
+    has "$calls" "claude plugin install andon --scope user --marketplace $REPO/skills/agent-config/plugins"
+  run CLAUDE_PLUGINS='[{"id":"andon@agent-config","enabled":false,"scope":"user"}]' -- --only agents
+  check "agents enables a disabled Andon plugin" has "$calls" "claude plugin enable andon --scope user"
+  run CLAUDE_PLUGINS='[{"id":"andon@agent-config","enabled":true,"scope":"user"}]' -- --only agents
+  check "agents leaves an enabled Andon plugin alone" lacks "$calls" "claude plugin"
+  rm "$STUBS/claude"
+else
+  for _ in 1 2 3; do
+    n=$((n + 1))
+    echo "ok $n # SKIP the Andon plugin checks need jq"
+  done
 fi
 
 if [ "$failed" -ne 0 ]; then
