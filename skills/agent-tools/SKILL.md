@@ -807,7 +807,8 @@ current simplified UI layout as JSON and exit), `--agent-screenshots` /
 `--local-screenshots` / `--no-local-screenshots` (enable/disable saving debug
 screenshots locally), `--local-screenshot-dir DIR` (override directory for debug
 screenshots), `--output-dir DIR` (override directory for explicit agent
-screenshots), `--model MODEL` (override Gemini model)
+screenshots), `--model MODEL` (Gemini model, default: `$GEMINI_MODEL`, else
+`gemini-3.8-flash`)
 
 **Environment:** `GEMINI_API_KEY` (required), `ANDROID_SERIAL` (optional, target
 specific device), `GEMINI_MODEL` (optional), `AGENT_OFFLINE` (optional)

@@ -1074,7 +1074,7 @@ options:
                         the agent (default: current directory)
   --dump-layout         Dump the UI layout as JSON and exit
   --model MODEL         Gemini model to use (default: $GEMINI_MODEL if set,
-                        else gemini-flash-latest)
+                        else gemini-3.8-flash)
   -h, --help            show this help message and exit
 
 Environment:
