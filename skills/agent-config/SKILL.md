@@ -470,6 +470,9 @@ andon prompt e790 | claude -p
 andon resolve e790 --all-matching --note "Fixed the script path in SKILL.md"
 ```
 
+`andon doctor` checks the store itself (writable, its files parse, the default
+level is valid), never the alerts in it, and exits non-zero on any warning.
+
 ______________________________________________________________________
 
 ## Usage Examples
