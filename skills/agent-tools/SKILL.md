@@ -794,12 +794,19 @@ Gemini. This allows semantic control of the device by providing a goal in
 natural language. Screenshots are captured at each step and saved to a unique
 run directory in an XDG-compliant temporary location.
 
+By default the agent first closes interstitials that cover the content (cookie
+banners, sign-up popups, promotions), preferring "Reject" or close over
+"Accept". It leaves login screens, permission dialogs and paywalls alone, and
+lists what it closed in the `dismissed` field of the `result` event (and on
+stderr).
+
 ```bash
 scripts/popper "GOAL"
 ```
 
 **Options:** `--launch PACKAGE` (launch a package before starting),
 `--stay-in-app` (restrict the run to a single application package),
+`--no-dismiss-interstitials` (leave cookie banners and popups alone),
 `--timeout SECONDS` (execution timeout, default: 180),
 `--output-format {text,stream-json}` (output format), `--dump-layout` (print the
 current simplified UI layout as JSON and exit), `--agent-screenshots` /
