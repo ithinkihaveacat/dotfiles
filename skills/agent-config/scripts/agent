@@ -1,0 +1,529 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cmd=$(basename "$0")
+
+usage() {
+  cat <<EOF
+Usage: $cmd COMMAND [NAME...] [OPTIONS]
+
+Install, update, configure and check the coding agent CLIs on this machine.
+
+Commands:
+  list [NAME...]      Table of agents: installed or not, version, path
+  sync [NAME...]      Link shared context, hooks and plugins into each
+                      installed agent's configuration
+  update [NAME...]    Run each installed agent's own updater
+  doctor [NAME...]    Check each installed agent: configuration linked, and
+                      (on Linux) no process still running an executable that
+                      an update replaced; non-zero on warnings or failures
+
+Names:
+  claude              Claude Code
+  codex               OpenAI Codex CLI
+  opencode            OpenCode
+  agy                 Antigravity CLI
+
+Options:
+  --quiet             doctor: print only warnings and failures, with their
+                      fixes; print nothing when every check passes
+  -h, --help          Display this help message and exit
+
+Examples:
+  $cmd list
+  $cmd sync
+  $cmd update claude
+  $cmd doctor
+  $cmd doctor --quiet
+
+Context, hooks and plugins come from the dotfiles checkout that holds this
+script and its overlays (.private, .corp) beside it; a file in a later overlay
+wins. sync never replaces a real file or directory with a link; doctor reports
+it instead. update ignores install.sh's once-a-day schedule and skips every
+agent when AGENT_OFFLINE is set. Nothing here restarts a running agent: doctor
+says which processes need a restart and how.
+EOF
+  exit 0
+}
+
+die() {
+  printf '%s: %s\n' "$cmd" "$*" >&2
+  exit 1
+}
+
+die_sub() {
+  printf '%s %s: %s\n' "$cmd" "$command" "$*" >&2
+  exit 1
+}
+
+for arg in "$@"; do
+  case $arg in
+    -h | --help) usage ;;
+  esac
+done
+
+if [ $# -eq 0 ]; then
+  cat <<EOF >&2
+Usage: $cmd COMMAND [NAME...] [OPTIONS]
+
+Install, update, configure and check the coding agent CLIs on this machine.
+
+Example:
+  $cmd doctor
+
+Try '$cmd --help' for more information.
+EOF
+  exit 1
+fi
+
+ALL_NAMES="claude codex opencode agy"
+
+command=$1
+shift
+quiet=0
+names=()
+for arg in "$@"; do
+  case $arg in
+    --quiet) quiet=1 ;;
+    claude | codex | opencode | agy) names+=("$arg") ;;
+    -*) die "unknown option '$arg' (try '$cmd --help')" ;;
+    *) die "unknown name '$arg' (expected claude, codex, opencode or agy)" ;;
+  esac
+done
+if [ ${#names[@]} -eq 0 ]; then
+  read -r -a names <<<"$ALL_NAMES"
+fi
+if [ "$quiet" -eq 1 ] && [ "$command" != doctor ]; then
+  die "--quiet applies to doctor only"
+fi
+
+XDG_CONFIG_HOME=${XDG_CONFIG_HOME:-$HOME/.config}
+
+# ---------------------------------------------------------------------------
+# source roots: the dotfiles checkout holding this script, then its overlays
+
+script=${BASH_SOURCE[0]}
+while [ -L "$script" ]; do
+  target=$(readlink "$script")
+  case $target in
+    /*) script=$target ;;
+    *) script=$(dirname "$script")/$target ;;
+  esac
+done
+SRCDIR=$(cd -P "$(dirname "$script")/../../.." && pwd)
+DSTDIR=$(cd -P "$SRCDIR/.." && pwd)
+ROOTS=("$SRCDIR")
+for overlay in .private .corp; do
+  if [ -d "$DSTDIR/$overlay" ]; then
+    ROOTS+=("$DSTDIR/$overlay")
+  fi
+done
+
+overlay_path() { # relative path -> the copy in the last root that has it
+  local i
+  for ((i = ${#ROOTS[@]} - 1; i >= 0; i--)); do
+    if [ -e "${ROOTS[$i]}/$1" ]; then
+      printf '%s\n' "${ROOTS[$i]}/$1"
+      return 0
+    fi
+  done
+  return 1
+}
+
+tilde() { # path -> path with $HOME shown as ~
+  # shellcheck disable=SC2088 # a literal ~ for display
+  case $1 in
+    "$HOME"/*) printf '~/%s' "${1#"$HOME"/}" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
+# what each agent is
+
+agent_bin() { # name -> installed executable, or nothing
+  local path
+  case $1 in
+    codex)
+      # /usr/bin/codex is a file viewer, not the agent.
+      path=$(type -P codex 2>/dev/null || true)
+      case $path in /usr/bin/codex | /bin/codex) path= ;; esac
+      ;;
+    opencode)
+      path=$(type -P opencode 2>/dev/null || true)
+      if [ -z "$path" ] && [ -x "$HOME/.opencode/bin/opencode" ]; then
+        path="$HOME/.opencode/bin/opencode"
+      fi
+      ;;
+    *) path=$(type -P "$1" 2>/dev/null || true) ;;
+  esac
+  printf '%s' "$path"
+}
+
+agent_version() { # name bin -> version string, or "-"
+  local version
+  version=$("$2" --version 2>/dev/null | head -1 || true)
+  version=${version#opencode }
+  version=${version%% *}
+  printf '%s' "${version:-"-"}"
+}
+
+context_file() { # name -> where the agent reads user-wide context
+  case $1 in
+    claude) printf '%s' "$HOME/.claude/CLAUDE.md" ;;
+    codex) printf '%s' "$HOME/.codex/AGENTS.md" ;;
+    opencode) printf '%s' "$XDG_CONFIG_HOME/opencode/AGENTS.md" ;;
+    agy) printf '%s' "$HOME/.gemini/GEMINI.md" ;;
+  esac
+}
+
+links() { # name -> "SOURCE<TAB>DESTINATION" per link, SOURCE relative to a root
+  printf 'etc/agents/AGENTS.md\t%s\n' "$(context_file "$1")"
+  case $1 in
+    agy)
+      printf 'etc/agents/agy/hooks.json\t%s\n' "$HOME/.gemini/config/hooks.json"
+      printf 'etc/agents/agy/hooks\t%s\n' "$HOME/.gemini/config/hooks"
+      ;;
+    opencode)
+      printf 'etc/agents/opencode/plugins/ensure-commit-hooks.ts\t%s\n' \
+        "$XDG_CONFIG_HOME/opencode/plugins/ensure-commit-hooks.ts"
+      printf 'skills/agent-config/plugins/andon/opencode\t%s\n' \
+        "$XDG_CONFIG_HOME/opencode/plugins/andon"
+      ;;
+  esac
+}
+
+CLAUDE_HOOK=etc/agents/hooks/ensure-commit-hooks
+CLAUDE_HOOK_MATCHER=Bash
+CLAUDE_SETTINGS="$HOME/.claude/settings.json"
+
+claude_hook_registered() { # command -> true when a PreToolUse hook runs it
+  [ -f "$CLAUDE_SETTINGS" ] &&
+    jq -e --arg cmd "$1" --arg matcher "$CLAUDE_HOOK_MATCHER" \
+      'any(.hooks.PreToolUse[]?; .matcher == $matcher and any(.hooks[]?; .command == $cmd))' \
+      "$CLAUDE_SETTINGS" >/dev/null 2>&1
+}
+
+# ---------------------------------------------------------------------------
+# sync
+
+synced=0
+
+sync_link() { # source destination
+  local src=$1 dst=$2
+  if [ -L "$dst" ] && [ "$(readlink "$dst")" = "$src" ]; then
+    return 0
+  fi
+  if [ -e "$dst" ] && [ ! -L "$dst" ]; then
+    printf '%s sync: %s is a real file, not a link; leaving it in place\n' \
+      "$cmd" "$(tilde "$dst")" >&2
+    return 1
+  fi
+  mkdir -p "$(dirname "$dst")"
+  rm -f "$dst"
+  ln -s "$src" "$dst"
+  printf 'linked %s -> %s\n' "$(tilde "$dst")" "$(tilde "$src")"
+  synced=$((synced + 1))
+}
+
+# Register the commit-hook script as a Claude Code PreToolUse hook in
+# ~/.claude/settings.json, leaving every other setting and hook in place.
+sync_claude_hook() {
+  local hook tmp
+  hook=$(overlay_path "$CLAUDE_HOOK") || return 0
+  if ! command -v jq >/dev/null 2>&1; then
+    printf '%s sync: jq not found; Claude Code hook not registered\n' "$cmd" >&2
+    return 1
+  fi
+  mkdir -p "$(dirname "$CLAUDE_SETTINGS")"
+  if [ ! -s "$CLAUDE_SETTINGS" ]; then
+    (umask 077 && echo '{}' >"$CLAUDE_SETTINGS")
+  fi
+  if ! jq -e 'type == "object"' "$CLAUDE_SETTINGS" >/dev/null 2>&1; then
+    printf '%s sync: %s is not a JSON object; Claude Code hook not registered\n' \
+      "$cmd" "$(tilde "$CLAUDE_SETTINGS")" >&2
+    return 1
+  fi
+  claude_hook_registered "$hook" && return 0
+  # Drop stale registrations of the same script (another matcher), then add.
+  tmp="$CLAUDE_SETTINGS.tmp.$$"
+  if (umask 077 && jq --arg cmd "$hook" --arg matcher "$CLAUDE_HOOK_MATCHER" '
+    .hooks.PreToolUse = (
+      ((.hooks.PreToolUse // [])
+        | map(.hooks |= map(select(.command != $cmd)))
+        | map(select((.hooks // []) | length > 0)))
+      + [{matcher: $matcher, hooks: [{type: "command", command: $cmd, timeout: 5}]}]
+    )' "$CLAUDE_SETTINGS" >"$tmp") && mv "$tmp" "$CLAUDE_SETTINGS"; then
+    printf 'registered Claude Code PreToolUse hook %s\n' "$(tilde "$hook")"
+    synced=$((synced + 1))
+  else
+    rm -f "$tmp"
+    printf '%s sync: failed to register the Claude Code hook in %s\n' \
+      "$cmd" "$(tilde "$CLAUDE_SETTINGS")" >&2
+    return 1
+  fi
+}
+
+do_sync() {
+  local name rel dst src failed=0
+  for name in "${names[@]}"; do
+    [ -n "$(agent_bin "$name")" ] || continue
+    while IFS=$'\t' read -r rel dst; do
+      src=$(overlay_path "$rel") || continue
+      sync_link "$src" "$dst" || failed=1
+    done < <(links "$name")
+    if [ "$name" = claude ]; then
+      sync_claude_hook || failed=1
+    fi
+  done
+  return "$failed"
+}
+
+# ---------------------------------------------------------------------------
+# update
+
+do_update() {
+  local name bin status failed=0
+  case $(printf '%s' "${AGENT_OFFLINE:-}" | tr '[:upper:]' '[:lower:]') in
+    1 | true | yes | on)
+      printf '%s update: skipped (AGENT_OFFLINE is set)\n' "$cmd" >&2
+      return 0
+      ;;
+  esac
+  for name in "${names[@]}"; do
+    bin=$(agent_bin "$name")
+    [ -n "$bin" ] || continue
+    printf '%s update: %s\n' "$cmd" "$name"
+    status=0
+    case $name in
+      # opencode upgrade keeps the installed channel and reuses its installer.
+      opencode) "$bin" upgrade || status=$? ;;
+      *) "$bin" update || status=$? ;;
+    esac
+    if [ "$status" -ne 0 ]; then
+      printf '%s update: %s update failed (exit %d)\n' "$cmd" "$name" "$status" >&2
+      failed=1
+    fi
+  done
+  return "$failed"
+}
+
+# ---------------------------------------------------------------------------
+# doctor
+
+passes=0
+warnings=0
+failures=0
+
+tag() { # WORD TEXT
+  local code
+  case $1 in
+    PASS) code=32 ;;
+    INFO) code=36 ;;
+    WARN) code=33 ;;
+    FAIL) code=31 ;;
+  esac
+  if [ -z "${NO_COLOR+x}" ] && [ -t 1 ]; then
+    printf '\033[%sm[%s]\033[0m  %s\n' "$code" "$1" "$2"
+  else
+    printf '[%s]  %s\n' "$1" "$2"
+  fi
+}
+pass() {
+  tag PASS "$1"
+  passes=$((passes + 1))
+}
+info() { tag INFO "$1"; }
+warn() {
+  tag WARN "$1"
+  warnings=$((warnings + 1))
+}
+fail() {
+  tag FAIL "$1"
+  failures=$((failures + 1))
+}
+hint() { printf '        %s\n' "$1"; }
+
+check_links() { # name
+  local rel dst src
+  while IFS=$'\t' read -r rel dst; do
+    src=$(overlay_path "$rel") || continue
+    if [ -L "$dst" ] && [ "$(readlink "$dst")" = "$src" ]; then
+      pass "$(tilde "$dst") -> $(tilde "$src")"
+    elif [ -e "$dst" ] && [ ! -L "$dst" ]; then
+      warn "$(tilde "$dst") is a real file, so $(tilde "$src") is not used"
+      hint "move it aside, then: $cmd sync $1"
+    else
+      warn "$(tilde "$dst") does not link to $(tilde "$src")"
+      hint "$cmd sync $1"
+    fi
+  done < <(links "$1")
+}
+
+check_claude_hook() {
+  local hook
+  hook=$(overlay_path "$CLAUDE_HOOK") || return 0
+  if ! command -v jq >/dev/null 2>&1; then
+    info "jq not found, so the commit hook registration was not checked"
+  elif claude_hook_registered "$hook"; then
+    pass "commit hook registered in $(tilde "$CLAUDE_SETTINGS")"
+  else
+    warn "commit hook $(tilde "$hook") is not registered in $(tilde "$CLAUDE_SETTINGS")"
+    hint "$cmd sync claude"
+  fi
+}
+
+check_andon_plugin() { # bin: is the Andon plugin enabled for every Claude session?
+  local plugin enabled scope
+  command -v jq >/dev/null 2>&1 || return 0
+  plugin=$("$1" plugin list --json 2>/dev/null |
+    jq -r 'first(.[] | select((.id // "" | split("@")[0]) == "andon")
+      | "\(.enabled // false)\t\(.scope // "-")") // empty' 2>/dev/null) || {
+    warn "andon: cannot read 'claude plugin list --json'"
+    hint "run it by hand to see the error"
+    return
+  }
+  if [ -z "$plugin" ]; then
+    warn "andon: plugin not installed, so Claude sessions have no Andon rule or pull tool"
+    hint "claude plugin install andon --scope user (see the agent-config skill)"
+    return
+  fi
+  IFS=$'\t' read -r enabled scope <<<"$plugin"
+  if [ "$enabled" != true ]; then
+    warn "andon: plugin installed ($scope scope) but disabled"
+    hint "claude plugin enable andon"
+  elif [ "$scope" = user ]; then
+    pass "andon: plugin enabled at user scope"
+  else
+    warn "andon: plugin enabled at $scope scope, so sessions elsewhere lack it"
+    hint "claude plugin install andon --scope user"
+  fi
+}
+
+# Linux keeps a running process's executable after an update replaces it on
+# disk, so an agent that updated itself (or was updated by 'agent update')
+# keeps running the old version until restarted. Only the installed path
+# itself (replaced in place) or, for versioned installs such as Claude's
+# versions/2.1.330, a sibling version file counts; other programs are ignored.
+# Processes are grouped by the systemd unit that holds them, so a service with
+# many sessions gives one line and one restart.
+check_processes() { # name bin
+  local name=$1 current proc exe target unit line stale total old pids hint_text
+  [ -d /proc/self ] || return 0
+  current=$(readlink -f "$2" 2>/dev/null) || return 0
+  [ -x "$current" ] || return 0
+  # One line per matching process: unit, stale (0/1), pid, executable name.
+  for proc in "${AGENT_PROC:-/proc}"/[0-9]*; do
+    [ -O "$proc" ] || continue
+    exe=$(readlink "$proc/exe" 2>/dev/null) || continue
+    target=${exe% (deleted)}
+    if [ "$target" != "$current" ]; then
+      [ "${target%/*}" = "${current%/*}" ] || continue
+      [[ "${target##*/}" == [0-9]* && "${current##*/}" == [0-9]* ]] || continue
+    fi
+    unit=$(sed -n '$s|.*/||p' "$proc/cgroup" 2>/dev/null || true)
+    if [ "$proc/exe" -ef "$current" ]; then
+      printf '%s\t0\t%s\t%s\n' "${unit:-"-"}" "${proc##*/}" "${target##*/}"
+    else
+      printf '%s\t1\t%s\t%s\n' "${unit:-"-"}" "${proc##*/}" "${target##*/}"
+    fi
+  done >"$TMP/procs"
+  [ -s "$TMP/procs" ] || return 0
+  if ! grep -q $'\t1\t' "$TMP/procs"; then
+    pass "$(wc -l <"$TMP/procs" | tr -d ' ') $name process(es) run the installed executable"
+    return
+  fi
+  # Per unit with stale processes: unit, stale count, total, an old name, pids.
+  awk -F'\t' '
+    { total[$1]++ }
+    $2 == 1 { stale[$1]++; old[$1] = $4; pids[$1] = pids[$1] (pids[$1] ? " " : "") $3 }
+    END { for (u in stale) printf "%s\t%d\t%d\t%s\t%s\n", u, stale[u], total[u], old[u], pids[u] }
+  ' "$TMP/procs" | sort >"$TMP/stale"
+  while IFS=$'\t' read -r unit stale total old pids; do
+    if [ "$old" = "${current##*/}" ]; then
+      line="run an executable replaced on disk"
+    else
+      line="run $old; ${current##*/} is installed"
+    fi
+    case $unit in
+      *.service)
+        warn "$stale of $total $name process(es) in $unit $line"
+        hint_text="restart $unit (systemctl --user restart $unit); this ends the sessions it runs"
+        ;;
+      *)
+        warn "$stale of $total $name process(es) in ${unit/#-/no unit} $line"
+        hint_text="exit and relaunch them (pid $pids)"
+        ;;
+    esac
+    hint "$hint_text"
+  done <"$TMP/stale"
+}
+
+doctor_agent() { # name
+  local name=$1 bin
+  bin=$(agent_bin "$name")
+  if [ -z "$bin" ]; then
+    info "$name: not installed"
+    printf '\n'
+    return
+  fi
+  printf '%s\n' "$name"
+  pass "installed: $(tilde "$bin") ($(agent_version "$name" "$bin"))"
+  check_links "$name"
+  if [ "$name" = claude ]; then
+    check_claude_hook
+    check_andon_plugin "$bin"
+  fi
+  check_processes "$name" "$bin"
+  printf '\n'
+}
+
+do_doctor() {
+  local name rc report
+  if [ "$quiet" -eq 1 ]; then
+    # Run the full report, then keep each WARN or FAIL line, the hints under
+    # it, and the name of the agent it belongs to.
+    rc=0
+    report=$(NO_COLOR=1 "$0" doctor "${names[@]}") || rc=$?
+    printf '%s\n' "$report" | awk '
+      !NF { head = ""; keep = 0; next }
+      /\[(WARN|FAIL)\]/ { if (head != "") print head; head = ""; print; keep = 1; next }
+      /^        / { if (keep) print; next }
+      /^[a-z]/ { head = $0; keep = 0; next }
+      { keep = 0 }'
+    return "$rc"
+  fi
+  TMP=$(mktemp -d)
+  # shellcheck disable=SC2064 # expand the path now
+  trap "rm -rf '$TMP'" EXIT
+  for name in "${names[@]}"; do
+    doctor_agent "$name"
+  done
+  printf '%d passed, %d warnings, %d failed\n' "$passes" "$warnings" "$failures"
+  [ $((warnings + failures)) -eq 0 ]
+}
+
+# ---------------------------------------------------------------------------
+# list
+
+do_list() {
+  local name bin
+  printf '%-10s %-14s %-12s %s\n' AGENT STATE VERSION PATH
+  for name in "${names[@]}"; do
+    bin=$(agent_bin "$name")
+    if [ -n "$bin" ]; then
+      printf '%-10s %-14s %-12s %s\n' "$name" installed \
+        "$(agent_version "$name" "$bin")" "$(tilde "$bin")"
+    else
+      printf '%-10s %-14s %-12s %s\n' "$name" "not installed" - -
+    fi
+  done
+}
+
+case $command in
+  list) do_list ;;
+  sync) do_sync ;;
+  update) do_update ;;
+  doctor) do_doctor ;;
+  *) die "unknown command '$command' (try '$cmd --help')" ;;
+esac

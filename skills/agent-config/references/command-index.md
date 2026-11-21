@@ -8,6 +8,7 @@
 - [permission](#permission)
 - [mcp](#mcp)
 - [andon](#andon)
+- [agent](#agent)
 
 ## skill
 
@@ -390,6 +391,55 @@ list, show, prompt and stats work from a read-only sandbox.
 Environment:
   ANDON_STATE_DIR  Directory holding events.jsonl and config.json.
   ANDON_LEVEL      Default trigger level (1-5); overrides 'andon level'.
+```
+
+<!-- /generated -->
+
+## agent
+
+The block below is `scripts/agent --help`, kept in sync by
+`command-index-format`.
+
+<!-- generated: ../scripts/agent --help -->
+
+```text
+Usage: agent COMMAND [NAME...] [OPTIONS]
+
+Install, update, configure and check the coding agent CLIs on this machine.
+
+Commands:
+  list [NAME...]      Table of agents: installed or not, version, path
+  sync [NAME...]      Link shared context, hooks and plugins into each
+                      installed agent's configuration
+  update [NAME...]    Run each installed agent's own updater
+  doctor [NAME...]    Check each installed agent: configuration linked, and
+                      (on Linux) no process still running an executable that
+                      an update replaced; non-zero on warnings or failures
+
+Names:
+  claude              Claude Code
+  codex               OpenAI Codex CLI
+  opencode            OpenCode
+  agy                 Antigravity CLI
+
+Options:
+  --quiet             doctor: print only warnings and failures, with their
+                      fixes; print nothing when every check passes
+  -h, --help          Display this help message and exit
+
+Examples:
+  agent list
+  agent sync
+  agent update claude
+  agent doctor
+  agent doctor --quiet
+
+Context, hooks and plugins come from the dotfiles checkout that holds this
+script and its overlays (.private, .corp) beside it; a file in a later overlay
+wins. sync never replaces a real file or directory with a link; doctor reports
+it instead. update ignores install.sh's once-a-day schedule and skips every
+agent when AGENT_OFFLINE is set. Nothing here restarts a running agent: doctor
+says which processes need a restart and how.
 ```
 
 <!-- /generated -->

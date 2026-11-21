@@ -1,0 +1,185 @@
+#!/usr/bin/env bash
+# Mock bodies are single-quoted on purpose: they expand when the mock runs.
+# shellcheck disable=SC2016
+
+# TAP tests for scripts/agent. Each case builds a fake HOME holding a copy of
+# the script inside a minimal dotfiles tree (plus a .private overlay), and a
+# PATH of mocks that record their arguments, so no test touches a real agent,
+# its configuration, or the network.
+
+set -uo pipefail
+
+DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT="$DIR/../scripts/agent"
+
+WORK=$(mktemp -d)
+WORK=$(cd -P "$WORK" && pwd)
+SLEEP_PID=
+cleanup() {
+  [ -z "$SLEEP_PID" ] || kill "$SLEEP_PID" 2>/dev/null || true
+  wait 2>/dev/null || true
+  rm -rf "$WORK"
+}
+trap cleanup EXIT
+
+n=0
+fails=0
+ok() { # description, condition result
+  n=$((n + 1))
+  if [ "$2" -eq 0 ]; then
+    echo "ok $n - $1"
+  else
+    echo "not ok $n - $1"
+    fails=$((fails + 1))
+    printf '%s\n' "$out" | sed 's/^/# /'
+  fi
+}
+yes_if() { if "$@"; then echo 0; else echo 1; fi; }
+
+mock() { # name body
+  printf '#!/usr/bin/env bash\n%s\n' "$2" >"$WORK/bin/$1"
+  chmod +x "$WORK/bin/$1"
+}
+
+# setup: a fresh HOME with ~/.dotfiles (this script and the files it links)
+# and an empty ~/.private overlay, and mocks for claude, agy and opencode.
+setup() {
+  local tool d
+  rm -rf "${WORK:?}/home" "${WORK:?}/bin" "${WORK:?}/calls"
+  d="$WORK/home/.dotfiles"
+  mkdir -p "$d/skills/agent-config/scripts" "$d/skills/agent-config/plugins/andon/opencode" \
+    "$d/etc/agents/hooks" "$d/etc/agents/agy/hooks" "$d/etc/agents/opencode/plugins" \
+    "$WORK/home/.private" "$WORK/bin"
+  cp "$SCRIPT" "$d/skills/agent-config/scripts/agent"
+  echo context >"$d/etc/agents/AGENTS.md"
+  printf '#!/bin/sh\n' >"$d/etc/agents/hooks/ensure-commit-hooks"
+  echo '{}' >"$d/etc/agents/agy/hooks.json"
+  echo plugin >"$d/etc/agents/opencode/plugins/ensure-commit-hooks.ts"
+  : >"$WORK/calls"
+  for tool in bash env awk grep sed tr head cat sort wc dirname basename mktemp \
+    readlink ln rm mkdir mv jq; do
+    ln -s "$(type -P "$tool")" "$WORK/bin/$tool"
+  done
+  mock claude '
+case "$*" in
+  --version) echo "1.0.1 (Claude Code)" ;;
+  "plugin list --json") cat "$HOME/plugins.json" ;;
+  *) echo "claude $*" >>"$CALLS"; exit "${CLAUDE_EXIT:-0}" ;;
+esac'
+  mock agy '[ "$1" = --version ] && echo 1.5.14 || echo "agy $*" >>"$CALLS"'
+  mock opencode '[ "$1" = --version ] && echo "opencode v2.3.2" || echo "opencode $*" >>"$CALLS"'
+  echo '[{"id":"andon@agent-config","enabled":true,"scope":"user"}]' >"$WORK/home/plugins.json"
+}
+
+agent() {
+  out=$(env -i HOME="$WORK/home" PATH="$WORK/bin" CALLS="$WORK/calls" NO_COLOR=1 \
+    ${AGENT_OFFLINE:+AGENT_OFFLINE="$AGENT_OFFLINE"} ${CLAUDE_EXIT:+CLAUDE_EXIT="$CLAUDE_EXIT"} \
+    "$WORK/bin/bash" "$WORK/home/.dotfiles/skills/agent-config/scripts/agent" "$@" 2>&1)
+  rc=$?
+}
+
+H="$WORK/home"
+
+echo "1..25"
+
+setup
+agent --help
+ok "--help lists the commands" "$([[ $rc -eq 0 && "$out" == *"sync [NAME...]"* && "$out" == *"doctor [NAME...]"* ]] && echo 0 || echo 1)"
+
+agent
+ok "no command prints a short usage and fails" "$([[ $rc -eq 1 && "$out" == *"Try 'agent --help'"* && "$out" != *Commands:* ]] && echo 0 || echo 1)"
+
+agent doctor gemini
+ok "an unknown name is refused" "$([[ $rc -eq 1 && "$out" == *"unknown name 'gemini'"* ]] && echo 0 || echo 1)"
+
+agent list --quiet
+ok "--quiet is refused outside doctor" "$([[ $rc -eq 1 && "$out" == *"--quiet applies to doctor only"* ]] && echo 0 || echo 1)"
+
+agent list
+ok "list shows versions and an absent codex" "$([[ $rc -eq 0 && "$out" == *"claude     installed      1.0.1"* && "$out" == *"opencode   installed      v2.3.2"* && "$out" == *"codex      not installed"* ]] && echo 0 || echo 1)"
+
+agent sync
+ok "sync links context into each installed agent" "$([[ $rc -eq 0 && "$(readlink "$H/.claude/CLAUDE.md")" == "$H/.dotfiles/etc/agents/AGENTS.md" && "$(readlink "$H/.gemini/GEMINI.md")" == "$H/.dotfiles/etc/agents/AGENTS.md" && "$(readlink "$H/.config/opencode/AGENTS.md")" == "$H/.dotfiles/etc/agents/AGENTS.md" ]] && echo 0 || echo 1)"
+ok "sync skips agents that are not installed" "$(yes_if [ ! -e "$H/.codex" ])"
+ok "sync links agy hooks and OpenCode plugins" "$([[ -L "$H/.gemini/config/hooks.json" && -L "$H/.gemini/config/hooks" && -L "$H/.config/opencode/plugins/ensure-commit-hooks.ts" && -L "$H/.config/opencode/plugins/andon" ]] && echo 0 || echo 1)"
+ok "sync registers the Claude commit hook" "$(jq -e --arg c "$H/.dotfiles/etc/agents/hooks/ensure-commit-hooks" 'any(.hooks.PreToolUse[]; .matcher == "Bash" and any(.hooks[]; .command == $c))' "$H/.claude/settings.json" >/dev/null && echo 0 || echo 1)"
+ok "sync reports what it linked" "$([[ "$out" == *"linked ~/.claude/CLAUDE.md -> ~/.dotfiles/etc/agents/AGENTS.md"* && "$out" == *"registered Claude Code PreToolUse hook"* ]] && echo 0 || echo 1)"
+
+agent sync
+ok "a second sync changes nothing and says nothing" "$([[ $rc -eq 0 && -z "$out" ]] && echo 0 || echo 1)"
+
+agent doctor
+ok "doctor passes once synced" "$([[ $rc -eq 0 && "$out" == *"[PASS]  installed: $WORK/bin/claude (1.0.1)"* ]] && echo 0 || echo 1)"
+ok "doctor reports an absent agent as one INFO line" "$([[ "$out" == *"[INFO]  codex: not installed"* && "$out" == *"0 warnings, 0 failed"* ]] && echo 0 || echo 1)"
+
+agent doctor --quiet
+ok "doctor --quiet prints nothing when healthy" "$([[ $rc -eq 0 && -z "$out" ]] && echo 0 || echo 1)"
+
+mkdir -p "$H/.private/etc/agents"
+echo private >"$H/.private/etc/agents/AGENTS.md"
+agent doctor claude
+ok "doctor warns when an overlay file is not linked yet" "$([[ $rc -eq 1 && "$out" == *"~/.claude/CLAUDE.md does not link to ~/.private/etc/agents/AGENTS.md"* && "$out" == *"        agent sync claude"* ]] && echo 0 || echo 1)"
+
+agent doctor --quiet
+ok "doctor --quiet prints the warning, its fix and its agent" "$([[ $rc -eq 1 && "$out" == $'claude\n[WARN]  ~/.claude/CLAUDE.md does not link to ~/.private/etc/agents/AGENTS.md\n        agent sync claude'* && "$out" != *PASS* && "$out" != *passed* ]] && echo 0 || echo 1)"
+
+agent sync claude
+ok "sync prefers the overlay's copy" "$([[ $rc -eq 0 && "$(readlink "$H/.claude/CLAUDE.md")" == "$H/.private/etc/agents/AGENTS.md" && "$(readlink "$H/.gemini/GEMINI.md")" == "$H/.dotfiles/etc/agents/AGENTS.md" ]] && echo 0 || echo 1)"
+
+rm "$H/.gemini/GEMINI.md"
+echo mine >"$H/.gemini/GEMINI.md"
+agent sync agy
+ok "sync leaves a real file in place and fails" "$([[ $rc -eq 1 && "$(cat "$H/.gemini/GEMINI.md")" == mine && "$out" == *"is a real file, not a link"* ]] && echo 0 || echo 1)"
+agent doctor agy
+ok "doctor warns about the real file" "$([[ $rc -eq 1 && "$out" == *"~/.gemini/GEMINI.md is a real file"* && "$out" == *"move it aside, then: agent sync agy"* ]] && echo 0 || echo 1)"
+
+setup
+echo '[]' >"$H/plugins.json"
+agent doctor claude
+ok "doctor warns when the Andon plugin is not installed" "$([[ $rc -eq 1 && "$out" == *"andon: plugin not installed"* ]] && echo 0 || echo 1)"
+
+setup
+agent update
+ok "update runs each installed agent's updater" "$([[ $rc -eq 0 && "$(cat "$WORK/calls")" == $'claude update\nopencode upgrade\nagy update' ]] && echo 0 || echo 1)"
+
+: >"$WORK/calls"
+CLAUDE_EXIT=3 agent update
+ok "a failed update is reported, the rest still run, and the exit is non-zero" "$([[ $rc -eq 1 && "$out" == *"claude update failed (exit 3)"* && "$(cat "$WORK/calls")" == *"agy update"* ]] && echo 0 || echo 1)"
+
+: >"$WORK/calls"
+AGENT_OFFLINE=1 agent update
+ok "update does nothing offline" "$([[ $rc -eq 0 && "$out" == *"skipped (AGENT_OFFLINE is set)"* && ! -s "$WORK/calls" ]] && echo 0 || echo 1)"
+
+# Stale executables: claude on PATH is versions/1.0.1 while a copy of sleep
+# runs as versions/1.0.0, as after an update replaced the running version.
+if [ -d /proc/self ]; then
+  setup
+  versions="$H/.local/share/claude/versions"
+  mkdir -p "$versions"
+  mv "$WORK/bin/claude" "$versions/1.0.1"
+  ln -s "$versions/1.0.1" "$WORK/bin/claude"
+  cp "$(type -P sleep)" "$versions/1.0.0"
+  "$versions/1.0.0" 60 &
+  SLEEP_PID=$!
+  agent sync claude
+  agent doctor claude
+  ok "doctor warns about a process running a replaced version" "$([[ $rc -eq 1 && "$out" == *"1 of 1 claude process(es) in "*" run 1.0.0; 1.0.1 is installed"* ]] && echo 0 || echo 1)"
+  kill "$SLEEP_PID" 2>/dev/null
+  wait "$SLEEP_PID" 2>/dev/null
+  cp "$(type -P sleep)" "$versions/1.0.2"
+  rm "$WORK/bin/claude"
+  ln -s "$versions/1.0.2" "$WORK/bin/claude"
+  "$versions/1.0.2" 60 &
+  SLEEP_PID=$!
+  agent doctor claude
+  ok "doctor passes a process on the installed version" "$([[ "$out" == *"1 claude process(es) run the installed executable"* && "$out" != *"is installed"* ]] && echo 0 || echo 1)"
+  kill "$SLEEP_PID" 2>/dev/null
+  wait "$SLEEP_PID" 2>/dev/null
+  SLEEP_PID=
+else
+  echo "ok 24 # SKIP no /proc"
+  echo "ok 25 # SKIP no /proc"
+  n=$((n + 2))
+fi
+
+[ "$fails" -eq 0 ]

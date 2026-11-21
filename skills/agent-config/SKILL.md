@@ -42,6 +42,10 @@ they see, what they may do, and what they are told. It consists of:
 1. **`andon`**: The Andon cord. Records and triages defects agents report in
    their own instructions, skills, rules and tools, through harness plugins for
    Claude Code, OpenCode and local Codex (`plugins/andon`).
+1. **`agent`**: The agent CLI manager. Lists the installed agents (Claude Code,
+   Codex, OpenCode, Antigravity), links shared context, hooks and plugins into
+   their configuration, runs their own updaters, and checks them, including for
+   processes still running a version that an update replaced.
 
 ______________________________________________________________________
 
@@ -391,6 +395,33 @@ with the agent's own login (`/mcp` in Claude Code, `codex mcp login NAME`,
 `logs --serve`, which opens a port; reading logs stays pre-approved.
 
 See the [Command Index](references/command-index.md) for full help details.
+
+______________________________________________________________________
+
+## Managing Agent CLIs (`agent`)
+
+The `agent` tool (symlinked in `bin/`) handles the agent programs themselves, on
+any machine. `install.sh` runs `agent sync` in its `agents` feature,
+`agent update` in its daily `upgrades`, and `agent doctor --quiet` at the end of
+a workstation run.
+
+```bash
+agent list                # installed or not, version, path
+agent sync [NAME...]      # link etc/agents context, hooks and plugins
+agent update [NAME...]    # run each installed agent's own updater, now
+agent doctor [--quiet]    # check configuration and stale running versions
+```
+
+- **`sync`** takes each file from the last of `~/.dotfiles`, `~/.private` and
+  `~/.corp` that has it, as `install.sh` does. It never replaces a real file
+  with a link; `doctor` reports one instead.
+- **`doctor`** groups processes still running a replaced executable by systemd
+  unit, so a service with many sessions gives one warning with one restart
+  command. It never restarts anything: restarting a Remote Control service ends
+  every session it runs, including the caller's. `--quiet` prints only warnings
+  and failures, and nothing when healthy.
+- Long-running services that serve agents to other machines are host-specific
+  and stay out of this tool; an overlay manages them.
 
 ______________________________________________________________________
 
