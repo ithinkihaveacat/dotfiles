@@ -44,8 +44,8 @@ they see, what they may do, and what they are told. It consists of:
    Claude Code, OpenCode and local Codex (`plugins/andon`).
 1. **`agent`**: The agent CLI manager. Lists and installs the agents (Claude
    Code, Codex, OpenCode, Antigravity) and browse, runs their own updaters, and
-   checks them: the configuration `install.sh` links into them, and processes
-   still running a version that an update replaced.
+   checks where each is installed and for processes still running a version that
+   an update replaced.
 
 ______________________________________________________________________
 
@@ -403,8 +403,9 @@ ______________________________________________________________________
 The `agent` tool (symlinked in `bin/`) handles installing and maintaining the
 agent programs, and browse, on any machine. Their configuration is
 `install.sh`'s job: its `agents` feature links `etc/agents` context, hooks and
-plugins into each installed agent, and its `browse` feature configures an
-installed browse for OpenCode. `install.sh` does not call `agent`.
+plugins into each installed agent and installs Claude Code's Andon plugin, and
+its `browse` feature configures an installed browse for OpenCode. `install.sh`
+does not call `agent`.
 
 ```bash
 agent list                # installed or not, version, path
@@ -423,12 +424,13 @@ agent doctor [--quiet]    # check configuration and stale running versions
   `install.sh --only agents` for the configuration.
 - **`update`** is for running by hand: the agents mostly update themselves or
   prompt in their own UI, and browse updates itself while OpenCode runs.
-- **`doctor`** reports where each agent landed (and when this shell's PATH does
-  not reach it), checks the links `install.sh` makes, and groups processes still
-  running a replaced executable by systemd unit, so a service with many sessions
-  gives one warning with one restart command. It never restarts anything:
-  restarting a Remote Control service ends every session it runs, including the
-  caller's. `--quiet` prints only warnings and failures.
+- **`doctor`** checks only what `agent` owns: where each agent landed (and when
+  this shell's PATH does not reach it), and processes still running a replaced
+  executable, grouped by systemd unit so a service with many sessions gives one
+  warning. Restarting is left to the owner, because restarting a Remote Control
+  service ends every session it runs, including the caller's; the warning says
+  how. Configuration is not checked here: running `install.sh --only agents`
+  checks and repairs it. `--quiet` prints only warnings and failures.
 - Long-running services that serve agents to other machines are host-specific
   and stay out of this tool; an overlay manages them.
 
@@ -450,10 +452,11 @@ session writes to one store, `${XDG_STATE_HOME:-~/.local/state}/andon`, through
 the `andon` CLI (`scripts/andon`, symlinked in `bin/`). See
 [plugins/andon/README.md](plugins/andon/README.md) for the design.
 
-**Claude Code:** install it once, from a terminal, at user scope. It then loads
-in terminal and desktop Code tab sessions alike. The desktop app's + → Plugins
-menu manages plugins, but adding this local-folder marketplace needs the
-terminal:
+**Claude Code:** `install.sh`'s `agents` feature installs (or enables) it at
+user scope whenever `claude` is installed. It then loads in terminal and desktop
+Code tab sessions alike. To install it by hand, use a terminal (the desktop
+app's + → Plugins menu manages plugins, but adding this local-folder marketplace
+needs the terminal):
 
 ```bash
 claude plugin install andon --marketplace ~/.dotfiles/skills/agent-config/plugins

@@ -2332,7 +2332,7 @@ function link_agent_file {
   if [ -e "$dst" ] && [ ! -L "$dst" ] && [ "$FORCE" -ne 1 ]; then
     echo "warning: $dst is a real file, not a link to $src; leaving it in place" >&2
     echo "hint: move it aside, or re-run with --force" >&2
-    AGENT_LINK_FAILED=1
+    AGENTS_FAILED=1
     return 0
   fi
   xmkdir "$(dirname "$dst")"
@@ -2393,11 +2393,45 @@ function register_claude_pretooluse_hook {
   fi
 }
 
+# Install the Andon plugin for every Claude Code session (user scope) from
+# agent-config's local marketplace, or enable it, unless it is already enabled
+# at user scope. Changes nothing when 'claude plugin list --json' is unreadable.
+function install_claude_andon_plugin {
+  local marketplace state
+  marketplace=$(overlay_path "skills/agent-config/plugins") || return 0
+  if ! exists jq; then
+    echo "warning: jq not found; Claude Code Andon plugin not checked" >&2
+    return 0
+  fi
+  if ! state=$(claude plugin list --json 2>/dev/null | jq -er '
+    first(.[] | select((.id // "" | split("@")[0]) == "andon")
+      | "\(.enabled // false) \(.scope // "-")") // "absent"' 2>/dev/null); then
+    echo "warning: cannot read 'claude plugin list --json'; Claude Code Andon plugin not checked" >&2
+    AGENTS_FAILED=1
+    return 0
+  fi
+  case $state in
+    "true user") ;;
+    "false user")
+      x claude plugin enable andon --scope user || {
+        echo "warning: failed to enable the Claude Code Andon plugin" >&2
+        AGENTS_FAILED=1
+      }
+      ;;
+    *)
+      x claude plugin install andon --scope user --marketplace "$marketplace" || {
+        echo "warning: failed to install the Claude Code Andon plugin" >&2
+        AGENTS_FAILED=1
+      }
+      ;;
+  esac
+}
+
 function feature_agents {
   local agents_context
 
   heading "agents"
-  AGENT_LINK_FAILED=0
+  AGENTS_FAILED=0
 
   # Symlink user-supplied context for all agents
   agents_context=$(overlay_path "etc/agents/AGENTS.md") || agents_context=""
@@ -2437,6 +2471,7 @@ function feature_agents {
 
   if exists claude; then
     register_claude_pretooluse_hook "etc/agents/hooks/ensure-commit-hooks" Bash
+    install_claude_andon_plugin
   fi
 
   heading "agent permissions"
@@ -2481,7 +2516,7 @@ function feature_agents {
       fi
     done
   fi
-  return "$AGENT_LINK_FAILED"
+  return "$AGENTS_FAILED"
 }
 
 function feature_browse {

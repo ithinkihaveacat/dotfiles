@@ -411,9 +411,9 @@ Commands:
   list [NAME...]      Table of agents: installed or not, version, path
   install NAME...     Install agents with their vendors' installers
   update [NAME...]    Run each installed agent's own updater
-  doctor [NAME...]    Check each installed agent: configuration linked, and
-                      (on Linux) no process still running an executable that
-                      an update replaced; non-zero on warnings or failures
+  doctor [NAME...]    Check each installed agent: where it is, and (on Linux)
+                      no process still running an executable that an update
+                      replaced; non-zero on warnings or failures
 
 Names:
   claude              Claude Code
@@ -434,9 +434,8 @@ Examples:
   agent doctor
   agent doctor --quiet
 
-Configuration (shared context, hooks, plugins) is install.sh's job: its
-agents feature links it, and doctor checks it against the dotfiles checkout
-that holds this script and its overlays (.private, .corp). install runs each
+Configuration (shared context, hooks, plugins) is install.sh's job, not this
+command's: run install.sh --only agents after installing. install runs each
 vendor's own installer (downloaded first, then run) with the switches it
 offers to leave shell startup files alone and skip prompts; installers may
 still edit shell startup files, so install says so after each one. Agents

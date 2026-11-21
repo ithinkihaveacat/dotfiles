@@ -13,9 +13,9 @@ Commands:
   list [NAME...]      Table of agents: installed or not, version, path
   install NAME...     Install agents with their vendors' installers
   update [NAME...]    Run each installed agent's own updater
-  doctor [NAME...]    Check each installed agent: configuration linked, and
-                      (on Linux) no process still running an executable that
-                      an update replaced; non-zero on warnings or failures
+  doctor [NAME...]    Check each installed agent: where it is, and (on Linux)
+                      no process still running an executable that an update
+                      replaced; non-zero on warnings or failures
 
 Names:
   claude              Claude Code
@@ -36,9 +36,8 @@ Examples:
   $cmd doctor
   $cmd doctor --quiet
 
-Configuration (shared context, hooks, plugins) is install.sh's job: its
-agents feature links it, and doctor checks it against the dotfiles checkout
-that holds this script and its overlays (.private, .corp). install runs each
+Configuration (shared context, hooks, plugins) is install.sh's job, not this
+command's: run install.sh --only agents after installing. install runs each
 vendor's own installer (downloaded first, then run) with the switches it
 offers to leave shell startup files alone and skip prompts; installers may
 still edit shell startup files, so install says so after each one. Agents
@@ -131,25 +130,6 @@ while [ -L "$script" ]; do
   esac
 done
 SRCDIR=$(cd -P "$(dirname "$script")/../../.." && pwd)
-DSTDIR=$(cd -P "$SRCDIR/.." && pwd)
-ROOTS=("$SRCDIR")
-for overlay in .private .corp; do
-  if [ -d "$DSTDIR/$overlay" ]; then
-    ROOTS+=("$DSTDIR/$overlay")
-  fi
-done
-
-overlay_path() { # relative path -> the copy in the last root that has it
-  local i
-  for ((i = ${#ROOTS[@]} - 1; i >= 0; i--)); do
-    if [ -e "${ROOTS[$i]}/$1" ]; then
-      printf '%s\n' "${ROOTS[$i]}/$1"
-      return 0
-    fi
-  done
-  return 1
-}
-
 tilde() { # path -> path with $HOME shown as ~
   # shellcheck disable=SC2088 # a literal ~ for display
   case $1 in
@@ -192,44 +172,6 @@ agent_version() { # name bin -> version string, or "-"
   version=${version#opencode }
   version=${version%% *}
   printf '%s' "${version:-"-"}"
-}
-
-context_file() { # name -> where the agent reads user-wide context
-  case $1 in
-    claude) printf '%s' "$HOME/.claude/CLAUDE.md" ;;
-    codex) printf '%s' "$HOME/.codex/AGENTS.md" ;;
-    opencode) printf '%s' "$XDG_CONFIG_HOME/opencode/AGENTS.md" ;;
-    agy) printf '%s' "$HOME/.gemini/GEMINI.md" ;;
-  esac
-}
-
-# What install.sh's agents feature links for each agent; doctor checks these.
-links() { # name -> "SOURCE<TAB>DESTINATION" per link, SOURCE relative to a root
-  [ "$1" != browse ] || return 0
-  printf 'etc/agents/AGENTS.md\t%s\n' "$(context_file "$1")"
-  case $1 in
-    agy)
-      printf 'etc/agents/agy/hooks.json\t%s\n' "$HOME/.gemini/config/hooks.json"
-      printf 'etc/agents/agy/hooks\t%s\n' "$HOME/.gemini/config/hooks"
-      ;;
-    opencode)
-      printf 'etc/agents/opencode/plugins/ensure-commit-hooks.ts\t%s\n' \
-        "$XDG_CONFIG_HOME/opencode/plugins/ensure-commit-hooks.ts"
-      printf 'skills/agent-config/plugins/andon/opencode\t%s\n' \
-        "$XDG_CONFIG_HOME/opencode/plugins/andon"
-      ;;
-  esac
-}
-
-CLAUDE_HOOK=etc/agents/hooks/ensure-commit-hooks
-CLAUDE_HOOK_MATCHER=Bash
-CLAUDE_SETTINGS="$HOME/.claude/settings.json"
-
-claude_hook_registered() { # command -> true when a PreToolUse hook runs it
-  [ -f "$CLAUDE_SETTINGS" ] &&
-    jq -e --arg cmd "$1" --arg matcher "$CLAUDE_HOOK_MATCHER" \
-      'any(.hooks.PreToolUse[]?; .matcher == $matcher and any(.hooks[]?; .command == $cmd))' \
-      "$CLAUDE_SETTINGS" >/dev/null 2>&1
 }
 
 # ---------------------------------------------------------------------------
@@ -418,62 +360,6 @@ fail() {
 }
 hint() { printf '        %s\n' "$1"; }
 
-check_links() { # name
-  local rel dst src
-  while IFS=$'\t' read -r rel dst; do
-    src=$(overlay_path "$rel") || continue
-    if [ -L "$dst" ] && [ "$(readlink "$dst")" = "$src" ]; then
-      pass "$(tilde "$dst") -> $(tilde "$src")"
-    elif [ -e "$dst" ] && [ ! -L "$dst" ]; then
-      warn "$(tilde "$dst") is a real file, so $(tilde "$src") is not used"
-      hint "move it aside, then: $(tilde "$SRCDIR")/install.sh --only agents (or add --force)"
-    else
-      warn "$(tilde "$dst") does not link to $(tilde "$src")"
-      hint "$(tilde "$SRCDIR")/install.sh --only agents"
-    fi
-  done < <(links "$1")
-}
-
-check_claude_hook() {
-  local hook
-  hook=$(overlay_path "$CLAUDE_HOOK") || return 0
-  if ! command -v jq >/dev/null 2>&1; then
-    info "jq not found, so the commit hook registration was not checked"
-  elif claude_hook_registered "$hook"; then
-    pass "commit hook registered in $(tilde "$CLAUDE_SETTINGS")"
-  else
-    warn "commit hook $(tilde "$hook") is not registered in $(tilde "$CLAUDE_SETTINGS")"
-    hint "$(tilde "$SRCDIR")/install.sh --only agents"
-  fi
-}
-
-check_andon_plugin() { # bin: is the Andon plugin enabled for every Claude session?
-  local plugin enabled scope
-  command -v jq >/dev/null 2>&1 || return 0
-  plugin=$("$1" plugin list --json 2>/dev/null |
-    jq -r 'first(.[] | select((.id // "" | split("@")[0]) == "andon")
-      | "\(.enabled // false)\t\(.scope // "-")") // empty' 2>/dev/null) || {
-    warn "andon: cannot read 'claude plugin list --json'"
-    hint "run it by hand to see the error"
-    return
-  }
-  if [ -z "$plugin" ]; then
-    warn "andon: plugin not installed, so Claude sessions have no Andon rule or pull tool"
-    hint "claude plugin install andon --scope user --marketplace $(tilde "$SRCDIR/skills/agent-config/plugins")"
-    return
-  fi
-  IFS=$'\t' read -r enabled scope <<<"$plugin"
-  if [ "$enabled" != true ]; then
-    warn "andon: plugin installed ($scope scope) but disabled"
-    hint "claude plugin enable andon"
-  elif [ "$scope" = user ]; then
-    pass "andon: plugin enabled at user scope"
-  else
-    warn "andon: plugin enabled at $scope scope, so sessions elsewhere lack it"
-    hint "claude plugin install andon --scope user --marketplace $(tilde "$SRCDIR/skills/agent-config/plugins")"
-  fi
-}
-
 # Linux keeps a running process's executable after an update replaces it on
 # disk, so an agent that updated itself (or was updated by 'agent update')
 # keeps running the old version until restarted. Only the installed path
@@ -550,11 +436,6 @@ doctor_agent() { # name
       hint "its installer may have added it to a shell startup file; a new shell picks that up"
       ;;
   esac
-  check_links "$name"
-  if [ "$name" = claude ]; then
-    check_claude_hook
-    check_andon_plugin "$bin"
-  fi
   check_processes "$name" "$bin"
   printf '\n'
 }

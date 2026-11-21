@@ -337,10 +337,10 @@ the network.
 
 `install.sh` configures the coding agents but does not install or update them:
 the `agents` feature links shared context, hooks and plugins into each installed
-agent (leaving a real file in the way alone unless `--force` is given), and
-`browse` configures an installed browse for OpenCode. Installing, updating and
-checking them is `agent` (from the `agent-config` skill): `agent install NAME`,
-`agent update`, `agent doctor`.
+agent (leaving a real file in the way alone unless `--force` is given) and
+installs Claude Code's Andon plugin, and `browse` configures an installed browse
+for OpenCode. Installing, updating and checking them is `agent` (from the
+`agent-config` skill): `agent install NAME`, `agent update`, `agent doctor`.
 
 The default run ends with `overlay-hooks`, which runs each overlay's `update`
 script (`~/.private/update`, `~/.corp/update`) when it is executable, for

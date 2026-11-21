@@ -5,8 +5,7 @@
 # TAP tests for scripts/agent. Each case builds a fake HOME holding a copy of
 # the script inside a minimal dotfiles tree (plus a .private overlay), and a
 # PATH of mocks that record their arguments, so no test touches a real agent,
-# its configuration, or the network. install.sh, not agent, makes the
-# configuration links; link_all makes them here the way install.sh does.
+# its configuration, or the network.
 
 set -uo pipefail
 # CI sets AGENT_OFFLINE for every test; these cases set it themselves.
@@ -98,26 +97,6 @@ chmod +x "\$HOME/.local/bin/$n"
 EOS'
 }
 
-# link_all: the links and hook install.sh's agents feature makes for the mocked
-# claude, opencode and agy, taking AGENTS.md from .private when it has one.
-link_all() {
-  local d="$WORK/home/.dotfiles" h="$WORK/home" ctx
-  ctx="$d/etc/agents/AGENTS.md"
-  [ ! -e "$h/.private/etc/agents/AGENTS.md" ] || ctx="$h/.private/etc/agents/AGENTS.md"
-  mkdir -p "$h/.claude" "$h/.gemini/config" "$h/.config/opencode/plugins"
-  ln -sfn "$ctx" "$h/.claude/CLAUDE.md"
-  ln -sfn "$ctx" "$h/.gemini/GEMINI.md"
-  ln -sfn "$ctx" "$h/.config/opencode/AGENTS.md"
-  ln -sfn "$d/etc/agents/agy/hooks.json" "$h/.gemini/config/hooks.json"
-  ln -sfn "$d/etc/agents/agy/hooks" "$h/.gemini/config/hooks"
-  ln -sfn "$d/etc/agents/opencode/plugins/ensure-commit-hooks.ts" \
-    "$h/.config/opencode/plugins/ensure-commit-hooks.ts"
-  ln -sfn "$d/skills/agent-config/plugins/andon/opencode" "$h/.config/opencode/plugins/andon"
-  jq -n --arg c "$d/etc/agents/hooks/ensure-commit-hooks" \
-    '{hooks: {PreToolUse: [{matcher: "Bash", hooks: [{type: "command", command: $c, timeout: 5}]}]}}' \
-    >"$h/.claude/settings.json"
-}
-
 agent() {
   out=$(env -i HOME="$WORK/home" PATH="$WORK/bin" CALLS="$WORK/calls" NO_COLOR=1 \
     ${AGENT_OFFLINE:+AGENT_OFFLINE="$AGENT_OFFLINE"} ${CLAUDE_EXIT:+CLAUDE_EXIT="$CLAUDE_EXIT"} \
@@ -128,7 +107,7 @@ agent() {
 
 H="$WORK/home"
 
-echo "1..32"
+echo "1..29"
 
 setup
 agent --help
@@ -150,34 +129,12 @@ agent list
 ok "list shows versions, an absent codex and an absent browse" "$([[ $rc -eq 0 && "$out" == *"claude     installed      1.0.1"* && "$out" == *"opencode   installed      v2.3.2"* && "$out" == *"codex      not installed"* && "$out" == *"browse     not installed"* ]] && echo 0 || echo 1)"
 
 agent doctor
-ok "doctor warns about configuration install.sh has not linked" "$([[ $rc -eq 1 && "$out" == *"~/.claude/CLAUDE.md does not link to ~/.dotfiles/etc/agents/AGENTS.md"* && "$out" == *"        ~/.dotfiles/install.sh --only agents"* ]] && echo 0 || echo 1)"
-
-link_all
-agent doctor
-ok "doctor passes once configured" "$([[ $rc -eq 0 && "$out" == *"[PASS]  installed: $WORK/bin/claude (1.0.1)"* && "$out" == *"commit hook registered"* ]] && echo 0 || echo 1)"
+ok "doctor passes installed agents" "$([[ $rc -eq 0 && "$out" == *"[PASS]  installed: $WORK/bin/claude (1.0.1)"* ]] && echo 0 || echo 1)"
 ok "doctor reports an absent agent as one INFO line" "$([[ "$out" == *"[INFO]  codex: not installed"* && "$out" == *"[INFO]  browse: not installed"* && "$out" == *"0 warnings, 0 failed"* ]] && echo 0 || echo 1)"
+ok "doctor leaves configuration and Andon to install.sh" "$([[ "$out" != *CLAUDE.md* && "$out" != *"commit hook"* && "$out" != *andon* ]] && echo 0 || echo 1)"
 
 agent doctor --quiet
 ok "doctor --quiet prints nothing when healthy" "$([[ $rc -eq 0 && -z "$out" ]] && echo 0 || echo 1)"
-
-mkdir -p "$H/.private/etc/agents"
-echo private >"$H/.private/etc/agents/AGENTS.md"
-agent doctor claude
-ok "doctor expects the overlay's copy" "$([[ $rc -eq 1 && "$out" == *"~/.claude/CLAUDE.md does not link to ~/.private/etc/agents/AGENTS.md"* ]] && echo 0 || echo 1)"
-
-agent doctor --quiet
-ok "doctor --quiet prints the warning, its fix and its agent" "$([[ $rc -eq 1 && "$out" == $'claude\n[WARN]  ~/.claude/CLAUDE.md does not link to ~/.private/etc/agents/AGENTS.md\n        ~/.dotfiles/install.sh --only agents'* && "$out" != *PASS* && "$out" != *passed* ]] && echo 0 || echo 1)"
-
-link_all
-rm "$H/.gemini/GEMINI.md"
-echo mine >"$H/.gemini/GEMINI.md"
-agent doctor agy
-ok "doctor warns about a real file where a link belongs" "$([[ $rc -eq 1 && "$out" == *"~/.gemini/GEMINI.md is a real file"* && "$out" == *"move it aside, then: ~/.dotfiles/install.sh --only agents (or add --force)"* && "$(cat "$H/.gemini/GEMINI.md")" == mine ]] && echo 0 || echo 1)"
-
-setup
-echo '[]' >"$H/plugins.json"
-agent doctor claude
-ok "doctor warns when the Andon plugin is not installed, with the marketplace to install from" "$([[ $rc -eq 1 && "$out" == *"andon: plugin not installed"* && "$out" == *"claude plugin install andon --scope user --marketplace ~/.dotfiles/skills/agent-config/plugins"* ]] && echo 0 || echo 1)"
 
 setup
 agent update
@@ -257,9 +214,10 @@ if [ -d /proc/self ]; then
   cp "$(type -P bash)" "$versions/1.0.0"
   "$versions/1.0.0" -c 'sleep 60; :' 2>/dev/null &
   SLEEP_PID=$!
-  link_all
   agent doctor claude
   ok "doctor warns about a process running a replaced version" "$([[ $rc -eq 1 && "$out" == *"1 of 1 claude process(es) in "*" run 1.0.0; 1.0.1 is installed"* ]] && echo 0 || echo 1)"
+  agent doctor --quiet claude
+  ok "doctor --quiet prints only the warning, its fix and its agent" "$([[ $rc -eq 1 && "$out" == $'claude\n[WARN]  1 of 1 claude process(es) in '* && "$out" == *$'\n        '* && "$out" != *PASS* && "$out" != *passed* ]] && echo 0 || echo 1)"
   stop_sleeper
   cp "$(type -P bash)" "$versions/1.0.2"
   rm "$WORK/bin/claude"
@@ -270,9 +228,10 @@ if [ -d /proc/self ]; then
   ok "doctor passes a process on the installed version" "$([[ "$out" == *"1 claude process(es) run the installed executable"* && "$out" != *"is installed"* ]] && echo 0 || echo 1)"
   stop_sleeper
 else
-  echo "ok 31 # SKIP no /proc"
-  echo "ok 32 # SKIP no /proc"
-  n=$((n + 2))
+  echo "ok 27 # SKIP no /proc"
+  echo "ok 28 # SKIP no /proc"
+  echo "ok 29 # SKIP no /proc"
+  n=$((n + 3))
 fi
 
 [ "$fails" -eq 0 ]
