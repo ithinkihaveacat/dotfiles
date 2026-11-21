@@ -115,6 +115,13 @@ Environment:
         help="Restrict the agent to a single application package for the entire run",
     )
     parser.add_argument(
+        "--dismiss-interstitials",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Close cookie banners, sign-up popups and similar clutter that "
+        "covers the content; login screens are left alone (default: enabled)",
+    )
+    parser.add_argument(
         "--timeout",
         type=int,
         default=180,
@@ -776,18 +783,25 @@ Environment:
         except Exception as e:
             return {"status": "error", "message": str(e)}
 
-    def complete_task(success: bool, reason: str) -> dict:
+    def complete_task(
+        success: bool, reason: str, dismissed: list[str] | None = None
+    ) -> dict:
         """Call this when the goal has been definitively achieved or cannot be achieved.
 
         Args:
             success: True if the goal was achieved, False if it failed.
             reason: Explanation of the outcome.
+            dismissed: Each interstitial you dismissed and saw disappear, with the
+                button used, e.g. ["cookie banner (Reject all)"]. Empty if none.
         """
+        dismissed = [str(x) for x in (dismissed or [])]
+        if dismissed:
+            print(f"[agent] Dismissed: {'; '.join(dismissed)}", file=sys.stderr)
         print(
             f"[agent] Task marked complete (success={success}, reason={reason})",
             file=sys.stderr,
         )
-        return {"success": success, "reason": reason}
+        return {"success": success, "reason": reason, "dismissed": dismissed}
 
     def save_screenshot(filename: str | None = None) -> dict:
         """Saves a screenshot of the current UI state to the output directory.
@@ -852,6 +866,40 @@ Environment:
             "(e.g. into system settings or other apps) to achieve the goal."
         )
 
+    # Worded as a default rather than a rule, with reasons and examples, so the
+    # model applies it with judgement; "never" is kept for the login boundary.
+    if args.dismiss_interstitials:
+        interstitial_instruction = """Interstitials: By default, before and while working on the goal, close
+interstitials that cover the content: cookie or consent banners, newsletter and
+email sign-up popups, promotional offers, feature tours, rating prompts, and
+"update later" nags. They carry no user intent and obscure what the user wants
+to see, so dismissing them is a low-risk step that clears the way for the task.
+Prefer the least-committal option: "Reject all", "Necessary only", "No thanks",
+"Not now", or the close (X) button; tap "Accept" only when it is the only way out.
+If the goal itself concerns the interstitial, treat it as part of the task instead.
+
+Leave these alone unless the goal asks you to act on them: system permission
+dialogs, login or sign-in screens, paywalls, age gates, and anything that asks
+for personal details. Never enter credentials, and never skip a login screen or
+choose "continue as guest": the user may want the logged-in experience. If the
+goal cannot be reached without signing in, call complete_task(success=False)
+and say a login screen is blocking it.
+
+When you call complete_task, list each interstitial you dismissed and saw
+disappear in the dismissed argument, e.g. ["cookie banner (Reject all)",
+"newsletter popup (X)"]. Pass [] if you dismissed nothing.
+
+<example>Cookie banner over a news article; goal "screenshot the headline":
+tap "Reject all", then save_screenshot.</example>
+<example>"Get 10% off: join our list" popup: tap the X or "No thanks".</example>
+<example>"Sign in to continue" with a "Skip" link; goal "describe the home
+screen": do not tap Skip; describe the sign-in screen.</example>"""
+    else:
+        interstitial_instruction = (
+            "Interstitials: Leave popups, banners and dialogs as they are unless "
+            "the goal requires acting on them."
+        )
+
     # The core system instruction template is adapted from the official Google Gemini documentation
     # for agentic workflows: https://ai.google.dev/gemini-api/docs/prompting-strategies#agentic-si-template
     system_instruction = f"""You are a very strong reasoner and planner operating a complex user interface. Use these critical instructions to structure your plans, thoughts, and responses.
@@ -898,6 +946,8 @@ Device Information:
 
 Constraints:
 {cross_app_instruction}
+
+{interstitial_instruction}
 """
 
     config = types.GenerateContentConfig(
@@ -1127,6 +1177,7 @@ What is your first action?"""
                 "type": "result",
                 "success": task_result.get("success", False),
                 "reason": task_result.get("reason", ""),
+                "dismissed": task_result.get("dismissed", []),
                 "steps": step,
                 "elapsed_ms": int(total_elapsed * 1000),
                 "context": context_usage,
