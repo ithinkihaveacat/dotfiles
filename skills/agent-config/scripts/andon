@@ -939,6 +939,123 @@ def cmd_level(args: argparse.Namespace) -> int:
     return 0
 
 
+def use_color_for(stream: Any) -> bool:
+    if os.environ.get("NO_COLOR"):
+        return False
+    force = os.environ.get("FORCE_COLOR")
+    if force and force != "0":
+        return True
+    return stream.isatty() if hasattr(stream, "isatty") else False
+
+
+def doctor_store() -> tuple[str, str, list[str]]:
+    """Can a pull write the store? Read-only: checks permissions, writes nothing,
+    so a sandbox that denies writes the permissions allow goes unnoticed."""
+    directory = state_dir()
+    if directory.exists() and not directory.is_dir():
+        return "FAIL", f"store {directory} is not a directory", []
+    if not directory.exists():
+        # The first pull creates it, so the nearest existing parent must be writable.
+        parent = next(p for p in directory.parents if p.exists())
+        if os.access(parent, os.W_OK | os.X_OK):
+            return "PASS", f"store {directory} absent; the first pull creates it", []
+        return (
+            "FAIL",
+            f"store {directory} absent and {parent} is not writable",
+            ["set ANDON_STATE_DIR to a writable directory"],
+        )
+    if not os.access(directory, os.W_OK | os.X_OK):
+        return (
+            "FAIL",
+            f"store {directory} is not writable",
+            ["run outside the sandbox or set ANDON_STATE_DIR to a writable directory"],
+        )
+    return "PASS", f"store {directory} is writable", []
+
+
+def doctor_events() -> tuple[str, str, list[str]]:
+    path = events_path()
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return "PASS", f"{path} absent (no alerts yet)", []
+    except OSError as err:
+        return "FAIL", f"cannot read {path}: {err.strerror or err}", []
+    bad = []
+    for lineno, line in enumerate(lines, 1):
+        if not line.strip():
+            continue
+        try:
+            ok = isinstance(json.loads(line), dict)
+        except json.JSONDecodeError:
+            ok = False
+        if not ok:
+            bad.append(lineno)
+    if bad:
+        shown = ", ".join(map(str, bad[:5])) + (", ..." if len(bad) > 5 else "")
+        return (
+            "WARN",
+            f"{path}: {len(bad)} unreadable line(s), skipped by every command",
+            [f"line(s) {shown}; fix or delete them by hand"],
+        )
+    return "PASS", f"{path} parses", []
+
+
+def doctor_config() -> tuple[str, str, list[str]]:
+    path = config_path()
+    try:
+        config = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return "PASS", f"{path} absent (defaults apply)", []
+    except json.JSONDecodeError as err:
+        return (
+            "WARN",
+            f"{path} is not valid JSON (line {err.lineno}), so it is ignored",
+            [f"{PROG} level --reset rewrites it"],
+        )
+    except OSError as err:
+        return "FAIL", f"cannot read {path}: {err.strerror or err}", []
+    if not isinstance(config, dict):
+        return "WARN", f"{path} is not a JSON object, so it is ignored", []
+    if "level" in config and parse_level(config["level"]) is None:
+        return (
+            "WARN",
+            f"{path}: level {config['level']!r} is not 1-5, so it is ignored",
+            [f"{PROG} level N, or {PROG} level --reset"],
+        )
+    return "PASS", f"{path} parses", []
+
+
+def doctor_level() -> tuple[str, str, list[str]]:
+    env = os.environ.get("ANDON_LEVEL")
+    if env is not None and parse_level(env) is None:
+        return "WARN", f"ignoring ANDON_LEVEL={env!r} (want 1-5)", []
+    try:
+        level, source = effective_level()
+    except AndonError as err:
+        return "FAIL", str(err), []
+    return "INFO", f"default level {level} ({source})", []
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    """Checks the store and settings, never the alerts in it."""
+    colors = {"PASS": 32, "INFO": 36, "WARN": 33, "FAIL": 31}
+    use_color = use_color_for(sys.stdout)
+    counts = {"WARN": 0, "FAIL": 0}
+    for check in (doctor_store, doctor_events, doctor_config, doctor_level):
+        status, message, details = check()
+        tag = f"[{status}]"
+        if use_color:
+            tag = f"\033[{colors[status]}m{tag}\033[0m"
+        print(f"{tag}  {message}")
+        for detail in details:
+            print(f"        {detail}")
+        if status in counts:
+            counts[status] += 1
+    print(f"{PROG} doctor: {counts['FAIL']} failure(s), {counts['WARN']} warning(s)")
+    return 1 if counts["FAIL"] or counts["WARN"] else 0
+
+
 def cmd_clear_resolved(args: argparse.Namespace) -> int:
     with locked_alerts() as alerts:
         kept = [a for a in alerts if a["status"] == Status.OPEN]
@@ -978,6 +1095,9 @@ Examples:
 
   # Hand an alert to a fresh agent, which fixes the source and resolves it
   andon prompt e790 | claude -p
+
+  # Check the store is writable and its files parse
+  andon doctor
 
   # Serve tools to a local MCP client
   andon mcp --stdio
@@ -1119,6 +1239,10 @@ def build_parser() -> argparse.ArgumentParser:
     level.add_argument("--json", action="store_true", help="print JSON")
 
     command("clear-resolved", "Delete every resolved and dismissed alert")
+    command(
+        "doctor",
+        "Check the store is writable and its files parse (not the alerts in it)",
+    )
     mcp = command("mcp", "Serve Andon tools over MCP (stdio only)")
     mcp.add_argument(
         "--stdio", action="store_true", help="use stdin/stdout (the default)"
@@ -1157,6 +1281,7 @@ HANDLERS = {
     "stats": cmd_stats,
     "level": cmd_level,
     "clear-resolved": cmd_clear_resolved,
+    "doctor": cmd_doctor,
     "mcp": cmd_mcp,
 }
 

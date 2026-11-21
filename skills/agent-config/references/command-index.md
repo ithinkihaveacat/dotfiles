@@ -361,6 +361,8 @@ positional arguments:
                     fingerprint
     level           Print or set the default trigger level
     clear-resolved  Delete every resolved and dismissed alert
+    doctor          Check the store is writable and its files parse (not the
+                    alerts in it)
     mcp             Serve Andon tools over MCP (stdio only)
 
 options:
@@ -373,6 +375,9 @@ Examples:
 
   # Hand an alert to a fresh agent, which fixes the source and resolves it
   andon prompt e790 | claude -p
+
+  # Check the store is writable and its files parse
+  andon doctor
 
   # Serve tools to a local MCP client
   andon mcp --stdio
