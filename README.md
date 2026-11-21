@@ -335,11 +335,17 @@ A failing feature is reported and the rest still run; the exit status is
 non-zero if any failed. Set `AGENT_OFFLINE=1` to skip every feature that needs
 the network.
 
-The default run ends with `overlay-hooks`, which runs each overlay's `update`
-script (`~/.private/update`, `~/.corp/update`) when it is executable. Because it
-runs after the agent CLIs update, an overlay can use it for host-specific health
-checks, such as reporting agents still running an executable the update
-replaced. Keep these hooks read-only, quick, and non-fatal.
+Agent CLIs are handled by `agent` (from the `agent-config` skill): the `agents`
+feature runs `agent sync`, `upgrades` runs `agent update`, and the default run
+ends with `agent-doctor`, which runs `agent doctor --quiet`. It prints nothing
+when the agents are healthy, and otherwise each problem with its fix, such as a
+service still running a version an update replaced. It never restarts an agent,
+and its findings never fail the run.
+
+Before that, `overlay-hooks` runs each overlay's `update` script
+(`~/.private/update`, `~/.corp/update`) when it is executable, for host-specific
+checks such as long-running agent services. Keep these hooks read-only, quick,
+and non-fatal.
 
 ### Developing and publishing changes
 

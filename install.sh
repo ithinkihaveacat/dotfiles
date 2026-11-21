@@ -92,10 +92,11 @@ FEATURES=(
   'cloudflare|-|Cloudflare'"'"'s cf CLI (beta) from npm, with its telemetry off'
   'app-host|-|cloudflared, for a host serving apps through a Cloudflare Tunnel'
   'skills|workstation cloud|Link skill and permission plugins; apply default skills'
-  'agents|workstation|Link agent context and hooks, and synchronize permissions'
+  'agents|workstation|Link agent context and hooks (agent sync), and synchronize permissions'
   'browse|workstation|Install browse, the browser-control MCP server, for OpenCode'
   'upgrades|workstation|Daily: upgrade packages, uv, ruby-build, Android and agent CLIs'
   'overlay-hooks|workstation|Run each overlay'"'"'s update hook'
+  'agent-doctor|workstation|Report problems with installed coding agents, such as a stale running version'
 )
 PROFILES="workstation cloud ci"
 PACKAGE_FEATURES="base cli-extras services media android ruby"
@@ -495,18 +496,6 @@ function is_codex_agent {
 function is_opencode_agent {
   exists opencode && return 0
   [ -x "$HOME/.opencode/bin/opencode" ]
-}
-
-# Print the OpenCode executable to run. The standalone installer puts the
-# binary in ~/.opencode/bin, which the fish wrapper adds to its own lookup but
-# a non-interactive bash (install.sh) does not have on PATH.
-function opencode_bin {
-  local path
-  if path=$(type -P opencode); then
-    printf '%s\n' "$path"
-  else
-    printf '%s\n' "$HOME/.opencode/bin/opencode"
-  fi
 }
 
 PACKAGE_STAMP="$XDG_CACHE_HOME/dotfiles/last_package_update"
@@ -1679,23 +1668,9 @@ function feature_upgrades {
       compose-preview update || echo "warning: compose-preview update failed" >&2
   fi
 
-  if exists agy || exists claude || is_codex_agent || is_opencode_agent; then
-    heading "agent CLIs upgrade"
-  fi
-  if exists agy; then
-    x agy update || echo "warning: agy update failed" >&2
-  fi
-  if exists claude; then
-    x claude update || echo "warning: claude update failed" >&2
-  fi
-  if is_codex_agent; then
-    x codex update || echo "warning: codex update failed" >&2
-  fi
-  if is_opencode_agent; then
-    # `opencode upgrade` keeps the installed channel (the standalone
-    # installer's v2 build here) and reuses its own curl installer.
-    x "$(opencode_bin)" upgrade || echo "warning: opencode upgrade failed" >&2
-  fi
+  # The agent CLIs: 'agent update' runs each installed one's own updater.
+  heading "agent CLIs upgrade"
+  x "$SRCDIR/bin/agent" update || echo "warning: agent update failed" >&2
 }
 
 # uv: installs uv itself, then fetches everything this repository's uv-based
@@ -2348,100 +2323,11 @@ function cleanup_legacy_gemini_skills_json {
   fi
 }
 
-# Register an overlay script as a Claude Code PreToolUse command hook in
-# ~/.claude/settings.json, leaving every other setting and hook in place. The
-# file is rewritten only when no hook for MATCHER already runs the script.
-function register_claude_pretooluse_hook {
-  local rel=$1
-  local matcher=$2
-  local settings="$HOME/.claude/settings.json"
-  local cmd tmp
-
-  cmd=$(overlay_path "$rel") || return 0
-  if ! exists jq; then
-    echo "warning: jq not found; Claude Code hook $rel not registered" >&2
-    return 0
-  fi
-
-  xmkdir "$HOME/.claude"
-  if [ ! -s "$settings" ]; then
-    (umask 077 && echo '{}' >"$settings")
-  fi
-  if ! jq -e 'type == "object"' "$settings" >/dev/null 2>&1; then
-    echo "warning: $settings is not a JSON object; Claude Code hook $rel not registered" >&2
-    return 0
-  fi
-
-  if jq -e --arg cmd "$cmd" --arg matcher "$matcher" \
-    'any(.hooks.PreToolUse[]?; .matcher == $matcher and any(.hooks[]?; .command == $cmd))' \
-    "$settings" >/dev/null; then
-    return 0
-  fi
-
-  # Drop stale registrations of the same script (another matcher), then add.
-  tmp="$settings.tmp.$$"
-  if (umask 077 && jq --arg cmd "$cmd" --arg matcher "$matcher" '
-    .hooks.PreToolUse = (
-      ((.hooks.PreToolUse // [])
-        | map(.hooks |= map(select(.command != $cmd)))
-        | map(select((.hooks // []) | length > 0)))
-      + [{matcher: $matcher, hooks: [{type: "command", command: $cmd, timeout: 5}]}]
-    )' "$settings" >"$tmp") && x mv "$tmp" "$settings"; then
-    echo "registered Claude Code PreToolUse hook: $cmd" >&2
-  else
-    rm -f "$tmp"
-    echo "warning: failed to register Claude Code hook in $settings" >&2
-  fi
-}
-
 function feature_agents {
-  local agents_context andon_plugins
-
   heading "agents"
 
-  # Symlink user-supplied context for all agents
-  agents_context=$(overlay_path "etc/agents/AGENTS.md") || agents_context=""
-  if [ -n "$agents_context" ]; then
-    if is_codex_agent; then
-      xmkdir "$HOME/.codex"
-      x ln -sf "$agents_context" "$HOME/.codex/AGENTS.md"
-    fi
-    if exists agy; then
-      xmkdir "$HOME/.gemini"
-      x ln -sf "$agents_context" "$HOME/.gemini/GEMINI.md"
-    fi
-    if exists claude; then
-      xmkdir "$HOME/.claude"
-      x ln -sf "$agents_context" "$HOME/.claude/CLAUDE.md"
-    fi
-    if is_opencode_agent; then
-      xmkdir "$XDG_CONFIG_HOME/opencode"
-      x ln -sf "$agents_context" "$XDG_CONFIG_HOME/opencode/AGENTS.md"
-    fi
-  fi
-
-  if exists agy; then
-    xmkdir "$HOME/.gemini/config"
-    link_overlay_path "etc/agents/agy/hooks.json" "$HOME/.gemini/config/hooks.json"
-    link_overlay_path "etc/agents/agy/hooks" "$HOME/.gemini/config/hooks"
-  fi
-
-  if is_opencode_agent; then
-    xmkdir "$XDG_CONFIG_HOME/opencode/plugins"
-    link_overlay_path \
-      "etc/agents/opencode/plugins/ensure-commit-hooks.ts" \
-      "$XDG_CONFIG_HOME/opencode/plugins/ensure-commit-hooks.ts"
-    andon_plugins="$XDG_CONFIG_HOME/opencode/plugins/andon"
-    if [ -e "$andon_plugins" ] && [ ! -L "$andon_plugins" ]; then
-      echo "warning: $andon_plugins exists and is not a symlink; leaving it in place" >&2
-    else
-      link_overlay_path "skills/agent-config/plugins/andon/opencode" "$andon_plugins"
-    fi
-  fi
-
-  if exists claude; then
-    register_claude_pretooluse_hook "etc/agents/hooks/ensure-commit-hooks" Bash
-  fi
+  # Link shared context, hooks and plugins into each installed agent.
+  x "$SRCDIR/bin/agent" sync || echo "warning: agent sync failed" >&2
 
   heading "agent permissions"
 
@@ -2544,6 +2430,14 @@ function feature_overlay_hooks {
     heading "corp update"
     "$DSTDIR/.corp/update"
   fi
+}
+
+# Report problems with the installed agents, such as a process still running a
+# version that an update replaced; nothing when they are healthy. Findings never
+# fail the run: restarting an agent is the owner's call.
+function feature_agent_doctor {
+  heading "agent doctor"
+  "$SRCDIR/bin/agent" doctor --quiet || true
 }
 
 # Ask for sudo upfront, but only if a selected feature will use it on Linux:
