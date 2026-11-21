@@ -335,13 +335,11 @@ A failing feature is reported and the rest still run; the exit status is
 non-zero if any failed. Set `AGENT_OFFLINE=1` to skip every feature that needs
 the network.
 
-On Linux, the default run ends with `restart-warnings`: it checks this user's
-native Claude and OpenCode processes for executables replaced on disk. This also
-catches application-managed updates and runs even when daily upgrades are
-skipped. Warnings include the PID and a restart command when the launcher is
-recognizable; nothing is restarted automatically. Run the check alone with
-`./install.sh --only restart-warnings`. It does not monitor continuously or
-detect outdated libraries, script-based installations, or processes on macOS.
+The default run ends with `overlay-hooks`, which runs each overlay's `update`
+script (`~/.private/update`, `~/.corp/update`) when it is executable. Because it
+runs after the agent CLIs update, an overlay can use it for host-specific health
+checks, such as reporting agents still running an executable the update
+replaced. Keep these hooks read-only, quick, and non-fatal.
 
 ### Developing and publishing changes
 
