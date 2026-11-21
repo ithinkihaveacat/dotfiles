@@ -7,7 +7,6 @@
 # tests/test-install-git-pull (git_up, interactive gating, self-reexec),
 # tests/test-install-node (the per-user default Node.js),
 # tests/test-install-fish-completions (generated fish completions)
-# Tests: tests/test-install-restart-warnings (stale agent executables)
 
 # When piped from the network the caller picks the interpreter
 # (`curl ... | bash`), so the shebang above is bypassed. The body of this script
@@ -97,7 +96,6 @@ FEATURES=(
   'browse|workstation|Install browse, the browser-control MCP server, for OpenCode'
   'upgrades|workstation|Daily: upgrade packages, uv, ruby-build, Android and agent CLIs'
   'overlay-hooks|workstation|Run each overlay'"'"'s update hook'
-  'restart-warnings|workstation|Warn about running agents using replaced executables (Linux)'
 )
 PROFILES="workstation cloud ci"
 PACKAGE_FEATURES="base cli-extras services media android ruby"
@@ -160,10 +158,6 @@ rebases, resets, or stashes. Incoming changes require confirmation, or an
 explicit --accept-updates for automation. Use --apply to apply the current
 checkout without fetching or updating Git.
 
-On Linux, restart-warnings checks this user's native Claude and OpenCode
-processes against the installed executables, including updates installed by
-the applications themselves. It only warns; it never restarts an agent.
-
 OPTIONS:
   -h, --help    Show this help message and exit
   --profile NAME
@@ -211,7 +205,6 @@ EXAMPLES:
   $(basename "$0") --without upgrades # Skip the daily upgrades
   $(basename "$0") --apply            # Apply local edits without Git updates
   $(basename "$0") --accept-updates --no-input # Explicitly adopt updates on an agent host
-  $(basename "$0") --only restart-warnings # Check running agents without updating
   $(basename "$0") --profile cloud    # From a cloud environment's setup script
   $(basename "$0") --only uv          # Prepare a CI job for offline use
   $(basename "$0") --only uv --force  # Rebuild uv script caches from scratch
@@ -2550,59 +2543,6 @@ function feature_overlay_hooks {
   if [ -x "$DSTDIR/.corp/update" ]; then
     heading "corp update"
     "$DSTDIR/.corp/update"
-  fi
-}
-
-# Recognize only the binary's native service mode, not convenience wrappers.
-# Never replay a full command line: it may contain credentials or arguments
-# unsuitable to reuse.
-function agent_restart_hint {
-  local agent=$1 proc=$2 arg
-  if [ "$agent" = opencode ] && [ -r "$proc/cmdline" ]; then
-    while IFS= read -r -d '' arg; do
-      if [ "$arg" = --service ]; then
-        echo "hint: opencode service restart" >&2
-        return 0
-      fi
-    done <"$proc/cmdline"
-  fi
-  echo "hint: stop and relaunch $agent PID ${proc##*/} using its original launcher; reconnecting a client is not enough" >&2
-}
-
-# Linux retains the executable inode of a running process after replacement.
-# This catches both installer updates and independent auto-updates, without
-# starting an agent, calling its API, or tracking update history. Restrict the
-# comparison to the selected installation (plus native Claude's version files),
-# so a separate installation/channel is not treated as stale.
-function warn_agent_processes {
-  local agent=$1 installed=$2 proc_root=$3 current proc exe target
-  current=$(readlink -f "$installed" 2>/dev/null) || return 0
-  [ -x "$current" ] || return 0
-  for proc in "$proc_root"/[0-9]*; do
-    [ -O "$proc" ] && [ -r "$proc/exe" ] || continue
-    exe=$(readlink "$proc/exe" 2>/dev/null) || continue
-    target=${exe% (deleted)}
-    if [ "$target" != "$current" ]; then
-      # Native Claude moves its launcher symlink between sibling versions.
-      [ "$agent" = claude ] &&
-        [[ "$current" == "$HOME/.local/share/claude/versions/"* ]] &&
-        [[ "$target" == "$HOME/.local/share/claude/versions/"* ]] || continue
-    fi
-    [ "$proc/exe" -ef "$current" ] && continue
-    echo "warning: $agent PID ${proc##*/} is using an outdated executable; restart required to use the installed version" >&2
-    agent_restart_hint "$agent" "$proc"
-  done
-  return 0
-}
-
-function feature_restart_warnings {
-  local installed
-  [ "$PLATFORM" = linux ] && [ -d /proc/self ] || return 0
-  if installed=$(type -P claude); then
-    warn_agent_processes claude "$installed" /proc
-  fi
-  if is_opencode_agent; then
-    warn_agent_processes opencode "$(opencode_bin)" /proc
   fi
 }
 
