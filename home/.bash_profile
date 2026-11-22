@@ -3,8 +3,10 @@
 start_fish() {
   [[ $- == *i* ]] || return 0
 
-  # SSH clients can use bash -ilc to load the login environment. Keep Bash
-  # syntax for commands sent over SSH without an allocated terminal.
+  # SSH clients can use bash -ilc without a terminal to load the login
+  # environment before running a command. Codex Desktop does this to locate
+  # Codex on the remote host. Keep the command in Bash so assignments such
+  # as CODEX_HOME from the probe are parsed using Bash syntax.
   if [[ -n ${SSH_CONNECTION-} && -z ${SSH_TTY-} && -n ${BASH_EXECUTION_STRING-} ]]; then
     return 0
   fi
