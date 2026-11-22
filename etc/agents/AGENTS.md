@@ -88,8 +88,10 @@ triggered.
 Some pages are throwaway: single-use visualisations, sample sites, quick
 previews (even if iterated on and briefly hosted). Default to producing them
 through a small build step: content in data files (YAML or JSON), structure in
-templates, and a short script or standard static-site generator. This keeps
-edits cheap and token use low; trivial snippets can stay single files.
+templates, and a short script or standard static-site generator. These pages
+usually go through several rounds of edits after the first version, so a build
+step keeps each revision cheap (change the data, rebuild) and keeps token use
+low; trivial snippets can stay single files.
 
 Deleting the output and rebuilding may change details or regress slightly, but
 must not lose content or require re-authoring: the sources are the artifact.
