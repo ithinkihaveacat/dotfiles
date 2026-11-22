@@ -17,6 +17,7 @@ etc/agents/
 │   ├── hooks/         # PreToolUse, SessionStart
 │   └── statusline.sh
 ├── claude/            # Claude Code adapters
+│   ├── settings.json  # Merged into ~/.claude/settings.json
 │   └── statusline.sh
 └── opencode/          # OpenCode adapters
     └── plugins/
@@ -55,6 +56,7 @@ configured by hand, as described in the script's header.
 | Global instructions     | `AGENTS.md`, linked by `install.sh`                          | `~/.claude/CLAUDE.md`     | `~/.codex/AGENTS.md`           | `~/.gemini/GEMINI.md`    | `~/.config/opencode/AGENTS.md`   |
 | Launch wrapper          | `fish/functions/<agent>.fish`                                | Session directory         | Sandbox defaults and git hooks | None                     | Binary lookup                    |
 | Commit-hook safety net  | `hooks/ensure-commit-hooks`                                  | `~/.claude/settings.json` | `codex.fish` (at launch)       | `agy/hooks/PreToolUse`   | `plugins/ensure-commit-hooks.ts` |
+| Settings                | `claude/settings.json`, merged by `install.sh`               | `~/.claude/settings.json` | None                           | None                     | None                             |
 | Status line             | `<agent>/statusline.sh`                                      | Manual                    | None                           | Manual                   | None                             |
 | Skills                  | `skill` ([agent-config](../../skills/agent-config/SKILL.md)) | Workspace, session, user  | Workspace, user                | Workspace, session, user | Workspace, user                  |
 | Command permissions     | `permission` (agent-config)                                  | Yes                       | Yes                            | Yes                      | No                               |
