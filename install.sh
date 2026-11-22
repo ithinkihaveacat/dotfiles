@@ -2347,6 +2347,47 @@ function link_agent_path {
   link_agent_file "$src" "$2"
 }
 
+# Deep-merge the overlay's etc/agents/claude/settings.json into
+# ~/.claude/settings.json, leaving keys the fragment does not name in place.
+# Objects merge recursively; arrays and scalars in the fragment replace the
+# existing value. The file is rewritten only when the merge changes it.
+function merge_claude_settings {
+  local settings="$HOME/.claude/settings.json"
+  local fragment tmp
+
+  fragment=$(overlay_path "etc/agents/claude/settings.json") || return 0
+  if ! exists jq; then
+    echo "warning: jq not found; Claude Code settings not merged" >&2
+    return 0
+  fi
+  if ! jq -e 'type == "object"' "$fragment" >/dev/null 2>&1; then
+    echo "warning: $fragment is not a JSON object; Claude Code settings not merged" >&2
+    return 0
+  fi
+
+  xmkdir "$HOME/.claude"
+  if [ ! -s "$settings" ]; then
+    (umask 077 && echo '{}' >"$settings")
+  fi
+  if ! jq -e 'type == "object"' "$settings" >/dev/null 2>&1; then
+    echo "warning: $settings is not a JSON object; Claude Code settings not merged" >&2
+    return 0
+  fi
+
+  if jq -e --slurpfile f "$fragment" '. == (. * $f[0])' "$settings" >/dev/null; then
+    return 0
+  fi
+
+  tmp="$settings.tmp.$$"
+  if (umask 077 && jq --slurpfile f "$fragment" '. * $f[0]' "$settings" >"$tmp") &&
+    x mv "$tmp" "$settings"; then
+    echo "merged Claude Code settings: $fragment" >&2
+  else
+    rm -f "$tmp"
+    echo "warning: failed to merge Claude Code settings into $settings" >&2
+  fi
+}
+
 # Register an overlay script as a Claude Code PreToolUse command hook in
 # ~/.claude/settings.json, leaving every other setting and hook in place. The
 # file is rewritten only when no hook for MATCHER already runs the script.
@@ -2470,6 +2511,7 @@ function feature_agents {
   fi
 
   if exists claude; then
+    merge_claude_settings
     register_claude_pretooluse_hook "etc/agents/hooks/ensure-commit-hooks" Bash
     install_claude_andon_plugin
   fi
