@@ -1,25 +1,30 @@
 # -*- sh -*-
 
-is_interactive() { [[ $- == *i* ]]; }
+start_fish() {
+  [[ $- == *i* ]] || return 0
 
-if is_interactive; then
+  # SSH clients can use bash -ilc to load the login environment. Keep Bash
+  # syntax for commands sent over SSH without an allocated terminal.
+  if [[ -n ${SSH_CONNECTION-} && -z ${SSH_TTY-} && -n ${BASH_EXECUTION_STRING-} ]]; then
+    return 0
+  fi
 
-    # If we're running in interactive mode, look for fish, and exec if it exists.
+  local fish
+  fish=$(env PATH="$HOME/local/bin:/opt/homebrew/bin:$PATH" which fish)
+  [[ -x $fish ]] || return 0
 
-    FISH=$(env PATH="$HOME/local/bin:/opt/homebrew/bin:$PATH" which fish)
+  # Local IDE probes such as Android Studio's printenv need fish's environment.
+  # https://youtrack.jetbrains.com/articles/SUPPORT-A-1727/Shell-Environment-Loading
+  if [[ -n ${BASH_EXECUTION_STRING-} ]]; then
+    exec env SHELL="$fish" "$fish" -i -c "$BASH_EXECUTION_STRING"
+  fi
+  exec env SHELL="$fish" "$fish" -i
+}
 
-    if [[ -x "$FISH" ]]; then
-      # If bash was invoked with -c 'command' (e.g., Android Studio's printenv),
-      # pass the command to fish so it runs in fish's environment after fish config.
-      # See https://youtrack.jetbrains.com/articles/SUPPORT-A-1727/Shell-Environment-Loading
-      if [[ -n "${BASH_EXECUTION_STRING-}" ]]; then
-        exec env SHELL="$FISH" "$FISH" -i -c "$BASH_EXECUTION_STRING"
-      else
-        exec env SHELL="$FISH" "$FISH" -i
-      fi
-    fi
+start_fish
 
+# Set up PATH and other defaults when the login shell stays in Bash.
+if [[ -r $HOME/.bashrc ]]; then
+  # shellcheck source=/dev/null
+  . "$HOME/.bashrc"
 fi
-
-# If we reach here, fish wasn't found. Source bashrc for PATH and environment setup.
-[[ -r "$HOME/.bashrc" ]] && . "$HOME/.bashrc"
