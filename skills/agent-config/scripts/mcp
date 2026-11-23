@@ -310,7 +310,7 @@ def run_cli(agent: str, argv: list[str], cwd: Path) -> None:
 
 
 def write_atomic(path: Path, text: str) -> None:
-    mode = path.stat().st_mode & 0o777
+    mode = (path.stat().st_mode & 0o777) if path.exists() else 0o600
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
     try:
         with os.fdopen(fd, "w") as f:
@@ -320,6 +320,59 @@ def write_atomic(path: Path, text: str) -> None:
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
         raise
+
+
+def sync_git_exclude(ws: Path, rel_paths: list[str]) -> None:
+    """Manages a '# >>> mcp >>>' block in .git/info/exclude listing
+    workspace-local MCP config files that currently exist."""
+    try:
+        res = subprocess.run(
+            ["git", "-C", str(ws), "rev-parse", "--git-path", "info/exclude"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        exclude_file = (ws / res.stdout.strip()).resolve()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return
+
+    present = sorted(p for p in rel_paths if (ws / p.lstrip("/")).is_file())
+    mark_begin = "# >>> mcp >>>"
+    mark_end = "# <<< mcp <<<"
+
+    other_lines: list[str] = []
+    if exclude_file.is_file():
+        in_block = False
+        with open(exclude_file, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                stripped = line.strip()
+                if stripped == mark_begin:
+                    in_block = True
+                    continue
+                if stripped == mark_end:
+                    in_block = False
+                    continue
+                if not in_block:
+                    other_lines.append(line)
+
+    out_lines = list(other_lines)
+    if out_lines and not out_lines[-1].endswith("\n"):
+        out_lines[-1] += "\n"
+    if present:
+        out_lines.append(mark_begin + "\n")
+        out_lines.append("# managed by 'mcp'\n")
+        for p in present:
+            out_lines.append(p + "\n")
+        out_lines.append(mark_end + "\n")
+
+    exclude_file.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        write_atomic(exclude_file, "".join(out_lines))
+    except OSError as e:
+        print(
+            f"mcp: warning: could not update info/exclude: {e}",
+            file=sys.stderr,
+        )
 
 
 class Backend:
@@ -333,6 +386,10 @@ class Backend:
 
     def detected(self) -> bool:
         return shutil.which(self.cli) is not None
+
+    def uses_cli(self, scope: str, cmd: str) -> bool:
+        """Whether CMD in SCOPE shells out to self.cli."""
+        return True
 
     def sources(self, scope: str, ws: Path) -> list[Source]:
         """Returns the existing sources for SCOPE (none for missing files)."""
@@ -678,7 +735,130 @@ class OpenCodeBackend(Backend):
         write_atomic(source.path, new_text)
 
 
-BACKENDS = [ClaudeBackend(), CodexBackend(), OpenCodeBackend()]
+class AgyBackend(Backend):
+    """Antigravity (agy). user: mcpServers in ~/.gemini/config/mcp_config.json
+    (via 'agy mcp'). workspace: mcpServers in <workspace>/.agents/mcp_config.json
+    (edited directly and excluded via .git/info/exclude, as 'agy mcp' has no
+    workspace scope)."""
+
+    name = "agy"
+    cli = "agy"
+    display = "Antigravity"
+
+    def user_config_path(self) -> Path:
+        return Path.home() / ".gemini" / "config" / "mcp_config.json"
+
+    def workspace_config_path(self, ws: Path) -> Path:
+        return ws / ".agents" / "mcp_config.json"
+
+    def config_hint(self) -> str:
+        return clean_p(self.user_config_path())
+
+    def detected(self) -> bool:
+        return super().detected() or self.user_config_path().exists()
+
+    def uses_cli(self, scope: str, cmd: str) -> bool:
+        return scope == "user"
+
+    def sources(self, scope, ws):
+        path = (
+            self.user_config_path()
+            if scope == "user"
+            else self.workspace_config_path(ws)
+        )
+        if not path.exists():
+            return []
+        src = Source(self.name, scope, path, clean_p(path), kind=scope)
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError) as e:
+            src.error = str(e)
+            return [src]
+        if not isinstance(data, dict):
+            src.error = "top level is not an object"
+            return [src]
+        table = data.get("mcpServers", {})
+        if not isinstance(table, dict):
+            src.error = "mcpServers is not an object"
+            return [src]
+        for name, e in table.items():
+            if not isinstance(e, dict):
+                src.problems.append(("FAIL", f"{name}: entry is not an object", []))
+                continue
+            is_http = "serverUrl" in e or "url" in e
+            url = e.get("serverUrl") if "serverUrl" in e else e.get("url")
+            entry = server_entry(
+                "http" if is_http else "stdio",
+                command=e.get("command"),
+                args=e.get("args"),
+                url=url,
+                env=(e.get("env") or {}).keys(),
+                headers=(e.get("headers") or {}).keys(),
+            )
+            entry["disabled"] = e.get("disabled") is True
+            src.servers[name] = entry
+        return [src]
+
+    def add(self, scope, ws, spec):
+        if scope == "user":
+            argv = ["agy", "mcp", "add"]
+            if spec.url:
+                argv += ["--type", "http"]
+                for k, v in spec.headers:
+                    argv += ["--header", f"{k}: {v}"]
+                argv += [spec.name, spec.url]
+            else:
+                for e in spec.env:
+                    argv += ["--env", e]
+                argv += [spec.name, "--", *spec.command]
+            run_cli(self.name, argv, ws)
+            return
+
+        path = self.workspace_config_path(ws)
+        if path.exists():
+            try:
+                data = json.loads(path.read_text())
+            except (OSError, json.JSONDecodeError) as e:
+                raise RuntimeError(f"cannot read {clean_p(path)}: {e}") from e
+            if not isinstance(data, dict):
+                raise RuntimeError(f"{clean_p(path)}: top level is not an object")
+        else:
+            data = {}
+        servers = data.setdefault("mcpServers", {})
+        if type(servers) is not dict:
+            raise RuntimeError(f"{clean_p(path)}: mcpServers is not an object")
+        if spec.url:
+            entry: dict = {"serverUrl": spec.url}
+            if spec.headers:
+                entry["headers"] = dict(spec.headers)
+        else:
+            entry = {"command": spec.command[0]}
+            if len(spec.command) > 1:
+                entry["args"] = list(spec.command[1:])
+            if spec.env:
+                entry["env"] = dict(e.split("=", 1) for e in spec.env)
+        servers[spec.name] = entry
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_atomic(path, json.dumps(data, indent=2) + "\n")
+        sync_git_exclude(ws, ["/.agents/mcp_config.json"])
+
+    def remove(self, source, ws, name):
+        if source.kind == "user":
+            run_cli(self.name, ["agy", "mcp", "remove", name], ws)
+            return
+        try:
+            data = json.loads(source.path.read_text())
+        except (OSError, json.JSONDecodeError) as e:
+            raise RuntimeError(f"cannot read {source.label}: {e}") from e
+        servers = data.get("mcpServers") if isinstance(data, dict) else None
+        if not isinstance(servers, dict) or name not in servers:
+            raise RuntimeError(f"failed to remove '{name}' from {source.label}")
+        del servers[name]
+        write_atomic(source.path, json.dumps(data, indent=2) + "\n")
+        sync_git_exclude(ws, ["/.agents/mcp_config.json"])
+
+
+BACKENDS = [ClaudeBackend(), CodexBackend(), OpenCodeBackend(), AgyBackend()]
 
 
 def select_backends(agent: str | None, cmd: str) -> list[Backend]:
@@ -789,18 +969,19 @@ def write_targets(agent, scope, cmd) -> list[Backend]:
         b = backends[0]
         if scope not in b.scopes:
             usage_error(cmd, f"{b.name} has no {scope} scope")
-        require_cli(b)
+        if b.uses_cli(scope, cmd):
+            require_cli(b)
         return backends
     targets = []
     for b in backends:
         if scope not in b.scopes:
             print(f"{b.name}: no {scope} scope, skipped", file=sys.stderr)
-        elif shutil.which(b.cli) is None:
+        elif b.uses_cli(scope, cmd) and shutil.which(b.cli) is None:
             print(f"{b.name}: {b.cli} not found, skipped", file=sys.stderr)
         else:
             targets.append(b)
     if not targets:
-        die(f"{cmd}: no agent to update (looked for claude, codex and opencode)")
+        die(f"{cmd}: no agent to update (looked for claude, codex, opencode and agy)")
     return targets
 
 
@@ -921,7 +1102,9 @@ def cmd_doctor(agent, scope, stream=sys.stdout):
         report(
             "WARN",
             "No supported agent found",
-            ["Looked for claude, codex and opencode on PATH and in their config dirs"],
+            [
+                "Looked for claude, codex, opencode and agy on PATH and in their config dirs"
+            ],
         )
 
     for b in detected:
@@ -981,8 +1164,8 @@ def cmd_doctor(agent, scope, stream=sys.stdout):
 HELP_MAIN = """Usage: mcp <command> [options] [arguments]
 
 Manage the MCP servers configured for each installed agent: Claude Code
-(claude), Codex (codex) and OpenCode (opencode), and read the request logs of
-this repository's own MCP servers.
+(claude), Codex (codex), OpenCode (opencode) and Antigravity (agy), and read
+the request logs of this repository's own MCP servers.
 
 Commands:
   list [--json]              List configured servers per agent and scope
@@ -997,8 +1180,8 @@ Commands:
                              records (see 'mcp logs --help')
 
 Options:
-  --agent NAME               Operate on one agent (claude, codex or opencode);
-                             by default, every installed agent
+  --agent NAME               Operate on one agent (claude, codex, opencode or
+                             agy); by default, every installed agent
   --scope SCOPE              'user' or 'workspace'; add and remove default to
                              'user', list and doctor read both
   -e, --env KEY=VALUE        (add) Environment variable for a stdio server;
@@ -1009,11 +1192,13 @@ Options:
 
 Scopes:
   user       claude: mcpServers in ~/.claude.json; codex: ~/.codex/config.toml;
-             opencode: ~/.config/opencode/opencode.json(c)
+             opencode: ~/.config/opencode/opencode.json(c); agy:
+             ~/.gemini/config/mcp_config.json
   workspace  claude: the repository's entry in ~/.claude.json (Claude's local
              scope, where add writes) and .mcp.json (Claude's project scope);
              opencode: opencode.json(c) or .opencode/opencode.json(c) at the
-             repository root; codex has no workspace scope
+             repository root; agy: .agents/mcp_config.json at the repository
+             root (excluded via .git/info/exclude); codex has no workspace scope
 
 Examples:
   # Add a remote server for every installed agent
@@ -1029,13 +1214,14 @@ Examples:
   mcp list --json | jq -r 'group_by(.name)[] | select(all(.agent != "codex")) | .[0].name'
 
 add and remove run each agent's own CLI (claude mcp, codex mcp, opencode mcp
-add); OpenCode has no remove command, so remove edits its config file and
-keeps the file's comments. add skips an agent that already has the server in
-the scope, and refuses before changing anything when an agent cannot take the
-server (codex mcp add cannot set headers). add does not log in to a remote
-server that uses OAuth; use the agent's own login (claude: /mcp, codex: codex
-mcp login NAME, opencode: opencode mcp auth NAME). --env and --header values
-are written as given; list shows only their names."""
+add, agy mcp); OpenCode has no remove command, so remove edits its config file
+and keeps the file's comments, and agy mcp has no workspace scope, so workspace
+add and remove edit .agents/mcp_config.json directly. add skips an agent that
+already has the server in the scope, and refuses before changing anything when
+an agent cannot take the server (codex mcp add cannot set headers). add does not
+log in to a remote server that uses OAuth; use the agent's own login (claude:
+/mcp, codex: codex mcp login NAME, opencode: opencode mcp auth NAME, agy: /mcp).
+--env and --header values are written as given; list shows only their names."""
 
 HELP_LIST = """Usage: mcp list [--agent NAME] [--scope SCOPE] [--json]
 
@@ -1044,7 +1230,7 @@ name, transport (stdio, http or sse), and the command or URL. Environment
 variables and headers are listed by name only (in --json).
 
 Options:
-  --agent NAME   List one agent only (claude, codex or opencode)
+  --agent NAME   List one agent only (claude, codex, opencode or agy)
   --scope SCOPE  List one scope only ('user' or 'workspace'); default: both
   --json         Print a JSON array of servers instead of a table
   -h, --help     Display this help message and exit
@@ -1057,7 +1243,8 @@ HELP_ADD = """Usage: mcp add [options] NAME URL
        mcp add [options] NAME -- COMMAND [ARG...]
 
 Add an MCP server to every installed agent, or to the one named by --agent,
-by running that agent's own CLI.
+by running that agent's own CLI (or editing .agents/mcp_config.json for agy's
+workspace scope).
 
 Arguments:
   NAME     Server name: letters, digits, '-' and '_'
@@ -1065,7 +1252,8 @@ Arguments:
   COMMAND  The command (and its arguments) that starts a stdio server
 
 Options:
-  --agent NAME               Add to one agent only (claude, codex or opencode)
+  --agent NAME               Add to one agent only (claude, codex, opencode or
+                             agy)
   --scope SCOPE              'user' (default) or 'workspace'
   -e, --env KEY=VALUE        Environment variable for a stdio server;
                              repeatable
@@ -1089,7 +1277,7 @@ Arguments:
   NAME...        The servers to remove
 
 Options:
-  --agent NAME   Remove from one agent only (claude, codex or opencode)
+  --agent NAME   Remove from one agent only (claude, codex, opencode or agy)
   --scope SCOPE  'user' (default) or 'workspace'
   -h, --help     Display this help message and exit
 
@@ -1110,7 +1298,7 @@ CLI, which add and remove run, is on PATH. Read-only; exits 1 on any warning
 or failure.
 
 Options:
-  --agent NAME   Check one agent only (claude, codex or opencode)
+  --agent NAME   Check one agent only (claude, codex, opencode or agy)
   --scope SCOPE  Check one scope only ('user' or 'workspace'); default: both
   -h, --help     Display this help message and exit
 
