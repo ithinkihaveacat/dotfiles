@@ -5,10 +5,10 @@ description: >-
   in a workspace, a single session, or user-wide, and the defaults every
   workspace gets (skill); which commands and directories Claude Code, Codex,
   and Antigravity may use, including the safe commands skills declare
-  (permission); which MCP servers Claude Code, Codex and OpenCode connect to
-  (mcp); and the defects agents report in their own instructions, skills and
-  tools (andon). Use when installing, removing, choosing, bundling, or auditing
-  agent skills; adding per-session or default skills; granting, restricting,
+  (permission); which MCP servers Claude Code, Codex, OpenCode and Antigravity
+  connect to (mcp); and the defects agents report in their own instructions,
+  skills and tools (andon). Use when installing, removing, choosing, bundling,
+  or auditing agent skills; adding per-session or default skills; granting,
   or debugging agent command or directory permissions; writing a skill's
   permissions/unsafe file; listing, adding, removing, or checking MCP servers
   across agents; installing the Andon plugin for Claude Code, OpenCode or Codex;
@@ -36,8 +36,9 @@ they see, what they may do, and what they are told. It consists of:
    user-wide for Antigravity), including pre-approving the safe commands
    declared by installed skills.
 1. **`mcp`**: The MCP server manager. Lists, adds, removes and checks the MCP
-   servers each installed agent (Claude Code, Codex, OpenCode) is configured
-   with, user-wide or for the workspace, through each agent's own CLI, and reads
+   servers each installed agent (Claude Code, Codex, OpenCode, Antigravity) is
+   configured with, user-wide or for the workspace, through each agent's own CLI
+   (or `.agents/mcp_config.json` for Antigravity's workspace scope), and reads
    the request logs of this repository's own MCP servers (`mcp logs`).
 1. **`andon`**: The Andon cord. Records and triages defects agents report in
    their own instructions, skills, rules and tools, through harness plugins for
@@ -336,9 +337,10 @@ ______________________________________________________________________
 ## Managing MCP Servers (`mcp`)
 
 The `mcp` tool (symlinked in `bin/`) gives one view of the MCP servers that
-Claude Code (`claude`), Codex (`codex`) and OpenCode (`opencode`) are configured
-with, and adds or removes a server across all of them at once. By default every
-command operates on each installed agent; use `--agent NAME` to scope to one.
+Claude Code (`claude`), Codex (`codex`), OpenCode (`opencode`) and Antigravity
+(`agy`) are configured with, and adds or removes a server across all of them at
+once. By default every command operates on each installed agent; use
+`--agent NAME` to scope to one.
 
 ```bash
 mcp <command> [options] [arguments]
@@ -377,22 +379,26 @@ mcp <command> [options] [arguments]
 Scopes (`--scope`; `add` and `remove` default to `user`, `list` and `doctor`
 read both):
 
-- **`user`**: `mcpServers` in `~/.claude.json`, `~/.codex/config.toml`, and
-  `~/.config/opencode/opencode.json(c)`.
+- **`user`**: `mcpServers` in `~/.claude.json`, `~/.codex/config.toml`,
+  `~/.config/opencode/opencode.json(c)`, and `~/.gemini/config/mcp_config.json`.
 - **`workspace`**: Claude Code's local scope (the repository's entry in
   `~/.claude.json`, where `add` writes) and its shared `.mcp.json`; OpenCode's
-  `opencode.json(c)` or `.opencode/opencode.json(c)` at the repository root.
-  Codex has no workspace scope: `codex mcp` writes only to
+  `opencode.json(c)` or `.opencode/opencode.json(c)` at the repository root;
+  Antigravity's `.agents/mcp_config.json` at the repository root (excluded via
+  `.git/info/exclude`). Codex has no workspace scope: `codex mcp` writes only to
   `~/.codex/config.toml`.
 
 `add` and `remove` run each agent's own CLI (`claude mcp`, `codex mcp`,
-`opencode mcp add`), so the agents' own validation and file handling apply.
-OpenCode has no remove command, so `mcp remove` edits its config file and keeps
-the file's comments. `add` does not log in to servers that use OAuth; finish
-with the agent's own login (`/mcp` in Claude Code, `codex mcp login NAME`,
-`opencode mcp auth NAME`). `add` and `remove` are declared in
-`permissions/unsafe`, since they change which tools an agent has, and so is
-`logs --serve`, which opens a port; reading logs stays pre-approved.
+`opencode mcp add`, `agy mcp`), so the agents' own validation and file handling
+apply. OpenCode has no remove command, so `mcp remove` edits its config file and
+keeps the file's comments; `agy mcp` has no workspace scope, so workspace `add`
+and `remove` edit `.agents/mcp_config.json` directly and maintain a
+`# >>> mcp >>>` block in `.git/info/exclude`. `add` does not log in to servers
+that use OAuth; finish with the agent's own login (`/mcp` in Claude Code or
+Antigravity, `codex mcp login NAME`, `opencode mcp auth NAME`). `add` and
+`remove` are declared in `permissions/unsafe`, since they change which tools an
+agent has, and so is `logs --serve`, which opens a port; reading logs stays
+pre-approved.
 
 See the [Command Index](references/command-index.md) for full help details.
 

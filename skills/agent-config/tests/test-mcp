@@ -5,7 +5,7 @@ set -euo pipefail
 TEST_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT="${TEST_DIR}/../scripts/mcp"
 
-echo "1..33"
+echo "1..39"
 
 TMPDIR=$(mktemp -d)
 trap 'rm -rf -- "$TMPDIR"' EXIT
@@ -23,7 +23,7 @@ done
 GIT_PATH=$(type -p git || echo "")
 [[ -n "$GIT_PATH" ]] && ln -sf "$GIT_PATH" "$MOCK_BIN/git"
 export MOCK_LOG="${TMPDIR}/calls.log"
-for agent in claude codex opencode; do
+for agent in claude codex opencode agy; do
   cat >"$MOCK_BIN/$agent" <<'EOF'
 #!/bin/sh
 printf '%s|%s|%s\n' "$(basename "$0")" "$(pwd -P)" "$*" >>"$MOCK_LOG"
@@ -61,8 +61,9 @@ mkdir -p "$WS/sub"
 git -C "$WS" init -q
 
 write_fixtures() {
-  rm -rf "$CODEX_HOME" "$XDG_CONFIG_HOME/opencode" "$WS/.mcp.json" "$WS/opencode.json" "$WS/.opencode"
-  mkdir -p "$CODEX_HOME" "$XDG_CONFIG_HOME/opencode" "$WS/.opencode"
+  rm -rf "$CODEX_HOME" "$XDG_CONFIG_HOME/opencode" "$HOME/.gemini" "$WS/.mcp.json" "$WS/opencode.json" "$WS/.opencode" "$WS/.agents"
+  mkdir -p "$CODEX_HOME" "$XDG_CONFIG_HOME/opencode" "$HOME/.gemini/config" "$WS/.opencode" "$WS/.agents"
+  printf '# existing exclude\n*.tmp\n' >"$WS/.git/info/exclude"
   cat >"$HOME/.claude.json" <<EOF
 {
   "mcpServers": {
@@ -102,6 +103,15 @@ EOF
 }
 EOF
   printf '{\n  "mcp": {\n    "servers": {\n      "only": {"type": "remote", "url": "https://only.example.com/mcp"}\n    }\n  }\n}\n' >"$WS/.opencode/opencode.json"
+  cat >"$HOME/.gemini/config/mcp_config.json" <<'EOF'
+{
+  "mcpServers": {
+    "ctx": {"serverUrl": "https://mcp.example.com/ctx", "headers": {"Authorization": "Bearer sekrit-agy"}},
+    "browse": {"command": "good-server", "args": ["mcp"], "disabled": false}
+  }
+}
+EOF
+  printf '{"mcpServers": {"agy-ws": {"url": "https://agy.example.com/mcp"}}}\n' >"$WS/.agents/mcp_config.json"
   : >"$MOCK_LOG"
 }
 
@@ -164,7 +174,7 @@ if [[ $status -eq 1 && "$err" == *"unknown scope"* ]]; then pass "[usage] unknow
 # --- list -------------------------------------------------------------------
 
 RUN_DIR="$WS/sub" run list
-if [[ $status -eq 0 && "$out" == *"claude    user       ctx"* && "$out" == *"wsonly"* && "$out" == *"shared"* && "$out" == *"codex     user       everything"* && "$out" == *"opencode  workspace  only"* && "$out" == *"good-server x"* ]]; then pass "[list] shows every agent's user and workspace servers"; else fail "[list] shows every agent's user and workspace servers"; fi
+if [[ $status -eq 0 && "$out" == *"claude    user       ctx"* && "$out" == *"wsonly"* && "$out" == *"shared"* && "$out" == *"codex     user       everything"* && "$out" == *"opencode  workspace  only"* && "$out" == *"good-server x"* && "$out" == *"agy       user       browse"* && "$out" == *"agy       workspace  agy-ws"* ]]; then pass "[list] shows every agent's user and workspace servers"; else fail "[list] shows every agent's user and workspace servers"; fi
 
 run list --json
 if [[ $status -eq 0 && "$out" == *"\"API_KEY\""* && "$out" == *"\"Authorization\""* && "$out" != *sekrit* ]]; then pass "[list] --json names env and headers without their values"; else fail "[list] --json names env and headers without their values"; fi
@@ -176,8 +186,8 @@ if [[ $status -eq 0 && "$out" == *"middle"* && "$out" != *"only"* && "$out" != *
 
 write_fixtures
 RUN_DIR="$WS/sub" run add docs https://docs.example.com/mcp
-if [[ $status -eq 0 && "$(calls)" == *"claude|$WS|mcp add -s user -t http docs https://docs.example.com/mcp"* && "$(calls)" == *"codex|$WS|mcp add docs --url https://docs.example.com/mcp"* && "$(calls)" == *"opencode|$WS|mcp add --global docs --url https://docs.example.com/mcp"* ]]; then pass "[add] remote server goes to every agent's user scope"; else fail "[add] remote server goes to every agent's user scope"; fi
-if [[ "$err" == *"claude: added docs (user)"* && "$err" == *"opencode: added docs (user)"* ]]; then pass "[add] reports each agent git-style on stderr"; else fail "[add] reports each agent git-style on stderr"; fi
+if [[ $status -eq 0 && "$(calls)" == *"claude|$WS|mcp add -s user -t http docs https://docs.example.com/mcp"* && "$(calls)" == *"codex|$WS|mcp add docs --url https://docs.example.com/mcp"* && "$(calls)" == *"opencode|$WS|mcp add --global docs --url https://docs.example.com/mcp"* && "$(calls)" == *"agy|$WS|mcp add --type http docs https://docs.example.com/mcp"* ]]; then pass "[add] remote server goes to every agent's user scope"; else fail "[add] remote server goes to every agent's user scope"; fi
+if [[ "$err" == *"claude: added docs (user)"* && "$err" == *"opencode: added docs (user)"* && "$err" == *"agy: added docs (user)"* ]]; then pass "[add] reports each agent git-style on stderr"; else fail "[add] reports each agent git-style on stderr"; fi
 
 write_fixtures
 run add docs https://docs.example.com/mcp --header "X-Api-Key: abc"
@@ -189,7 +199,7 @@ if [[ $status -eq 0 && "$(calls)" == "opencode|$WS|mcp add --global docs --url h
 
 write_fixtures
 RUN_DIR="$WS/sub" run add --scope workspace -e A=1 tool -- good-server --flag
-if [[ $status -eq 0 && "$(calls)" == *"claude|$WS|mcp add -s local tool --env A=1 -- good-server --flag"* && "$(calls)" == *"opencode|$WS|mcp add tool --env A=1 -- good-server --flag"* && "$(calls)" != *codex* && "$err" == *"codex: no workspace scope, skipped"* ]]; then pass "[add] workspace stdio server: claude local, opencode project, codex skipped"; else fail "[add] workspace stdio server: claude local, opencode project, codex skipped"; fi
+if [[ $status -eq 0 && "$(calls)" == *"claude|$WS|mcp add -s local tool --env A=1 -- good-server --flag"* && "$(calls)" == *"opencode|$WS|mcp add tool --env A=1 -- good-server --flag"* && "$(calls)" != *codex* && "$(calls)" != *agy* && "$err" == *"codex: no workspace scope, skipped"* && "$err" == *"agy: added tool (workspace)"* && "$(<"$WS/.agents/mcp_config.json")" == *"\"tool\""* ]]; then pass "[add] workspace stdio server: claude local, opencode project, agy .agents, codex skipped"; else fail "[add] workspace stdio server: claude local, opencode project, agy .agents, codex skipped"; fi
 
 write_fixtures
 run add ctx https://mcp.example.com/ctx
@@ -218,7 +228,7 @@ if [[ $status -eq 127 && "$err" == *"claude not found"* ]]; then pass "[add] a m
 
 write_fixtures
 run remove ctx
-if [[ $status -eq 0 && "$(calls)" == *"claude|$WS|mcp remove -s user ctx"* && "$(calls)" == *"codex|$WS|mcp remove ctx"* ]]; then pass "[remove] runs claude and codex remove for the user scope"; else fail "[remove] runs claude and codex remove for the user scope"; fi
+if [[ $status -eq 0 && "$(calls)" == *"claude|$WS|mcp remove -s user ctx"* && "$(calls)" == *"codex|$WS|mcp remove ctx"* && "$(calls)" == *"agy|$WS|mcp remove ctx"* ]]; then pass "[remove] runs claude, codex and agy remove for the user scope"; else fail "[remove] runs claude, codex and agy remove for the user scope"; fi
 OC_USER="$XDG_CONFIG_HOME/opencode/opencode.jsonc"
 if [[ "$(<"$OC_USER")" != *"\"ctx\""* && "$(<"$OC_USER")" == *"// user settings"* && "$(<"$OC_USER")" == *"\"middle\""* && "$err" == *"opencode: removed ctx from ~/.config/opencode/opencode.jsonc"* ]]; then pass "[remove] edits opencode's JSONC and keeps its comments"; else fail "[remove] edits opencode's JSONC and keeps its comments"; fi
 
@@ -263,3 +273,44 @@ if [[ $status -eq 1 && "$out" == *"[FAIL]  opencode: cannot parse"* ]]; then pas
 
 FORCE_COLOR=1 run doctor --agent opencode
 if [[ "$out" == *$'\e[31m[FAIL]\e[0m'* ]]; then pass "[doctor] FORCE_COLOR styles the tags"; else fail "[doctor] FORCE_COLOR styles the tags"; fi
+
+# --- agy --------------------------------------------------------------------
+
+write_fixtures
+run add --agent agy -H "X-Api-Key: abc" docs https://docs.example.com/mcp
+if [[ $status -eq 0 && "$(calls)" == "agy|$WS|mcp add --type http --header X-Api-Key: abc docs https://docs.example.com/mcp" ]]; then pass "[agy] user remote add puts flags before name"; else fail "[agy] user remote add puts flags before name"; fi
+
+write_fixtures
+run add --agent agy -e A=1 tool -- good-server --flag
+if [[ $status -eq 0 && "$(calls)" == "agy|$WS|mcp add --env A=1 tool -- good-server --flag" ]]; then pass "[agy] user stdio add puts --env before name and -- before command"; else fail "[agy] user stdio add puts --env before name and -- before command"; fi
+
+write_fixtures
+rm -rf "$WS/.agents"
+run add --agent agy --scope workspace -H "Authorization: Bearer tok" docs https://docs.example.com/mcp
+EXCLUDE=$(<"$WS/.git/info/exclude")
+GIT_ST=$(git -C "$WS" status --porcelain .agents)
+if [[ $status -eq 0 && -f "$WS/.agents/mcp_config.json" && "$(<"$WS/.agents/mcp_config.json")" == *"\"serverUrl\": \"https://docs.example.com/mcp\""* && "$EXCLUDE" == *"*.tmp"* && "$EXCLUDE" == *"/.agents/mcp_config.json"* && -z "$GIT_ST" ]]; then pass "[agy] workspace add creates .agents/mcp_config.json and excludes it in .git/info/exclude"; else fail "[agy] workspace add creates .agents/mcp_config.json and excludes it in .git/info/exclude"; fi
+
+write_fixtures
+rm -rf "$WS/.agents"
+status=0
+out=$(cd "$WS" && PATH="$TMPDIR/nobin:/bin:/usr/bin" "$UV_PATH" run --quiet "$SCRIPT" add --agent agy --scope workspace tool -- good-server 2>"$TMPDIR/err") || status=$?
+err=$(<"$TMPDIR/err")
+if [[ $status -eq 0 && -f "$WS/.agents/mcp_config.json" && "$(<"$WS/.agents/mcp_config.json")" == *"\"command\": \"good-server\""* ]]; then pass "[agy] workspace add works without agy CLI on PATH"; else fail "[agy] workspace add works without agy CLI on PATH"; fi
+
+write_fixtures
+run remove --agent agy --scope workspace agy-ws
+if [[ $status -eq 0 && "$(tr -d " \n" <"$WS/.agents/mcp_config.json")" == "{\"mcpServers\":{}}" && "$err" == *"agy: removed agy-ws"* ]]; then pass "[agy] workspace remove edits .agents/mcp_config.json"; else fail "[agy] workspace remove edits .agents/mcp_config.json"; fi
+
+write_fixtures
+cat >"$WS/.agents/mcp_config.json" <<'EOF'
+{
+  "mcpServers": {
+    "gone": { "command": "no-such-server" },
+    "bad": { "serverUrl": "ftp://x" },
+    "off": { "command": "no-such-server", "disabled": true }
+  }
+}
+EOF
+run doctor --agent agy --scope workspace
+if [[ $status -eq 1 && "$out" == *"[WARN]  agy: gone (workspace): command no-such-server not found on PATH"* && "$out" == *"[FAIL]  agy: bad (workspace): URL"* && "$out" != *"off"* ]]; then pass "[agy] doctor flags missing commands and bad URLs, ignoring disabled servers"; else fail "[agy] doctor flags missing commands and bad URLs, ignoring disabled servers"; fi

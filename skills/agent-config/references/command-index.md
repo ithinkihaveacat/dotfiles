@@ -159,8 +159,8 @@ The block below is `scripts/mcp --help`, kept in sync by `command-index-format`.
 Usage: mcp <command> [options] [arguments]
 
 Manage the MCP servers configured for each installed agent: Claude Code
-(claude), Codex (codex) and OpenCode (opencode), and read the request logs of
-this repository's own MCP servers.
+(claude), Codex (codex), OpenCode (opencode) and Antigravity (agy), and read
+the request logs of this repository's own MCP servers.
 
 Commands:
   list [--json]              List configured servers per agent and scope
@@ -175,8 +175,8 @@ Commands:
                              records (see 'mcp logs --help')
 
 Options:
-  --agent NAME               Operate on one agent (claude, codex or opencode);
-                             by default, every installed agent
+  --agent NAME               Operate on one agent (claude, codex, opencode or
+                             agy); by default, every installed agent
   --scope SCOPE              'user' or 'workspace'; add and remove default to
                              'user', list and doctor read both
   -e, --env KEY=VALUE        (add) Environment variable for a stdio server;
@@ -187,11 +187,13 @@ Options:
 
 Scopes:
   user       claude: mcpServers in ~/.claude.json; codex: ~/.codex/config.toml;
-             opencode: ~/.config/opencode/opencode.json(c)
+             opencode: ~/.config/opencode/opencode.json(c); agy:
+             ~/.gemini/config/mcp_config.json
   workspace  claude: the repository's entry in ~/.claude.json (Claude's local
              scope, where add writes) and .mcp.json (Claude's project scope);
              opencode: opencode.json(c) or .opencode/opencode.json(c) at the
-             repository root; codex has no workspace scope
+             repository root; agy: .agents/mcp_config.json at the repository
+             root (excluded via .git/info/exclude); codex has no workspace scope
 
 Examples:
   # Add a remote server for every installed agent
@@ -207,13 +209,14 @@ Examples:
   mcp list --json | jq -r 'group_by(.name)[] | select(all(.agent != "codex")) | .[0].name'
 
 add and remove run each agent's own CLI (claude mcp, codex mcp, opencode mcp
-add); OpenCode has no remove command, so remove edits its config file and
-keeps the file's comments. add skips an agent that already has the server in
-the scope, and refuses before changing anything when an agent cannot take the
-server (codex mcp add cannot set headers). add does not log in to a remote
-server that uses OAuth; use the agent's own login (claude: /mcp, codex: codex
-mcp login NAME, opencode: opencode mcp auth NAME). --env and --header values
-are written as given; list shows only their names.
+add, agy mcp); OpenCode has no remove command, so remove edits its config file
+and keeps the file's comments, and agy mcp has no workspace scope, so workspace
+add and remove edit .agents/mcp_config.json directly. add skips an agent that
+already has the server in the scope, and refuses before changing anything when
+an agent cannot take the server (codex mcp add cannot set headers). add does not
+log in to a remote server that uses OAuth; use the agent's own login (claude:
+/mcp, codex: codex mcp login NAME, opencode: opencode mcp auth NAME, agy: /mcp).
+--env and --header values are written as given; list shows only their names.
 ```
 
 <!-- /generated -->

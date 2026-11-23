@@ -26,7 +26,7 @@ complete -c mcp -n "not __fish_seen_subcommand_from $commands" -a rm -d 'Remove 
 complete -c mcp -n "not __fish_seen_subcommand_from $commands" -a doctor -d 'Check each agent\'s MCP configuration'
 complete -c mcp -n "not __fish_seen_subcommand_from $commands" -a logs -d "Print this repository's MCP servers' request records"
 
-complete -c mcp -n "__fish_seen_subcommand_from $config_commands" -l agent -xa 'claude codex opencode' -d 'Operate on one agent'
+complete -c mcp -n "__fish_seen_subcommand_from $config_commands" -l agent -xa 'claude codex opencode agy' -d 'Operate on one agent'
 complete -c mcp -n "__fish_seen_subcommand_from $config_commands" -l scope -xa 'user workspace' -d Scope
 complete -c mcp -n "__fish_seen_subcommand_from list ls" -l json -d 'Print servers as JSON'
 complete -c mcp -n "__fish_seen_subcommand_from add" -s e -l env -x -d 'Environment variable for a stdio server (KEY=VALUE)'
