@@ -8,6 +8,13 @@ people, or places are knowledge skills; see
 [Knowledge Skill Guidelines](knowledge-skills.md). Scripts bundled with a
 knowledge skill still follow this guide.
 
+This guide clarifies and expands on the canonical Agent Skills specification and
+authoring documentation at [agentskills.io](https://agentskills.io/); it is not
+intended to conflict with it, and you do not need to read `agentskills.io` to
+follow this guide. If an unintentional discrepancy arises, prefer
+`agentskills.io` unless a deliberate practical amendment is explicitly noted
+here.
+
 ## Intent and Audience
 
 Capability skills provide instructions, workflows, and tools for AI agents
@@ -37,14 +44,16 @@ discover or routinely gets wrong:
 | Canonical doc snippets that break common states (cold start, logged out, minified) | Workarounds only needed by weaker or older models |
 | Recipes that save heavy trial-and-error or stop a model from guessing              | Step-by-step walkthroughs of routine workflows    |
 
-**Test your intuition.** It is easy to overestimate how novel a lesson is right
-after debugging it. When in doubt — especially when distilling an audit,
-postmortem, or bug fix — check that an unprimed frontier model (without the
-skill, and without leading keywords in the prompt) actually hits the gap or
-spends real effort rediscovering the answer. How you check is up to you: a quick
-prompt on a realistic symptom or small fixture is usually enough, scaling up to
-paired with/without-skill evals when tuning a larger skill. If the baseline
-already handles it cleanly, leave it out.
+**Test your intuition.** When distilling an audit, postmortem, or bug fix, check
+that an unprimed frontier model (without the skill or leading keywords) actually
+hits the gap or spends real effort rediscovering it. A quick prompt on a
+realistic symptom or small fixture is usually enough; scale up to paired
+with/without-skill evals when tuning a larger skill. If the baseline already
+handles it cleanly, leave it out.
+
+**Calibrate degrees of freedom.** Match instruction specificity to task
+fragility: reserve exact commands for fragile or destructive operations, and use
+clear guidelines and rationale where multiple approaches are valid.
 
 ## Core Principles & Decoupling Rule
 
@@ -53,13 +62,8 @@ environments, **design every reusable skill so a user can pick and install it
 independently without needing to track down other skills from your personal
 collection**.
 
-### Skill Independence & Degrees of Freedom
+### Skill Independence
 
-- **Calibrate Degrees of Freedom:** Match instruction specificity to task
-  fragility. Restrict low-freedom, exact commands to truly fragile or
-  destructive operations (e.g. database migrations, security boundaries). For
-  heuristics, reviews, and workflows, provide clear guidelines and rely on the
-  model's context-aware reasoning.
 - **No Sibling Skill Dependencies:** Do not mandate or cross-reference other
   skills from your own personal repository, or assume their `scripts/` are
   installed.
@@ -119,11 +123,10 @@ repository, not how to pass a specific test case:
   Troubleshooting rather than as mandatory workflow steps, and state
   package-level API rules rather than labeling the few symbols used by benchmark
   tasks as "Essential".
-- **Explain the "Why" Once Instead of Repeating Rigid `ALWAYS`/`NEVER` Bans:**
-  Repeating all-caps `NEVER` or `MUST` warnings across multiple sections is a
-  yellow flag that crowds out context. When models repeatedly hallucinate an API
-  call or import, explain the underlying API design or asymmetry once in the
-  relevant reference section so the model understands *why*.
+- **Explain API Asymmetries Once Instead of Repeating `ALWAYS`/`NEVER` Bans:**
+  When models repeatedly hallucinate an API call or import, explain the
+  underlying design or asymmetry once in the relevant reference section rather
+  than scattering repeated all-caps `NEVER`/`MUST` warnings across the skill.
 - **Fix Flawed Evaluations Rather Than Polluting the Skill:** Keep the skill
   general even if narrow, overfitted hints score higher on a benchmark. If
   removing a task-specific hint causes a severe regression, clarify the general
@@ -230,15 +233,6 @@ adb shell am broadcast -a com.google.android.wearable.app.DEBUG_SURFACE --es ope
 ```
 ````
 
-> [!NOTE] **Active Experiment — Bundled Script Discovery (`taskgo`):** A new
-> approach to referencing bundled scripts across heterogeneous environments is
-> currently being tested in `taskgo/SKILL.md`. Instead of assuming a script is
-> on `$PATH` or located at `./scripts/` in CWD, the skill documents both optimal
-> `$PATH` execution (`taskgo <cmd>`) and dynamic anchor resolution
-> (`<skill-dir>/scripts/taskgo <cmd>`, where `<skill-dir>` is the directory
-> containing `SKILL.md`). If this pattern proves effective, consider deploying
-> it to other skills that bundle helper scripts.
-
 ### Example 3: Cross-Skill Relative Hyperlinks vs. Functional Topic References
 
 **DON'T (Broken Relative Link):**
@@ -298,6 +292,18 @@ solid-color placeholder.
 ## Bundled Scripts & Generated Command Indexes
 
 When a skill bundles executable utilities or helper tools in `scripts/`:
+
+1. **Document Both `$PATH` and `<skill-dir>` Invocation (Practical Amendment to
+   `agentskills.io`):** The `agentskills.io` guide on
+   [using scripts](https://agentskills.io/skill-creation/using-scripts) shows
+   CWD-relative invocations such as `scripts/validate.sh`, assuming the agent
+   runs commands from the skill directory root. In practice, many agent
+   harnesses run shell commands from the user's workspace root instead. Do not
+   assume a bundled script is reachable at `./scripts/` in the current working
+   directory: document both `$PATH` execution (when installed on `$PATH`, e.g.,
+   `taskgo <cmd>`) and dynamic anchor resolution
+   (`<skill-dir>/scripts/<tool> <cmd>`, where `<skill-dir>` is the directory
+   containing `SKILL.md`).
 
 1. **Keep `SKILL.md` Lean:** Do not copy exhaustive command-line options, flag
    tables, or multi-page `--help` text directly into `SKILL.md`. Keep the main
