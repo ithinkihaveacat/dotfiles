@@ -812,6 +812,7 @@ Catalog Entries:
   gemini-api             Gemini API documentation and examples
   gemini-sdk-js          Google Gemini JavaScript SDK codegen instructions
   gemini-sdk-py          Google Gen AI Python SDK documentation
+  google-home            Google Home Automations Script Editor documentation and schema reference
   homeassistant          Home Assistant integration, automation, API and CLI documentation
   inkyframe              Pimoroni Inky Frame documentation
   kamal                  Kamal deployment documentation
