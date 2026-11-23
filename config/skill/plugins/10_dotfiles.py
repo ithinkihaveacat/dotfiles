@@ -85,3 +85,8 @@ def register(api):
         "remote:cf-cli",
         "https://github.com/cloudflare/skills/tree/main/skills/cf-cli",
     )
+
+    api.register_skill(
+        "remote:socratic-tutor",
+        "https://github.com/janestreet/agent_skills/tree/master/socratic-tutor",
+    )
