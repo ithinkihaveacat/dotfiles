@@ -490,15 +490,14 @@ ______________________________________________________________________
 ## scout
 
 Fast, lightweight, Google-grounded web reconnaissance via the Gemini
-Interactions API (`gemini-3.5-flash-lite` by default, `--deep` for
-`gemini-4-hydrogen`).
+Interactions API (`gemini-3.5-flash-lite` by default; override with `--model`).
 
 ### Help
 
 <!-- generated: ../scripts/scout --help -->
 
 ```text
-usage: scout [--deep] [--model MODEL] [--urls-only] [--json] [--no-resolve]
+usage: scout [--model MODEL] [--urls-only] [--json] [--no-resolve]
              [--timeout SECONDS] [-q] [-h]
              [PROMPT ...]
 
@@ -510,8 +509,6 @@ positional arguments:
                      stdin.
 
 options:
-  --deep             Use gemini-4-hydrogen (low thinking) for higher recall on
-                     harder queries.
   --model MODEL      Gemini model to use (default: $GEMINI_MODEL, else
                      gemini-3.5-flash-lite).
   --urls-only        Run a semantic search internally, then print only
@@ -527,7 +524,7 @@ options:
 
 Environment:
   GEMINI_API_KEY        Required. Your Gemini API key.
-  GEMINI_MODEL          Optional. Default model when --model and --deep are unset.
+  GEMINI_MODEL          Optional. Default model when --model is unset.
   AGENT_OFFLINE         Set to 1/true to fail immediately without network calls.
   AGENT_TELEMETRY_JSON  Optional. Destination path for JSON execution telemetry.
 
@@ -539,7 +536,7 @@ Exit Codes:
 
 Examples:
   scout "What is the latest stable Python release and download URL?"
-  scout --deep "Compare UK non-expiring PAYG eSIMs with web top-ups"
+  scout --model gemini-4-hydrogen "Compare UK non-expiring PAYG eSIMs with web top-ups"
   scout --urls-only "Official Lenovo ThinkCentre M75q Gen 2 PSREF PDF"
   printf "Latest UK eBay private seller fee rules" | scout --json -
 ```

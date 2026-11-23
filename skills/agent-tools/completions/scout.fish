@@ -1,5 +1,4 @@
 # Fish completion for scout
-complete -c scout -l deep -d "Use gemini-4-hydrogen (low thinking) for harder lookups"
 complete -c scout -l model -x -d "Gemini model to use (default: gemini-3.5-flash-lite)"
 complete -c scout -l urls-only -d "Run semantic search and print only unwrapped URLs"
 complete -c scout -l json -d "Output JSON with answer, sources, queries, and usage"

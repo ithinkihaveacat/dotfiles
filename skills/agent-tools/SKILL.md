@@ -337,7 +337,7 @@ real browser solely to discover pages or triage a question.
 
 - Your harness already has a working native web search tool or a dedicated
   search API (prefer that first unless you specifically want unwrapped direct
-  URLs or `--deep` multi-query synthesis).
+  URLs or multi-query synthesis).
 - You need **live, authoritative page state** that cannot rely on search
   snippets: exact checkout/shipping rules, current stock, secondhand/sold
   valuations, interactive forms/portals, login-gated pages, or exact high-stakes
@@ -360,22 +360,23 @@ real browser solely to discover pages or triage a question.
   unwraps `url_citation` redirects to canonical URLs via `HTTP 302 Location`
   without touching destination hosts.
 - **Avoid tight fan-out loops.** Each invocation typically executes 2–5 Google
-  Search queries (more with `--deep`) against the project's shared monthly
-  grounding allowance.
+  Search queries (more with larger models such as `gemini-4-hydrogen`) against
+  the project's shared monthly grounding allowance.
 
 ```bash
 scripts/scout "PROMPT"
-scripts/scout --deep "PROMPT"        # gemini-4-hydrogen (low): slower, higher recall
+scripts/scout --model gemini-4-hydrogen "PROMPT"  # slower, higher recall (low thinking)
 scripts/scout --urls-only "PROMPT"   # semantic search internally, print unwrapped URLs only
 scripts/scout --json "PROMPT"        # client-side JSON wrapper (preserves all citations)
 ```
 
-**Options:** `--deep` (use `gemini-4-hydrogen` with `low` thinking),
-`--model MODEL` (override model), `--urls-only` (print only unwrapped URLs),
-`--json` (emit JSON with `answer`, `sources`, `queries`, `grounded`, and
-`usage`), `--no-resolve` (keep raw redirect URIs), `--timeout SECONDS` (default
-60), `-q, --quiet` (suppress the `stderr` summary line). Pass `-` as `PROMPT` to
-read the prompt from `stdin`.
+**Options:** `--model MODEL` (override model; defaults to `GEMINI_MODEL`, else
+`gemini-3.5-flash-lite`; `gemini-4*` and `*-pro` models automatically use `low`
+thinking), `--urls-only` (print only unwrapped URLs), `--json` (emit JSON with
+`answer`, `sources`, `queries`, `grounded`, and `usage`), `--no-resolve` (keep
+raw redirect URIs), `--timeout SECONDS` (default 60), `-q, --quiet` (suppress
+the `stderr` summary line). Pass `-` as `PROMPT` to read the prompt from
+`stdin`.
 
 **Environment:** `GEMINI_API_KEY` (required), `GEMINI_MODEL` (optional),
 `AGENT_OFFLINE` (optional), `AGENT_TELEMETRY_JSON` (optional).
