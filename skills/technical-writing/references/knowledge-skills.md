@@ -7,6 +7,13 @@ people, and places. Any agent in any workspace can load it by topic. Skills that
 teach how to do a class of task are capability skills; see
 [Capability Skill Guidelines](capability-skills.md).
 
+This guide clarifies and expands on the canonical Agent Skills specification and
+authoring documentation at [agentskills.io](https://agentskills.io/); it is not
+intended to conflict with it, and you do not need to read `agentskills.io` to
+follow this guide. If an unintentional discrepancy arises, prefer
+`agentskills.io` unless a deliberate practical amendment is explicitly noted
+here.
+
 ## Intent and Audience
 
 - **Goal:** Keep facts current, findable, and cheap to load. An agent should
@@ -43,15 +50,14 @@ Organize by entity, so each lookup lands on one small file:
 - **`SKILL.md` is an index.** State the scope in a sentence or two, the privacy
   policy, a quick-access table for the most frequent lookups, and a list of
   entities linking to their reference files. Detail belongs in the references.
-  When `SKILL.md` grows beyond a short index (roughly 150 lines), move sections
-  out.
+  When `SKILL.md` grows beyond a short index, move sections out.
 - **`references/` holds one file per entity**, or per small group of similar
   entities (one per machine, one per provider, one per street). Name the file
   after the entity and open it with a one-line statement of what the entity is.
 - **Procedures that span entities** (provisioning a server, rotating every key
   of one kind) get their own reference file rather than being split across
   entity files.
-- **`resources/`** holds verbatim captured material, such as configuration files
+- **`assets/`** holds verbatim captured material, such as configuration files
   copied from a host. Record where each file came from (host and path).
 - **`scripts/`** holds automation, written to the capability skill rules. List
   destructive scripts in `permissions/unsafe`.

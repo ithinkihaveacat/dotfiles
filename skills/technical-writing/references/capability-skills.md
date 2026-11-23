@@ -8,6 +8,13 @@ people, or places are knowledge skills; see
 [Knowledge Skill Guidelines](knowledge-skills.md). Scripts bundled with a
 knowledge skill still follow this guide.
 
+This guide clarifies and expands on the canonical Agent Skills specification and
+authoring documentation at [agentskills.io](https://agentskills.io/); it is not
+intended to conflict with it, and you do not need to read `agentskills.io` to
+follow this guide. If an unintentional discrepancy arises, prefer
+`agentskills.io` unless a deliberate practical amendment is explicitly noted
+here.
+
 ## Intent and Audience
 
 Capability skills provide instructions, workflows, and tools for AI agents
@@ -230,15 +237,6 @@ adb shell am broadcast -a com.google.android.wearable.app.DEBUG_SURFACE --es ope
 ```
 ````
 
-> [!NOTE] **Active Experiment — Bundled Script Discovery (`taskgo`):** A new
-> approach to referencing bundled scripts across heterogeneous environments is
-> currently being tested in `taskgo/SKILL.md`. Instead of assuming a script is
-> on `$PATH` or located at `./scripts/` in CWD, the skill documents both optimal
-> `$PATH` execution (`taskgo <cmd>`) and dynamic anchor resolution
-> (`<skill-dir>/scripts/taskgo <cmd>`, where `<skill-dir>` is the directory
-> containing `SKILL.md`). If this pattern proves effective, consider deploying
-> it to other skills that bundle helper scripts.
-
 ### Example 3: Cross-Skill Relative Hyperlinks vs. Functional Topic References
 
 **DON'T (Broken Relative Link):**
@@ -298,6 +296,18 @@ solid-color placeholder.
 ## Bundled Scripts & Generated Command Indexes
 
 When a skill bundles executable utilities or helper tools in `scripts/`:
+
+1. **Document Both `$PATH` and `<skill-dir>` Invocation (Practical Amendment to
+   `agentskills.io`):** The `agentskills.io` guide on
+   [using scripts](https://agentskills.io/skill-creation/using-scripts) shows
+   CWD-relative invocations such as `scripts/validate.sh`, assuming the agent
+   runs commands from the skill directory root. In practice, many agent
+   harnesses run shell commands from the user's workspace root instead. Do not
+   assume a bundled script is reachable at `./scripts/` in the current working
+   directory: document both `$PATH` execution (when installed on `$PATH`, e.g.,
+   `taskgo <cmd>`) and dynamic anchor resolution
+   (`<skill-dir>/scripts/<tool> <cmd>`, where `<skill-dir>` is the directory
+   containing `SKILL.md`).
 
 1. **Keep `SKILL.md` Lean:** Do not copy exhaustive command-line options, flag
    tables, or multi-page `--help` text directly into `SKILL.md`. Keep the main

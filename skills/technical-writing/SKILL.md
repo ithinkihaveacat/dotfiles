@@ -77,7 +77,8 @@ relevant reference guide:
 - **[Capability Skills](references/capability-skills.md)** — Deciding what earns
   a place in a skill, and authoring modular, decoupled, and self-contained
   `SKILL.md` files and reference documents for skills that teach a class of
-  task.
+  task. Clarifies and expands on [agentskills.io](https://agentskills.io/).
 - **[Knowledge Skills](references/knowledge-skills.md)** — Structuring and
   maintaining skills that record current facts about particular systems,
-  accounts, people, and places.
+  accounts, people, and places. Clarifies and expands on
+  [agentskills.io](https://agentskills.io/).
