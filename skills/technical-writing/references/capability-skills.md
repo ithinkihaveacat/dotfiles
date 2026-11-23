@@ -44,14 +44,16 @@ discover or routinely gets wrong:
 | Canonical doc snippets that break common states (cold start, logged out, minified) | Workarounds only needed by weaker or older models |
 | Recipes that save heavy trial-and-error or stop a model from guessing              | Step-by-step walkthroughs of routine workflows    |
 
-**Test your intuition.** It is easy to overestimate how novel a lesson is right
-after debugging it. When in doubt — especially when distilling an audit,
-postmortem, or bug fix — check that an unprimed frontier model (without the
-skill, and without leading keywords in the prompt) actually hits the gap or
-spends real effort rediscovering the answer. How you check is up to you: a quick
-prompt on a realistic symptom or small fixture is usually enough, scaling up to
-paired with/without-skill evals when tuning a larger skill. If the baseline
-already handles it cleanly, leave it out.
+**Test your intuition.** When distilling an audit, postmortem, or bug fix, check
+that an unprimed frontier model (without the skill or leading keywords) actually
+hits the gap or spends real effort rediscovering it. A quick prompt on a
+realistic symptom or small fixture is usually enough; scale up to paired
+with/without-skill evals when tuning a larger skill. If the baseline already
+handles it cleanly, leave it out.
+
+**Calibrate degrees of freedom.** Match instruction specificity to task
+fragility: reserve exact commands for fragile or destructive operations, and use
+clear guidelines and rationale where multiple approaches are valid.
 
 ## Core Principles & Decoupling Rule
 
@@ -60,13 +62,8 @@ environments, **design every reusable skill so a user can pick and install it
 independently without needing to track down other skills from your personal
 collection**.
 
-### Skill Independence & Degrees of Freedom
+### Skill Independence
 
-- **Calibrate Degrees of Freedom:** Match instruction specificity to task
-  fragility. Restrict low-freedom, exact commands to truly fragile or
-  destructive operations (e.g. database migrations, security boundaries). For
-  heuristics, reviews, and workflows, provide clear guidelines and rely on the
-  model's context-aware reasoning.
 - **No Sibling Skill Dependencies:** Do not mandate or cross-reference other
   skills from your own personal repository, or assume their `scripts/` are
   installed.
@@ -126,11 +123,10 @@ repository, not how to pass a specific test case:
   Troubleshooting rather than as mandatory workflow steps, and state
   package-level API rules rather than labeling the few symbols used by benchmark
   tasks as "Essential".
-- **Explain the "Why" Once Instead of Repeating Rigid `ALWAYS`/`NEVER` Bans:**
-  Repeating all-caps `NEVER` or `MUST` warnings across multiple sections is a
-  yellow flag that crowds out context. When models repeatedly hallucinate an API
-  call or import, explain the underlying API design or asymmetry once in the
-  relevant reference section so the model understands *why*.
+- **Explain API Asymmetries Once Instead of Repeating `ALWAYS`/`NEVER` Bans:**
+  When models repeatedly hallucinate an API call or import, explain the
+  underlying design or asymmetry once in the relevant reference section rather
+  than scattering repeated all-caps `NEVER`/`MUST` warnings across the skill.
 - **Fix Flawed Evaluations Rather Than Polluting the Skill:** Keep the skill
   general even if narrow, overfitted hints score higher on a benchmark. If
   removing a task-specific hint causes a severe regression, clarify the general
