@@ -1037,8 +1037,9 @@ natural language.
 <!-- generated: ../scripts/popper --help -->
 
 ```text
-usage: popper [--launch PACKAGE] [--stay-in-app] [--timeout SECONDS]
-              [--output-format {text,stream-json}]
+usage: popper [--launch PACKAGE] [--stay-in-app]
+              [--dismiss-interstitials | --no-dismiss-interstitials]
+              [--timeout SECONDS] [--output-format {text,stream-json}]
               [--agent-screenshots | --no-agent-screenshots]
               [--local-screenshots | --no-local-screenshots]
               [--local-screenshot-dir DIR] [--output-dir DIR] [--dump-layout]
@@ -1056,6 +1057,10 @@ options:
                         com.example.fitness)
   --stay-in-app         Restrict the agent to a single application package for
                         the entire run
+  --dismiss-interstitials, --no-dismiss-interstitials
+                        Close cookie banners, sign-up popups and similar
+                        clutter that covers the content; login screens are
+                        left alone (default: enabled)
   --timeout SECONDS     Maximum execution time in seconds (default: 180; exit
                         code 2 on timeout)
   --output-format {text,stream-json}
@@ -1074,7 +1079,7 @@ options:
                         the agent (default: current directory)
   --dump-layout         Dump the UI layout as JSON and exit
   --model MODEL         Gemini model to use (default: $GEMINI_MODEL if set,
-                        else gemini-flash-latest)
+                        else gemini-3.8-flash)
   -h, --help            show this help message and exit
 
 Environment:

@@ -5,10 +5,10 @@ description: >-
   in a workspace, a single session, or user-wide, and the defaults every
   workspace gets (skill); which commands and directories Claude Code, Codex,
   and Antigravity may use, including the safe commands skills declare
-  (permission); which MCP servers Claude Code, Codex and OpenCode connect to
-  (mcp); and the defects agents report in their own instructions, skills and
-  tools (andon). Use when installing, removing, choosing, bundling, or auditing
-  agent skills; adding per-session or default skills; granting, restricting,
+  (permission); which MCP servers Claude Code, Codex, OpenCode and Antigravity
+  connect to (mcp); and the defects agents report in their own instructions,
+  skills and tools (andon). Use when installing, removing, choosing, bundling,
+  or auditing agent skills; adding per-session or default skills; granting,
   or debugging agent command or directory permissions; writing a skill's
   permissions/unsafe file; listing, adding, removing, or checking MCP servers
   across agents; installing the Andon plugin for Claude Code, OpenCode or Codex;
@@ -36,12 +36,17 @@ they see, what they may do, and what they are told. It consists of:
    user-wide for Antigravity), including pre-approving the safe commands
    declared by installed skills.
 1. **`mcp`**: The MCP server manager. Lists, adds, removes and checks the MCP
-   servers each installed agent (Claude Code, Codex, OpenCode) is configured
-   with, user-wide or for the workspace, through each agent's own CLI, and reads
+   servers each installed agent (Claude Code, Codex, OpenCode, Antigravity) is
+   configured with, user-wide or for the workspace, through each agent's own CLI
+   (or `.agents/mcp_config.json` for Antigravity's workspace scope), and reads
    the request logs of this repository's own MCP servers (`mcp logs`).
 1. **`andon`**: The Andon cord. Records and triages defects agents report in
    their own instructions, skills, rules and tools, through harness plugins for
    Claude Code, OpenCode and local Codex (`plugins/andon`).
+1. **`agent`**: The agent CLI manager. Lists and installs the agents (Claude
+   Code, Codex, OpenCode, Antigravity) and browse, runs their own updaters, and
+   checks where each is installed and for processes still running a version that
+   an update replaced.
 
 ______________________________________________________________________
 
@@ -332,9 +337,10 @@ ______________________________________________________________________
 ## Managing MCP Servers (`mcp`)
 
 The `mcp` tool (symlinked in `bin/`) gives one view of the MCP servers that
-Claude Code (`claude`), Codex (`codex`) and OpenCode (`opencode`) are configured
-with, and adds or removes a server across all of them at once. By default every
-command operates on each installed agent; use `--agent NAME` to scope to one.
+Claude Code (`claude`), Codex (`codex`), OpenCode (`opencode`) and Antigravity
+(`agy`) are configured with, and adds or removes a server across all of them at
+once. By default every command operates on each installed agent; use
+`--agent NAME` to scope to one.
 
 ```bash
 mcp <command> [options] [arguments]
@@ -373,24 +379,66 @@ mcp <command> [options] [arguments]
 Scopes (`--scope`; `add` and `remove` default to `user`, `list` and `doctor`
 read both):
 
-- **`user`**: `mcpServers` in `~/.claude.json`, `~/.codex/config.toml`, and
-  `~/.config/opencode/opencode.json(c)`.
+- **`user`**: `mcpServers` in `~/.claude.json`, `~/.codex/config.toml`,
+  `~/.config/opencode/opencode.json(c)`, and `~/.gemini/config/mcp_config.json`.
 - **`workspace`**: Claude Code's local scope (the repository's entry in
   `~/.claude.json`, where `add` writes) and its shared `.mcp.json`; OpenCode's
-  `opencode.json(c)` or `.opencode/opencode.json(c)` at the repository root.
-  Codex has no workspace scope: `codex mcp` writes only to
+  `opencode.json(c)` or `.opencode/opencode.json(c)` at the repository root;
+  Antigravity's `.agents/mcp_config.json` at the repository root (excluded via
+  `.git/info/exclude`). Codex has no workspace scope: `codex mcp` writes only to
   `~/.codex/config.toml`.
 
 `add` and `remove` run each agent's own CLI (`claude mcp`, `codex mcp`,
-`opencode mcp add`), so the agents' own validation and file handling apply.
-OpenCode has no remove command, so `mcp remove` edits its config file and keeps
-the file's comments. `add` does not log in to servers that use OAuth; finish
-with the agent's own login (`/mcp` in Claude Code, `codex mcp login NAME`,
-`opencode mcp auth NAME`). `add` and `remove` are declared in
-`permissions/unsafe`, since they change which tools an agent has, and so is
-`logs --serve`, which opens a port; reading logs stays pre-approved.
+`opencode mcp add`, `agy mcp`), so the agents' own validation and file handling
+apply. OpenCode has no remove command, so `mcp remove` edits its config file and
+keeps the file's comments; `agy mcp` has no workspace scope, so workspace `add`
+and `remove` edit `.agents/mcp_config.json` directly and maintain a
+`# >>> mcp >>>` block in `.git/info/exclude`. `add` does not log in to servers
+that use OAuth; finish with the agent's own login (`/mcp` in Claude Code or
+Antigravity, `codex mcp login NAME`, `opencode mcp auth NAME`). `add` and
+`remove` are declared in `permissions/unsafe`, since they change which tools an
+agent has, and so is `logs --serve`, which opens a port; reading logs stays
+pre-approved.
 
 See the [Command Index](references/command-index.md) for full help details.
+
+______________________________________________________________________
+
+## Managing Agent CLIs (`agent`)
+
+The `agent` tool (symlinked in `bin/`) handles installing and maintaining the
+agent programs, and browse, on any machine. Their configuration is
+`install.sh`'s job: its `agents` feature links `etc/agents` context, hooks and
+plugins into each installed agent and installs Claude Code's Andon plugin, and
+its `browse` feature configures an installed browse for OpenCode. `install.sh`
+does not call `agent`.
+
+```bash
+agent list                # installed or not, version, path
+agent install NAME...     # vendor installer
+agent update [NAME...]    # run each installed agent's own updater, now
+agent doctor [--quiet]    # check configuration and stale running versions
+```
+
+- **`install`** runs each vendor's own installer (`curl URL | bash`, downloaded
+  first) with the switches it offers: OpenCode's `--no-modify-path`, Codex's
+  `CODEX_NON_INTERACTIVE` and `CODEX_INSTALL_DIR`, and browse's
+  `-y -a opencode --no-open --no-wait --no-modify-path` (plus `--remote` on a
+  headless machine). Claude Code and agy install into `~/.local/bin` by default;
+  OpenCode always uses `~/.opencode/bin`. Installers may still edit shell
+  startup files, so `install` prints a note after each one, then points to
+  `install.sh --only agents` for the configuration.
+- **`update`** is for running by hand: the agents mostly update themselves or
+  prompt in their own UI, and browse updates itself while OpenCode runs.
+- **`doctor`** checks only what `agent` owns: where each agent landed (and when
+  this shell's PATH does not reach it), and processes still running a replaced
+  executable, grouped by systemd unit so a service with many sessions gives one
+  warning. Restarting is left to the owner, because restarting a Remote Control
+  service ends every session it runs, including the caller's; the warning says
+  how. Configuration is not checked here: running `install.sh --only agents`
+  checks and repairs it. `--quiet` prints only warnings and failures.
+- Long-running services that serve agents to other machines are host-specific
+  and stay out of this tool; an overlay manages them.
 
 ______________________________________________________________________
 
@@ -410,10 +458,11 @@ session writes to one store, `${XDG_STATE_HOME:-~/.local/state}/andon`, through
 the `andon` CLI (`scripts/andon`, symlinked in `bin/`). See
 [plugins/andon/README.md](plugins/andon/README.md) for the design.
 
-**Claude Code:** install it once, from a terminal, at user scope. It then loads
-in terminal and desktop Code tab sessions alike. The desktop app's + → Plugins
-menu manages plugins, but adding this local-folder marketplace needs the
-terminal:
+**Claude Code:** `install.sh`'s `agents` feature installs (or enables) it at
+user scope whenever `claude` is installed. It then loads in terminal and desktop
+Code tab sessions alike. To install it by hand, use a terminal (the desktop
+app's + → Plugins menu manages plugins, but adding this local-folder marketplace
+needs the terminal):
 
 ```bash
 claude plugin install andon --marketplace ~/.dotfiles/skills/agent-config/plugins
@@ -469,6 +518,9 @@ andon prompt e790 | claude -p
 # Close every alert that shares the fingerprint
 andon resolve e790 --all-matching --note "Fixed the script path in SKILL.md"
 ```
+
+`andon doctor` checks the store itself (writable, its files parse, the default
+level is valid), never the alerts in it, and exits non-zero on any warning.
 
 ______________________________________________________________________
 

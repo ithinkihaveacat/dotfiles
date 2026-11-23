@@ -1,9 +1,15 @@
 # Software Installation
 
 This document covers installation of CLI tools that are managed as optional
-entries in the dotfiles `install.sh` script. These tools are installed manually
-and self-update via their own update commands; the `install.sh` script calls
-those commands automatically when the tool is present in PATH.
+entries in the dotfiles `install.sh` script. These tools self-update via their
+own update commands; the `install.sh` script calls those commands automatically
+when the tool is present in PATH.
+
+For the coding agents (Antigravity, Claude Code, Codex and OpenCode) and browse,
+`agent install NAME` from the `agent-config` skill runs the vendor installer
+shown below (OpenCode's is `https://opencode.ai/v2/install`);
+`install.sh --only agents` then links the shared context and hooks, and
+`agent doctor` reports where each one landed.
 
 For non-interactive branch, commit, working-tree, and checked-out pull-request
 review, use an agent code review tool or rubric.

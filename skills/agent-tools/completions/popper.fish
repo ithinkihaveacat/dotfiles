@@ -7,6 +7,8 @@ end
 
 complete -c popper -l launch -x -a '(__fish_popper_list_packages)' -d "Launch the specified app before starting"
 complete -c popper -l stay-in-app -d "Restrict the run to a single application package"
+complete -c popper -l dismiss-interstitials -d "Close cookie banners and popups covering the content (default)"
+complete -c popper -l no-dismiss-interstitials -d "Leave cookie banners and popups alone"
 complete -c popper -l timeout -x -d "Maximum execution time in seconds"
 complete -c popper -l output-format -x -a "text stream-json" -d "Output format"
 complete -c popper -l agent-screenshots -d "Enable transmitting screenshots to the Gemini API"

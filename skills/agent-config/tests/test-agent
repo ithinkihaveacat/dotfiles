@@ -1,0 +1,242 @@
+#!/usr/bin/env bash
+# Mock bodies are single-quoted on purpose: they expand when the mock runs.
+# shellcheck disable=SC2016
+
+# TAP tests for scripts/agent. Each case builds a fake HOME holding a copy of
+# the script inside a minimal dotfiles tree (plus a .private overlay), and a
+# PATH of mocks that record their arguments, so no test touches a real agent,
+# its configuration, or the network.
+
+set -uo pipefail
+# CI sets AGENT_OFFLINE for every test; these cases set it themselves.
+unset AGENT_OFFLINE
+
+DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT="$DIR/../scripts/agent"
+
+WORK=$(mktemp -d)
+WORK=$(cd -P "$WORK" && pwd)
+SLEEP_PID=
+stop_sleeper() { # end the sleep, so the renamed bash waiting on it exits
+  [ -n "$SLEEP_PID" ] || return 0
+  pkill -P "$SLEEP_PID" 2>/dev/null || kill "$SLEEP_PID" 2>/dev/null || true
+  wait "$SLEEP_PID" 2>/dev/null || true
+  SLEEP_PID=
+}
+cleanup() {
+  stop_sleeper
+  wait 2>/dev/null || true
+  rm -rf "$WORK"
+}
+trap cleanup EXIT
+
+n=0
+fails=0
+ok() { # description, condition result
+  n=$((n + 1))
+  if [ "$2" -eq 0 ]; then
+    echo "ok $n - $1"
+  else
+    echo "not ok $n - $1"
+    fails=$((fails + 1))
+    printf '%s\n' "$out" | sed 's/^/# /'
+  fi
+}
+yes_if() { if "$@"; then echo 0; else echo 1; fi; }
+
+mock() { # name body
+  printf '#!/usr/bin/env bash\n%s\n' "$2" >"$WORK/bin/$1"
+  chmod +x "$WORK/bin/$1"
+}
+
+# setup: a fresh HOME with ~/.dotfiles (this script and the files it links)
+# and an empty ~/.private overlay, and mocks for claude, agy and opencode.
+setup() {
+  local tool d
+  rm -rf "${WORK:?}/home" "${WORK:?}/bin" "${WORK:?}/calls"
+  d="$WORK/home/.dotfiles"
+  mkdir -p "$d/skills/agent-config/scripts" "$d/skills/agent-config/plugins/andon/opencode" \
+    "$d/etc/agents/hooks" "$d/etc/agents/agy/hooks" "$d/etc/agents/opencode/plugins" \
+    "$WORK/home/.private" "$WORK/bin"
+  cp "$SCRIPT" "$d/skills/agent-config/scripts/agent"
+  echo context >"$d/etc/agents/AGENTS.md"
+  printf '#!/bin/sh\n' >"$d/etc/agents/hooks/ensure-commit-hooks"
+  echo '{}' >"$d/etc/agents/agy/hooks.json"
+  echo plugin >"$d/etc/agents/opencode/plugins/ensure-commit-hooks.ts"
+  : >"$WORK/calls"
+  for tool in bash env awk grep sed tr head cat sort wc dirname basename mktemp \
+    readlink ln rm mkdir mv jq sh chmod uname; do
+    ln -s "$(type -P "$tool")" "$WORK/bin/$tool"
+  done
+  mock claude '
+case "$*" in
+  --version) echo "1.0.1 (Claude Code)" ;;
+  "plugin list --json") cat "$HOME/plugins.json" ;;
+  *) echo "claude $*" >>"$CALLS"; exit "${CLAUDE_EXIT:-0}" ;;
+esac'
+  mock agy '[ "$1" = --version ] && echo 1.5.14 || echo "agy $*" >>"$CALLS"'
+  mock opencode '[ "$1" = --version ] && echo "opencode v2.3.2" || echo "opencode $*" >>"$CALLS"'
+  echo '[{"id":"andon@agent-config","enabled":true,"scope":"user"}]' >"$WORK/home/plugins.json"
+  # curl serves a fake installer that records its run and installs a mock
+  # agent in ~/.local/bin (unless NO_BIN is set); CURL_FAIL fails the download.
+  mock curl '
+out=; prev=
+for a; do [ "$prev" = -o ] && out=$a; prev=$a; done
+url=${!#}
+echo "curl $url" >>"$CALLS"
+[ -z "${CURL_FAIL:-}" ] || exit 22
+case $url in
+  *browse*) n=browse ;; *claude*) n=claude ;; *codex*) n=codex ;; *opencode*) n=opencode ;; *antigravity*) n=agy ;;
+esac
+cat >"$out" <<EOS
+echo "installer $n \$*\${CODEX_NON_INTERACTIVE:+ CODEX_NON_INTERACTIVE=\$CODEX_NON_INTERACTIVE}\${CODEX_INSTALL_DIR:+ CODEX_INSTALL_DIR=\$CODEX_INSTALL_DIR}" >>"\$CALLS"
+[ -z "\${NO_BIN:-}" ] || exit 0
+mkdir -p "\$HOME/.local/bin"
+printf "#!/bin/sh\\necho 1.0\\n" >"\$HOME/.local/bin/$n"
+chmod +x "\$HOME/.local/bin/$n"
+EOS'
+}
+
+agent() {
+  out=$(env -i HOME="$WORK/home" PATH="$WORK/bin" CALLS="$WORK/calls" NO_COLOR=1 \
+    ${AGENT_OFFLINE:+AGENT_OFFLINE="$AGENT_OFFLINE"} ${CLAUDE_EXIT:+CLAUDE_EXIT="$CLAUDE_EXIT"} \
+    ${NO_BIN:+NO_BIN=1} ${CURL_FAIL:+CURL_FAIL=1} \
+    "$WORK/bin/bash" "$WORK/home/.dotfiles/skills/agent-config/scripts/agent" "$@" 2>&1)
+  rc=$?
+}
+
+H="$WORK/home"
+
+echo "1..30"
+
+setup
+agent --help
+ok "--help lists the commands, without sync" "$([[ $rc -eq 0 && "$out" == *"install NAME..."* && "$out" == *"doctor [NAME...]"* && "$out" != *"sync ["* ]] && echo 0 || echo 1)"
+
+agent
+ok "no command prints a short usage and fails" "$([[ $rc -eq 1 && "$out" == *"Try 'agent --help'"* && "$out" != *Commands:* ]] && echo 0 || echo 1)"
+
+agent doctor gemini
+ok "an unknown name is refused" "$([[ $rc -eq 1 && "$out" == *"unknown name 'gemini'"* ]] && echo 0 || echo 1)"
+
+agent sync
+ok "sync is no longer a command" "$([[ $rc -eq 1 && "$out" == *"unknown command 'sync'"* ]] && echo 0 || echo 1)"
+
+agent list --quiet
+ok "--quiet is refused outside doctor" "$([[ $rc -eq 1 && "$out" == *"--quiet applies to doctor only"* ]] && echo 0 || echo 1)"
+
+agent list
+ok "list shows versions, an absent codex and an absent browse" "$([[ $rc -eq 0 && "$out" == *"claude     installed      1.0.1"* && "$out" == *"opencode   installed      v2.3.2"* && "$out" == *"codex      not installed"* && "$out" == *"browse     not installed"* ]] && echo 0 || echo 1)"
+
+mock codex '[ "$1" = --version ] && echo "codex-cli 0.171.0"'
+agent list codex
+ok "list finds the version after a name prefix" "$([[ $rc -eq 0 && "$out" == *"codex      installed      0.171.0"* ]] && echo 0 || echo 1)"
+rm "$WORK/bin/codex"
+
+agent doctor
+ok "doctor passes installed agents" "$([[ $rc -eq 0 && "$out" == *"[PASS]  installed: $WORK/bin/claude (1.0.1)"* ]] && echo 0 || echo 1)"
+ok "doctor reports an absent agent as one INFO line" "$([[ "$out" == *"[INFO]  codex: not installed"* && "$out" == *"[INFO]  browse: not installed"* && "$out" == *"0 warnings, 0 failed"* ]] && echo 0 || echo 1)"
+ok "doctor leaves configuration and Andon to install.sh" "$([[ "$out" != *CLAUDE.md* && "$out" != *"commit hook"* && "$out" != *andon* ]] && echo 0 || echo 1)"
+
+agent doctor --quiet
+ok "doctor --quiet prints nothing when healthy" "$([[ $rc -eq 0 && -z "$out" ]] && echo 0 || echo 1)"
+
+setup
+agent update
+ok "update runs each installed agent's updater" "$([[ $rc -eq 0 && "$(cat "$WORK/calls")" == $'claude update\nopencode upgrade\nagy update' ]] && echo 0 || echo 1)"
+
+: >"$WORK/calls"
+CLAUDE_EXIT=3 agent update
+ok "a failed update is reported, the rest still run, and the exit is non-zero" "$([[ $rc -eq 1 && "$out" == *"claude update failed (exit 3)"* && "$(cat "$WORK/calls")" == *"agy update"* ]] && echo 0 || echo 1)"
+
+: >"$WORK/calls"
+AGENT_OFFLINE=1 agent update
+ok "update does nothing offline" "$([[ $rc -eq 0 && "$out" == *"skipped (AGENT_OFFLINE is set)"* && ! -s "$WORK/calls" ]] && echo 0 || echo 1)"
+
+mock browse '[ "$1" = --version ] && echo 0.1.5 || echo "browse $*" >>"$CALLS"'
+: >"$WORK/calls"
+agent update browse
+ok "update leaves browse to update itself" "$([[ $rc -eq 0 && "$out" == *"browse updates itself while OpenCode runs"* && ! -s "$WORK/calls" ]] && echo 0 || echo 1)"
+
+setup
+agent install
+ok "install needs a name" "$([[ $rc -eq 1 && "$out" == *"NAME required"* && ! -s "$WORK/calls" ]] && echo 0 || echo 1)"
+
+AGENT_OFFLINE=1 agent install codex
+ok "install refuses offline" "$([[ $rc -eq 1 && "$out" == *"AGENT_OFFLINE is set"* && ! -s "$WORK/calls" ]] && echo 0 || echo 1)"
+
+agent install claude
+ok "install skips an agent already installed" "$([[ $rc -eq 0 && "$out" == *"claude is already installed"* && ! -s "$WORK/calls" ]] && echo 0 || echo 1)"
+
+agent install codex
+ok "install runs the vendor installer as downloaded" "$([[ $rc -eq 0 && "$(cat "$WORK/calls")" == $'curl https://chatgpt.com/codex/install.sh\ninstaller codex  CODEX_NON_INTERACTIVE=1 CODEX_INSTALL_DIR='"$H"'/.local/bin' ]] && echo 0 || echo 1)"
+ok "install notes shell files, says how to sign in, and points to install.sh" "$([[ "$out" == *"note: the codex installer may have changed shell startup files"* && "$out" == *"installed codex; next, run codex login"* && "$out" == *"then link its context and hooks: ~/.dotfiles/install.sh --only agents"* && ! -e "$H/.codex/AGENTS.md" ]] && echo 0 || echo 1)"
+
+agent doctor codex
+ok "doctor notes an agent whose directory is not on PATH" "$([[ "$out" == *"[INFO]  ~/.local/bin is not on this shell's PATH"* ]] && echo 0 || echo 1)"
+
+setup
+rm "$WORK/bin/opencode"
+agent install opencode
+ok "install uses OpenCode's v2 installer with --no-modify-path" "$([[ $rc -eq 0 && "$(cat "$WORK/calls")" == $'curl https://opencode.ai/v2/install\ninstaller opencode --no-modify-path' ]] && echo 0 || echo 1)"
+
+setup
+rm "$WORK/bin/agy"
+agent install agy
+ok "install runs agy's installer with its defaults" "$([[ $rc -eq 0 && "$(cat "$WORK/calls")" == $'curl https://antigravity.google/cli/install.sh\ninstaller agy ' ]] && echo 0 || echo 1)"
+
+setup
+agent install browse
+if [ "$(uname -s)" = Linux ]; then
+  ok "install browse configures OpenCode alone, over the relay on a headless machine" "$([[ $rc -eq 0 && "$(cat "$WORK/calls")" == $'curl https://opencode.ai/browse/install\ninstaller browse --remote --no-open --no-wait --no-modify-path -y -a opencode' && "$out" == *"pair a browser with browse pair"* && "$out" != *"then link its context"* ]] && echo 0 || echo 1)"
+else
+  ok "install browse configures OpenCode alone" "$([[ $rc -eq 0 && "$(cat "$WORK/calls")" == $'curl https://opencode.ai/browse/install\ninstaller browse --no-open --no-wait --no-modify-path -y -a opencode' ]] && echo 0 || echo 1)"
+fi
+
+setup
+rm "$WORK/bin/opencode"
+agent install browse
+ok "install browse needs OpenCode first" "$([[ $rc -eq 1 && "$out" == *"first: agent install opencode"* && ! -s "$WORK/calls" ]] && echo 0 || echo 1)"
+
+setup
+CURL_FAIL=1 agent install codex
+ok "a failed download is reported and nothing runs" "$([[ $rc -eq 1 && "$out" == *"failed to download https://chatgpt.com/codex/install.sh"* && "$(cat "$WORK/calls")" != *installer* && "$out" != *"shell startup files"* ]] && echo 0 || echo 1)"
+
+setup
+NO_BIN=1 agent install codex
+ok "an agent the installer put out of reach is reported, not failed" "$([[ $rc -eq 0 && "$out" == *"not found from this shell; open a new shell"* ]] && echo 0 || echo 1)"
+
+# Stale executables: claude on PATH is versions/1.0.1 while a copy of bash
+# runs as versions/1.0.0, as after an update replaced the running version.
+# bash, not sleep: a multi-call coreutils (Ubuntu 26.04's) runs as whatever
+# its file is named. The trailing ':' keeps bash from exec-ing sleep.
+if [ -d /proc/self ]; then
+  setup
+  versions="$H/.local/share/claude/versions"
+  mkdir -p "$versions"
+  mv "$WORK/bin/claude" "$versions/1.0.1"
+  ln -s "$versions/1.0.1" "$WORK/bin/claude"
+  cp "$(type -P bash)" "$versions/1.0.0"
+  "$versions/1.0.0" -c 'sleep 60; :' 2>/dev/null &
+  SLEEP_PID=$!
+  agent doctor claude
+  ok "doctor warns about a process running a replaced version" "$([[ $rc -eq 1 && "$out" == *"1 of 1 claude process(es) in "*" run 1.0.0; 1.0.1 is installed"* ]] && echo 0 || echo 1)"
+  agent doctor --quiet claude
+  ok "doctor --quiet prints only the warning, its fix and its agent" "$([[ $rc -eq 1 && "$out" == $'claude\n[WARN]  1 of 1 claude process(es) in '* && "$out" == *$'\n        '* && "$out" != *PASS* && "$out" != *passed* ]] && echo 0 || echo 1)"
+  stop_sleeper
+  cp "$(type -P bash)" "$versions/1.0.2"
+  rm "$WORK/bin/claude"
+  ln -s "$versions/1.0.2" "$WORK/bin/claude"
+  "$versions/1.0.2" -c 'sleep 60; :' 2>/dev/null &
+  SLEEP_PID=$!
+  agent doctor claude
+  ok "doctor passes a process on the installed version" "$([[ "$out" == *"1 claude process(es) run the installed executable"* && "$out" != *"is installed"* ]] && echo 0 || echo 1)"
+  stop_sleeper
+else
+  echo "ok 28 # SKIP no /proc"
+  echo "ok 29 # SKIP no /proc"
+  echo "ok 30 # SKIP no /proc"
+  n=$((n + 3))
+fi
+
+[ "$fails" -eq 0 ]

@@ -7,7 +7,6 @@
 # tests/test-install-git-pull (git_up, interactive gating, self-reexec),
 # tests/test-install-node (the per-user default Node.js),
 # tests/test-install-fish-completions (generated fish completions)
-# Tests: tests/test-install-restart-warnings (stale agent executables)
 
 # When piped from the network the caller picks the interpreter
 # (`curl ... | bash`), so the shebang above is bypassed. The body of this script
@@ -93,11 +92,10 @@ FEATURES=(
   'cloudflare|-|Cloudflare'"'"'s cf CLI (beta) from npm, with its telemetry off'
   'app-host|-|cloudflared, for a host serving apps through a Cloudflare Tunnel'
   'skills|workstation cloud|Link skill and permission plugins; apply default skills'
-  'agents|workstation|Link agent context and hooks, and synchronize permissions'
-  'browse|workstation|Install browse, the browser-control MCP server, for OpenCode'
+  'agents|workstation|Link agent context, hooks and plugins, and synchronize permissions'
+  'browse|workstation|Configure browse, the browser-control MCP server, for OpenCode'
   'upgrades|workstation|Daily: upgrade packages, uv, ruby-build, Android and agent CLIs'
   'overlay-hooks|workstation|Run each overlay'"'"'s update hook'
-  'restart-warnings|workstation|Warn about running agents using replaced executables (Linux)'
 )
 PROFILES="workstation cloud ci"
 PACKAGE_FEATURES="base cli-extras services media android ruby"
@@ -160,10 +158,6 @@ rebases, resets, or stashes. Incoming changes require confirmation, or an
 explicit --accept-updates for automation. Use --apply to apply the current
 checkout without fetching or updating Git.
 
-On Linux, restart-warnings checks this user's native Claude and OpenCode
-processes against the installed executables, including updates installed by
-the applications themselves. It only warns; it never restarts an agent.
-
 OPTIONS:
   -h, --help    Show this help message and exit
   --profile NAME
@@ -211,7 +205,6 @@ EXAMPLES:
   $(basename "$0") --without upgrades # Skip the daily upgrades
   $(basename "$0") --apply            # Apply local edits without Git updates
   $(basename "$0") --accept-updates --no-input # Explicitly adopt updates on an agent host
-  $(basename "$0") --only restart-warnings # Check running agents without updating
   $(basename "$0") --profile cloud    # From a cloud environment's setup script
   $(basename "$0") --only uv          # Prepare a CI job for offline use
   $(basename "$0") --only uv --force  # Rebuild uv script caches from scratch
@@ -502,18 +495,6 @@ function is_codex_agent {
 function is_opencode_agent {
   exists opencode && return 0
   [ -x "$HOME/.opencode/bin/opencode" ]
-}
-
-# Print the OpenCode executable to run. The standalone installer puts the
-# binary in ~/.opencode/bin, which the fish wrapper adds to its own lookup but
-# a non-interactive bash (install.sh) does not have on PATH.
-function opencode_bin {
-  local path
-  if path=$(type -P opencode); then
-    printf '%s\n' "$path"
-  else
-    printf '%s\n' "$HOME/.opencode/bin/opencode"
-  fi
 }
 
 PACKAGE_STAMP="$XDG_CACHE_HOME/dotfiles/last_package_update"
@@ -1686,23 +1667,8 @@ function feature_upgrades {
       compose-preview update || echo "warning: compose-preview update failed" >&2
   fi
 
-  if exists agy || exists claude || is_codex_agent || is_opencode_agent; then
-    heading "agent CLIs upgrade"
-  fi
-  if exists agy; then
-    x agy update || echo "warning: agy update failed" >&2
-  fi
-  if exists claude; then
-    x claude update || echo "warning: claude update failed" >&2
-  fi
-  if is_codex_agent; then
-    x codex update || echo "warning: codex update failed" >&2
-  fi
-  if is_opencode_agent; then
-    # `opencode upgrade` keeps the installed channel (the standalone
-    # installer's v2 build here) and reuses its own curl installer.
-    x "$(opencode_bin)" upgrade || echo "warning: opencode upgrade failed" >&2
-  fi
+  # The agent CLIs update themselves (or prompt in their own UI); 'agent update'
+  # updates them by hand.
 }
 
 # uv: installs uv itself, then fetches everything this repository's uv-based
@@ -2355,6 +2321,73 @@ function cleanup_legacy_gemini_skills_json {
   fi
 }
 
+# Link $2 to $1 for an agent's configuration. A real file or directory in the
+# way is left in place with a warning (it may hold the owner's own edits),
+# unless --force is given; the feature then reports a failure.
+function link_agent_file {
+  local src=$1 dst=$2
+  if [ -L "$dst" ] && [ "$(readlink "$dst")" = "$src" ]; then
+    return 0
+  fi
+  if [ -e "$dst" ] && [ ! -L "$dst" ] && [ "$FORCE" -ne 1 ]; then
+    echo "warning: $dst is a real file, not a link to $src; leaving it in place" >&2
+    echo "hint: move it aside, or re-run with --force" >&2
+    AGENTS_FAILED=1
+    return 0
+  fi
+  xmkdir "$(dirname "$dst")"
+  x rm -rf "$dst"
+  x ln -s "$src" "$dst"
+}
+
+# link_agent_file for the overlay copy of $1, when an overlay has one.
+function link_agent_path {
+  local src
+  src=$(overlay_path "$1") || return 0
+  link_agent_file "$src" "$2"
+}
+
+# Deep-merge the overlay's etc/agents/claude/settings.json into
+# ~/.claude/settings.json, leaving keys the fragment does not name in place.
+# Objects merge recursively; arrays and scalars in the fragment replace the
+# existing value. The file is rewritten only when the merge changes it.
+function merge_claude_settings {
+  local settings="$HOME/.claude/settings.json"
+  local fragment tmp
+
+  fragment=$(overlay_path "etc/agents/claude/settings.json") || return 0
+  if ! exists jq; then
+    echo "warning: jq not found; Claude Code settings not merged" >&2
+    return 0
+  fi
+  if ! jq -e 'type == "object"' "$fragment" >/dev/null 2>&1; then
+    echo "warning: $fragment is not a JSON object; Claude Code settings not merged" >&2
+    return 0
+  fi
+
+  xmkdir "$HOME/.claude"
+  if [ ! -s "$settings" ]; then
+    (umask 077 && echo '{}' >"$settings")
+  fi
+  if ! jq -e 'type == "object"' "$settings" >/dev/null 2>&1; then
+    echo "warning: $settings is not a JSON object; Claude Code settings not merged" >&2
+    return 0
+  fi
+
+  if jq -e --slurpfile f "$fragment" '. == (. * $f[0])' "$settings" >/dev/null; then
+    return 0
+  fi
+
+  tmp="$settings.tmp.$$"
+  if (umask 077 && jq --slurpfile f "$fragment" '. * $f[0]' "$settings" >"$tmp") &&
+    x mv "$tmp" "$settings"; then
+    echo "merged Claude Code settings: $fragment" >&2
+  else
+    rm -f "$tmp"
+    echo "warning: failed to merge Claude Code settings into $settings" >&2
+  fi
+}
+
 # Register an overlay script as a Claude Code PreToolUse command hook in
 # ~/.claude/settings.json, leaving every other setting and hook in place. The
 # file is rewritten only when no hook for MATCHER already runs the script.
@@ -2401,53 +2434,86 @@ function register_claude_pretooluse_hook {
   fi
 }
 
+# Install the Andon plugin for every Claude Code session (user scope) from
+# agent-config's local marketplace, or enable it, unless it is already enabled
+# at user scope. Changes nothing when 'claude plugin list --json' is unreadable.
+function install_claude_andon_plugin {
+  local marketplace state
+  marketplace=$(overlay_path "skills/agent-config/plugins") || return 0
+  if ! exists jq; then
+    echo "warning: jq not found; Claude Code Andon plugin not checked" >&2
+    return 0
+  fi
+  if ! state=$(claude plugin list --json 2>/dev/null | jq -er '
+    first(.[] | select((.id // "" | split("@")[0]) == "andon")
+      | "\(.enabled // false) \(.scope // "-")") // "absent"' 2>/dev/null); then
+    echo "warning: cannot read 'claude plugin list --json'; Claude Code Andon plugin not checked" >&2
+    AGENTS_FAILED=1
+    return 0
+  fi
+  case $state in
+    "true user") ;;
+    "false user")
+      x claude plugin enable andon --scope user || {
+        echo "warning: failed to enable the Claude Code Andon plugin" >&2
+        AGENTS_FAILED=1
+      }
+      ;;
+    *)
+      x claude plugin install andon --scope user --marketplace "$marketplace" || {
+        echo "warning: failed to install the Claude Code Andon plugin" >&2
+        AGENTS_FAILED=1
+      }
+      ;;
+  esac
+}
+
 function feature_agents {
-  local agents_context andon_plugins
+  local agents_context
 
   heading "agents"
+  AGENTS_FAILED=0
 
   # Symlink user-supplied context for all agents
   agents_context=$(overlay_path "etc/agents/AGENTS.md") || agents_context=""
   if [ -n "$agents_context" ]; then
     if is_codex_agent; then
       xmkdir "$HOME/.codex"
-      x ln -sf "$agents_context" "$HOME/.codex/AGENTS.md"
+      link_agent_file "$agents_context" "$HOME/.codex/AGENTS.md"
     fi
     if exists agy; then
       xmkdir "$HOME/.gemini"
-      x ln -sf "$agents_context" "$HOME/.gemini/GEMINI.md"
+      link_agent_file "$agents_context" "$HOME/.gemini/GEMINI.md"
     fi
     if exists claude; then
       xmkdir "$HOME/.claude"
-      x ln -sf "$agents_context" "$HOME/.claude/CLAUDE.md"
+      link_agent_file "$agents_context" "$HOME/.claude/CLAUDE.md"
     fi
     if is_opencode_agent; then
       xmkdir "$XDG_CONFIG_HOME/opencode"
-      x ln -sf "$agents_context" "$XDG_CONFIG_HOME/opencode/AGENTS.md"
+      link_agent_file "$agents_context" "$XDG_CONFIG_HOME/opencode/AGENTS.md"
     fi
   fi
 
   if exists agy; then
     xmkdir "$HOME/.gemini/config"
-    link_overlay_path "etc/agents/agy/hooks.json" "$HOME/.gemini/config/hooks.json"
-    link_overlay_path "etc/agents/agy/hooks" "$HOME/.gemini/config/hooks"
+    link_agent_path "etc/agents/agy/hooks.json" "$HOME/.gemini/config/hooks.json"
+    link_agent_path "etc/agents/agy/hooks" "$HOME/.gemini/config/hooks"
   fi
 
   if is_opencode_agent; then
     xmkdir "$XDG_CONFIG_HOME/opencode/plugins"
-    link_overlay_path \
+    link_agent_path \
       "etc/agents/opencode/plugins/ensure-commit-hooks.ts" \
       "$XDG_CONFIG_HOME/opencode/plugins/ensure-commit-hooks.ts"
-    andon_plugins="$XDG_CONFIG_HOME/opencode/plugins/andon"
-    if [ -e "$andon_plugins" ] && [ ! -L "$andon_plugins" ]; then
-      echo "warning: $andon_plugins exists and is not a symlink; leaving it in place" >&2
-    else
-      link_overlay_path "skills/agent-config/plugins/andon/opencode" "$andon_plugins"
-    fi
+    link_agent_path "skills/agent-config/plugins/andon/opencode" \
+      "$XDG_CONFIG_HOME/opencode/plugins/andon"
   fi
 
   if exists claude; then
+    merge_claude_settings
     register_claude_pretooluse_hook "etc/agents/hooks/ensure-commit-hooks" Bash
+    install_claude_andon_plugin
   fi
 
   heading "agent permissions"
@@ -2492,6 +2558,7 @@ function feature_agents {
       fi
     done
   fi
+  return "$AGENTS_FAILED"
 }
 
 function feature_browse {
@@ -2499,12 +2566,14 @@ function feature_browse {
   local args=(--no-open --no-wait --no-modify-path -y -a opencode)
   local relay=0
 
-  # browse is useful only to an agent that can call it, and this repository
-  # configures it for OpenCode only. Browsers on other computers reach the
-  # relay when there is no local browser to pair (a headless machine with no
-  # local VNC desktop or explicit loopback browse config), and are paired once
-  # by hand with `browse pair`.
+  # Configuration only: 'agent install browse' installs it. browse is useful
+  # only to an agent that can call it, and this repository configures it for
+  # OpenCode only. Browsers on other computers reach the relay when there is no
+  # local browser to pair (a headless machine with no local VNC desktop or
+  # explicit loopback browse config), and are paired once by hand with
+  # `browse pair`.
   is_opencode_agent || return 0
+  [ -x "$browse_bin" ] || return 0
   heading "browse"
 
   if [ "$PLATFORM" = linux ] && [ -z "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] &&
@@ -2515,23 +2584,13 @@ function feature_browse {
     args=(--remote "${args[@]}")
   fi
 
-  if [ ! -x "$browse_bin" ]; then
-    if is_offline; then
-      skip_offline "browse"
-      return 0
-    fi
-    # -a opencode keeps browse's installer from adding the MCP server to every
-    # agent it detects (Claude Code, Codex, Gemini CLI, Antigravity). --no-open
-    # and --no-wait keep an unattended install from opening a browser or
-    # waiting for the extension; --no-modify-path leaves PATH to the dotfiles.
-    run_installer https://opencode.ai/browse/install "${args[@]}" || return 1
-  fi
-
+  # -a opencode keeps browse from adding its MCP server to every agent it
+  # detects; --no-open and --no-wait keep it from opening a browser or waiting
+  # for the extension; --no-modify-path leaves PATH to the dotfiles.
   # OpenCode's entry carries OPENCODE_BROWSER_RUNTIME=auto-update, so browse
   # updates itself while OpenCode runs; do not run `browse update` here, which
   # reruns the full installer and may reconfigure agents. Add or refresh the
-  # entry when a separately installed browse is present, and open the relay on
-  # a headless machine that was set up before this feature existed.
+  # entry, and open the relay on a headless machine.
   if ! jq -e '.mcp.servers.browse.environment.OPENCODE_BROWSER_RUNTIME == "auto-update"' \
     "$XDG_CONFIG_HOME/opencode/opencode.json" >/dev/null 2>&1; then
     x "$browse_bin" install "${args[@]}" || return 1
@@ -2550,59 +2609,6 @@ function feature_overlay_hooks {
   if [ -x "$DSTDIR/.corp/update" ]; then
     heading "corp update"
     "$DSTDIR/.corp/update"
-  fi
-}
-
-# Recognize only the binary's native service mode, not convenience wrappers.
-# Never replay a full command line: it may contain credentials or arguments
-# unsuitable to reuse.
-function agent_restart_hint {
-  local agent=$1 proc=$2 arg
-  if [ "$agent" = opencode ] && [ -r "$proc/cmdline" ]; then
-    while IFS= read -r -d '' arg; do
-      if [ "$arg" = --service ]; then
-        echo "hint: opencode service restart" >&2
-        return 0
-      fi
-    done <"$proc/cmdline"
-  fi
-  echo "hint: stop and relaunch $agent PID ${proc##*/} using its original launcher; reconnecting a client is not enough" >&2
-}
-
-# Linux retains the executable inode of a running process after replacement.
-# This catches both installer updates and independent auto-updates, without
-# starting an agent, calling its API, or tracking update history. Restrict the
-# comparison to the selected installation (plus native Claude's version files),
-# so a separate installation/channel is not treated as stale.
-function warn_agent_processes {
-  local agent=$1 installed=$2 proc_root=$3 current proc exe target
-  current=$(readlink -f "$installed" 2>/dev/null) || return 0
-  [ -x "$current" ] || return 0
-  for proc in "$proc_root"/[0-9]*; do
-    [ -O "$proc" ] && [ -r "$proc/exe" ] || continue
-    exe=$(readlink "$proc/exe" 2>/dev/null) || continue
-    target=${exe% (deleted)}
-    if [ "$target" != "$current" ]; then
-      # Native Claude moves its launcher symlink between sibling versions.
-      [ "$agent" = claude ] &&
-        [[ "$current" == "$HOME/.local/share/claude/versions/"* ]] &&
-        [[ "$target" == "$HOME/.local/share/claude/versions/"* ]] || continue
-    fi
-    [ "$proc/exe" -ef "$current" ] && continue
-    echo "warning: $agent PID ${proc##*/} is using an outdated executable; restart required to use the installed version" >&2
-    agent_restart_hint "$agent" "$proc"
-  done
-  return 0
-}
-
-function feature_restart_warnings {
-  local installed
-  [ "$PLATFORM" = linux ] && [ -d /proc/self ] || return 0
-  if installed=$(type -P claude); then
-    warn_agent_processes claude "$installed" /proc
-  fi
-  if is_opencode_agent; then
-    warn_agent_processes opencode "$(opencode_bin)" /proc
   fi
 }
 
