@@ -1,0 +1,532 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
+"""TAP tests for skills/agent-tools/scripts/scout."""
+
+import contextlib
+import http.server
+import importlib.machinery
+import importlib.util
+import io
+import json
+import os
+import signal
+import subprocess
+import sys
+import tempfile
+import threading
+from pathlib import Path
+
+BIN = Path(__file__).resolve().parent.parent / "scripts" / "scout"
+
+
+def load_scout():
+    loader = importlib.machinery.SourceFileLoader("scout_under_test", str(BIN))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    assert spec is not None
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[loader.name] = mod
+    loader.exec_module(mod)
+    return mod
+
+
+class Tap:
+    def __init__(self, total: int):
+        print(f"1..{total}", flush=True)
+        self.n = 0
+        self.failed = 0
+
+    def check(self, desc: str, ok: bool, detail: object = "") -> None:
+        self.n += 1
+        if not ok:
+            self.failed += 1
+        print(f"{'ok' if ok else 'not ok'} {self.n} - {desc}", flush=True)
+        if not ok and detail:
+            for line in str(detail).splitlines()[:25]:
+                print(f"# {line}", flush=True)
+
+    def skip(self, reason: str) -> None:
+        self.n += 1
+        print(f"ok {self.n} # SKIP {reason}", flush=True)
+
+
+def run_cli(
+    args: list[str],
+    *,
+    env: dict[str, str | None] | None = None,
+    stdin_text: str = "",
+) -> subprocess.CompletedProcess[str]:
+    run_env = os.environ.copy()
+    if env:
+        for k, v in env.items():
+            if v is None:
+                run_env.pop(k, None)
+            else:
+                run_env[k] = v
+    return subprocess.run(
+        [str(BIN), *args],
+        env=run_env,
+        input=stdin_text,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def run_inproc(
+    scout_mod,
+    argv: list[str],
+    *,
+    env: dict[str, str | None] | None = None,
+    stdin_text: str = "",
+) -> tuple[int, str, str]:
+    stdout_buf = io.StringIO()
+    stderr_buf = io.StringIO()
+    old_argv = sys.argv
+    old_stdin = sys.stdin
+    old_sigint = signal.getsignal(signal.SIGINT)
+    old_sigterm = signal.getsignal(signal.SIGTERM)
+    saved_env: dict[str, str | None] = {}
+    if env:
+        for k, v in env.items():
+            saved_env[k] = os.environ.get(k)
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    try:
+        sys.argv = ["scout", *argv]
+        sys.stdin = io.StringIO(stdin_text)
+        with (
+            contextlib.redirect_stdout(stdout_buf),
+            contextlib.redirect_stderr(stderr_buf),
+        ):
+            rc = int(scout_mod.main())
+    except SystemExit as exc:
+        rc = int(exc.code) if exc.code is not None else 0
+    finally:
+        sys.argv = old_argv
+        sys.stdin = old_stdin
+        signal.signal(signal.SIGINT, old_sigint)
+        signal.signal(signal.SIGTERM, old_sigterm)
+        for k, orig in saved_env.items():
+            if orig is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = orig
+    return rc, stdout_buf.getvalue(), stderr_buf.getvalue()
+
+
+class _StoppableHTTPServer(http.server.ThreadingHTTPServer):
+    daemon_threads = False
+
+
+@contextlib.contextmanager
+def serve_http(handler_cls):
+    server = _StoppableHTTPServer(("127.0.0.1", 0), handler_cls)
+    thread = threading.Thread(target=server.serve_forever)
+    thread.start()
+    try:
+        yield server, f"http://127.0.0.1:{server.server_address[1]}"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)
+
+
+def main() -> int:
+    scout_mod = load_scout()
+    tap = Tap(17)
+
+    # 1 & 2: --help and -h
+    res_help = run_cli(["--help"])
+    tap.check(
+        "--help exits 0 and prints usage, options, Examples",
+        res_help.returncode == 0
+        and "usage: scout" in res_help.stdout.lower()
+        and "--deep" in res_help.stdout
+        and "Examples:" in res_help.stdout,
+        res_help.stdout + res_help.stderr,
+    )
+    res_h = run_cli(["-h"])
+    tap.check(
+        "-h exits 0 with identical help output",
+        res_h.returncode == 0 and res_h.stdout == res_help.stdout,
+        res_h.stderr,
+    )
+
+    # 3: missing prompt
+    res_missing = run_cli([])
+    tap.check(
+        "missing PROMPT exits 1 with concise usage, examples, and --help hint",
+        res_missing.returncode == 1
+        and "missing PROMPT" in res_missing.stderr
+        and "Examples:" in res_missing.stderr
+        and "--help" in res_missing.stderr,
+        res_missing.stderr,
+    )
+
+    # 4: AGENT_OFFLINE=1 fails immediately
+    res_offline = run_cli(
+        ["test query"],
+        env={"AGENT_OFFLINE": "1", "GEMINI_API_KEY": "unused"},
+    )
+    tap.check(
+        "AGENT_OFFLINE=1 fails immediately before calling API",
+        res_offline.returncode == 1 and "offline mode" in res_offline.stderr.lower(),
+        res_offline.stderr,
+    )
+
+    # 5: missing GEMINI_API_KEY fails clearly
+    res_nokey = run_cli(
+        ["test query"],
+        env={"AGENT_OFFLINE": "0", "GEMINI_API_KEY": None},
+    )
+    tap.check(
+        "missing GEMINI_API_KEY exits 1 with clear error",
+        res_nokey.returncode == 1 and "GEMINI_API_KEY" in res_nokey.stderr,
+        res_nokey.stderr,
+    )
+
+    # Shared mock Interactions + Redirect server
+    recorded_requests: list[dict] = []
+    redirect_hits: list[str] = []
+    target_hits: list[str] = []
+    server_mode = {"kind": "ok"}
+
+    class MockHandler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+        def do_POST(self) -> None:
+            length = int(self.headers.get("Content-Length") or "0")
+            body = json.loads(self.rfile.read(length).decode("utf-8"))
+            recorded_requests.append(body)
+            mode = server_mode["kind"]
+            base = f"http://127.0.0.1:{self.server.server_address[1]}"
+
+            if mode == "http_429":
+                err = json.dumps({"error": {"message": "quota exceeded"}}).encode(
+                    "utf-8"
+                )
+                self.send_response(429)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(err)))
+                self.end_headers()
+                self.wfile.write(err)
+                return
+
+            if mode == "truncated":
+                part = b'{"steps":[{"type":"model_output"'
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(part) + 200))
+                self.end_headers()
+                self.wfile.write(part)
+                return
+
+            if mode == "ungrounded":
+                resp_obj = {
+                    "status": "completed",
+                    "usage": {
+                        "total_input_tokens": 50,
+                        "total_output_tokens": 20,
+                        "total_thought_tokens": 0,
+                        "grounding_tool_count": [],
+                    },
+                    "steps": [
+                        {
+                            "type": "model_output",
+                            "content": [
+                                {"type": "text", "text": "Plain answer without search."}
+                            ],
+                        }
+                    ],
+                }
+            else:
+                resp_obj = {
+                    "status": "completed",
+                    "usage": {
+                        "total_input_tokens": 120,
+                        "total_output_tokens": 310,
+                        "total_thought_tokens": 40,
+                        "grounding_tool_count": [{"type": "google_search", "count": 2}],
+                    },
+                    "steps": [
+                        {
+                            "type": "google_search_call",
+                            "arguments": {"queries": ["query one", "query two"]},
+                        },
+                        {
+                            "type": "model_output",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": "Concise verified brief.",
+                                    "annotations": [
+                                        {
+                                            "type": "url_citation",
+                                            "url": f"{base}/redirect/1",
+                                            "title": "example.org",
+                                        },
+                                        {
+                                            "type": "url_citation",
+                                            "url": f"{base}/redirect/1-dup",
+                                            "title": "example.org",
+                                        },
+                                        {
+                                            "type": "url_citation",
+                                            "url": f"{base}/redirect/2",
+                                            "title": "docs.python.org",
+                                        },
+                                    ],
+                                }
+                            ],
+                        },
+                    ],
+                }
+
+            raw = json.dumps(resp_obj).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def do_GET(self) -> None:
+            base = f"http://127.0.0.1:{self.server.server_address[1]}"
+            if self.path.startswith("/redirect/"):
+                redirect_hits.append(self.path)
+                if self.path in ("/redirect/1", "/redirect/1-dup"):
+                    target = f"{base}/target/guide"
+                else:
+                    target = "https://docs.python.org/3/library/argparse.html"
+                self.send_response(302)
+                self.send_header("Location", target)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            if self.path.startswith("/target/"):
+                target_hits.append(self.path)
+                self.send_response(200)
+                self.end_headers()
+                return
+            self.send_response(404)
+            self.end_headers()
+
+    with serve_http(MockHandler) as (_srv, base_url):
+        old_url = scout_mod.INTERACTIONS_URL
+        old_prefix = scout_mod.REDIRECT_PREFIX
+        scout_mod.INTERACTIONS_URL = f"{base_url}/interactions"
+        scout_mod.REDIRECT_PREFIX = f"{base_url}/redirect/"
+        try:
+            mock_env = {"AGENT_OFFLINE": "0", "GEMINI_API_KEY": "fake-key"}
+
+            # 6: Happy path + redirect unwrap + deduplication + never hitting /target/
+            recorded_requests.clear()
+            redirect_hits.clear()
+            target_hits.clear()
+            rc, out, err = run_inproc(scout_mod, ["how to unblock"], env=mock_env)
+            tap.check(
+                "default mode unwraps 302s, deduplicates, avoids destination fetch, prints footer",
+                rc == 0
+                and "Concise verified brief." in out
+                and "## Sources" in out
+                and f"1. [127.0.0.1] {base_url}/target/guide" in out
+                and "2. [docs.python.org] https://docs.python.org/3/library/argparse.html"
+                in out
+                and "scout: gemini-3.5-flash-lite, 2 queries, 2 sources," in err
+                and len(target_hits) == 0,
+                f"rc={rc}\nout={out}\nerr={err}\ntarget_hits={target_hits}",
+            )
+
+            # 7: --deep sends gemini-4-hydrogen + thinking_level low
+            recorded_requests.clear()
+            rc, _out, _err = run_inproc(
+                scout_mod, ["--deep", "hard query"], env=mock_env
+            )
+            req = recorded_requests[-1]
+            tap.check(
+                "--deep uses gemini-4-hydrogen and thinking_level=low",
+                rc == 0
+                and req.get("model") == "gemini-4-hydrogen"
+                and (req.get("generation_config") or {}).get("thinking_level") == "low",
+                req,
+            )
+
+            # 8: --urls-only sends semantic prompt and prints only canonical URLs
+            rc, out, _err = run_inproc(
+                scout_mod, ["--urls-only", "links only"], env=mock_env
+            )
+            lines = [ln for ln in out.splitlines() if ln.strip()]
+            tap.check(
+                "--urls-only prints only unwrapped URLs (one per line)",
+                rc == 0
+                and lines
+                == [
+                    f"{base_url}/target/guide",
+                    "https://docs.python.org/3/library/argparse.html",
+                ],
+                out,
+            )
+
+            # 9: --json builds client-side JSON without response_format in API request
+            recorded_requests.clear()
+            rc, out, _err = run_inproc(
+                scout_mod, ["--json", "json query"], env=mock_env
+            )
+            parsed = json.loads(out) if out.strip() else {}
+            tap.check(
+                "--json emits client-side JSON without response_format in API payload",
+                rc == 0
+                and "response_format" not in recorded_requests[-1]
+                and parsed.get("grounded") is True
+                and parsed.get("answer") == "Concise verified brief."
+                and len(parsed.get("sources") or []) == 2
+                and parsed.get("queries") == ["query one", "query two"]
+                and (parsed.get("usage") or {}).get("search_queries") == 2,
+                out,
+            )
+
+            # 10: --no-resolve keeps raw redirect URIs without calling GET /redirect/*
+            redirect_hits.clear()
+            rc, out, _err = run_inproc(
+                scout_mod, ["--no-resolve", "--urls-only", "raw urls"], env=mock_env
+            )
+            tap.check(
+                "--no-resolve keeps redirect URIs without sending GET requests",
+                rc == 0
+                and len(redirect_hits) == 0
+                and f"{base_url}/redirect/1" in out
+                and f"{base_url}/redirect/2" in out,
+                f"hits={redirect_hits}\nout={out}",
+            )
+
+            # 11: -q / --quiet suppresses stderr footer
+            rc, _out, err = run_inproc(scout_mod, ["-q", "quiet query"], env=mock_env)
+            tap.check(
+                "-q suppresses stderr footer",
+                rc == 0 and err.strip() == "",
+                err,
+            )
+
+            # 12: stdin '-' reads prompt
+            recorded_requests.clear()
+            rc, _out, _err = run_inproc(
+                scout_mod, ["-q", "-"], env=mock_env, stdin_text="prompt via stdin\n"
+            )
+            tap.check(
+                "'-' reads prompt from stdin",
+                rc == 0 and recorded_requests[-1].get("input") == "prompt via stdin",
+                recorded_requests[-1],
+            )
+
+            # 13: AGENT_TELEMETRY_JSON written on success and failure
+            with tempfile.TemporaryDirectory() as tmp:
+                telem_ok = Path(tmp) / "sub" / "ok.json"
+                rc, _out, _err = run_inproc(
+                    scout_mod,
+                    ["-q", "telem ok"],
+                    env={**mock_env, "AGENT_TELEMETRY_JSON": str(telem_ok)},
+                )
+                t_ok = json.loads(telem_ok.read_text(encoding="utf-8"))
+                tap.check(
+                    "AGENT_TELEMETRY_JSON writes expected schema on success",
+                    rc == 0
+                    and t_ok.get("status") == "Succeeded"
+                    and t_ok.get("success") is True
+                    and t_ok.get("prompt_tokens") == 120
+                    and t_ok.get("candidate_tokens") == 310
+                    and t_ok.get("thinking_tokens") == 40
+                    and t_ok.get("search_queries") == 2
+                    and t_ok.get("sources_count") == 2
+                    and (t_ok.get("tools") or {})
+                    .get("google_search", {})
+                    .get("attempts")
+                    == 2,
+                    t_ok,
+                )
+
+                # 14: ungrounded response warns on stderr and sets grounded=False
+                server_mode["kind"] = "ungrounded"
+                rc, out, err = run_inproc(
+                    scout_mod, ["--json", "no search"], env=mock_env
+                )
+                parsed_ug = json.loads(out) if out.strip() else {}
+                tap.check(
+                    "ungrounded response warns on stderr and sets grounded=false",
+                    rc == 0
+                    and parsed_ug.get("grounded") is False
+                    and "no Google Search citations" in err,
+                    f"out={out}\nerr={err}",
+                )
+
+                # 15: HTTP 429 API error + failure telemetry
+                server_mode["kind"] = "http_429"
+                telem_err = Path(tmp) / "err.json"
+                rc, _out, err = run_inproc(
+                    scout_mod,
+                    ["err query"],
+                    env={**mock_env, "AGENT_TELEMETRY_JSON": str(telem_err)},
+                )
+                t_err = json.loads(telem_err.read_text(encoding="utf-8"))
+                tap.check(
+                    "HTTP 429 reports API status/message and writes Error telemetry",
+                    rc == 1
+                    and "HTTP 429" in err
+                    and "quota exceeded" in err
+                    and t_err.get("status") == "Error"
+                    and t_err.get("success") is False,
+                    f"err={err}\nt_err={t_err}",
+                )
+
+                # 16: truncated HTTP 200 JSON body reports transport failure
+                server_mode["kind"] = "truncated"
+                rc, _out, err = run_inproc(scout_mod, ["trunc query"], env=mock_env)
+                tap.check(
+                    "truncated HTTP 200 body reports incomplete transfer",
+                    rc == 1 and "did not finish transferring" in err,
+                    err,
+                )
+        finally:
+            scout_mod.INTERACTIONS_URL = old_url
+            scout_mod.REDIRECT_PREFIX = old_prefix
+
+    # 17: Optional live Gemini API smoke test
+    if not os.environ.get("GEMINI_API_KEY") or scout_mod.is_offline_enabled():
+        tap.skip("GEMINI_API_KEY not set or AGENT_OFFLINE=1")
+    else:
+        res_live = run_cli(
+            [
+                "--json",
+                "-q",
+                "What is the official Python documentation URL for argparse?",
+            ]
+        )
+        ok_live = False
+        if res_live.returncode == 0:
+            try:
+                live_data = json.loads(res_live.stdout)
+                ok_live = (
+                    live_data.get("grounded") is True
+                    and bool(live_data.get("answer"))
+                    and any(
+                        str(s.get("url", "")).startswith("https://")
+                        for s in live_data.get("sources") or []
+                    )
+                )
+            except json.JSONDecodeError:
+                ok_live = False
+        tap.check(
+            "live Gemini API smoke test returns grounded answer and unwrapped https URL",
+            ok_live,
+            res_live.stdout + res_live.stderr,
+        )
+
+    return 0 if tap.failed == 0 else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

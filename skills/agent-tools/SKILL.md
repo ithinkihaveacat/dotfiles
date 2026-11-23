@@ -4,12 +4,15 @@ description: >-
   Command-line AI tools and context gatherers for image analysis, screenshot diffing,
   smart cropping, token counting, technical essays (emerson), boolean condition evaluation,
   Android UI automation (popper), receipt extraction (pacioli), GitHub data formatting
-  (gh-markdown), deep reasoning research (Oracle), whole-tree text refactoring
-  (Caxton), question-set evaluation (socrates), and parallel CLI benchmarking
-  (benchmarker). Use when analyzing images, comparing screenshots, evaluating conditions,
-  extracting receipts, gathering domain context, automating Android apps, refactoring
-  multi-file repositories with Caxton, benchmarking AI CLIs, or performing deep research
-  with Oracle.
+  (gh-markdown), lightweight Google-grounded web reconnaissance (scout), deep reasoning
+  research (Oracle), whole-tree text refactoring (Caxton), question-set evaluation
+  (socrates), and parallel CLI benchmarking (benchmarker). Use when analyzing images,
+  comparing screenshots, evaluating conditions, extracting receipts, gathering domain
+  context, automating Android apps, needing a fast low-risk web check or candidate
+  URLs
+  before escalating to browser automation or scraping (especially without built-in
+  search or when direct fetches hit bot protection), refactoring multi-file repositories
+  with Caxton, benchmarking AI CLIs, or performing deep research with Oracle.
 compatibility: >-
   Requires curl, jq, and uv. Image tools also need base64 and magick (ImageMagick).
   Needs a Gemini API key (GEMINI_API_KEY) and network access to generativelanguage.googleapis.com.
@@ -77,6 +80,9 @@ scripts/photo-query "Is there a fireplace?" \
 # Generate essay-length analysis from text
 scripts/emerson "Summarize the key changes" < documentation.md
 
+# Fast, low-risk Google-grounded web reconnaissance
+scripts/scout "What is the official Python documentation URL for argparse?"
+
 # Evaluate a boolean condition against text
 echo "Hello world" | scripts/satisfies "is a greeting"
 
@@ -90,15 +96,17 @@ cat document.md | scripts/token-count
 scripts/popper "start an exercise"
 ```
 
-## Deep Reasoning Tools: Choosing Between Emerson, Oracle, and Caxton
+## Deep Reasoning Tools: Choosing Between Emerson, Scout, Oracle, and Caxton
 
-The `agent-tools` skill provides three distinct deep reasoning engines,
+The `agent-tools` skill provides four complementary text/research engines,
 separated by their epistemology (closed-world vs. grounded open-world), agency
-(consultation vs. disk mutation), and execution topology:
+(reconnaissance vs. strategic consultation vs. disk mutation), and execution
+topology:
 
 | Engine        | Epistemic Model                                                     | Execution Paradigm                           | Mutation Surface              | Primary Role                                                                                       |
 | :------------ | :------------------------------------------------------------------ | :------------------------------------------- | :---------------------------- | :------------------------------------------------------------------------------------------------- |
 | **`emerson`** | **Strict Closed-World** (zero search, trusts `stdin` as sole truth) | Single-turn Unix filter (`stdin` → `stdout`) | None                          | Distilling pre-gathered text into authoritative, footnoted ~3000-word essays without hallucination |
+| **`scout`**   | **Light Grounded Open-World** (Google Search + unwrapped URLs)      | Fast single-turn lookup (~3–5 s)             | None (read-only recon)        | Low-friction web triage and candidate URL discovery before scraping or browser automation          |
 | **`oracle`**  | **Grounded Open-World** (Google Search/Maps + Python execution)     | Single-turn streaming consultation           | None (read-only advice)       | Strategic research, architectural tradeoffs, and multimodal context synthesis (\<1 MB)             |
 | **`caxton`**  | **Hybrid Grounded Action** (Search/Code + Repository tools)         | Multi-turn autonomous agent loop             | Full disk mutation (`--edit`) | Multi-file text transformation, doc-code synchronization, and whole-tree harmonization             |
 
@@ -110,6 +118,14 @@ separated by their epistemology (closed-world vs. grounded open-world), agency
    absolute source of truth. Use it when you have already gathered raw context
    (e.g., via `context show gemini-api | emerson ...`) and need an authoritative
    summary or spec without any risk of external hallucination.
+
+1. **Needing a quick, low-risk web check or candidate URLs before scraping or
+   opening a browser? Use `scout`.** `scout` sends a focused question to Gemini
+   (`gemini-3.5-flash-lite` by default) with Google Search grounding and unwraps
+   the grounding citations to canonical URLs. Try it before scraping a search
+   engine, probing `403`/`429` sites with `curl`, or launching browser
+   automation just to find pages. Use `oracle` instead when local files or deep
+   synthesis are needed.
 
 1. **Asking complex, strategic, or internet-grounded questions? Use `oracle`.**
    `oracle` is a grounded, open-world synthesizer by default (pass `--no-search`
@@ -286,6 +302,86 @@ scripts/oracle "Evaluate this implementation against solid principles and propos
 # Time-sensitive research based on context
 scripts/oracle "What are the latest developments in this framework as of May 2026?" framework-docs.md
 ```
+
+### scout
+
+Fast, lightweight, Google-grounded web reconnaissance via the Gemini API
+(`gemini-3.5-flash-lite` by default). Sends a concise natural-language question,
+lets Gemini run sanctioned Google Search grounding, and returns a short summary
+alongside deduplicated, unwrapped canonical source URLs.
+
+**Why this exists:** `scout` is rarely the *ideal* tool—a working native search
+tool, a dedicated SERP API, or an official API/doc endpoint is usually better
+when available. It exists as a **safe, low-friction first step** when those are
+unavailable, rate-limited, or blocked: it uses Google Search grounding exactly
+as intended (no scraping, no CAPTCHA risk, no bot-detection footprint) and often
+surfaces deep URLs and facts from indexed sites that return `403` or WAF
+challenges to `curl` and headless browsers.
+
+**Try `scout` before escalating** whenever you are considering scraping a search
+engine, probing multiple retailer/municipal sites with `curl`, or launching a
+real browser solely to discover pages or triage a question.
+
+**When to use:**
+
+- Your agent harness has no built-in web search, or built-in search is
+  rate-limited or failing.
+- Direct HTTP fetches hit `403`, `429`, or Cloudflare/WAF challenges on pages
+  that are likely in Google's index (docs, product specs, local events, public
+  registries).
+- You want a quick (~3–5 s) semantic triage plus verified candidate URLs before
+  deciding which specific page(s) actually need a browser.
+- You need a quick web check that is far too small for `oracle`.
+
+**When NOT to use:**
+
+- Your harness already has a working native web search tool or a dedicated
+  search API (prefer that first unless you specifically want unwrapped direct
+  URLs or `--deep` multi-query synthesis).
+- You need **live, authoritative page state** that cannot rely on search
+  snippets: exact checkout/shipping rules, current stock, secondhand/sold
+  valuations, interactive forms/portals, login-gated pages, or exact high-stakes
+  technical specs (treat `scout` as triage and verify key claims on the primary
+  source).
+- You need deterministic SERP features (exact top-10 ranking, pagination, strict
+  date/locale filters).
+- You need deep, context-heavy reasoning over local files (use `oracle`) or
+  strict closed-world distillation without external lookup (use `emerson`).
+
+**Prompting guidelines:**
+
+- **Ask a focused semantic question, not keyword soup.** State every constraint
+  (for example, currency/region, model/year, what to distinguish as unconfirmed)
+  rather than asking for "10 blue links"—keyword-style prompts and "return a
+  list of links" instructions degrade multi-part queries without producing more
+  URLs.
+- **Trust the returned `Sources` block, not URLs mentioned in prose.** `scout`
+  instructs the model not to write raw URLs in prose and programmatically
+  unwraps `url_citation` redirects to canonical URLs via `HTTP 302 Location`
+  without touching destination hosts.
+- **Avoid tight fan-out loops.** Each invocation typically executes 2–5 Google
+  Search queries (more with `--deep`) against the project's shared monthly
+  grounding allowance.
+
+```bash
+scripts/scout "PROMPT"
+scripts/scout --deep "PROMPT"        # gemini-4-hydrogen (low): slower, higher recall
+scripts/scout --urls-only "PROMPT"   # semantic search internally, print unwrapped URLs only
+scripts/scout --json "PROMPT"        # client-side JSON wrapper (preserves all citations)
+```
+
+**Options:** `--deep` (use `gemini-4-hydrogen` with `low` thinking),
+`--model MODEL` (override model), `--urls-only` (print only unwrapped URLs),
+`--json` (emit JSON with `answer`, `sources`, `queries`, `grounded`, and
+`usage`), `--no-resolve` (keep raw redirect URIs), `--timeout SECONDS` (default
+60), `-q, --quiet` (suppress the `stderr` summary line). Pass `-` as `PROMPT` to
+read the prompt from `stdin`.
+
+**Environment:** `GEMINI_API_KEY` (required), `GEMINI_MODEL` (optional),
+`AGENT_OFFLINE` (optional), `AGENT_TELEMETRY_JSON` (optional).
+
+**Exit codes:** 0 success, 1 error (including usage or offline mode), 130
+interrupted, 141 stdout closed early.
 
 ### caxton
 
