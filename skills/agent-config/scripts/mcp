@@ -737,9 +737,9 @@ class OpenCodeBackend(Backend):
 
 class AgyBackend(Backend):
     """Antigravity (agy). user: mcpServers in ~/.gemini/config/mcp_config.json
-    (via 'agy mcp'). workspace: mcpServers in <workspace>/.agents/mcp_config.json
-    (edited directly and excluded via .git/info/exclude, as 'agy mcp' has no
-    workspace scope)."""
+    (via 'agy mcp' when on PATH, or edited directly when absent). workspace:
+    mcpServers in <workspace>/.agents/mcp_config.json (edited directly and
+    excluded via .git/info/exclude, as 'agy mcp' has no workspace scope)."""
 
     name = "agy"
     cli = "agy"
@@ -758,7 +758,7 @@ class AgyBackend(Backend):
         return super().detected() or self.user_config_path().exists()
 
     def uses_cli(self, scope: str, cmd: str) -> bool:
-        return scope == "user"
+        return scope == "user" and shutil.which(self.cli) is not None
 
     def sources(self, scope, ws):
         path = (
@@ -800,7 +800,7 @@ class AgyBackend(Backend):
         return [src]
 
     def add(self, scope, ws, spec):
-        if scope == "user":
+        if scope == "user" and shutil.which(self.cli) is not None:
             argv = ["agy", "mcp", "add"]
             if spec.url:
                 argv += ["--type", "http"]
@@ -814,7 +814,11 @@ class AgyBackend(Backend):
             run_cli(self.name, argv, ws)
             return
 
-        path = self.workspace_config_path(ws)
+        path = (
+            self.user_config_path()
+            if scope == "user"
+            else self.workspace_config_path(ws)
+        )
         if path.exists():
             try:
                 data = json.loads(path.read_text())
@@ -840,10 +844,11 @@ class AgyBackend(Backend):
         servers[spec.name] = entry
         path.parent.mkdir(parents=True, exist_ok=True)
         write_atomic(path, json.dumps(data, indent=2) + "\n")
-        sync_git_exclude(ws, ["/.agents/mcp_config.json"])
+        if scope == "workspace":
+            sync_git_exclude(ws, ["/.agents/mcp_config.json"])
 
     def remove(self, source, ws, name):
-        if source.kind == "user":
+        if source.kind == "user" and shutil.which(self.cli) is not None:
             run_cli(self.name, ["agy", "mcp", "remove", name], ws)
             return
         try:
@@ -855,7 +860,8 @@ class AgyBackend(Backend):
             raise RuntimeError(f"failed to remove '{name}' from {source.label}")
         del servers[name]
         write_atomic(source.path, json.dumps(data, indent=2) + "\n")
-        sync_git_exclude(ws, ["/.agents/mcp_config.json"])
+        if source.kind == "workspace":
+            sync_git_exclude(ws, ["/.agents/mcp_config.json"])
 
 
 BACKENDS = [ClaudeBackend(), CodexBackend(), OpenCodeBackend(), AgyBackend()]
@@ -1109,11 +1115,17 @@ def cmd_doctor(agent, scope, stream=sys.stdout):
 
     for b in detected:
         if shutil.which(b.cli) is None:
-            report(
-                "WARN",
-                f"{b.name}: {b.cli} not on PATH",
-                ["mcp add and remove run it; install it or put it on PATH"],
-            )
+            if any(b.uses_cli(sc, c) for sc in b.scopes for c in ("add", "remove")):
+                report(
+                    "WARN",
+                    f"{b.name}: {b.cli} not on PATH",
+                    ["mcp add and remove run it; install it or put it on PATH"],
+                )
+            else:
+                report(
+                    "INFO",
+                    f"{b.name}: {b.cli} not on PATH (editing config directly)",
+                )
         found = False
         for sc in scopes_for(scope):
             if sc not in b.scopes:
