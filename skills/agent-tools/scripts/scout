@@ -1,0 +1,647 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
+# Tests: skills/agent-tools/tests/test-scout
+"""Fast, lightweight, Google-grounded web reconnaissance via the Gemini API."""
+
+import argparse
+import concurrent.futures
+import datetime
+import http.client
+import json
+import os
+import signal
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+INTERACTIONS_URL = "https://generativelanguage.googleapis.com/v1beta/interactions"
+API_REVISION = "2026-05-20"
+DEFAULT_MODEL = "gemini-3.5-flash-lite"
+DEFAULT_TIMEOUT = 60.0
+REDIRECT_TIMEOUT = 10.0
+REDIRECT_PREFIX = "https://vertexaisearch.cloud.google.com/grounding-api-redirect/"
+
+
+@dataclass(slots=True, frozen=True)
+class Source:
+    """One deduplicated grounded citation source."""
+
+    url: str
+    domain: str
+    title: str
+    redirect_url: str
+    resolved: bool
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Return 3xx redirect responses directly without touching target servers."""
+
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> None:
+        return None
+
+    def http_error_301(
+        self, req: Any, fp: Any, code: int, msg: str, headers: Any
+    ) -> Any:
+        return fp
+
+    def http_error_302(
+        self, req: Any, fp: Any, code: int, msg: str, headers: Any
+    ) -> Any:
+        return fp
+
+    def http_error_303(
+        self, req: Any, fp: Any, code: int, msg: str, headers: Any
+    ) -> Any:
+        return fp
+
+    def http_error_307(
+        self, req: Any, fp: Any, code: int, msg: str, headers: Any
+    ) -> Any:
+        return fp
+
+    def http_error_308(
+        self, req: Any, fp: Any, code: int, msg: str, headers: Any
+    ) -> Any:
+        return fp
+
+
+_NO_REDIRECT_OPENER = urllib.request.build_opener(_NoRedirectHandler())
+
+
+def is_offline_enabled() -> bool:
+    """Return True when AGENT_OFFLINE is set to a truthy value."""
+    val = os.environ.get("AGENT_OFFLINE", "").strip().lower()
+    return val in {"1", "true", "yes", "on"}
+
+
+def extract_domain(url: str) -> str:
+    """Return normalized lowercase hostname without www. prefix."""
+    try:
+        host = (urllib.parse.urlsplit(url).hostname or "").lower()
+    except ValueError:
+        return ""
+    return host.removeprefix("www.")
+
+
+def build_system_instruction(today_str: str) -> str:
+    """Build the system instruction for Google-grounded web reconnaissance."""
+    return (
+        f"Today is {today_str}.\n"
+        "You are a fast, factual web reconnaissance assistant. Use Google Search "
+        "to answer the user's question with concrete, verified facts, specs, "
+        "prices, dates, and caveats.\n"
+        "- Run targeted searches covering every part of the question.\n"
+        "- Keep the answer concise (<=350 words) and easy to scan.\n"
+        "- Explicitly state when something cannot be verified rather than guessing.\n"
+        "- Never write raw URLs in your prose; ground every named product, page, "
+        "or claim via Google Search so source citations attach cleanly."
+    )
+
+
+def resolve_thinking_level(model: str) -> str:
+    """Choose the lightest reliable thinking level for the selected model."""
+    if model.startswith("gemini-4") or "-pro" in model:
+        return "low"
+    return "minimal"
+
+
+def call_interactions_api(
+    api_key: str,
+    model: str,
+    prompt: str,
+    thinking_level: str,
+    timeout: float,
+) -> dict[str, Any]:
+    """Send a grounded Google Search request to the Gemini Interactions API."""
+    today_str = datetime.datetime.now(datetime.UTC).date().isoformat()
+    # Workaround: Request plain Markdown/text from the Interactions API and wrap
+    # --json client-side instead of passing response_format=application/json.
+    # In November 2026 testing with gemini-3.5-flash-lite, combining
+    # response_format JSON with the google_search tool caused url_citation
+    # annotations to drop silently on ~50% of runs even when searches executed.
+    # Re-test upstream periodically and switch to response_format only if
+    # citation attachment becomes reliable.
+    payload = {
+        "model": model,
+        "input": prompt,
+        "system_instruction": build_system_instruction(today_str),
+        "tools": [{"type": "google_search"}],
+        "generation_config": {"thinking_level": thinking_level},
+        "store": False,
+    }
+    req = urllib.request.Request(
+        INTERACTIONS_URL,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "x-goog-api-key": api_key,
+            "Api-Revision": API_REVISION,
+        },
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw_body = resp.read()
+    except urllib.error.HTTPError as exc:
+        err_body = exc.read().decode("utf-8", errors="replace")
+        msg = err_body.strip()
+        try:
+            parsed = json.loads(err_body)
+            if isinstance(parsed, dict) and isinstance(parsed.get("error"), dict):
+                msg = parsed["error"].get("message") or msg
+        except json.JSONDecodeError:
+            pass
+        raise RuntimeError(
+            f"API error (HTTP {exc.code}): {msg or exc.reason}"
+        ) from None
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        reason = getattr(exc, "reason", exc)
+        raise RuntimeError(
+            f"could not reach {INTERACTIONS_URL} ({reason}): "
+            "network unreachable, DNS failure, or blocked egress"
+        ) from None
+    except http.client.IncompleteRead as exc:
+        raise RuntimeError(
+            f"{INTERACTIONS_URL} returned HTTP 200 but the body did not finish "
+            f"transferring ({exc})"
+        ) from None
+
+    try:
+        data = json.loads(raw_body)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"{INTERACTIONS_URL} returned HTTP 200 but the body did not finish "
+            f"transferring or was invalid JSON ({exc})"
+        ) from None
+
+    if not isinstance(data, dict):
+        raise TypeError(f"unexpected API response shape: {type(data).__name__}")
+    if data.get("error"):
+        err_obj = data["error"]
+        err_msg = (
+            err_obj.get("message", str(err_obj))
+            if isinstance(err_obj, dict)
+            else str(err_obj)
+        )
+        raise RuntimeError(f"API error: {err_msg}")
+    return data
+
+
+def unwrap_redirect(raw_url: str, title: str, resolve: bool) -> Source:
+    """Resolve one grounding redirect URL via HTTP Location without following it."""
+    if not resolve or not raw_url.startswith(REDIRECT_PREFIX):
+        domain = extract_domain(raw_url) or extract_domain(title) or title
+        return Source(
+            url=raw_url,
+            domain=domain,
+            title=title,
+            redirect_url=raw_url,
+            resolved=not raw_url.startswith(REDIRECT_PREFIX),
+        )
+
+    req = urllib.request.Request(
+        raw_url,
+        headers={"User-Agent": "Mozilla/5.0"},
+        method="GET",
+    )
+    try:
+        with _NO_REDIRECT_OPENER.open(req, timeout=REDIRECT_TIMEOUT) as resp:
+            loc = resp.headers.get("Location")
+            if loc:
+                resolved_url = urllib.parse.urljoin(raw_url, loc)
+                domain = extract_domain(resolved_url) or extract_domain(title) or title
+                return Source(
+                    url=resolved_url,
+                    domain=domain,
+                    title=title,
+                    redirect_url=raw_url,
+                    resolved=True,
+                )
+    except Exception:
+        pass
+
+    domain = extract_domain(title) or title
+    return Source(
+        url=raw_url,
+        domain=domain,
+        title=title,
+        redirect_url=raw_url,
+        resolved=False,
+    )
+
+
+def parse_interaction(
+    data: dict[str, Any], *, resolve_redirects: bool
+) -> tuple[str, list[str], list[Source], dict[str, int]]:
+    """Extract answer text, queries, unwrapped deduplicated sources, and usage."""
+    usage_raw = data.get("usage") or {}
+    input_tokens = int(usage_raw.get("total_input_tokens") or 0)
+    output_tokens = int(usage_raw.get("total_output_tokens") or 0)
+    thought_tokens = int(usage_raw.get("total_thought_tokens") or 0)
+
+    search_queries_billed = 0
+    for item in usage_raw.get("grounding_tool_count") or []:
+        if isinstance(item, dict) and item.get("type") == "google_search":
+            search_queries_billed += int(item.get("count") or 0)
+
+    text_parts: list[str] = []
+    queries: list[str] = []
+    raw_citations: list[tuple[str, str]] = []
+    seen_redirect_urls: set[str] = set()
+
+    for step in data.get("steps") or []:
+        if not isinstance(step, dict):
+            continue
+        stype = step.get("type")
+        if stype == "google_search_call":
+            qs = (step.get("arguments") or {}).get("queries") or []
+            queries.extend(str(q) for q in qs if str(q).strip())
+        elif stype == "model_output":
+            for block in step.get("content") or []:
+                if not isinstance(block, dict) or block.get("type") != "text":
+                    continue
+                text = block.get("text") or ""
+                if text:
+                    text_parts.append(text)
+                for ann in block.get("annotations") or []:
+                    if (
+                        isinstance(ann, dict)
+                        and ann.get("type") == "url_citation"
+                        and ann.get("url")
+                    ):
+                        rurl = str(ann["url"])
+                        if rurl not in seen_redirect_urls:
+                            seen_redirect_urls.add(rurl)
+                            raw_citations.append((rurl, str(ann.get("title") or "")))
+
+    if search_queries_billed == 0 and queries:
+        search_queries_billed = len(queries)
+
+    unwrapped: list[Source] = []
+    if raw_citations:
+        if resolve_redirects and len(raw_citations) > 1:
+            workers = min(10, len(raw_citations))
+            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+                unwrapped = list(
+                    pool.map(
+                        lambda item: unwrap_redirect(
+                            item[0], item[1], resolve_redirects
+                        ),
+                        raw_citations,
+                    )
+                )
+        else:
+            unwrapped = [
+                unwrap_redirect(rurl, title, resolve_redirects)
+                for rurl, title in raw_citations
+            ]
+
+    sources: list[Source] = []
+    seen_final: set[str] = set()
+    for src in unwrapped:
+        if src.url in seen_final:
+            continue
+        seen_final.add(src.url)
+        sources.append(src)
+
+    usage = {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "thought_tokens": thought_tokens,
+        "search_queries": search_queries_billed,
+    }
+    return "\n".join(text_parts).strip(), queries, sources, usage
+
+
+def write_telemetry(path_str: str | None, record: dict[str, Any]) -> None:
+    """Write AGENT_TELEMETRY_JSON output cleanly without failing the command."""
+    if not path_str:
+        return
+    try:
+        out_path = Path(path_str)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(
+            json.dumps(record, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+    except Exception as exc:
+        print(f"scout: warning: failed to write telemetry: {exc}", file=sys.stderr)
+
+
+def format_footer(
+    model: str, queries_count: int, sources_count: int, elapsed: float
+) -> str:
+    """Build the compact one-line stderr summary footer."""
+    q_word = "query" if queries_count == 1 else "queries"
+    s_word = "source" if sources_count == 1 else "sources"
+    return (
+        f"scout: {model}, {queries_count} {q_word}, {sources_count} {s_word}, "
+        f"{elapsed:.1f}s"
+    )
+
+
+def print_missing_prompt_error() -> None:
+    """Print concise usage and examples when PROMPT is omitted."""
+    print(
+        """scout: missing PROMPT argument
+Usage: scout [OPTIONS] [-] PROMPT
+
+Fast, lightweight, Google-grounded web reconnaissance via the Gemini API.
+
+Examples:
+  scout "What is the official Python documentation URL for argparse?"
+  scout --model gemini-4-hydrogen "Compare UK non-expiring PAYG eSIMs for web top-ups"
+
+Try 'scout --help' for more information.""",
+        file=sys.stderr,
+    )
+
+
+def make_parser() -> argparse.ArgumentParser:
+    """Construct the CLI argument parser."""
+    epilog = (
+        "Environment:\n"
+        "  GEMINI_API_KEY        Required. Your Gemini API key.\n"
+        "  GEMINI_MODEL          Optional. Default model when --model is unset.\n"
+        "  AGENT_OFFLINE         Set to 1/true to fail immediately without network calls.\n"
+        "  AGENT_TELEMETRY_JSON  Optional. Destination path for JSON execution telemetry.\n\n"
+        "Exit Codes:\n"
+        "  0    Success\n"
+        "  1    General error (usage, offline mode, API or transport error)\n"
+        "  130  Interrupted (SIGINT or SIGTERM)\n"
+        "  141  stdout closed early (SIGPIPE)\n\n"
+        "Examples:\n"
+        '  scout "What is the latest stable Python release and download URL?"\n'
+        '  scout --model gemini-4-hydrogen "Compare UK non-expiring PAYG eSIMs with web top-ups"\n'
+        '  scout --urls-only "Official Lenovo ThinkCentre M75q Gen 2 PSREF PDF"\n'
+        '  printf "Latest UK eBay private seller fee rules" | scout --json -'
+    )
+    parser = argparse.ArgumentParser(
+        prog="scout",
+        description=(
+            "Fast, lightweight, Google-grounded web reconnaissance via the Gemini API.\n"
+            "Returns a concise factual brief alongside deduplicated, unwrapped source URLs."
+        ),
+        epilog=epilog,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        add_help=False,
+    )
+    parser.add_argument(
+        "prompt",
+        nargs="*",
+        metavar="PROMPT",
+        help="Question or lookup prompt, or '-' to read the prompt from stdin.",
+    )
+    parser.add_argument(
+        "--model",
+        metavar="MODEL",
+        help=f"Gemini model to use (default: $GEMINI_MODEL, else {DEFAULT_MODEL}).",
+    )
+    parser.add_argument(
+        "--urls-only",
+        action="store_true",
+        help="Run a semantic search internally, then print only unwrapped URLs.",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output JSON with answer, sources, queries, grounded flag, and usage.",
+    )
+    parser.add_argument(
+        "--no-resolve",
+        action="store_true",
+        help="Keep raw grounding redirect URIs instead of unwrapping 302 Locations.",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=DEFAULT_TIMEOUT,
+        metavar="SECONDS",
+        help=f"API request timeout in seconds (default: {int(DEFAULT_TIMEOUT)}).",
+    )
+    parser.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        help="Suppress the compact stderr summary footer (warnings still print).",
+    )
+    parser.add_argument(
+        "-h",
+        "--help",
+        action="help",
+        help="Show this help message and exit.",
+    )
+    return parser
+
+
+def sigterm_handler(_signum: int, _frame: Any) -> None:
+    """Translate SIGTERM into KeyboardInterrupt for unified cleanup."""
+    raise KeyboardInterrupt
+
+
+def main() -> int:
+    signal.signal(signal.SIGTERM, sigterm_handler)
+    telemetry_path = os.environ.get("AGENT_TELEMETRY_JSON")
+    start = time.perf_counter()
+
+    parser = make_parser()
+    args = parser.parse_args()
+
+    if not args.prompt:
+        print_missing_prompt_error()
+        return 1
+
+    if args.prompt == ["-"]:
+        prompt = sys.stdin.read().strip()
+        if not prompt:
+            print("scout: no prompt on stdin", file=sys.stderr)
+            return 1
+    else:
+        prompt = " ".join(args.prompt).strip()
+        if not prompt:
+            print_missing_prompt_error()
+            return 1
+
+    if args.timeout <= 0:
+        print("scout: --timeout must be greater than 0", file=sys.stderr)
+        return 1
+
+    model = args.model or os.environ.get("GEMINI_MODEL") or DEFAULT_MODEL
+    thinking_level = resolve_thinking_level(model)
+
+    telemetry: dict[str, Any] = {
+        "status": "Error",
+        "success": False,
+        "model": model,
+        "thinking_level": thinking_level,
+        "elapsed_seconds": 0.0,
+        "prompt_tokens": 0,
+        "candidate_tokens": 0,
+        "thinking_tokens": 0,
+        "steps": 0,
+        "search_queries": 0,
+        "sources_count": 0,
+        "grounded": False,
+        "tools": {"google_search": {"attempts": 0, "successes": 0, "failures": 0}},
+        "modified_files": [],
+    }
+
+    try:
+        if is_offline_enabled():
+            msg = "offline mode enabled (AGENT_OFFLINE); cannot query Gemini API"
+            telemetry["error"] = msg
+            print(f"scout: {msg}", file=sys.stderr)
+            return 1
+
+        api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+        if not api_key:
+            msg = "GEMINI_API_KEY environment variable not set"
+            telemetry["error"] = msg
+            print(f"scout: {msg}", file=sys.stderr)
+            return 1
+
+        data = call_interactions_api(
+            api_key=api_key,
+            model=model,
+            prompt=prompt,
+            thinking_level=thinking_level,
+            timeout=args.timeout,
+        )
+        answer, queries, sources, usage = parse_interaction(
+            data, resolve_redirects=not args.no_resolve
+        )
+        elapsed = round(time.perf_counter() - start, 3)
+
+        search_count = usage["search_queries"]
+        grounded = search_count > 0 and len(sources) > 0
+
+        telemetry.update(
+            {
+                "status": "Succeeded",
+                "success": True,
+                "elapsed_seconds": elapsed,
+                "prompt_tokens": usage["input_tokens"],
+                "candidate_tokens": usage["output_tokens"],
+                "thinking_tokens": usage["thought_tokens"],
+                "steps": 1,
+                "search_queries": search_count,
+                "sources_count": len(sources),
+                "grounded": grounded,
+                "tools": {
+                    "google_search": {
+                        "attempts": search_count,
+                        "successes": search_count,
+                        "failures": 0,
+                    }
+                },
+            }
+        )
+
+        if not answer and not sources:
+            msg = "no response text or citations received from Gemini API"
+            telemetry["status"] = "Error"
+            telemetry["success"] = False
+            telemetry["error"] = msg
+            print(f"scout: {msg}", file=sys.stderr)
+            return 1
+
+        if not grounded:
+            print(
+                f"scout: warning: response had no Google Search citations "
+                f"(search_queries={search_count}); answer may be ungrounded",
+                file=sys.stderr,
+            )
+
+        if args.json:
+            out_obj = {
+                "answer": answer,
+                "sources": [
+                    {
+                        "url": src.url,
+                        "domain": src.domain,
+                        "title": src.title,
+                        "resolved": src.resolved,
+                    }
+                    for src in sources
+                ],
+                "queries": queries,
+                "grounded": grounded,
+                "model": model,
+                "thinking_level": thinking_level,
+                "usage": usage,
+                "elapsed_seconds": elapsed,
+            }
+            print(json.dumps(out_obj, indent=2, ensure_ascii=False))
+        elif args.urls_only:
+            for src in sources:
+                print(src.url)
+        else:
+            print(answer)
+            print("\n## Sources")
+            if not sources:
+                print("- (none)")
+            else:
+                for idx, src in enumerate(sources, 1):
+                    label = src.domain or src.title or "source"
+                    print(f"{idx}. [{label}] {src.url}")
+
+        if not args.quiet:
+            print(
+                format_footer(model, search_count, len(sources), elapsed),
+                file=sys.stderr,
+            )
+        return 0
+
+    except Exception as exc:
+        elapsed = round(time.perf_counter() - start, 3)
+        telemetry["elapsed_seconds"] = elapsed
+        telemetry["status"] = "Error"
+        telemetry["success"] = False
+        telemetry["error"] = str(exc)
+        telemetry["tools"] = {
+            "google_search": {"attempts": 1, "successes": 0, "failures": 1}
+        }
+        print(f"scout: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        old_int = signal.signal(signal.SIGINT, signal.SIG_IGN)
+        old_term = signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        try:
+            telemetry["elapsed_seconds"] = round(time.perf_counter() - start, 3)
+            write_telemetry(telemetry_path, telemetry)
+        finally:
+            signal.signal(signal.SIGINT, old_int)
+            signal.signal(signal.SIGTERM, old_term)
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        try:
+            sys.stderr.write("\n")
+            sys.stderr.flush()
+        except Exception:
+            pass
+        sys.exit(130)
+    except BrokenPipeError:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        sys.exit(141)

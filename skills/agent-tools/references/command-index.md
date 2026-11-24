@@ -10,6 +10,8 @@
 - [photo-query](#photo-query) - Ask Gemini about photos (boolean / schema /
   free-text)
 - [oracle](#oracle) - Deep reasoning and synthesis over files or directories
+- [scout](#scout) - Fast Google-grounded web reconnaissance with unwrapped
+  source URLs
 - [caxton](#caxton) - Transform, refactor or audit selected repository paths
 - [emerson](#emerson) - Generate essay-length analysis from text
 - [pascal](#pascal) - Ask a question and get a short response
@@ -482,6 +484,70 @@ recursively walking directories and processing media files.)*
 | 1    | General error (including incomplete or empty response) |
 | 130  | Interrupted (SIGINT or SIGTERM)                        |
 | 141  | stdout closed early (SIGPIPE)                          |
+
+______________________________________________________________________
+
+## scout
+
+Fast, lightweight, Google-grounded web reconnaissance via the Gemini
+Interactions API (`gemini-3.5-flash-lite` by default; override with `--model`).
+
+### Help
+
+<!-- generated: ../scripts/scout --help -->
+
+```text
+usage: scout [--model MODEL] [--urls-only] [--json] [--no-resolve]
+             [--timeout SECONDS] [-q] [-h]
+             [PROMPT ...]
+
+Fast, lightweight, Google-grounded web reconnaissance via the Gemini API.
+Returns a concise factual brief alongside deduplicated, unwrapped source URLs.
+
+positional arguments:
+  PROMPT             Question or lookup prompt, or '-' to read the prompt from
+                     stdin.
+
+options:
+  --model MODEL      Gemini model to use (default: $GEMINI_MODEL, else
+                     gemini-3.5-flash-lite).
+  --urls-only        Run a semantic search internally, then print only
+                     unwrapped URLs.
+  --json             Output JSON with answer, sources, queries, grounded flag,
+                     and usage.
+  --no-resolve       Keep raw grounding redirect URIs instead of unwrapping
+                     302 Locations.
+  --timeout SECONDS  API request timeout in seconds (default: 60).
+  -q, --quiet        Suppress the compact stderr summary footer (warnings
+                     still print).
+  -h, --help         Show this help message and exit.
+
+Environment:
+  GEMINI_API_KEY        Required. Your Gemini API key.
+  GEMINI_MODEL          Optional. Default model when --model is unset.
+  AGENT_OFFLINE         Set to 1/true to fail immediately without network calls.
+  AGENT_TELEMETRY_JSON  Optional. Destination path for JSON execution telemetry.
+
+Exit Codes:
+  0    Success
+  1    General error (usage, offline mode, API or transport error)
+  130  Interrupted (SIGINT or SIGTERM)
+  141  stdout closed early (SIGPIPE)
+
+Examples:
+  scout "What is the latest stable Python release and download URL?"
+  scout --model gemini-4-hydrogen "Compare UK non-expiring PAYG eSIMs with web top-ups"
+  scout --urls-only "Official Lenovo ThinkCentre M75q Gen 2 PSREF PDF"
+  printf "Latest UK eBay private seller fee rules" | scout --json -
+```
+
+<!-- /generated -->
+
+### Raw API Command
+
+Model: `gemini-3.5-flash-lite` (`thinking_level: "minimal"`, Interactions API
+with `tools: [{"type": "google_search"}]`, unwrapping `url_citation` redirects
+via `Location` headers).
 
 ______________________________________________________________________
 
