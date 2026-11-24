@@ -138,7 +138,7 @@ def serve_http(handler_cls):
 
 def main() -> int:
     scout_mod = load_scout()
-    tap = Tap(17)
+    tap = Tap(23)
 
     # 1 & 2: --help and -h
     res_help = run_cli(["--help"])
@@ -524,6 +524,210 @@ def main() -> int:
             "live Gemini API smoke test returns grounded answer and unwrapped https URL",
             ok_live,
             res_live.stdout + res_live.stderr,
+        )
+
+    # 18: Unknown CLI flag exits 1 (not argparse default 2) with --help hint
+    res_unknown = run_cli(["--unknown-flag"])
+    tap.check(
+        "unknown flag exits 1 with scout prefix and --help hint",
+        res_unknown.returncode == 1
+        and "scout:" in res_unknown.stderr
+        and "--help" in res_unknown.stderr,
+        f"rc={res_unknown.returncode}\nerr={res_unknown.stderr}",
+    )
+
+    # 19: --json and --urls-only are mutually exclusive (exit 1)
+    res_mutex = run_cli(["--json", "--urls-only", "query"])
+    tap.check(
+        "--json and --urls-only are mutually exclusive and exit 1",
+        res_mutex.returncode == 1 and "not allowed with argument" in res_mutex.stderr,
+        f"rc={res_mutex.returncode}\nerr={res_mutex.stderr}",
+    )
+
+    # 20: Invalid --timeout and blank --model exit 1
+    bad_invocations = [
+        ["--timeout", "0", "q"],
+        ["--timeout", "-1", "q"],
+        ["--timeout", "nan", "q"],
+        ["--timeout", "inf", "q"],
+        ["--model", "   ", "q"],
+    ]
+    bad_results = [run_cli(argv) for argv in bad_invocations]
+    tap.check(
+        "non-positive/non-finite --timeout and blank --model exit 1",
+        all(r.returncode == 1 and "scout:" in r.stderr for r in bad_results),
+        [
+            (argv, r.returncode, r.stderr)
+            for argv, r in zip(bad_invocations, bad_results, strict=True)
+        ],
+    )
+
+    # 21: Failed redirect unwrap emits stderr warning and keeps resolved=false
+    class UnwrapFailHandler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+        def do_POST(self) -> None:
+            base = f"http://127.0.0.1:{self.server.server_address[1]}"
+            resp_obj = {
+                "status": "completed",
+                "usage": {
+                    "total_input_tokens": 10,
+                    "total_output_tokens": 10,
+                    "total_thought_tokens": 0,
+                    "grounding_tool_count": [{"type": "google_search", "count": 1}],
+                },
+                "steps": [
+                    {
+                        "type": "google_search_call",
+                        "arguments": {"queries": ["q"]},
+                    },
+                    {
+                        "type": "model_output",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "Brief.",
+                                "annotations": [
+                                    {
+                                        "type": "url_citation",
+                                        "url": f"{base}/redirect/fail",
+                                        "title": "broken.example",
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                ],
+            }
+            raw = json.dumps(resp_obj).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def do_GET(self) -> None:
+            self.send_response(500)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+    with serve_http(UnwrapFailHandler) as (_srv, fail_base):
+        old_u = scout_mod.INTERACTIONS_URL
+        old_p = scout_mod.REDIRECT_PREFIX
+        scout_mod.INTERACTIONS_URL = f"{fail_base}/interactions"
+        scout_mod.REDIRECT_PREFIX = f"{fail_base}/redirect/"
+        try:
+            rc, out, err = run_inproc(
+                scout_mod,
+                ["--json", "-q", "unwrap fail"],
+                env={"AGENT_OFFLINE": "0", "GEMINI_API_KEY": "fake-key"},
+            )
+            parsed_fail = json.loads(out) if out.strip() else {}
+            srcs = parsed_fail.get("sources") or []
+            tap.check(
+                "failed redirect unwrap warns on stderr and marks resolved=false",
+                rc == 0
+                and "failed to unwrap 1 of 1" in err
+                and len(srcs) == 1
+                and srcs[0].get("resolved") is False
+                and srcs[0].get("url") == f"{fail_base}/redirect/fail",
+                f"rc={rc}\nout={out}\nerr={err}",
+            )
+        finally:
+            scout_mod.INTERACTIONS_URL = old_u
+            scout_mod.REDIRECT_PREFIX = old_p
+
+    # 22: BrokenPipeError exits 141 silently without traceback
+    pipe_runner = """
+import io, json, runpy, sys, urllib.request
+class FakeResp(io.BytesIO):
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+payload = {
+    "status": "completed",
+    "usage": {"total_input_tokens": 1, "total_output_tokens": 1, "grounding_tool_count": [{"type": "google_search", "count": 1}]},
+    "steps": [
+        {"type": "google_search_call", "arguments": {"queries": ["q"]}},
+        {"type": "model_output", "content": [{"type": "text", "text": "FIRST_LINE\\n" + ("X" * 524288), "annotations": [{"type": "url_citation", "url": "https://example.org/doc", "title": "example.org"}]}]},
+    ],
+}
+urllib.request.urlopen = lambda req, timeout=None: FakeResp(json.dumps(payload).encode("utf-8"))
+sys.argv = ["scout", "--no-resolve", "-q", "pipe query"]
+runpy.run_path(sys.argv[1] if False else __import__("os").environ["SCOUT_BIN"], run_name="__main__")
+"""
+    pipe_env = {
+        **os.environ,
+        "SCOUT_BIN": str(BIN),
+        "AGENT_OFFLINE": "0",
+        "GEMINI_API_KEY": "k",
+    }
+    proc_pipe = subprocess.Popen(
+        [sys.executable, "-c", pipe_runner],
+        env=pipe_env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    assert proc_pipe.stdout is not None
+    assert proc_pipe.stderr is not None
+    first_line = proc_pipe.stdout.readline()
+    proc_pipe.stdout.close()
+    pipe_err = proc_pipe.stderr.read().decode("utf-8", errors="replace")
+    pipe_rc = proc_pipe.wait(timeout=5.0)
+    tap.check(
+        "BrokenPipeError exits 141 cleanly with no stderr traceback",
+        first_line == b"FIRST_LINE\n" and pipe_rc == 141 and pipe_err == "",
+        f"first_line={first_line!r} rc={pipe_rc} err={pipe_err!r}",
+    )
+
+    # 23: SIGTERM exits 130 cleanly, prints trailing newline, and writes Interrupted telemetry
+    with tempfile.TemporaryDirectory() as sig_tmp:
+        sig_telem = Path(sig_tmp) / "sigterm.json"
+        sig_runner = """
+import runpy, sys, threading, urllib.request
+def hanging_urlopen(req, timeout=None):
+    sys.stderr.write("READY\\n")
+    sys.stderr.flush()
+    threading.Event().wait(5.0)
+    raise AssertionError("unreached")
+urllib.request.urlopen = hanging_urlopen
+sys.argv = ["scout", "sigterm query"]
+runpy.run_path(__import__("os").environ["SCOUT_BIN"], run_name="__main__")
+"""
+        sig_env = {
+            **os.environ,
+            "SCOUT_BIN": str(BIN),
+            "AGENT_OFFLINE": "0",
+            "GEMINI_API_KEY": "k",
+            "AGENT_TELEMETRY_JSON": str(sig_telem),
+        }
+        proc_sig = subprocess.Popen(
+            [sys.executable, "-c", sig_runner],
+            env=sig_env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        assert proc_sig.stderr is not None
+        assert proc_sig.stdout is not None
+        ready_line = proc_sig.stderr.readline().decode("utf-8", errors="replace")
+        proc_sig.terminate()
+        rest_err = proc_sig.stderr.read().decode("utf-8", errors="replace")
+        sig_out = proc_sig.stdout.read().decode("utf-8", errors="replace")
+        sig_rc = proc_sig.wait(timeout=5.0)
+        sig_tel = (
+            json.loads(sig_telem.read_text(encoding="utf-8"))
+            if sig_telem.exists()
+            else {}
+        )
+        tap.check(
+            "SIGTERM exits 130 with stderr newline, no traceback, and Interrupted telemetry",
+            ready_line == "READY\n"
+            and sig_rc == 130
+            and sig_out == ""
+            and rest_err == "\n"
+            and sig_tel.get("status") == "Interrupted"
+            and sig_tel.get("success") is False,
+            f"ready={ready_line!r} rc={sig_rc} err={rest_err!r} tel={sig_tel}",
         )
 
     return 0 if tap.failed == 0 else 1

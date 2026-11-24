@@ -497,7 +497,7 @@ Interactions API (`gemini-3.5-flash-lite` by default; override with `--model`).
 <!-- generated: ../scripts/scout --help -->
 
 ```text
-usage: scout [--model MODEL] [--urls-only] [--json] [--no-resolve]
+usage: scout [--model MODEL] [--urls-only | --json] [--no-resolve]
              [--timeout SECONDS] [-q] [-h]
              [PROMPT ...]
 
@@ -516,8 +516,7 @@ positional arguments:
 options:
   --model MODEL      Gemini model to use (default: $GEMINI_MODEL, else
                      gemini-3.5-flash-lite).
-  --urls-only        Run a semantic search internally, then print only
-                     unwrapped URLs.
+  --urls-only        Print only unwrapped source URLs (one per line).
   --json             Output JSON with answer, sources, queries, grounded flag,
                      and usage.
   --no-resolve       Keep raw grounding redirect URIs instead of unwrapping
@@ -530,7 +529,7 @@ options:
 Environment:
   GEMINI_API_KEY        Required. Your Gemini API key.
   GEMINI_MODEL          Optional. Default model when --model is unset.
-  AGENT_OFFLINE         Set to 1/true to fail immediately without network calls.
+  AGENT_OFFLINE         Disable network calls (1/true/yes/on; set 0 to override).
   AGENT_TELEMETRY_JSON  Optional. Destination path for JSON execution telemetry.
 
 Exit Codes:

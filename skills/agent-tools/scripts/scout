@@ -11,16 +11,19 @@ import concurrent.futures
 import datetime
 import http.client
 import json
+import math
 import os
 import signal
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn, NotRequired, TypedDict
 
 INTERACTIONS_URL = "https://generativelanguage.googleapis.com/v1beta/interactions"
 API_REVISION = "2026-05-20"
@@ -28,6 +31,110 @@ DEFAULT_MODEL = "gemini-3.5-flash-lite"
 DEFAULT_TIMEOUT = 60.0
 REDIRECT_TIMEOUT = 10.0
 REDIRECT_PREFIX = "https://vertexaisearch.cloud.google.com/grounding-api-redirect/"
+
+
+class ThinkingLevel(StrEnum):
+    """Supported Gemini thinking levels used by scout."""
+
+    MINIMAL = "minimal"
+    LOW = "low"
+
+
+class TelemetryStatus(StrEnum):
+    """Execution outcome values written to AGENT_TELEMETRY_JSON."""
+
+    SUCCEEDED = "Succeeded"
+    ERROR = "Error"
+    INTERRUPTED = "Interrupted"
+
+
+class UsageStats(TypedDict):
+    """Normalized token and search-query usage counters."""
+
+    input_tokens: int
+    output_tokens: int
+    thought_tokens: int
+    search_queries: int
+
+
+class SourceOutput(TypedDict):
+    """One serialized source entry in JSON output."""
+
+    url: str
+    domain: str
+    title: str
+    resolved: bool
+
+
+class JsonOutput(TypedDict):
+    """Top-level JSON schema emitted by `scout --json`."""
+
+    answer: str
+    sources: list[SourceOutput]
+    queries: list[str]
+    grounded: bool
+    model: str
+    thinking_level: str
+    usage: UsageStats
+    elapsed_seconds: float
+
+
+class ToolCallStats(TypedDict):
+    """Per-tool telemetry counters."""
+
+    attempts: int
+    successes: int
+    failures: int
+
+
+class TelemetryRecord(TypedDict):
+    """Schema written to AGENT_TELEMETRY_JSON."""
+
+    status: TelemetryStatus
+    success: bool
+    model: str
+    thinking_level: ThinkingLevel
+    elapsed_seconds: float
+    prompt_tokens: int
+    candidate_tokens: int
+    thinking_tokens: int
+    steps: int
+    search_queries: int
+    sources_count: int
+    grounded: bool
+    tools: dict[str, ToolCallStats]
+    modified_files: list[str]
+    error: NotRequired[str]
+
+
+class Parser(argparse.ArgumentParser):
+    """Exits 1 on usage errors to match repository CLI conventions."""
+
+    def error(self, message: str) -> NoReturn:
+        self.print_usage(sys.stderr)
+        self.exit(
+            1,
+            f"{self.prog}: {message}\nTry '{self.prog} --help' for more information.\n",
+        )
+
+
+def positive_float(raw: str) -> float:
+    """Validate that a CLI float option is finite and strictly greater than zero."""
+    try:
+        value = float(raw)
+    except ValueError:
+        raise argparse.ArgumentTypeError("must be a positive finite number") from None
+    if not math.isfinite(value) or value <= 0:
+        raise argparse.ArgumentTypeError("must be a positive finite number")
+    return value
+
+
+def non_empty_model(raw: str) -> str:
+    """Validate that --model receives a non-blank model identifier."""
+    cleaned = raw.strip()
+    if not cleaned:
+        raise argparse.ArgumentTypeError("must not be empty")
+    return cleaned
 
 
 @dataclass(slots=True, frozen=True)
@@ -114,18 +221,18 @@ def build_system_instruction(today_str: str) -> str:
     )
 
 
-def resolve_thinking_level(model: str) -> str:
+def resolve_thinking_level(model: str) -> ThinkingLevel:
     """Choose the lightest reliable thinking level for the selected model."""
     if model.startswith("gemini-4") or "-pro" in model:
-        return "low"
-    return "minimal"
+        return ThinkingLevel.LOW
+    return ThinkingLevel.MINIMAL
 
 
 def call_interactions_api(
     api_key: str,
     model: str,
     prompt: str,
-    thinking_level: str,
+    thinking_level: ThinkingLevel,
     timeout: float,
 ) -> dict[str, Any]:
     """Send a grounded Google Search request to the Gemini Interactions API."""
@@ -142,7 +249,7 @@ def call_interactions_api(
         "input": prompt,
         "system_instruction": build_system_instruction(today_str),
         "tools": [{"type": "google_search"}],
-        "generation_config": {"thinking_level": thinking_level},
+        "generation_config": {"thinking_level": str(thinking_level)},
         "store": False,
     }
     req = urllib.request.Request(
@@ -182,6 +289,10 @@ def call_interactions_api(
             f"{INTERACTIONS_URL} returned HTTP 200 but the body did not finish "
             f"transferring ({exc})"
         ) from None
+    except http.client.HTTPException as exc:
+        raise RuntimeError(
+            f"HTTP protocol error communicating with {INTERACTIONS_URL}: {exc}"
+        ) from None
 
     try:
         data = json.loads(raw_body)
@@ -204,7 +315,12 @@ def call_interactions_api(
     return data
 
 
-def unwrap_redirect(raw_url: str, title: str, resolve: bool) -> Source:
+def unwrap_redirect(
+    raw_url: str,
+    title: str,
+    resolve: bool,
+    stop_event: threading.Event | None = None,
+) -> Source:
     """Resolve one grounding redirect URL via HTTP Location without following it."""
     if not resolve or not raw_url.startswith(REDIRECT_PREFIX):
         domain = extract_domain(raw_url) or extract_domain(title) or title
@@ -214,6 +330,16 @@ def unwrap_redirect(raw_url: str, title: str, resolve: bool) -> Source:
             title=title,
             redirect_url=raw_url,
             resolved=not raw_url.startswith(REDIRECT_PREFIX),
+        )
+
+    if stop_event is not None and stop_event.is_set():
+        domain = extract_domain(title) or title
+        return Source(
+            url=raw_url,
+            domain=domain,
+            title=title,
+            redirect_url=raw_url,
+            resolved=False,
         )
 
     req = urllib.request.Request(
@@ -234,7 +360,7 @@ def unwrap_redirect(raw_url: str, title: str, resolve: bool) -> Source:
                     redirect_url=raw_url,
                     resolved=True,
                 )
-    except Exception:
+    except (urllib.error.URLError, http.client.HTTPException, TimeoutError, OSError):
         pass
 
     domain = extract_domain(title) or title
@@ -249,7 +375,7 @@ def unwrap_redirect(raw_url: str, title: str, resolve: bool) -> Source:
 
 def parse_interaction(
     data: dict[str, Any], *, resolve_redirects: bool
-) -> tuple[str, list[str], list[Source], dict[str, int]]:
+) -> tuple[str, list[str], list[Source], UsageStats]:
     """Extract answer text, queries, unwrapped deduplicated sources, and usage."""
     usage_raw = data.get("usage") or {}
     input_tokens = int(usage_raw.get("total_input_tokens") or 0)
@@ -298,15 +424,22 @@ def parse_interaction(
     if raw_citations:
         if resolve_redirects and len(raw_citations) > 1:
             workers = min(10, len(raw_citations))
-            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-                unwrapped = list(
-                    pool.map(
-                        lambda item: unwrap_redirect(
-                            item[0], item[1], resolve_redirects
-                        ),
-                        raw_citations,
+            stop_event = threading.Event()
+            pool = concurrent.futures.ThreadPoolExecutor(max_workers=workers)
+            try:
+                futures = [
+                    pool.submit(
+                        unwrap_redirect, rurl, title, resolve_redirects, stop_event
                     )
-                )
+                    for rurl, title in raw_citations
+                ]
+                unwrapped = [fut.result() for fut in futures]
+            except BaseException:
+                stop_event.set()
+                pool.shutdown(wait=False, cancel_futures=True)
+                raise
+            else:
+                pool.shutdown(wait=True)
         else:
             unwrapped = [
                 unwrap_redirect(rurl, title, resolve_redirects)
@@ -321,7 +454,7 @@ def parse_interaction(
         seen_final.add(src.url)
         sources.append(src)
 
-    usage = {
+    usage: UsageStats = {
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "thought_tokens": thought_tokens,
@@ -330,7 +463,7 @@ def parse_interaction(
     return "\n".join(text_parts).strip(), queries, sources, usage
 
 
-def write_telemetry(path_str: str | None, record: dict[str, Any]) -> None:
+def write_telemetry(path_str: str | None, record: TelemetryRecord) -> None:
     """Write AGENT_TELEMETRY_JSON output cleanly without failing the command."""
     if not path_str:
         return
@@ -361,7 +494,7 @@ def print_missing_prompt_error() -> None:
     """Print concise usage and examples when PROMPT is omitted."""
     print(
         """scout: missing PROMPT argument
-Usage: scout [OPTIONS] [-] PROMPT
+Usage: scout [OPTIONS] PROMPT | -
 
 Fast, lightweight, Google-grounded web reconnaissance via the Gemini API.
 
@@ -374,13 +507,13 @@ Try 'scout --help' for more information.""",
     )
 
 
-def make_parser() -> argparse.ArgumentParser:
+def make_parser() -> Parser:
     """Construct the CLI argument parser."""
     epilog = (
         "Environment:\n"
         "  GEMINI_API_KEY        Required. Your Gemini API key.\n"
         "  GEMINI_MODEL          Optional. Default model when --model is unset.\n"
-        "  AGENT_OFFLINE         Set to 1/true to fail immediately without network calls.\n"
+        "  AGENT_OFFLINE         Disable network calls (1/true/yes/on; set 0 to override).\n"
         "  AGENT_TELEMETRY_JSON  Optional. Destination path for JSON execution telemetry.\n\n"
         "Exit Codes:\n"
         "  0    Success\n"
@@ -393,7 +526,7 @@ def make_parser() -> argparse.ArgumentParser:
         '  scout --urls-only "Official Lenovo ThinkCentre M75q Gen 2 PSREF PDF"\n'
         '  printf "Latest UK eBay private seller fee rules" | scout --json -'
     )
-    parser = argparse.ArgumentParser(
+    parser = Parser(
         prog="scout",
         description=(
             "Fast, lightweight, Google-grounded web reconnaissance via the Gemini API.\n"
@@ -415,15 +548,17 @@ def make_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--model",
+        type=non_empty_model,
         metavar="MODEL",
         help=f"Gemini model to use (default: $GEMINI_MODEL, else {DEFAULT_MODEL}).",
     )
-    parser.add_argument(
+    output_group = parser.add_mutually_exclusive_group()
+    output_group.add_argument(
         "--urls-only",
         action="store_true",
-        help="Run a semantic search internally, then print only unwrapped URLs.",
+        help="Print only unwrapped source URLs (one per line).",
     )
-    parser.add_argument(
+    output_group.add_argument(
         "--json",
         action="store_true",
         help="Output JSON with answer, sources, queries, grounded flag, and usage.",
@@ -435,7 +570,7 @@ def make_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--timeout",
-        type=float,
+        type=positive_float,
         default=DEFAULT_TIMEOUT,
         metavar="SECONDS",
         help=f"API request timeout in seconds (default: {int(DEFAULT_TIMEOUT)}).",
@@ -461,7 +596,6 @@ def sigterm_handler(_signum: int, _frame: Any) -> None:
 
 
 def main() -> int:
-    signal.signal(signal.SIGTERM, sigterm_handler)
     telemetry_path = os.environ.get("AGENT_TELEMETRY_JSON")
     start = time.perf_counter()
 
@@ -483,15 +617,11 @@ def main() -> int:
             print_missing_prompt_error()
             return 1
 
-    if args.timeout <= 0:
-        print("scout: --timeout must be greater than 0", file=sys.stderr)
-        return 1
-
-    model = args.model or os.environ.get("GEMINI_MODEL") or DEFAULT_MODEL
+    model = args.model or os.environ.get("GEMINI_MODEL", "").strip() or DEFAULT_MODEL
     thinking_level = resolve_thinking_level(model)
 
-    telemetry: dict[str, Any] = {
-        "status": "Error",
+    telemetry: TelemetryRecord = {
+        "status": TelemetryStatus.ERROR,
         "success": False,
         "model": model,
         "thinking_level": thinking_level,
@@ -509,7 +639,10 @@ def main() -> int:
 
     try:
         if is_offline_enabled():
-            msg = "offline mode enabled (AGENT_OFFLINE); cannot query Gemini API"
+            msg = (
+                "offline mode enabled (AGENT_OFFLINE); cannot query Gemini API "
+                "(set AGENT_OFFLINE=0 to override)"
+            )
             telemetry["error"] = msg
             print(f"scout: {msg}", file=sys.stderr)
             return 1
@@ -538,7 +671,7 @@ def main() -> int:
 
         telemetry.update(
             {
-                "status": "Succeeded",
+                "status": TelemetryStatus.SUCCEEDED,
                 "success": True,
                 "elapsed_seconds": elapsed,
                 "prompt_tokens": usage["input_tokens"],
@@ -560,7 +693,7 @@ def main() -> int:
 
         if not answer and not sources:
             msg = "no response text or citations received from Gemini API"
-            telemetry["status"] = "Error"
+            telemetry["status"] = TelemetryStatus.ERROR
             telemetry["success"] = False
             telemetry["error"] = msg
             print(f"scout: {msg}", file=sys.stderr)
@@ -573,8 +706,17 @@ def main() -> int:
                 file=sys.stderr,
             )
 
+        if not args.no_resolve:
+            unresolved = sum(1 for src in sources if not src.resolved)
+            if unresolved > 0:
+                print(
+                    f"scout: warning: failed to unwrap {unresolved} of {len(sources)} "
+                    "grounding redirect URL(s); keeping raw redirect URI(s)",
+                    file=sys.stderr,
+                )
+
         if args.json:
-            out_obj = {
+            out_obj: JsonOutput = {
                 "answer": answer,
                 "sources": [
                     {
@@ -588,7 +730,7 @@ def main() -> int:
                 "queries": queries,
                 "grounded": grounded,
                 "model": model,
-                "thinking_level": thinking_level,
+                "thinking_level": str(thinking_level),
                 "usage": usage,
                 "elapsed_seconds": elapsed,
             }
@@ -613,10 +755,18 @@ def main() -> int:
             )
         return 0
 
+    except KeyboardInterrupt:
+        telemetry["elapsed_seconds"] = round(time.perf_counter() - start, 3)
+        telemetry["status"] = TelemetryStatus.INTERRUPTED
+        telemetry["success"] = False
+        telemetry["error"] = "interrupted"
+        raise
+    except BrokenPipeError:
+        raise
     except Exception as exc:
         elapsed = round(time.perf_counter() - start, 3)
         telemetry["elapsed_seconds"] = elapsed
-        telemetry["status"] = "Error"
+        telemetry["status"] = TelemetryStatus.ERROR
         telemetry["success"] = False
         telemetry["error"] = str(exc)
         telemetry["tools"] = {
@@ -636,9 +786,16 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, sigterm_handler)
     try:
-        sys.exit(main())
+        try:
+            rc = main()
+        finally:
+            sys.stdout.flush()
+        sys.exit(rc)
     except KeyboardInterrupt:
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
         try:
             sys.stderr.write("\n")
             sys.stderr.flush()
@@ -648,4 +805,5 @@ if __name__ == "__main__":
     except BrokenPipeError:
         devnull = os.open(os.devnull, os.O_WRONLY)
         os.dup2(devnull, sys.stdout.fileno())
+        os.close(devnull)
         sys.exit(141)
