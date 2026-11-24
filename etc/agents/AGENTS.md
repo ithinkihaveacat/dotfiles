@@ -5,53 +5,50 @@ knowledge.
 
 ## Agent Skills
 
-Available skills are curated for this environment and provide high-signal
-workflows, helper scripts, and local conventions.
+Curated environment skills provide workflows, helper scripts, and local
+conventions.
 
-- **Use pre-loaded skills liberally**: Review your active skills before starting
-  a task. When a task touches a skill's domain—or when in doubt—read its
-  `SKILL.md` and follow its prescribed workflow and scripts rather than
-  inventing an ad-hoc approach.
+- **Use pre-loaded skills liberally**: Review active skills before starting;
+  when a task touches a skill's domain—or in doubt—read its `SKILL.md` and
+  follow its workflow and scripts instead of improvising.
 - **Load session-specific skills when relevant**: Default skills cover only
-  baseline workflows. When work shifts to an uncovered repository or stack,
-  delegate a subagent to search `skill --offline catalog --json` (NDJSON;
-  inspect with `skill info <NAME>` / `skill show <NAME>`) and return matching
-  skill names and paths to the parent session instead of running
-  `skill --scope session add` inside the subagent. In the parent session, reuse
+  baseline workflows. For an uncovered repo or stack, have a subagent search
+  `skill --offline catalog --json` (NDJSON; inspect cached entries with
+  `skill --offline info <NAME>`) and return matching names/paths instead of
+  running `skill --scope session add` itself. In the parent session, reuse
   harness skills, run `skill --scope session add <NAME>...` when supported
-  (Claude wrapper or Antigravity), or read
-  `$(skill --offline resolve <NAME>)/SKILL.md` directly (OpenCode/Codex; never
-  install workspace/user skills as a fallback).
+  (bound `claude` wrapper, or Antigravity/Jetski—pass `-C <artifactDir>` if
+  needed and read the copied `SKILL.md` for same-turn use), or read
+  `$(skill --offline resolve <NAME>)/SKILL.md` directly (OpenCode, Codex, or
+  unbound/remote-control Claude; never fall back to workspace/user installs).
 - **Skill provenance and pull-only runtime checkouts**: User-scope default
-  skills are symlinks, whereas workspace and session skills are directory copies
-  carrying `metadata.source` in `SKILL.md` frontmatter. Resolve cross-skill
-  links (`../<sibling>/...`) against `metadata.source` /
-  `skill --offline resolve <NAME>` (or symlink `realpath`). `~/.dotfiles` and
-  active overlay installs (`~/.private`, `~/.corp`) are pull-only runtime
-  checkouts—never edit, stage, or commit inside them, even when a skill symlink
-  or `metadata.source` resolves there. Make edits in a separate development
-  checkout of the target repository instead (consulting the project tracker
-  `README.md` when tracked, or asking the user where the development checkout
-  lives), and update live installs only by fast-forwarding from upstream after
+  skills are symlinks; workspace and session skills are directory copies with
+  `metadata.source` in `SKILL.md` frontmatter. Resolve cross-skill links
+  (`../<sibling>/...`) via `metadata.source`, `skill --offline resolve <NAME>`,
+  or symlink `realpath`. `~/.dotfiles` and active overlays (`~/.private`,
+  `~/.corp`) are pull-only runtime checkouts—never edit, stage, or commit inside
+  them, even when a symlink or `metadata.source` resolves there. Edit a separate
+  development checkout instead (check the project tracker `README.md` or ask
+  where it lives), and update live installs only by fast-forwarding after
   publication.
 - **Common skill triggers**:
-  - **Android & Wear OS devices**: Use the relevant device skill's exact `adb`
-    commands and scripts (e.g., for screenshots or UI interaction).
-  - **Code formatting & linting**: Run the formatting and validation tools
-    prescribed by coding-standards skills (e.g., `shell-format` for Bash,
-    Markdown style rules).
-  - **Runtimes & CLI tools**: When a Node.js, Ruby, or Python runtime or
-    package/CLI tool is missing, activate `workspace-tools` and install it into
-    the workspace rather than user- or system-wide. If a `uv run --script`
-    helper fails to resolve cached dependencies in a sandbox, run
+  - **Android & Wear OS**: Use the device skill's exact `adb` commands and
+    scripts (e.g., screenshots, UI interaction).
+  - **Formatting & linting**: Use `coding-standards` tools (e.g., `shell-format`
+    for Bash, Markdown style rules).
+  - **Runtimes & CLI tools**: For a missing Node.js, Ruby, or Python
+    runtime/tool, use `workspace-tools` (`envrc` + `direnv exec . ...`) and
+    install packages/CLIs workspace-locally, not user-/system-wide. If
+    `uv run --script` misses cached deps in a sandbox, run
     `uv sync --script <script>` or `~/.dotfiles/install.sh --apply --only uv`
-    (with network access, without `--force`) to populate the script cache rather
-    than changing the script's shebang.
-  - **Version control & commits**: Format commit messages according to the
-    active VCS/standards skill. Ensure the workspace commit hooks are installed
-    (`hook apply` or `hook -C <repo> apply`) before committing in a repository.
-    Local git hooks strictly enforce subject-line length and body-wrapping
-    limits and will reject non-compliant commits.
+    (online, without `--force`; set `UV_CACHE_DIR` to a writable scratch dir if
+    `~/.cache/uv` is read-only) instead of editing the shebang.
+  - **Version control & commits**: Follow the active VCS/standards skill. In
+    owned repos without symlinked `.git/hooks` (if not already applied), run
+    `hook apply` or `hook -C <repo> apply` before committing. The `agent`
+    `commit-msg` hook strips attribution trailers, auto-rewraps body prose to 72
+    chars, and rejects bad Conventional Commits syntax, >50-char subjects, or a
+    missing blank line 2.
 
 ## Writing Style
 
