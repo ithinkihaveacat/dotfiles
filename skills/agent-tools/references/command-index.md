@@ -504,6 +504,11 @@ usage: scout [--model MODEL] [--urls-only] [--json] [--no-resolve]
 Fast, lightweight, Google-grounded web reconnaissance via the Gemini API.
 Returns a concise factual brief alongside deduplicated, unwrapped source URLs.
 
+Use when built-in web search is unavailable/failing or direct fetches hit
+403/429/Cloudflare on indexed sites. Do not replace working native search or
+run parallel fan-out loops (each call bills multiple queries against a shared
+monthly Google Search grounding allowance).
+
 positional arguments:
   PROMPT             Question or lookup prompt, or '-' to read the prompt from
                      stdin.
