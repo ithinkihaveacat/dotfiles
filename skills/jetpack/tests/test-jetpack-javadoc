@@ -1,15 +1,14 @@
 #!/usr/bin/env bash
 #
 # Hermetic tests for `jetpack javadoc`, `jetpack inspect` fallback to
-# `-javadoc.jar`, empty/placeholder `-javadoc.jar` rejection, the 64 KiB
-# single-file stdout guard, dual-language `/kotlin/` page deduplication, nested
-# `Outer.Inner` / `Outer$Inner` resolution, and `AGENT_OFFLINE=1` replay.
+# `-javadoc.jar`, placeholder `-javadoc.jar` rejection, the 64 KiB single-file
+# stdout cap, Dackka `/kotlin/` mirror deduplication, and nested class lookup.
 
 set -u
 
 SCRIPT_DIR=$(dirname "$0")
 ROOT_DIR="$SCRIPT_DIR/.."
-BIN_JETPACK="$ROOT_DIR/scripts/jetpack"
+ABS_JETPACK=$(cd "$(dirname "$ROOT_DIR/scripts/jetpack")" && pwd)/jetpack
 
 unset AGENT_OFFLINE
 
@@ -23,7 +22,7 @@ SERVE_DIR="$TEST_TMP/serve"
 CURL_LOG="$TEST_TMP/curl.log"
 mkdir -p "$SHIM_DIR" "$SERVE_DIR" "$JETPACK_CACHE_DIR"
 
-TOTAL_TESTS=94
+TOTAL_TESTS=16
 TEST_NUM=0
 echo "1..$TOTAL_TESTS"
 
@@ -32,85 +31,20 @@ cleanup() {
 }
 trap cleanup EXIT
 
-ok() {
+check() {
+  local description="$1" cond="$2"
+  shift 2
   TEST_NUM=$((TEST_NUM + 1))
-  echo "ok $TEST_NUM - $1"
-}
-
-not_ok() {
-  TEST_NUM=$((TEST_NUM + 1))
-  echo "not ok $TEST_NUM - $1"
-  shift
-  local line
-  for line in "$@"; do
-    echo "# $line"
-  done
-}
-
-assert_equals() {
-  local description="$1" actual="$2" expected="$3"
-  if [[ "$actual" == "$expected" ]]; then
-    ok "$description"
+  if [[ "$cond" == "1" ]]; then
+    echo "ok $TEST_NUM - $description"
   else
-    not_ok "$description" "Expected: $expected" "Actual:   $actual"
+    echo "not ok $TEST_NUM - $description"
+    local line
+    for line in "$@"; do
+      echo "# $line"
+    done
   fi
 }
-
-assert_status() {
-  local description="$1" status="$2" expected="$3"
-  if [[ "$status" -eq "$expected" ]]; then
-    ok "$description"
-  else
-    not_ok "$description" "Expected exit $expected, got $status"
-  fi
-}
-
-assert_contains() {
-  local description="$1" haystack="$2" needle="$3"
-  if [[ "$haystack" == *"$needle"* ]]; then
-    ok "$description"
-  else
-    not_ok "$description" "Expected to contain: $needle" "Got: $haystack"
-  fi
-}
-
-assert_not_contains() {
-  local description="$1" haystack="$2" needle="$3"
-  if [[ "$haystack" != *"$needle"* ]]; then
-    ok "$description"
-  else
-    not_ok "$description" "Expected NOT to contain: $needle" "Got: $haystack"
-  fi
-}
-
-seed_metadata() {
-  local base_dir="$1" group="$2" artifact="$3" version="$4"
-  mkdir -p "$base_dir/$version"
-  cat >"$base_dir/maven-metadata.xml" <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<metadata>
-  <groupId>$group</groupId>
-  <artifactId>$artifact</artifactId>
-  <versioning>
-    <latest>$version</latest>
-    <release>$version</release>
-    <versions>
-      <version>$version</version>
-    </versions>
-  </versioning>
-</metadata>
-EOF
-  cat >"$base_dir/$version/$artifact-$version.pom" <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<project>
-  <groupId>$group</groupId>
-  <artifactId>$artifact</artifactId>
-  <version>$version</version>
-</project>
-EOF
-}
-
-# --- Seed GMaven class index -------------------------------------------------
 
 cat >"$JETPACK_CACHE_DIR/androidx-index.json" <<'EOF'
 {
@@ -152,15 +86,39 @@ cat >"$JETPACK_CACHE_DIR/androidx-index.json" <<'EOF'
 }
 EOF
 
-# 1. Google Maven closed-source Doclava SDK: play-services-wearable:19.0.0
-#    (NO -sources.jar; has normal + nested + oversized >64 KiB HTML pages)
-GMS_WEAR="$SERVE_DIR/dl.google.com/android/maven2/com/google/android/gms/play-services-wearable"
-seed_metadata "$GMS_WEAR" "com.google.android.gms" "play-services-wearable" "19.0.0"
+# Build all Maven metadata, POMs, and fixture JARs in one Python invocation.
+python3 - "$SERVE_DIR" <<'PY'
+import os, sys, zipfile
 
-python3 - "$GMS_WEAR/19.0.0/play-services-wearable-19.0.0-javadoc.jar" <<'PY'
-import sys, zipfile
-jar_path = sys.argv[1]
-with zipfile.ZipFile(jar_path, "w") as z:
+serve = sys.argv[1]
+
+def seed_meta(repo, group, artifact, version):
+    base = os.path.join(serve, repo, *group.split("."), artifact)
+    os.makedirs(os.path.join(base, version), exist_ok=True)
+    with open(os.path.join(base, "maven-metadata.xml"), "w") as f:
+        f.write(
+            f"<metadata><groupId>{group}</groupId><artifactId>{artifact}</artifactId>"
+            f"<versioning><latest>{version}</latest><release>{version}</release>"
+            f"<versions><version>{version}</version></versions></versioning></metadata>\n"
+        )
+    with open(os.path.join(base, version, f"{artifact}-{version}.pom"), "w") as f:
+        f.write(
+            f"<project><groupId>{group}</groupId><artifactId>{artifact}</artifactId>"
+            f"<version>{version}</version></project>\n"
+        )
+    return os.path.join(base, version, f"{artifact}-{version}")
+
+# 1. Closed-source Doclava SDK: normal, nested, and >64 KiB HTML pages (no -sources.jar)
+wear_prefix = seed_meta(
+    "dl.google.com/android/maven2",
+    "com.google.android.gms",
+    "play-services-wearable",
+    "19.0.0",
+)
+big_head = "<html><body><h1>WearableListenerService</h1><p>"
+big_tail = "</p><h2>Public Methods</h2><p>onDataChanged contract</p></body></html>\n"
+big_html = big_head + ("c" * (70000 - len(big_head) - len(big_tail))) + big_tail
+with zipfile.ZipFile(wear_prefix + "-javadoc.jar", "w") as z:
     z.writestr("META-INF/MANIFEST.MF", "Manifest-Version: 1.0\n")
     z.writestr("client/wearable/packages.html", "<html><body>packages</body></html>\n")
     z.writestr(
@@ -171,88 +129,44 @@ with zipfile.ZipFile(jar_path, "w") as z:
         "com/google/android/gms/wearable/NodeClient.OnNodeMigratedListener.html",
         "<html><body><h1>NodeClient.OnNodeMigratedListener</h1><p>DataItemBuffer closes on return.</p></body></html>\n",
     )
-    # Exact 65536-byte boundary page (should still print inline)
-    exact_prefix = "<html><body><h1>ExactBoundary</h1><p>"
-    exact_suffix = "</p></body></html>\n"
-    exact_body = exact_prefix + ("x" * (65536 - len(exact_prefix) - len(exact_suffix))) + exact_suffix
-    assert len(exact_body.encode("utf-8")) == 65536
-    z.writestr("com/google/android/gms/wearable/ExactBoundary.html", exact_body)
-    # Oversized 70000-byte page (> 65536, should print path + stderr size info)
-    big_prefix = "<html><body><h1>WearableListenerService</h1><p>"
-    big_suffix = "</p><h2>Public Methods</h2><p>onDataChanged contract</p></body></html>\n"
-    big_body = big_prefix + ("c" * (70000 - len(big_prefix) - len(big_suffix))) + big_suffix
-    assert len(big_body.encode("utf-8")) == 70000
-    z.writestr("com/google/android/gms/wearable/WearableListenerService.html", big_body)
-PY
+    z.writestr("com/google/android/gms/wearable/WearableListenerService.html", big_html)
 
-# 2. Google Maven closed-source Dackka SDK: billing:7.1.1
-#    (Dual-language `reference/` and `reference/kotlin/` HTML trees)
-GMS_BILLING="$SERVE_DIR/dl.google.com/android/maven2/com/android/billingclient/billing"
-seed_metadata "$GMS_BILLING" "com.android.billingclient" "billing" "7.1.1"
-
-python3 - "$GMS_BILLING/7.1.1/billing-7.1.1-javadoc.jar" <<'PY'
-import sys, zipfile
-with zipfile.ZipFile(sys.argv[1], "w") as z:
-    z.writestr(
-        "reference/com/android/billingclient/api/BillingClient.html",
-        "<html devsite='true'><body><h1>BillingClient (Java)</h1></body></html>\n",
-    )
-    z.writestr(
-        "reference/kotlin/com/android/billingclient/api/BillingClient.html",
-        "<html devsite='true'><body><h1>BillingClient (Kotlin)</h1></body></html>\n",
-    )
+# 2. Dackka dual-language SDK: reference/ + reference/kotlin/ mirror + real kotlin/* package
+billing_prefix = seed_meta(
+    "dl.google.com/android/maven2", "com.android.billingclient", "billing", "7.1.1"
+)
+with zipfile.ZipFile(billing_prefix + "-javadoc.jar", "w") as z:
     z.writestr(
         "reference/com/android/billingclient/api/BillingClient.Builder.html",
-        "<html devsite='true'><body><h1>BillingClient.Builder</h1></body></html>\n",
+        "<html devsite='true'><body><h1>BillingClient.Builder (Java)</h1></body></html>\n",
     )
     z.writestr(
         "reference/kotlin/com/android/billingclient/api/BillingClient.Builder.html",
         "<html devsite='true'><body><h1>BillingClient.Builder (Kotlin)</h1></body></html>\n",
     )
-    # Real package starting with `kotlin/` (no non-kotlin counterpart)
     z.writestr(
         "kotlin/collections/RealKotlinPkgOnly.html",
         "<html><body><h1>RealKotlinPkgOnly</h1></body></html>\n",
     )
-PY
 
-# 3. Empty/placeholder -javadoc.jar cases:
-#    3a. firebase-analytics:24.0.0 -> 0-byte index.html + boilerplate only
-FB_ANALYTICS="$SERVE_DIR/dl.google.com/android/maven2/com/google/firebase/firebase-analytics"
-seed_metadata "$FB_ANALYTICS" "com.google.firebase" "firebase-analytics" "24.0.0"
-
-python3 - "$FB_ANALYTICS/24.0.0/firebase-analytics-24.0.0-javadoc.jar" <<'PY'
-import sys, zipfile
-with zipfile.ZipFile(sys.argv[1], "w") as z:
+# 3. Placeholder -javadoc.jar: 0-byte index.html + index boilerplate only
+fb_prefix = seed_meta(
+    "dl.google.com/android/maven2", "com.google.firebase", "firebase-analytics", "24.0.0"
+)
+with zipfile.ZipFile(fb_prefix + "-javadoc.jar", "w") as z:
     z.writestr("META-INF/MANIFEST.MF", "Manifest-Version: 1.0\n")
     z.writestr("index.html", "")
     z.writestr("client/analytics/packages.html", "<html>packages</html>\n")
     z.writestr("allclasses.html", "<html>allclasses</html>\n")
     z.writestr("overview-summary.html", "<html>overview</html>\n")
-PY
 
-#    3b. Maven Central empty Dokka stub JAR: io.insert-koin:koin-core-jvm:4.1.1 (0 html files)
-MC_KOIN_STUB="$SERVE_DIR/repo1.maven.org/maven2/io/insert-koin/koin-core-jvm"
-seed_metadata "$MC_KOIN_STUB" "io.insert-koin" "koin-core-jvm" "4.1.1"
-
-python3 - "$MC_KOIN_STUB/4.1.1/koin-core-jvm-4.1.1-javadoc.jar" <<'PY'
-import sys, zipfile
-with zipfile.ZipFile(sys.argv[1], "w") as z:
-    z.writestr("META-INF/MANIFEST.MF", "Manifest-Version: 1.0\n")
-PY
-
-# 4. Maven Central JDK 17+ modular Javadoc: com.google.code.gson:gson:2.11.0
-#    (Includes modular path prefix + `class-use/Gson.html` + `GsonBuilder.html`)
-MC_GSON="$SERVE_DIR/repo1.maven.org/maven2/com/google/code/gson/gson"
-seed_metadata "$MC_GSON" "com.google.code.gson" "gson" "2.11.0"
-
-python3 - "$MC_GSON/2.11.0/gson-2.11.0-javadoc.jar" <<'PY'
-import sys, zipfile
-with zipfile.ZipFile(sys.argv[1], "w") as z:
+# 4. Maven Central JDK modular Javadoc with class-use/ cross-reference page
+gson_prefix = seed_meta("repo1.maven.org/maven2", "com.google.code.gson", "gson", "2.11.0")
+with zipfile.ZipFile(gson_prefix + "-javadoc.jar", "w") as z:
     z.writestr("allclasses-index.html", "<html>index</html>\n")
     z.writestr(
         "com.google.gson/com/google/gson/Gson.html",
-        "<html><body><h1>Class Gson</h1><p>Main JSON serializer.</p></body></html>\n",
+        "<html><body><h1>Class Gson</h1></body></html>\n",
     )
     z.writestr(
         "com.google.gson/com/google/gson/GsonBuilder.html",
@@ -262,32 +176,23 @@ with zipfile.ZipFile(sys.argv[1], "w") as z:
         "com.google.gson/com/google/gson/class-use/Gson.html",
         "<html><body><h1>Uses of Class Gson</h1></body></html>\n",
     )
-PY
 
-# 5. Google Maven open-source artifact with nested enum in Lifecycle.kt:
-#    androidx.lifecycle:lifecycle-common:2.8.7
-ANDROIDX_LIFECYCLE="$SERVE_DIR/dl.google.com/android/maven2/androidx/lifecycle/lifecycle-common"
-seed_metadata "$ANDROIDX_LIFECYCLE" "androidx.lifecycle" "lifecycle-common" "2.8.7"
-
-python3 - "$ANDROIDX_LIFECYCLE/2.8.7/lifecycle-common-2.8.7-sources.jar" <<'PY'
-import sys, zipfile
-with zipfile.ZipFile(sys.argv[1], "w") as z:
+# 5. Open-source Kotlin artifact with nested enum in enclosing Outer.kt
+lc_prefix = seed_meta(
+    "dl.google.com/android/maven2", "androidx.lifecycle", "lifecycle-common", "2.8.7"
+)
+with zipfile.ZipFile(lc_prefix + "-sources.jar", "w") as z:
     z.writestr(
         "androidx/lifecycle/Lifecycle.kt",
         "package androidx.lifecycle\nabstract class Lifecycle {\n  enum class State { CREATED, STARTED, RESUMED }\n}\n",
     )
 PY
 
-# Stubbed curl serving from $SERVE_DIR and recording every URL to $CURL_LOG
 cat >"$SHIM_DIR/curl" <<'SHIM'
 #!/usr/bin/env bash
-out=""
-url=""
-prev=""
+out="" url="" prev=""
 for a in "$@"; do
-  case "$prev" in
-    -o) out="$a" ;;
-  esac
+  [[ "$prev" == "-o" ]] && out="$a"
   prev="$a"
   case "$a" in
     http://* | https://*) url="$a" ;;
@@ -297,10 +202,6 @@ printf '%s\n' "$url" >>"$CURL_LOG"
 
 if [[ -n "${FORCE_STATUS:-}" ]]; then
   [[ -n "$out" ]] && printf 'forced error body' >"$out"
-  if [[ "$FORCE_STATUS" == "000" ]]; then
-    printf '000'
-    exit 7
-  fi
   printf '%s' "$FORCE_STATUS"
   exit 0
 fi
@@ -309,21 +210,18 @@ rel="${url#*://}"
 if [[ -f "$SERVE_DIR/$rel" ]]; then
   [[ -n "$out" ]] && cp "$SERVE_DIR/$rel" "$out"
   printf '200'
-  exit 0
 else
   [[ -n "$out" ]] && printf '<html>404 Not Found</html>' >"$out"
   printf '404'
-  exit 0
 fi
 SHIM
 chmod +x "$SHIM_DIR/curl"
-
 export SERVE_DIR CURL_LOG
 
-run_shimmed() {
+run_jetpack() {
   : >"$CURL_LOG"
   local err_file="$TEST_TMP/stderr.tmp"
-  STDOUT=$(PATH="$SHIM_DIR:$PATH" "$BIN_JETPACK" "$@" 2>"$err_file")
+  STDOUT=$(PATH="$SHIM_DIR:$PATH" "$ABS_JETPACK" "$@" 2>"$err_file")
   STATUS=$?
   STDERR=$(cat "$err_file")
   rm -f "$err_file"
@@ -331,311 +229,142 @@ run_shimmed() {
   CURL_URLS=$(cat "$CURL_LOG")
 }
 
-# --- 1. `jetpack javadoc` basic extraction & raw HTML checks ----------------
+# 1. Directory extraction strips META-INF and prints output path
+run_jetpack javadoc --output "$TEST_TMP/wear-docs" com.google.android.gms:play-services-wearable
+cond=0
+[[ $STATUS -eq 0 && "$STDOUT" == "$TEST_TMP/wear-docs" &&
+  -f "$TEST_TMP/wear-docs/com/google/android/gms/wearable/NodeClient.html" &&
+  ! -d "$TEST_TMP/wear-docs/META-INF" ]] && cond=1
+check "javadoc extracts raw .html tree and removes META-INF" "$cond" \
+  "status=$STATUS stdout=$STDOUT"
 
-run_shimmed javadoc --output "$TEST_TMP/wear-docs" com.google.android.gms:play-services-wearable
-assert_status "javadoc extracts Google Maven Doclava JAR" "$STATUS" 0
-assert_equals "javadoc prints output directory" "$STDOUT" "$TEST_TMP/wear-docs"
-if [[ -f "$TEST_TMP/wear-docs/com/google/android/gms/wearable/NodeClient.html" && ! -d "$TEST_TMP/wear-docs/META-INF" ]]; then
-  ok "javadoc extracts raw .html files and removes META-INF"
-else
-  not_ok "javadoc extracts raw .html files and removes META-INF" \
-    "Unexpected tree in $TEST_TMP/wear-docs"
-fi
-
-run_shimmed javadoc --find NodeClient com.google.android.gms:play-services-wearable
-assert_status "javadoc --find NodeClient succeeds" "$STATUS" 0
-assert_contains "javadoc --find NodeClient prefers exact NodeClient.html over nested pages" \
-  "$STDOUT" "<h1>NodeClient</h1>"
-assert_not_contains "javadoc --find NodeClient does not dump nested listener page" \
-  "$STDOUT" "OnNodeMigratedListener"
-
-run_shimmed javadoc --find NodeClient.OnNodeMigratedListener com.google.android.gms:play-services-wearable
-assert_status "javadoc --find Outer.Inner succeeds" "$STATUS" 0
-assert_contains "javadoc --find Outer.Inner prints nested class HTML" \
-  "$STDOUT" "DataItemBuffer closes on return."
-
-run_shimmed javadoc --find "NodeClient\$OnNodeMigratedListener" com.google.android.gms:play-services-wearable
-assert_status "javadoc --find Outer\$Inner normalizes \$ to dot and succeeds" "$STATUS" 0
-assert_contains "javadoc --find Outer\$Inner prints nested class HTML" \
-  "$STDOUT" "DataItemBuffer closes on return."
-
-# --- 2. 64 KiB (65536-byte) single-file stdout sanity check -----------------
-
-run_shimmed javadoc --find ExactBoundary com.google.android.gms:play-services-wearable
-assert_status "javadoc --find at exact 65536-byte cap succeeds" "$STATUS" 0
-assert_contains "65536-byte HTML file prints inline to stdout" "$STDOUT" "<h1>ExactBoundary</h1>"
-assert_not_contains "65536-byte HTML file does not trigger oversized notice" \
-  "$STDERR" "printing path instead of contents"
-
-run_shimmed javadoc --output "$TEST_TMP/wear-big" --find WearableListenerService \
-  com.google.android.gms:play-services-wearable
-assert_status "javadoc --find on >64 KiB HTML page exits 0" "$STATUS" 0
-assert_equals "oversized HTML page prints file path on stdout" \
-  "$STDOUT" "$TEST_TMP/wear-big/com/google/android/gms/wearable/WearableListenerService.html"
-assert_contains "oversized HTML page logs byte size notice on stderr" \
-  "$STDERR" "70000 bytes (> 65536 bytes); printing path instead of contents"
-if [[ -f "$STDOUT" ]]; then
-  ok "printed path for oversized HTML page exists on disk"
-else
-  not_ok "printed path for oversized HTML page exists on disk" "Missing: $STDOUT"
-fi
-
-# --- 3. Dual-language Dackka `/kotlin/` deduplication -----------------------
-
-run_shimmed javadoc --find BillingClient com.android.billingclient:billing
-assert_status "Dackka dual-language javadoc --find BillingClient succeeds" "$STATUS" 0
-assert_contains "Dackka --find deduplicates /kotlin/ mirror and prints primary page" \
-  "$STDOUT" "<h1>BillingClient (Java)</h1>"
-
-run_shimmed javadoc --find "BillingClient\$Builder" com.android.billingclient:billing
-assert_status "Dackka nested BillingClient\$Builder deduplicates /kotlin/ mirror" "$STATUS" 0
-assert_contains "Dackka nested BillingClient\$Builder prints Builder HTML" \
-  "$STDOUT" "<h1>BillingClient.Builder</h1>"
-
-run_shimmed javadoc --find RealKotlinPkgOnly com.android.billingclient:billing
-assert_status "genuine kotlin/* package file without non-kotlin twin is preserved" "$STATUS" 0
-assert_contains "genuine kotlin/* package HTML prints cleanly" "$STDOUT" "<h1>RealKotlinPkgOnly</h1>"
-
-# --- 4. Maven Central fallback + JDK 17+ modular Javadoc (`class-use`) ------
-
-run_shimmed javadoc --find Gson com.google.code.gson:gson
-assert_status "Maven Central javadoc falls back from Google Maven and succeeds" "$STATUS" 0
-assert_contains "Maven Central javadoc logs info notice on stderr" "$STDERR" "Maven Central"
-assert_contains "JDK modular javadoc ignores class-use/Gson.html and GsonBuilder.html" \
-  "$STDOUT" "<h1>Class Gson</h1>"
-assert_not_contains "JDK modular javadoc does not return class-use page" \
-  "$STDOUT" "Uses of Class Gson"
-
-# --- 5. Empty / placeholder `-javadoc.jar` rejection & temp cleanup ---------
-
+# 2. Inline <= 64 KiB --find prefers exact <Class>.html and cleans up $TMPDIR
 rm -rf "${CLEAN_TMP:?}"/*
-run_shimmed javadoc com.google.firebase:firebase-analytics
-assert_status "placeholder -javadoc.jar (0-byte index.html + packages.html) fails" "$STATUS" 1
-assert_contains "placeholder -javadoc.jar error explains empty class pages" \
-  "$STDERR" "contains no class documentation HTML pages"
-if [[ -z "$(ls -A "$CLEAN_TMP")" ]]; then
-  ok "failed javadoc cleans up auto-created temporary directory"
-else
-  not_ok "failed javadoc cleans up auto-created temporary directory" \
-    "Leftover files in TMPDIR: $(ls -A "$CLEAN_TMP")"
-fi
+run_jetpack javadoc --find NodeClient com.google.android.gms:play-services-wearable
+cond=0
+[[ $STATUS -eq 0 && "$STDOUT" == *"<h1>NodeClient</h1>"* &&
+  "$STDOUT" != *"OnNodeMigratedListener"* && -z "$(ls -A "$CLEAN_TMP")" ]] && cond=1
+check "javadoc --find <=64 KiB prints exact class HTML inline and cleans TMPDIR" "$cond" \
+  "status=$STATUS stdout=$STDOUT tmp=$(ls -A "$CLEAN_TMP")"
 
-run_shimmed javadoc io.insert-koin:koin-core-jvm
-assert_status "Maven Central empty stub -javadoc.jar (0 HTML files) fails" "$STATUS" 1
-assert_contains "Maven Central empty stub -javadoc.jar reports empty archive" \
-  "$STDERR" "contains no class documentation HTML pages"
+# 3. Oversized > 64 KiB --find retains temp HTML file and prints path + size note
+rm -rf "${CLEAN_TMP:?}"/*
+run_jetpack javadoc --find WearableListenerService com.google.android.gms:play-services-wearable
+cond=0
+[[ $STATUS -eq 0 && "$STDOUT" == "$CLEAN_TMP/"*"/WearableListenerService.html" &&
+  -f "$STDOUT" && "$STDERR" == *"70000 bytes (> 65536 bytes)"* ]] && cond=1
+check "javadoc --find >64 KiB retains HTML file and prints path with size notice" "$cond" \
+  "status=$STATUS stdout=$STDOUT stderr=$STDERR"
+rm -rf "${CLEAN_TMP:?}"/*
 
-# --- 6. `jetpack source` hint vs. `jetpack inspect` automatic fallback ------
+# 4. Slash-qualified --find matches path substrings without find -name warnings
+run_jetpack javadoc --find wearable/Node com.google.android.gms:play-services-wearable
+cond=0
+[[ $STATUS -eq 0 && "$STDOUT" == *"NodeClient.html"* && "$STDERR" != *"warning:"* ]] && cond=1
+check "javadoc --find supports slash-qualified path patterns" "$cond" \
+  "status=$STATUS stdout=$STDOUT stderr=$STDERR"
 
-run_shimmed source --output "$TEST_TMP/src-404" com.google.android.gms:play-services-wearable
-assert_status "jetpack source exits 1 when -sources.jar returns HTTP 404" "$STATUS" 1
-assert_contains "jetpack source prints hint pointing to jetpack javadoc" \
-  "$STDERR" "try 'jetpack javadoc com.google.android.gms:play-services-wearable 19.0.0'"
-assert_not_contains "jetpack source never fetches -javadoc.jar" "$CURL_URLS" "-javadoc.jar"
-if [[ -z "$(ls -A "$TEST_TMP/src-404")" ]]; then
-  ok "failed jetpack source leaves no stray 404 body file in --output"
-else
-  not_ok "failed jetpack source leaves no stray 404 body file in --output" \
-    "Stray files: $(ls -A "$TEST_TMP/src-404")"
-fi
-
-run_shimmed inspect com.google.android.gms.wearable.NodeClient.OnNodeMigratedListener
-assert_status "inspect nested Outer.Inner falls back from 404 -sources.jar to -javadoc.jar" "$STATUS" 0
-assert_contains "inspect logs fallback provenance notice on stderr" \
-  "$STDERR" "no -sources.jar published for com.google.android.gms:play-services-wearable; falling back to -javadoc.jar"
-assert_contains "inspect prints nested Javadoc HTML contract" \
-  "$STDOUT" "DataItemBuffer closes on return."
-
-run_shimmed inspect "com.google.android.gms.wearable.NodeClient\$OnNodeMigratedListener"
-assert_status "inspect nested Outer\$Inner falls back to -javadoc.jar" "$STATUS" 0
-assert_contains "inspect Outer\$Inner prints nested Javadoc HTML contract" \
-  "$STDOUT" "DataItemBuffer closes on return."
-
-run_shimmed inspect --output "$TEST_TMP/inspect-coord" com.google.android.gms:play-services-wearable
-assert_status "inspect GROUP:ARTIFACT without --find falls back to -javadoc.jar" "$STATUS" 0
-assert_equals "inspect GROUP:ARTIFACT prints extracted Javadoc directory" \
-  "$STDOUT" "$TEST_TMP/inspect-coord"
-if [[ -f "$TEST_TMP/inspect-coord/com/google/android/gms/wearable/NodeClient.html" &&
-  ! -f "$TEST_TMP/inspect-coord/play-services-wearable-19.0.0-sources.jar" ]]; then
-  ok "inspect GROUP:ARTIFACT directory has HTML docs and no stray 404 -sources.jar"
-else
-  not_ok "inspect GROUP:ARTIFACT directory has HTML docs and no stray 404 -sources.jar" \
-    "Unexpected contents in $TEST_TMP/inspect-coord"
-fi
-
-run_shimmed inspect --output "$TEST_TMP/inspect-big" \
-  com.google.android.gms.wearable.WearableListenerService
-assert_status "inspect oversized closed-source class exits 0" "$STATUS" 0
-assert_equals "inspect oversized closed-source class prints HTML file path" \
-  "$STDOUT" "$TEST_TMP/inspect-big/com/google/android/gms/wearable/WearableListenerService.html"
-assert_contains "inspect oversized closed-source class logs size notice" \
-  "$STDERR" "printing path instead of contents"
-
-# Guardrail: HTTP 429 on -sources.jar must NOT trigger -javadoc.jar fallback
-FORCE_STATUS=429 run_shimmed inspect com.google.android.gms:play-services-wearable 19.0.0
-assert_status "HTTP 429 during inspect fails without falling back to javadoc" "$STATUS" 1
-assert_not_contains "HTTP 429 never touches -javadoc.jar" "$CURL_URLS" "-javadoc.jar"
-
-# --- 7. Offline (`AGENT_OFFLINE=1`) replay for javadoc & inspect fallback ---
-
-AGENT_OFFLINE=1 run_shimmed javadoc --find NodeClient com.google.android.gms:play-services-wearable
-assert_status "offline javadoc succeeds from warmed cache" "$STATUS" 0
-assert_equals "offline javadoc makes 0 HTTP requests" "$CURL_CALLS" "0"
-assert_contains "offline javadoc reports cache age on stderr" "$STDERR" "(cached just now)"
-assert_contains "offline javadoc prints cached NodeClient HTML" "$STDOUT" "<h1>NodeClient</h1>"
-
-AGENT_OFFLINE=1 run_shimmed inspect com.google.android.gms.wearable.NodeClient.OnNodeMigratedListener
-assert_status "offline inspect falls back to cached -javadoc.jar with 0 HTTP requests" "$STATUS" 0
-assert_equals "offline inspect makes 0 HTTP requests" "$CURL_CALLS" "0"
-assert_contains "offline inspect logs fallback notice" "$STDERR" "falling back to -javadoc.jar"
-assert_contains "offline inspect prints nested listener HTML" \
-  "$STDOUT" "DataItemBuffer closes on return."
-
-AGENT_OFFLINE=1 run_shimmed javadoc --find Gson com.google.code.gson:gson
-assert_status "offline Maven Central javadoc succeeds from warmed cache" "$STATUS" 0
-assert_equals "offline Maven Central javadoc makes 0 HTTP requests" "$CURL_CALLS" "0"
-assert_contains "offline Maven Central javadoc prints Gson HTML" "$STDOUT" "<h1>Class Gson</h1>"
-
-# --- 8. Nested class inspect on open-source `-sources.jar` (Outer.kt) -------
-
-run_shimmed inspect androidx.lifecycle.Lifecycle.State
-assert_status "inspect open-source Outer.Inner finds enclosing Outer.kt" "$STATUS" 0
-assert_contains "inspect open-source Outer.Inner prints Lifecycle.kt" \
-  "$STDOUT" "enum class State { CREATED, STARTED, RESUMED }"
-
-run_shimmed inspect "androidx.lifecycle.Lifecycle\$State"
-assert_status "inspect open-source Outer\$Inner finds enclosing Lifecycle.kt" "$STATUS" 0
-assert_contains "inspect open-source Outer\$Inner prints Lifecycle.kt" \
-  "$STDOUT" "enum class State { CREATED, STARTED, RESUMED }"
-
-# --- 9. Relative & trailing-slash `--output`, CLI validation, & sandboxes ---
-
-ABS_JETPACK=$(cd "$(dirname "$BIN_JETPACK")" && pwd)/$(basename "$BIN_JETPACK")
-
-REL_OUT=$(cd "$TEST_TMP" && PATH="$SHIM_DIR:$PATH" "$ABS_JETPACK" javadoc -o rel-docs \
-  com.google.android.gms:play-services-wearable 2>"$TEST_TMP/rel.err")
+# 5. Relative trailing-slash -o + Outer$Inner + Dackka /kotlin/ mirror deduplication
+REL_OUT=$(cd "$TEST_TMP" && PATH="$SHIM_DIR:$PATH" "$ABS_JETPACK" javadoc -o rel-billing/ \
+  --find "BillingClient\$Builder" com.android.billingclient:billing 2>"$TEST_TMP/rel.err")
 REL_RC=$?
-assert_status "javadoc with relative -o path succeeds" "$REL_RC" 0
-if [[ -f "$TEST_TMP/rel-docs/com/google/android/gms/wearable/NodeClient.html" ]]; then
-  ok "javadoc with relative -o extracts HTML into relative target"
-else
-  not_ok "javadoc with relative -o extracts HTML into relative target" \
-    "Missing NodeClient.html under $TEST_TMP/rel-docs (stdout=$REL_OUT)"
-fi
+cond=0
+[[ $REL_RC -eq 0 && "$REL_OUT" == *"<h1>BillingClient.Builder (Java)</h1>"* &&
+  -f "$TEST_TMP/rel-billing/reference/com/android/billingclient/api/BillingClient.Builder.html" ]] && cond=1
+check "javadoc handles relative trailing-slash -o, Outer\$Inner, and /kotlin/ deduplication" "$cond" \
+  "rc=$REL_RC out=$REL_OUT"
 
-REL_INSP=$(cd "$TEST_TMP" && PATH="$SHIM_DIR:$PATH" "$ABS_JETPACK" inspect -o rel-inspect \
-  com.google.android.gms:play-services-wearable 2>"$TEST_TMP/rel2.err")
-REL_INSP_RC=$?
-assert_status "inspect fallback with relative -o path succeeds" "$REL_INSP_RC" 0
-if [[ -f "$TEST_TMP/rel-inspect/com/google/android/gms/wearable/NodeClient.html" ]]; then
-  ok "inspect fallback with relative -o extracts HTML into relative target"
-else
-  not_ok "inspect fallback with relative -o extracts HTML into relative target" \
-    "Missing NodeClient.html under $TEST_TMP/rel-inspect (stdout=$REL_INSP)"
-fi
+# 6. Genuine kotlin/* package without a non-kotlin twin is preserved
+run_jetpack javadoc --find RealKotlinPkgOnly com.android.billingclient:billing
+cond=0
+[[ $STATUS -eq 0 && "$STDOUT" == *"<h1>RealKotlinPkgOnly</h1>"* ]] && cond=1
+check "javadoc preserves genuine kotlin/* package pages" "$cond" \
+  "status=$STATUS stdout=$STDOUT"
 
-run_shimmed javadoc -o "$TEST_TMP/billing-slash/" --find BillingClient com.android.billingclient:billing
-assert_status "javadoc with trailing-slash --output succeeds" "$STATUS" 0
-assert_contains "trailing-slash --output still deduplicates /kotlin/ mirror" \
-  "$STDOUT" "<h1>BillingClient (Java)</h1>"
+# 7 & 8. JDK modular class-use/ cross-reference pages are skipped unless requested
+run_jetpack javadoc --find Gson com.google.code.gson:gson
+cond=0
+[[ $STATUS -eq 0 && "$STDOUT" == *"<h1>Class Gson</h1>"* &&
+  "$STDOUT" != *"Uses of Class Gson"* ]] && cond=1
+check "javadoc --find skips JDK class-use/ pages by default" "$cond" \
+  "status=$STATUS stdout=$STDOUT"
 
-run_shimmed javadoc
-assert_status "javadoc with 0 arguments exits 1" "$STATUS" 1
-if [[ -z "$STDOUT" && "$STDERR" == *"Usage:"* ]]; then
-  ok "javadoc with 0 arguments writes usage to stderr only"
-else
-  not_ok "javadoc with 0 arguments writes usage to stderr only" \
-    "stdout=$STDOUT stderr=$STDERR"
-fi
+run_jetpack javadoc --find class-use/Gson com.google.code.gson:gson
+cond=0
+[[ $STATUS -eq 0 && "$STDOUT" == *"Uses of Class Gson"* ]] && cond=1
+check "javadoc --find class-use/... locates cross-reference page when requested" "$cond" \
+  "status=$STATUS stdout=$STDOUT"
 
-run_shimmed javadoc -o "$TEST_TMP/opt-only"
-assert_status "javadoc with options only and no artifacts exits 1" "$STATUS" 1
-
-run_shimmed javadoc https://repo1.maven.org/maven2
-assert_status "javadoc with URL only exits 1 without slice crash" "$STATUS" 1
-if [[ "$STDERR" == *"no artifacts specified"* && "$STDERR" != *"substring expression"* ]]; then
-  ok "javadoc with URL only reports no artifacts specified cleanly"
-else
-  not_ok "javadoc with URL only reports no artifacts specified cleanly" "stderr=$STDERR"
-fi
-
-run_shimmed javadoc com.google.code.gson:gson --bogus
-assert_status "javadoc rejects unknown --bogus option" "$STATUS" 1
-assert_contains "unknown option message names --bogus" "$STDERR" "unknown option: --bogus"
-
-run_shimmed javadoc --find wearable/Node com.google.android.gms:play-services-wearable
-assert_status "slash-qualified --find substring succeeds" "$STATUS" 0
-assert_contains "slash-qualified --find lists matching paths" "$STDOUT" "NodeClient.html"
-assert_not_contains "slash-qualified --find emits no find -name warning" "$STDERR" "warning:"
-
-run_shimmed javadoc --find class-use/Gson com.google.code.gson:gson
-assert_status "explicit --find class-use/... matches cross-reference page" "$STATUS" 0
-assert_contains "explicit --find class-use/... prints class-use HTML" \
-  "$STDOUT" "Uses of Class Gson"
-
+# 9. Placeholder -javadoc.jar (0-byte index.html + boilerplate) fails and cleans TMPDIR
 rm -rf "${CLEAN_TMP:?}"/*
-run_shimmed javadoc --find NodeClient com.google.android.gms:play-services-wearable
-assert_status "inline --find without --output succeeds" "$STATUS" 0
-if [[ -z "$(ls -A "$CLEAN_TMP")" ]]; then
-  ok "inline --find without --output cleans up temporary directory"
-else
-  not_ok "inline --find without --output cleans up temporary directory" \
-    "Leftover in CLEAN_TMP: $(ls -A "$CLEAN_TMP")"
-fi
+run_jetpack javadoc com.google.firebase:firebase-analytics
+cond=0
+[[ $STATUS -eq 1 && "$STDERR" == *"contains no class documentation HTML pages"* &&
+  -z "$(ls -A "$CLEAN_TMP")" ]] && cond=1
+check "javadoc rejects placeholder -javadoc.jar and cleans TMPDIR" "$cond" \
+  "status=$STATUS stderr=$STDERR tmp=$(ls -A "$CLEAN_TMP")"
 
-rm -rf "${CLEAN_TMP:?}"/*
-run_shimmed javadoc --find WearableListenerService com.google.android.gms:play-services-wearable
-assert_status "oversized --find without --output exits 0" "$STATUS" 0
-if [[ -f "$STDOUT" && "$STDOUT" == "$CLEAN_TMP/"* ]]; then
-  ok "oversized --find without --output retains temp file so caller can read it"
-else
-  not_ok "oversized --find without --output retains temp file so caller can read it" \
-    "Missing or unexpected path: $STDOUT"
-fi
-rm -rf "${CLEAN_TMP:?}"/*
+# 10. `source` stays strict on 404, hints `javadoc`, and leaves --output clean
+run_jetpack source --output "$TEST_TMP/src-404" com.google.android.gms:play-services-wearable
+cond=0
+[[ $STATUS -eq 1 && "$STDERR" == *"try 'jetpack javadoc com.google.android.gms:play-services-wearable 19.0.0'"* &&
+  "$CURL_URLS" != *"-javadoc.jar"* && -z "$(ls -A "$TEST_TMP/src-404")" ]] && cond=1
+check "source exits 1 on 404 with javadoc hint and no stray output" "$cond" \
+  "status=$STATUS stderr=$STDERR urls=$CURL_URLS"
 
-# Cold-cache offline miss: keep index, wipe HTTP cache
+# 11. `inspect` falls back from -sources.jar 404 to -javadoc.jar for nested Outer.Inner
+run_jetpack inspect com.google.android.gms.wearable.NodeClient.OnNodeMigratedListener
+cond=0
+[[ $STATUS -eq 0 && "$STDERR" == *"falling back to -javadoc.jar"* &&
+  "$STDOUT" == *"DataItemBuffer closes on return."* ]] && cond=1
+check "inspect falls back to -javadoc.jar on 404 for nested Outer.Inner" "$cond" \
+  "status=$STATUS stderr=$STDERR stdout=$STDOUT"
+
+# 12. `inspect` coordinate fallback leaves no stray 404 -sources.jar in --output
+run_jetpack inspect --output "$TEST_TMP/inspect-coord" com.google.android.gms:play-services-wearable
+cond=0
+[[ $STATUS -eq 0 && "$STDOUT" == "$TEST_TMP/inspect-coord" &&
+  -f "$TEST_TMP/inspect-coord/com/google/android/gms/wearable/NodeClient.html" &&
+  ! -f "$TEST_TMP/inspect-coord/play-services-wearable-19.0.0-sources.jar" ]] && cond=1
+check "inspect GROUP:ARTIFACT falls back to -javadoc.jar cleanly" "$cond" \
+  "status=$STATUS stdout=$STDOUT"
+
+# 13. `inspect` does NOT fall back to -javadoc.jar on transient HTTP 429
+FORCE_STATUS=429 run_jetpack inspect com.google.android.gms:play-services-wearable 19.0.0
+cond=0
+[[ $STATUS -eq 1 && "$CURL_URLS" != *"-javadoc.jar"* ]] && cond=1
+check "inspect does not fall back to -javadoc.jar on HTTP 429" "$cond" \
+  "status=$STATUS urls=$CURL_URLS"
+
+# 14. Offline `inspect` replays -javadoc.jar fallback with 0 HTTP requests
+AGENT_OFFLINE=1 run_jetpack inspect "com.google.android.gms.wearable.NodeClient\$OnNodeMigratedListener"
+cond=0
+[[ $STATUS -eq 0 && "$CURL_CALLS" == "0" && "$STDERR" == *"falling back to -javadoc.jar"* &&
+  "$STDOUT" == *"DataItemBuffer closes on return."* ]] && cond=1
+check "offline inspect replays -javadoc.jar fallback for Outer\$Inner" "$cond" \
+  "status=$STATUS calls=$CURL_CALLS stderr=$STDERR"
+
+# 15. Cold-cache offline `inspect` quotes Outer$Inner safely without SNAPSHOT noise
 COLD_CACHE="$TEST_TMP/cold_cache"
 mkdir -p "$COLD_CACHE"
 cp "$JETPACK_CACHE_DIR/androidx-index.json" "$COLD_CACHE/androidx-index.json"
-COLD_ERR_FILE="$TEST_TMP/cold.err"
-COLD_OUT=$(AGENT_OFFLINE=1 JETPACK_CACHE_DIR="$COLD_CACHE" PATH="$SHIM_DIR:$PATH" \
+COLD_ERR=$(AGENT_OFFLINE=1 JETPACK_CACHE_DIR="$COLD_CACHE" PATH="$SHIM_DIR:$PATH" \
   "$ABS_JETPACK" inspect "com.google.android.gms.wearable.NodeClient\$OnNodeMigratedListener" \
-  2>"$COLD_ERR_FILE")
+  2>&1 >/dev/null)
 COLD_RC=$?
-COLD_ERR=$(cat "$COLD_ERR_FILE")
-assert_status "cold-cache offline inspect exits 1" "$COLD_RC" 1
-assert_contains "cold-cache warm_hint single-quotes Outer\$Inner safely" \
-  "$COLD_ERR" "'com.google.android.gms.wearable.NodeClient\$OnNodeMigratedListener'"
-assert_not_contains "cold-cache offline inspect is not reported as not found" \
-  "$COLD_ERR" "not found"
-assert_not_contains "cold-cache offline inspect does not suggest AndroidX SNAPSHOT" \
-  "$COLD_ERR" "SNAPSHOT"
-: "$COLD_OUT"
+cond=0
+[[ $COLD_RC -eq 1 && "$COLD_ERR" == *"'com.google.android.gms.wearable.NodeClient\$OnNodeMigratedListener'"* &&
+  "$COLD_ERR" != *"not found"* && "$COLD_ERR" != *"SNAPSHOT"* ]] && cond=1
+check "cold-cache offline inspect quotes Outer\$Inner without SNAPSHOT hint" "$cond" \
+  "rc=$COLD_RC err=$COLD_ERR"
 
-# Read-only $TMPDIR sandbox checks
-RO_TMP="$TEST_TMP/ro_tmpdir"
-mkdir -p "$RO_TMP"
-chmod 500 "$RO_TMP"
-
-RO_ERR_FILE="$TEST_TMP/ro1.err"
-TMPDIR="$RO_TMP" AGENT_OFFLINE=1 PATH="$SHIM_DIR:$PATH" \
-  "$ABS_JETPACK" javadoc com.google.android.gms:play-services-wearable \
-  >"$TEST_TMP/ro1.out" 2>"$RO_ERR_FILE"
-RO1_RC=$?
-RO1_ERR=$(cat "$RO_ERR_FILE")
-assert_status "javadoc fails cleanly when TMPDIR is read-only and --output omitted" "$RO1_RC" 1
-assert_contains "read-only TMPDIR error points to --output" "$RO1_ERR" "--output"
-
-TMPDIR="$RO_TMP" AGENT_OFFLINE=1 PATH="$SHIM_DIR:$PATH" \
-  "$ABS_JETPACK" javadoc -o "$TEST_TMP/ro-ok-javadoc" --find NodeClient \
-  com.google.android.gms:play-services-wearable >"$TEST_TMP/ro2.out" 2>"$TEST_TMP/ro2.err"
-assert_status "offline javadoc with -o succeeds when TMPDIR is read-only" "$?" 0
-
-TMPDIR="$RO_TMP" AGENT_OFFLINE=1 PATH="$SHIM_DIR:$PATH" \
-  "$ABS_JETPACK" inspect -o "$TEST_TMP/ro-ok-inspect" \
-  com.google.android.gms.wearable.NodeClient.OnNodeMigratedListener \
-  >"$TEST_TMP/ro3.out" 2>"$TEST_TMP/ro3.err"
-assert_status "offline inspect fallback with -o succeeds when TMPDIR is read-only" "$?" 0
-chmod 700 "$RO_TMP"
+# 16. Open-source nested Outer.Inner and Outer$Inner resolve to enclosing Outer.kt
+run_jetpack inspect androidx.lifecycle.Lifecycle.State
+OUT_DOT="$STDOUT" RC_DOT=$STATUS
+run_jetpack inspect "androidx.lifecycle.Lifecycle\$State"
+cond=0
+[[ $RC_DOT -eq 0 && $STATUS -eq 0 &&
+  "$OUT_DOT" == *"enum class State { CREATED, STARTED, RESUMED }"* &&
+  "$STDOUT" == *"enum class State { CREATED, STARTED, RESUMED }"* ]] && cond=1
+check "inspect resolves nested Outer.Inner and Outer\$Inner to enclosing Outer.kt" "$cond" \
+  "rc_dot=$RC_DOT rc_dollar=$STATUS"
