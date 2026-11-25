@@ -2,9 +2,9 @@
 name: taskgo
 description: >-
   Tracks projects and tasks in a private Git-backed control repository of
-  Markdown records (STATUS.md, tasks/TASK-XXXXX-*.md, decisions/, INBOX.md)
-  through the taskgo CLI or MCP tools. Use when the user wants to add, start,
-  update, block, close, or hand off a task; asks what to work on next or what is
+  Markdown records (STATUS.md, tasks/TASK-XXXXX-*.md, decisions/) through the
+  taskgo CLI or MCP tools. Use when the user wants to add, start, update, block, close,
+  or hand off a task; asks what to work on next or what is
   blocked or due; mentions a TASK-XXXXX ID, a tracked project, or the control
   repo; records a decision (ADR); or wants a weekly, monthly, or quarterly
   activity report from tracked work. Use at the start and end of work on a

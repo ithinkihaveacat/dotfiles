@@ -42,7 +42,8 @@ complete -f -c taskgo -n __fish_use_subcommand -a handoff -d 'Print agent instru
 complete -f -c taskgo -n __fish_use_subcommand -a handover -d 'Print agent instructions for a project or task'
 complete -f -c taskgo -n __fish_use_subcommand -a dispatch -d 'Print agent instructions for a project or task'
 complete -f -c taskgo -n __fish_use_subcommand -a sync -d 'Update STATUS.md snapshot'
-complete -f -c taskgo -n __fish_use_subcommand -a check -d 'Sweep wait_for gates and date horizons'
+complete -f -c taskgo -n __fish_use_subcommand -a triage -d 'Sweep due dates, gates, and stale items'
+complete -f -c taskgo -n __fish_use_subcommand -a check -d 'Sweep due dates, gates, and stale items'
 complete -f -c taskgo -n __fish_use_subcommand -a doctor -d 'Run mechanical checks (read-only)'
 complete -f -c taskgo -n __fish_use_subcommand -a fix -d 'Auto-heal task metadata and snapshots'
 complete -f -c taskgo -n __fish_use_subcommand -a history -d 'Show frontmatter history'
@@ -60,7 +61,7 @@ complete -f -c taskgo -l no-fetch -d 'Skip remote Git fetch and push (same as --
 complete -c taskgo -f -s h -l help -d 'Display help message and exit'
 
 # Subcommand arguments (Projects)
-complete -f -c taskgo -n '__fish_seen_subcommand_from create list info skills status handoff handover dispatch sync check doctor fix' -a '(__fish_taskgo_projects)' -d Project
+complete -f -c taskgo -n '__fish_seen_subcommand_from create list info skills status handoff handover dispatch sync triage check doctor fix' -a '(__fish_taskgo_projects)' -d Project
 
 # Subcommand arguments (Task IDs for update / history / checkpoint)
 complete -f -c taskgo -n '__fish_seen_subcommand_from update history checkpoint status handoff handover dispatch' -a '(__fish_taskgo_tasks)' -d 'Task ID'
@@ -136,8 +137,8 @@ complete -f -c taskgo -n '__fish_seen_subcommand_from handoff handover dispatch'
 complete -f -c taskgo -n '__fish_seen_subcommand_from list' -s s -l state -l status -x -a 'todo in-progress blocked done cancelled ready' -d 'Filter by state'
 complete -f -c taskgo -n '__fish_seen_subcommand_from list' -s j -l json -d 'Emit JSON output'
 
-# info, skills, status, and check options
-complete -f -c taskgo -n '__fish_seen_subcommand_from info skills status check' -s j -l json -d 'Emit JSON output'
+# info, skills, status, and triage options
+complete -f -c taskgo -n '__fish_seen_subcommand_from info skills status triage check' -s j -l json -d 'Emit JSON output'
 
 # fix options
 complete -f -c taskgo -n '__fish_seen_subcommand_from fix' -l dry-run -d 'Preview repairs without modifying files'

@@ -4001,6 +4001,121 @@ def audit_project_adrs(snap: Snapshot, name: str, findings: list[Finding]) -> No
             )
 
 
+def _read_reference_frontmatter(
+    snap: Snapshot, rel: str
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Parses optional YAML frontmatter on a reference Markdown file.
+
+    Returns (fm_dict_or_none, error_message_or_none). Plain files without
+    frontmatter return ({}, None).
+    """
+    try:
+        content = snap.read_text(rel)
+    except OSError:
+        return {}, None
+    if not content.startswith("---"):
+        return {}, None
+    m_fm = _FRONTMATTER_RE.match(content)
+    if not m_fm:
+        if re.match(r"^---\r?\n", content):
+            return None, "frontmatter is not closed"
+        return {}, None
+    ok, payload = _load_frontmatter_yaml(m_fm.group(1))
+    if not ok:
+        err_kind, err_detail = payload
+        if err_kind == "not_dict":
+            return None, "frontmatter must be a YAML mapping"
+        return None, str(err_detail)
+    return {str(k).lower(): v for k, v in payload.items()}, None
+
+
+def audit_project_references(
+    snap: Snapshot,
+    name: str,
+    findings: list[Finding],
+    only: set[str] | None = None,
+) -> None:
+    """Validates optional reference frontmatter and links to deprecated references."""
+    refs_dir = f"{name}/references"
+    if not snap.is_dir(refs_dir):
+        return
+
+    ref_files = snap.walk_md(refs_dir)
+    if not ref_files:
+        return
+
+    deprecated_refs: dict[str, str | None] = {}
+    for rel in ref_files:
+        fm, err = _read_reference_frontmatter(snap, rel)
+        if err is not None:
+            if only is None or rel in only:
+                findings.append(
+                    Finding(
+                        category="reference",
+                        severity="WARN",
+                        message=f"{rel}: invalid YAML frontmatter: {err}",
+                        path=rel,
+                        remediation=None,
+                    )
+                )
+            continue
+        assert fm is not None
+        status = str(fm.get("status", "")).strip().lower()
+        if status == "deprecated":
+            sup = fm.get("superseded_by")
+            sup_str = str(sup).strip() if sup is not None and str(sup).strip() else None
+            deprecated_refs[rel] = sup_str
+
+    if not deprecated_refs:
+        return
+
+    # Check project README and open tasks for links to deprecated references.
+    sources_to_check: list[str] = []
+    doc_rel = project_readme_rel(snap, name)
+    if doc_rel is not None and (only is None or doc_rel in only):
+        sources_to_check.append(doc_rel)
+    tasks_dir = f"{name}/tasks"
+    for tf in snap.glob_md(tasks_dir):
+        if only is not None and tf not in only:
+            continue
+        row = task_row_for_path(snap, tf)
+        if row is not None and row.status in RESOLVED_STATES:
+            continue
+        sources_to_check.append(tf)
+
+    for src in sources_to_check:
+        try:
+            raw_content = snap.read_text(src)
+        except OSError:
+            continue
+        body = extract_body(raw_content)
+        src_dir = posixpath.dirname(src)
+        cited: list[str] = []
+        for m in re.finditer(r"\[[^\]]+\]\(([^)\s]+)\)", body):
+            target = m.group(1).split("#", 1)[0].strip()
+            if (
+                not target
+                or re.match(r"^(?:https?|mailto|conversation|file):", target)
+                or target.startswith("/")
+            ):
+                continue
+            resolved = resolve_link(snap, src_dir, target)
+            if resolved in deprecated_refs:
+                cited.append(resolved)
+        for dep_rel in dict.fromkeys(cited):
+            sup = deprecated_refs[dep_rel]
+            suffix = f" (superseded by {sup})" if sup else ""
+            findings.append(
+                Finding(
+                    category="reference",
+                    severity="WARN",
+                    message=f"{src}: links to deprecated reference '{dep_rel}'{suffix}",
+                    path=src,
+                    remediation=None,
+                )
+            )
+
+
 def audit_workspace(root: Path, target_project: str | None = None) -> list[Finding]:
     """Audits the working tree: repository checks, then the snapshot audit."""
     findings: list[Finding] = []
@@ -4030,7 +4145,7 @@ def audit_workspace(root: Path, target_project: str | None = None) -> list[Findi
 # Root files taskgo scaffolds and formats; other root Markdown is left alone.
 # Root records the formatting sweep covers. AGENTS.md is left out: outside
 # its managed block it holds the repository's own policy, in its own style.
-FORMATTED_ROOT_RECORDS = ("INBOX.md", "README.md")
+FORMATTED_ROOT_RECORDS = ("README.md",)
 
 
 def is_record_file(rel: str) -> bool:
@@ -4210,25 +4325,7 @@ def audit_snapshot(
                         )
                     )
 
-        # 2. INBOX.md check & remediation
-        inbox_file = "INBOX.md"
-        if not snap.is_file(inbox_file):
-
-            def remediate_missing_inbox() -> list[str]:
-                snap.write_markdown(inbox_file, "# Inbox\n")
-                return [inbox_file]
-
-            findings.append(
-                Finding(
-                    category="root",
-                    severity="WARN",
-                    message="missing INBOX.md",
-                    path=inbox_file,
-                    remediation=remediate_missing_inbox,
-                )
-            )
-
-        # 2b. Directories with tracker records but no README are not
+        # 2. Directories with tracker records but no README are not
         # projects: list_projects, handoff, and the MCP server skip them.
         if not target_project:
             for name in snap.list_dir(""):
@@ -4642,6 +4739,9 @@ def audit_snapshot(
         if only is None or any(p.startswith(f"{name}/decisions/") for p in only):
             audit_project_adrs(snap, name, findings)
 
+        # Check optional reference frontmatter and links to deprecated references
+        audit_project_references(snap, name, findings, only=only)
+
         # Check Markdown formatting of the project's records; free-form
         # documents are the owner's to format.
         for mf in snap.walk_md(name) if markdown else ():
@@ -4736,51 +4836,6 @@ def audit_snapshot(
                         message=(
                             f"{row.rel_path}: blocked_by names resolved task(s): "
                             f"{formatted}; re-plan or remove the edge"
-                        ),
-                        path=row.rel_path,
-                        remediation=None,
-                    )
-                )
-
-            # Invalid dates are reported by the schema field check.
-            due_date = parse_iso_date(row.due)
-            if due_date is not None and due_date < today:
-                findings.append(
-                    Finding(
-                        category="schedule",
-                        severity="FAIL",
-                        message=(
-                            f"{row.rel_path}: overdue (due {due_date.isoformat()}, "
-                            f"{(today - due_date).days}d ago)"
-                        ),
-                        path=row.rel_path,
-                        remediation=None,
-                    )
-                )
-            elif due_date is not None and due_date <= today + timedelta(days=2):
-                findings.append(
-                    Finding(
-                        category="schedule",
-                        severity="INFO",
-                        message=(
-                            f"{row.rel_path}: due soon (due {due_date.isoformat()}, "
-                            "within 48h)"
-                        ),
-                        path=row.rel_path,
-                        remediation=None,
-                    )
-                )
-
-            stale_date = parse_iso_date(row.stale_after)
-            if stale_date is not None and stale_date < today:
-                findings.append(
-                    Finding(
-                        category="schedule",
-                        severity="WARN",
-                        message=(
-                            f"{row.rel_path}: stale task "
-                            f"(stale_after {stale_date.isoformat()}); "
-                            "re-scope or cancel"
                         ),
                         path=row.rel_path,
                         remediation=None,
@@ -6198,8 +6253,8 @@ def apply_replace_section(cs: ChangeSet, change: dict[str, Any]) -> None:
 
 def check_asset_path(snap: Snapshot, path: Any) -> str:
     """REL, if write_file, delete_file, or edit_file may change it: a project
-    asset or INBOX.md. An executable file is an asset like any other; writes
-    keep its mode unless write_file's 'executable' says otherwise.
+    asset. An executable file is an asset like any other; writes keep its mode
+    unless write_file's 'executable' says otherwise.
     """
     rel = change_line(path, "path")
     parts = rel.split("/")
@@ -6207,15 +6262,12 @@ def check_asset_path(snap: Snapshot, path: Any) -> str:
         raise ChangeSetError(f"invalid path {rel!r}")
     if any(p.startswith(".git") for p in parts):
         raise ChangeSetError(f"{rel}: Git files are not writable")
-    if rel != "INBOX.md":
-        if len(parts) < 2 or not is_project(snap, parts[0]):
-            raise ChangeSetError(
-                f"{rel}: only files in an existing project, and INBOX.md, are writable"
-            )
-        if parts[1] in ("tasks", "decisions") or parts[1:] == ["STATUS.md"]:
-            raise ChangeSetError(
-                f"{rel} is controlled state; change it with typed operations"
-            )
+    if len(parts) < 2 or not is_project(snap, parts[0]):
+        raise ChangeSetError(f"{rel}: only files in an existing project are writable")
+    if parts[1] in ("tasks", "decisions") or parts[1:] == ["STATUS.md"]:
+        raise ChangeSetError(
+            f"{rel} is controlled state; change it with typed operations"
+        )
     if snap.is_link(rel):
         raise ChangeSetError(f"{rel} is or is under a symbolic link")
     if snap.is_dir(rel):
@@ -8076,6 +8128,20 @@ def cmd_doctor(
             if f.severity in ("WARN", "FAIL"):
                 has_warn_or_fail = True
 
+        triage_count = len(
+            _collect_triage_entries(
+                FsSnapshot(root), root, project, poll_external=False
+            )
+        )
+        if triage_count:
+            scope = f" {project}" if project else ""
+            print(
+                _tagged(
+                    f"[INFO]  {triage_count} item(s) due, unblocked, or stale; "
+                    f"run taskgo triage{scope}"
+                )
+            )
+
         print(
             _tagged(
                 """[INFO]  Agent semantic review
@@ -8458,140 +8524,275 @@ def poll_external_uri(
     return None
 
 
-def cmd_check(
+@dataclass(slots=True, frozen=True)
+class TriageEntry:
+    kind: Literal["task", "reference"]
+    project: str
+    item_id: str | None
+    status: str | None
+    title: str
+    rel_path: str
+    watermark: str | None
+    wait_for: tuple[str, ...]
+    due: str | None
+    stale_after: str | None
+    triggers: tuple[CheckTrigger, ...]
+
+
+def _collect_triage_entries(
+    snap: Snapshot,
+    root: Path,
+    project: str | None = None,
+    *,
+    poll_external: bool = True,
+) -> list[TriageEntry]:
+    """Collects time- and gate-triggered tasks and stale project references."""
+    today = get_today(snap)
+    rows = get_task_rows(snap, project)
+    probe_cache: dict[str, tuple[str, bool, datetime | None, str | None] | None] = {}
+    entries: list[TriageEntry] = []
+
+    for row in rows:
+        if row.status in RESOLVED_STATES:
+            continue
+        if not (row.wait_for or row.due or row.stale_after):
+            continue
+
+        triggers: list[CheckTrigger] = []
+        watermark_cached: tuple[str | None, datetime | None] | None = None
+
+        def get_wm(r: TaskRow = row) -> tuple[str | None, datetime | None]:
+            nonlocal watermark_cached
+            if watermark_cached is None:
+                watermark_cached = get_task_watermark(root, r)
+            return watermark_cached
+
+        for gate in row.wait_for:
+            gate_date = parse_iso_date(gate)
+            if gate_date is not None:
+                if today >= gate_date:
+                    triggers.append(
+                        CheckTrigger(
+                            kind="wait_for_elapsed",
+                            gate=gate,
+                            detail=f"wait_for {gate_date.isoformat()} elapsed",
+                        )
+                    )
+                continue
+
+            if not poll_external:
+                continue
+
+            if gate not in probe_cache:
+                probe_cache[gate] = poll_external_uri(gate)
+            polled = probe_cache[gate]
+            if polled is None:
+                continue
+
+            up_status, is_terminal, mod_dt, mod_str = polled
+            if is_terminal:
+                triggers.append(
+                    CheckTrigger(
+                        kind="wait_for_resolved",
+                        gate=gate,
+                        detail=f"wait_for {gate} resolved ({up_status})",
+                        upstream_state=up_status,
+                        upstream_modified=mod_str,
+                    )
+                )
+            elif mod_dt is not None:
+                _, wm_dt = get_wm()
+                if wm_dt is None or mod_dt > wm_dt:
+                    triggers.append(
+                        CheckTrigger(
+                            kind="wait_for_activity",
+                            gate=gate,
+                            detail=(
+                                f"wait_for {gate} updated ({up_status} at "
+                                f"{mod_str or mod_dt.isoformat()})"
+                            ),
+                            upstream_state=up_status,
+                            upstream_modified=mod_str or mod_dt.isoformat(),
+                        )
+                    )
+
+        if row.due is not None:
+            due_date = parse_iso_date(row.due)
+            if due_date is not None:
+                if today > due_date:
+                    triggers.append(
+                        CheckTrigger(
+                            kind="due_overdue",
+                            gate=due_date.isoformat(),
+                            detail=(
+                                f"due {due_date.isoformat()} "
+                                f"({(today - due_date).days}d ago)"
+                            ),
+                        )
+                    )
+                elif due_date <= today + timedelta(days=2):
+                    triggers.append(
+                        CheckTrigger(
+                            kind="due_soon",
+                            gate=due_date.isoformat(),
+                            detail=f"due {due_date.isoformat()} (within 48h)",
+                        )
+                    )
+
+        if row.stale_after is not None:
+            stale_date = parse_iso_date(row.stale_after)
+            if stale_date is not None and today > stale_date:
+                triggers.append(
+                    CheckTrigger(
+                        kind="stale",
+                        gate=stale_date.isoformat(),
+                        detail=(
+                            f"stale_after {stale_date.isoformat()} "
+                            f"({(today - stale_date).days}d ago)"
+                        ),
+                    )
+                )
+
+        if triggers:
+            wm_str = get_wm()[0] if poll_external else None
+            entries.append(
+                TriageEntry(
+                    kind="task",
+                    project=row.project,
+                    item_id=row.task_id,
+                    status=row.status,
+                    title=row.title,
+                    rel_path=row.rel_path,
+                    watermark=wm_str,
+                    wait_for=row.wait_for,
+                    due=row.due,
+                    stale_after=row.stale_after,
+                    triggers=tuple(triggers),
+                )
+            )
+
+    # Scan optional frontmatter stale_after on <project>/references/*.md
+    proj_names = [project] if project else list_projects(snap)
+    for proj_name in proj_names:
+        refs_dir = f"{proj_name}/references"
+        if not snap.is_dir(refs_dir):
+            continue
+        for rel in snap.walk_md(refs_dir):
+            fm, err = _read_reference_frontmatter(snap, rel)
+            if err is not None or not fm:
+                continue
+            ref_status = str(fm.get("status", "")).strip().lower() or "stable"
+            if ref_status == "deprecated":
+                continue
+            raw_stale = fm.get("stale_after")
+            stale_date = parse_iso_date(raw_stale)
+            if stale_date is None or today <= stale_date:
+                continue
+            try:
+                ref_title = extract_title(snap.read_text(rel)) or rel.rsplit("/", 1)[
+                    -1
+                ].removesuffix(".md")
+            except OSError:
+                ref_title = rel.rsplit("/", 1)[-1].removesuffix(".md")
+            entries.append(
+                TriageEntry(
+                    kind="reference",
+                    project=proj_name,
+                    item_id=None,
+                    status=ref_status,
+                    title=ref_title,
+                    rel_path=rel,
+                    watermark=None,
+                    wait_for=(),
+                    due=None,
+                    stale_after=stale_date.isoformat(),
+                    triggers=(
+                        CheckTrigger(
+                            kind="stale",
+                            gate=stale_date.isoformat(),
+                            detail=(
+                                f"stale_after {stale_date.isoformat()} "
+                                f"({(today - stale_date).days}d ago)"
+                            ),
+                        ),
+                    ),
+                )
+            )
+
+    return entries
+
+
+def _render_triage_human(entries: list[TriageEntry]) -> str:
+    """Renders triage entries grouped into Overdue, Due soon, Gates, and Stale."""
+    buckets: list[tuple[str, list[TriageEntry]]] = [
+        ("Overdue", []),
+        ("Due soon", []),
+        ("Gates", []),
+        ("Stale", []),
+    ]
+    for e in entries:
+        kinds = {t.kind for t in e.triggers}
+        if "due_overdue" in kinds:
+            buckets[0][1].append(e)
+        elif "due_soon" in kinds:
+            buckets[1][1].append(e)
+        elif kinds & {"wait_for_elapsed", "wait_for_resolved", "wait_for_activity"}:
+            buckets[2][1].append(e)
+        else:
+            buckets[3][1].append(e)
+
+    proj_w = max(len(e.project) for e in entries)
+    id_w = max(len(e.item_id or "reference") for e in entries)
+    status_w = max(len(e.status or "(missing)") for e in entries)
+    path_indent = " " * (2 + proj_w + 2)
+
+    blocks: list[str] = []
+    for heading, items in buckets:
+        if not items:
+            continue
+        lines = [heading]
+        for e in items:
+            label = e.item_id or "reference"
+            st = e.status or "(missing)"
+            summary = "; ".join(t.detail for t in e.triggers)
+            lines.append(
+                f"  {e.project.ljust(proj_w)}  {label.ljust(id_w)}  "
+                f"{st.ljust(status_w)}  {summary}"
+            )
+            lines.append(f"{path_indent}{e.rel_path}")
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks)
+
+
+def cmd_triage(
     project: str | None = None,
     as_json: bool = False,
 ) -> None:
-    """Evaluate wait_for gates, due deadlines, and stale_after cutoffs."""
+    """Sweep wait_for gates, due deadlines, and stale_after cutoffs."""
     root = get_repo_root()
     with repo_lock(root):
         pre_sync_repo(root)
         snap = FsSnapshot(root)
         if project:
             require_project(snap, project)
-
-        today = get_today(snap)
-        rows = get_task_rows(snap, project)
-        probe_cache: dict[
-            str, tuple[str, bool, datetime | None, str | None] | None
-        ] = {}
-
-        triggered_entries: list[tuple[TaskRow, str | None, list[CheckTrigger]]] = []
-
-        for row in rows:
-            if row.status in RESOLVED_STATES:
-                continue
-            if not (row.wait_for or row.due or row.stale_after):
-                continue
-
-            triggers: list[CheckTrigger] = []
-            watermark_cached: tuple[str | None, datetime | None] | None = None
-
-            def get_wm(r: TaskRow = row) -> tuple[str | None, datetime | None]:
-                nonlocal watermark_cached
-                if watermark_cached is None:
-                    watermark_cached = get_task_watermark(root, r)
-                return watermark_cached
-
-            for gate in row.wait_for:
-                gate_date = parse_iso_date(gate)
-                if gate_date is not None:
-                    if today >= gate_date:
-                        triggers.append(
-                            CheckTrigger(
-                                kind="wait_for_elapsed",
-                                gate=gate,
-                                detail=f"wait_for date {gate_date.isoformat()} elapsed",
-                            )
-                        )
-                    continue
-
-                if gate not in probe_cache:
-                    probe_cache[gate] = poll_external_uri(gate)
-                polled = probe_cache[gate]
-                if polled is None:
-                    continue
-
-                up_status, is_terminal, mod_dt, mod_str = polled
-                if is_terminal:
-                    triggers.append(
-                        CheckTrigger(
-                            kind="wait_for_resolved",
-                            gate=gate,
-                            detail=f"wait_for {gate} resolved ({up_status})",
-                            upstream_state=up_status,
-                            upstream_modified=mod_str,
-                        )
-                    )
-                elif mod_dt is not None:
-                    _, wm_dt = get_wm()
-                    if wm_dt is None or mod_dt > wm_dt:
-                        triggers.append(
-                            CheckTrigger(
-                                kind="wait_for_activity",
-                                gate=gate,
-                                detail=(
-                                    f"wait_for {gate} updated ({up_status} at "
-                                    f"{mod_str or mod_dt.isoformat()})"
-                                ),
-                                upstream_state=up_status,
-                                upstream_modified=mod_str or mod_dt.isoformat(),
-                            )
-                        )
-
-            if row.due is not None:
-                due_date = parse_iso_date(row.due)
-                if due_date is not None:
-                    if today > due_date:
-                        triggers.append(
-                            CheckTrigger(
-                                kind="due_overdue",
-                                gate=due_date.isoformat(),
-                                detail=(
-                                    f"overdue (due {due_date.isoformat()}, "
-                                    f"{(today - due_date).days}d ago)"
-                                ),
-                            )
-                        )
-                    elif due_date <= today + timedelta(days=2):
-                        triggers.append(
-                            CheckTrigger(
-                                kind="due_soon",
-                                gate=due_date.isoformat(),
-                                detail=f"due soon (due {due_date.isoformat()}, within 48h)",
-                            )
-                        )
-
-            if row.stale_after is not None:
-                stale_date = parse_iso_date(row.stale_after)
-                if stale_date is not None and today > stale_date:
-                    triggers.append(
-                        CheckTrigger(
-                            kind="stale",
-                            gate=stale_date.isoformat(),
-                            detail=f"stale task (stale_after {stale_date.isoformat()})",
-                        )
-                    )
-
-            if triggers:
-                wm_str, _ = get_wm()
-                triggered_entries.append((row, wm_str, triggers))
+        triggered_entries = _collect_triage_entries(
+            snap, root, project, poll_external=True
+        )
 
     if not triggered_entries:
         return
 
     if as_json:
-        out = [
-            {
-                "project": r.project,
-                "id": r.task_id,
-                "status": r.status,
-                "title": r.title,
-                "path": r.rel_path,
-                "watermark": wm_str,
-                "wait_for": list(r.wait_for),
-                "due": r.due,
-                "stale_after": r.stale_after,
+        out = []
+        for e in triggered_entries:
+            rec: dict[str, Any] = {
+                "kind": e.kind,
+                "project": e.project,
+                "id": e.item_id,
+                "status": e.status,
+                "title": e.title,
+                "path": e.rel_path,
+                "stale_after": e.stale_after,
                 "triggers": [
                     {
                         "kind": t.kind,
@@ -8608,19 +8809,18 @@ def cmd_check(
                             else {}
                         ),
                     }
-                    for t in trigs
+                    for t in e.triggers
                 ],
             }
-            for r, wm_str, trigs in triggered_entries
-        ]
+            if e.kind == "task":
+                rec["watermark"] = e.watermark
+                rec["wait_for"] = list(e.wait_for)
+                rec["due"] = e.due
+            out.append(rec)
         print(json.dumps(out, indent=2))
         return
 
-    for r, _, trigs in triggered_entries:
-        summary = "; ".join(t.detail for t in trigs)
-        print(
-            f"{r.project}\t{r.task_id}\t{r.status or '(missing)'}\t{summary}\t{r.rel_path}"
-        )
+    print(_render_triage_human(triggered_entries))
 
 
 @dataclass(slots=True, frozen=True)
@@ -9251,16 +9451,13 @@ def commit_gate(root: Path, project: str, files: list[str], scope: str) -> None:
     """Refuses a commit of FILES in PROJECT that doctor finds broken.
 
     Only WARN and FAIL findings on the files being committed block, so one
-    old or unrelated record never holds up the rest. Schedule findings
-    (overdue, due soon, stale_after, cleared gates) never block, and nor
-    does a stale STATUS.md task block, which the commit regenerates. Every
-    other finding in the project is counted in one line, not refused.
+    old or unrelated record never holds up the rest. A stale STATUS.md task
+    block never blocks because the commit regenerates it. Every other finding
+    in the project is counted in one line, not refused.
     """
     committed = set(files)
     findings = [
-        f
-        for f in audit_workspace(root, project)
-        if f.severity in ("WARN", "FAIL") and f.category != "schedule"
+        f for f in audit_workspace(root, project) if f.severity in ("WARN", "FAIL")
     ]
     blocking = [
         f
@@ -9430,6 +9627,37 @@ def cmd_checkpoint(
         format_records(root, requested)
 
         commit_gate(root, project_name, requested, "checkpoint")
+
+        # Non-blocking hint when closing a task with large unfolded Findings.
+        try:
+            task_text = target_path.read_text(encoding="utf-8")
+            task_fm, task_body = parse_frontmatter(task_text)
+            if (
+                str(task_fm.get("status", "")).strip().lower() == TaskStatus.DONE.value
+                and not refs_list
+            ):
+                m_find = re.search(
+                    r"^##\s+Findings\s*$(.*?)(?=^##\s+|\Z)",
+                    task_body,
+                    re.MULTILINE | re.DOTALL,
+                )
+                if m_find:
+                    findings_text = m_find.group(1).strip()
+                    n_lines = len(findings_text.splitlines()) if findings_text else 0
+                    if n_lines >= 50 and not re.search(
+                        r"(?:references|decisions)/", findings_text
+                    ):
+                        print(
+                            _tagged(
+                                f"[INFO]  {rel_path}: ## Findings has {n_lines} lines "
+                                "with no link to references/, decisions/, or --ref; "
+                                "consider folding durable findings out",
+                                sys.stderr,
+                            ),
+                            file=sys.stderr,
+                        )
+        except OSError:
+            pass
 
         if session:
             scheme, c_id = session
@@ -9824,7 +10052,7 @@ Health:
   doctor [PROJECT]                 Run mechanical checks (read-only)
   fix [PROJECT] [OPTIONS]          Auto-heal IDs, statuses, snapshots, AGENTS.md
   sync [PROJECT]                   Update STATUS.md snapshot
-  check [PROJECT] [--json]         Sweep wait_for gates and date horizons
+  triage [PROJECT] [--json]        Sweep due dates, gates, and stale items
 
 Server:
   mcp [OPTIONS]                    Serve the tracker to MCP clients
@@ -10379,19 +10607,21 @@ in-progress, blocked, and ready tasks, as the MCP handoff tool returns them.""",
         add_sub("sync", "Update STATUS.md snapshot for a project or the workspace")
     )
 
-    p_check = add_sub(
-        "check",
-        "Evaluate wait_for gates, due deadlines, and stale_after cutoffs",
+    p_triage = add_sub(
+        "triage",
+        "Sweep wait_for gates, due deadlines, and stale_after cutoffs",
         manual_help=True,
+        aliases=["check"],
         epilog="""Examples:
-  taskgo check
-  taskgo check my-project --json
+  taskgo triage
+  taskgo triage my-project --json
 
-Scans open tasks declaring wait_for, due, or stale_after against today and each
-task file's Git commit watermark, emitting nothing when no tasks trigger.""",
+Scans open tasks declaring wait_for, due, or stale_after (and project
+references declaring stale_after) against today and each task file's Git
+commit watermark, emitting nothing when nothing triggers.""",
     )
-    _add_project(p_check)
-    _add_json(p_check)
+    _add_project(p_triage)
+    _add_json(p_triage)
 
     _add_project(
         add_sub(
@@ -10874,8 +11104,8 @@ def main(argv: list[str] | None = None) -> None:
         cmd_handoff(target=args.target, at=args.at, as_json=args.as_json)
     elif args.command == "sync":
         cmd_sync(project=args.project)
-    elif args.command == "check":
-        cmd_check(project=args.project, as_json=args.as_json)
+    elif args.command in ("triage", "check"):
+        cmd_triage(project=args.project, as_json=args.as_json)
     elif args.command == "doctor":
         cmd_doctor(project=args.project)
     elif args.command == "fix":
