@@ -8,6 +8,7 @@
 - [Network Errors](#network-errors)
 - [Search Failures](#search-failures)
 - [Resolution Failures](#resolution-failures)
+- [Closed-Source Libraries and Empty Javadoc JARs](#closed-source-libraries-and-empty-javadoc-jars)
 - [Version Not Found](#version-not-found)
 - [Kotlin Multiplatform](#kotlin-multiplatform)
 
@@ -73,18 +74,46 @@ it cannot be rebuilt. **Solution**:
 `could not resolve or find artifact for 'X'`. **Cause**: `resolve` and `search`
 query the cached Google Maven class index (`classes-v0.1.json.gz`), which only
 indexes Google Maven (`androidx.*`, `com.google.android.*`, etc.) and lists
-top-level classes only. A package, a Kotlin top-level function, a nested class,
-or a library hosted on Maven Central (such as Horologist, Koin, Ktor, or Coil 3)
-will not match. **Solution**:
+top-level classes. Nested classes (`pkg.Outer.Inner` or `pkg.Outer$Inner`)
+automatically resolve via their enclosing top-level class, whereas a package
+name, a Kotlin top-level function, or a library hosted on Maven Central (such as
+Horologist, Koin, Ktor, or Coil 3) will not match `resolve`. **Solution**:
 
 1. Search the package on Google Maven, then pick a coordinate:
    `scripts/jetpack search androidx.compose.foundation.layout`.
 1. For Maven Central libraries (or any known coordinate), pass `GROUP:ARTIFACT`
    directly — coordinate commands automatically fall back to Maven Central:
-   `scripts/jetpack source --find KoinApplication io.insert-koin:koin-core` or
+   `scripts/jetpack source --find KoinApplication io.insert-koin:koin-core`,
+   `scripts/jetpack javadoc --find Gson com.google.code.gson:gson`, or
    `scripts/jetpack inspect com.google.android.horologist:horologist-media-ui-material3`.
-1. If a Google Maven top-level class known to exist still misses, refresh the
-   index: `scripts/jetpack search --force QUERY`.
+1. If a Google Maven class known to exist still misses, refresh the index:
+   `scripts/jetpack search --force QUERY`.
+
+## Closed-Source Libraries and Empty Javadoc JARs
+
+**Symptom**: `source: failed to download ...-sources.jar: ... returned HTTP 404`
+with `hint: no -sources.jar published ...; try 'jetpack javadoc ...'`.
+**Cause**: Closed-source SDKs (such as Google Play Services, Play Billing, ML
+Kit, and parts of Firebase) publish `-javadoc.jar` API reference HTML instead of
+`-sources.jar`. **Solution**:
+
+- Run `scripts/jetpack javadoc [--find CLASS] GROUP:ARTIFACT [VERSION]`, or use
+  `scripts/jetpack inspect CLASS_OR_COORD`, which falls back to `-javadoc.jar`
+  automatically when `-sources.jar` returns HTTP 404.
+
+**Symptom**:
+`javadoc: ...-javadoc.jar contains no class documentation HTML pages (empty or placeholder -javadoc.jar)`.
+**Cause**: Wrapper artifacts (such as `com.google.mlkit:barcode-scanning` or
+`com.google.firebase:firebase-analytics`) and some Kotlin Multiplatform target
+JARs publish a stub `-javadoc.jar` containing only `META-INF/MANIFEST.MF` or a
+0-byte/index-only placeholder while the documented classes live in a direct
+dependency. **Solution**:
+
+- Inspect direct dependencies to locate the underlying API artifact:
+  `scripts/jetpack list dependencies GROUP:ARTIFACT`, then run
+  `scripts/jetpack javadoc` against the dependency coordinate (for example,
+  `com.google.android.gms:play-services-mlkit-barcode-scanning` or
+  `com.google.android.gms:play-services-measurement-api`).
 
 ## Version Not Found
 
