@@ -48,8 +48,33 @@ result into the right page in place. Link sources; keep observations,
 interpretations, and untested proposals apart; date observations when their age
 matters. Revise maintained pages, but keep the historical meaning of task
 outcomes, captured evidence, and dated reports. Link every page from the README
-map, directly or through a short index. Promote material to a skill only when
-other projects keep needing it.
+map, directly or through a short index.
+
+Reference files remain freeform Markdown with no required schema—existing plain
+files stay valid. When a reference page has a real shelf life, relies on
+uncheckable external sources, or is being retired, optional YAML frontmatter
+fields compatible with the
+[Open Knowledge Format](https://github.com/open-knowledge-format/open-knowledge-format)
+make that state scannable:
+
+- `status`: `draft`, `stable` (default when omitted), or `deprecated`.
+- `superseded_by`: relative path (or skill/URL) to the replacement when
+  `status: deprecated`. Update the superseded file itself (frontmatter plus a
+  short note at the top) and keep it in place so inbound links from closed tasks
+  and commits remain valid without misleading later readers.
+- `stale_after`: `YYYY-MM-DD` review cutoff when the content has a known shelf
+  life (live prices, time-bounded research, expiring options); omit rather than
+  inventing a date.
+- `sources`: list of `{ id, resource, title }` entries paired with `[^id]`
+  footnotes in the body when claims come from external or mined material that
+  cannot be checked directly against code or a live system.
+
+Movement across layers is judgment-based and slight drift is normal: fold
+durable findings out of a task's `## Findings` into `references/` once another
+task will need them (leaving a brief summary and link in the closed task);
+update an existing knowledge skill directly instead of staging durable system
+facts in `references/`; graduate code-level docs to the artifact repository; and
+promote material to a new skill only when other projects keep needing it.
 
 **`scripts/`** holds repeatable helpers so later sessions reuse them instead of
 rewriting them. They need not meet the packaging bar of skill scripts. Raw run
@@ -186,9 +211,13 @@ files on the CLI and committed with `commit` or `checkpoint --all`).
 
 - **Superseding:** when a newer ADR replaces an older decision, record
   `supersedes: [001-old-decision.md]` (filename, stem, or numeric prefix such as
-  `001`) in the *newer* ADR's frontmatter. Do not rewrite the older file. Edit
-  an accepted ADR in place only for typos, status updates, broken links, or
-  implementation notes, never to change its decision.
+  `001`) in the *newer* ADR's frontmatter so `taskgo sync` and `taskgo doctor`
+  track the graph. Also update the *older* ADR's `## Status` section (for
+  example, `Superseded by [004-new-decision.md](004-new-decision.md)`) so a
+  reader landing directly on the old file sees immediately that it is no longer
+  active. Leave the older ADR's `Context`, `Decision`, and `Consequences` intact
+  (edit an accepted ADR in place only for typos, status updates, broken links,
+  or implementation notes, never to change its decision).
 - **Projection:** `taskgo sync` lists only active (not superseded) ADRs in the
   `### Decisions` part of the generated `STATUS.md` block.
 - **Checks:** `taskgo doctor` checks `supersedes` targets and cycles. For active
