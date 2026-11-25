@@ -25,9 +25,11 @@ per-subcommand detail and raw commands.
 ```text
 Usage: jetpack <command> [arguments]
 
-Jetpack library utilities for working with AndroidX packages.
+Jetpack library utilities for working with AndroidX and Maven packages.
 This tool helps resolve Maven artifacts, finding versions, and downloading
-source code for AndroidX libraries, including support for SNAPSHOT builds.
+source code for AndroidX libraries (including SNAPSHOT builds). Coordinate
+commands (version, list, source, inspect GROUP:ARTIFACT) default to Google
+Maven and automatically fall back to Maven Central when no repo URL is given.
 
 Commands:
   version <artifact> [type] [repo]

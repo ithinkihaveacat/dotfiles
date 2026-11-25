@@ -1,0 +1,383 @@
+#!/usr/bin/env bash
+#
+# Hermetic tests for automatic Maven Central fallback, multi-artifact source
+# resolution, offline Maven Central replay, and the class-index boundary.
+#
+# Uses a stubbed curl shim serving fake Google Maven and Maven Central responses
+# and logging every requested URL so we can assert exact request counts (zero
+# extra requests for Google Maven artifacts, no fallback on explicit REPO_URL /
+# SNAPSHOT / build IDs / non-404 errors).
+
+set -u
+
+SCRIPT_DIR=$(dirname "$0")
+ROOT_DIR="$SCRIPT_DIR/.."
+BIN_JETPACK="$ROOT_DIR/scripts/jetpack"
+
+unset AGENT_OFFLINE
+
+TEST_TMP=$(mktemp -d)
+export TMPDIR="$TEST_TMP"
+export JETPACK_CACHE_DIR="$TEST_TMP/cache"
+
+SHIM_DIR="$TEST_TMP/shim"
+SERVE_DIR="$TEST_TMP/serve"
+CURL_LOG="$TEST_TMP/curl.log"
+mkdir -p "$SHIM_DIR" "$SERVE_DIR" "$JETPACK_CACHE_DIR"
+echo '{"Index": []}' >"$JETPACK_CACHE_DIR/androidx-index.json"
+
+TOTAL_TESTS=57
+TEST_NUM=0
+echo "1..$TOTAL_TESTS"
+
+cleanup() {
+  rm -rf "$TEST_TMP"
+}
+trap cleanup EXIT
+
+ok() {
+  TEST_NUM=$((TEST_NUM + 1))
+  echo "ok $TEST_NUM - $1"
+}
+
+not_ok() {
+  TEST_NUM=$((TEST_NUM + 1))
+  echo "not ok $TEST_NUM - $1"
+  shift
+  local line
+  for line in "$@"; do
+    echo "# $line"
+  done
+}
+
+assert_equals() {
+  local description="$1" actual="$2" expected="$3"
+  if [[ "$actual" == "$expected" ]]; then
+    ok "$description"
+  else
+    not_ok "$description" "Expected: $expected" "Actual:   $actual"
+  fi
+}
+
+assert_status() {
+  local description="$1" status="$2" expected="$3"
+  if [[ "$status" -eq "$expected" ]]; then
+    ok "$description"
+  else
+    not_ok "$description" "Expected exit $expected, got $status"
+  fi
+}
+
+assert_contains() {
+  local description="$1" haystack="$2" needle="$3"
+  if [[ "$haystack" == *"$needle"* ]]; then
+    ok "$description"
+  else
+    not_ok "$description" "Expected to contain: $needle" "Got: $haystack"
+  fi
+}
+
+assert_not_contains() {
+  local description="$1" haystack="$2" needle="$3"
+  if [[ "$haystack" != *"$needle"* ]]; then
+    ok "$description"
+  else
+    not_ok "$description" "Expected NOT to contain: $needle" "Got: $haystack"
+  fi
+}
+
+# Build a small sources JAR in $SERVE_DIR/<rel_path>
+make_sources_jar() {
+  local dest="$1" rel_src="$2" body="$3"
+  local stage="$TEST_TMP/stage.$$"
+  mkdir -p "$(dirname "$dest")" "$stage/$(dirname "$rel_src")"
+  printf '%s\n' "$body" >"$stage/$rel_src"
+  (cd "$stage" && jar cf "$dest" .)
+  rm -rf "$stage"
+}
+
+# Seed fake upstream files mapped by URL path (<host>/<path>).
+# 1. Google Maven artifact: androidx.wear.tiles:tiles (1.4.0)
+GMAVEN_TILES="$SERVE_DIR/dl.google.com/android/maven2/androidx/wear/tiles/tiles"
+mkdir -p "$GMAVEN_TILES/1.4.0"
+cat >"$GMAVEN_TILES/maven-metadata.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<metadata>
+  <groupId>androidx.wear.tiles</groupId>
+  <artifactId>tiles</artifactId>
+  <versioning>
+    <latest>1.4.0</latest>
+    <release>1.4.0</release>
+    <versions>
+      <version>1.3.0</version>
+      <version>1.4.0</version>
+    </versions>
+  </versioning>
+</metadata>
+EOF
+cat >"$GMAVEN_TILES/1.4.0/tiles-1.4.0.pom" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<project>
+  <groupId>androidx.wear.tiles</groupId>
+  <artifactId>tiles</artifactId>
+  <version>1.4.0</version>
+  <dependencies>
+    <dependency>
+      <groupId>androidx.annotation</groupId>
+      <artifactId>annotation</artifactId>
+      <version>1.8.0</version>
+      <scope>compile</scope>
+    </dependency>
+  </dependencies>
+</project>
+EOF
+make_sources_jar "$GMAVEN_TILES/1.4.0/tiles-1.4.0-sources.jar" \
+  "androidx/wear/tiles/TileService.java" "public class TileService {}"
+
+# 2. Maven Central KMP artifact: io.insert-koin:koin-core (4.0.2) + -jvm target
+MC_KOIN="$SERVE_DIR/repo1.maven.org/maven2/io/insert-koin/koin-core"
+MC_KOIN_JVM="$SERVE_DIR/repo1.maven.org/maven2/io/insert-koin/koin-core-jvm"
+mkdir -p "$MC_KOIN/4.0.2" "$MC_KOIN_JVM/4.0.2"
+cat >"$MC_KOIN/maven-metadata.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<metadata>
+  <groupId>io.insert-koin</groupId>
+  <artifactId>koin-core</artifactId>
+  <versioning>
+    <latest>4.1.0-alpha01</latest>
+    <release>4.0.2</release>
+    <versions>
+      <version>4.0.0</version>
+      <version>4.0.2</version>
+      <version>4.1.0-alpha01</version>
+    </versions>
+  </versioning>
+</metadata>
+EOF
+cat >"$MC_KOIN/4.0.2/koin-core-4.0.2.pom" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<project>
+  <groupId>io.insert-koin</groupId>
+  <artifactId>koin-core</artifactId>
+  <version>4.0.2</version>
+  <dependencies>
+    <dependency>
+      <groupId>io.insert-koin</groupId>
+      <artifactId>koin-core-jvm</artifactId>
+      <version>4.0.2</version>
+      <scope>compile</scope>
+    </dependency>
+  </dependencies>
+</project>
+EOF
+make_sources_jar "$MC_KOIN/4.0.2/koin-core-4.0.2-sources.jar" \
+  "org/koin/core/KoinApplication.kt" "class KoinApplication"
+make_sources_jar "$MC_KOIN_JVM/4.0.2/koin-core-jvm-4.0.2-sources.jar" \
+  "org/koin/core/KoinJvm.kt" "class KoinJvm"
+
+# 3. Second Google Maven artifact on a DIFFERENT version train (2.9.0)
+GMAVEN_CORE="$SERVE_DIR/dl.google.com/android/maven2/androidx/core/core"
+mkdir -p "$GMAVEN_CORE/2.9.0"
+cat >"$GMAVEN_CORE/maven-metadata.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<metadata>
+  <groupId>androidx.core</groupId>
+  <artifactId>core</artifactId>
+  <versioning>
+    <latest>2.9.0</latest>
+    <release>2.9.0</release>
+    <versions>
+      <version>2.9.0</version>
+    </versions>
+  </versioning>
+</metadata>
+EOF
+cat >"$GMAVEN_CORE/2.9.0/core-2.9.0.pom" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<project>
+  <groupId>androidx.core</groupId>
+  <artifactId>core</artifactId>
+  <version>2.9.0</version>
+</project>
+EOF
+make_sources_jar "$GMAVEN_CORE/2.9.0/core-2.9.0-sources.jar" \
+  "androidx/core/CoreCompat.java" "public class CoreCompat {}"
+
+# Stubbed curl that serves from $SERVE_DIR and logs every URL to $CURL_LOG.
+# Honors optional FORCE_STATUS env var (e.g. 429 or 000) to simulate failures.
+cat >"$SHIM_DIR/curl" <<'SHIM'
+#!/usr/bin/env bash
+out=""
+url=""
+prev=""
+for a in "$@"; do
+  case "$prev" in
+    -o) out="$a" ;;
+  esac
+  prev="$a"
+  case "$a" in
+    http://* | https://*) url="$a" ;;
+  esac
+done
+printf '%s\n' "$url" >>"$CURL_LOG"
+
+if [[ -n "${FORCE_STATUS:-}" ]]; then
+  [[ -n "$out" ]] && : >"$out"
+  if [[ "$FORCE_STATUS" == "000" ]]; then
+    printf '000'
+    exit 7
+  fi
+  printf '%s' "$FORCE_STATUS"
+  exit 0
+fi
+
+rel="${url#*://}"
+if [[ -f "$SERVE_DIR/$rel" ]]; then
+  [[ -n "$out" ]] && cp "$SERVE_DIR/$rel" "$out"
+  printf '200'
+  exit 0
+else
+  [[ -n "$out" ]] && : >"$out"
+  printf '404'
+  exit 0
+fi
+SHIM
+chmod +x "$SHIM_DIR/curl"
+
+export SERVE_DIR CURL_LOG
+
+run_shimmed() {
+  : >"$CURL_LOG"
+  local err_file
+  err_file=$(mktemp)
+  STDOUT=$(PATH="$SHIM_DIR:$PATH" "$BIN_JETPACK" "$@" 2>"$err_file")
+  STATUS=$?
+  STDERR=$(cat "$err_file")
+  rm -f "$err_file"
+  CURL_CALLS=$(wc -l <"$CURL_LOG" | tr -d ' ')
+  CURL_URLS=$(cat "$CURL_LOG")
+}
+
+# --- 1. Google Maven artifact incurs zero extra HTTP requests --------------
+
+run_shimmed version androidx.wear.tiles:tiles STABLE
+assert_status "Google Maven version succeeds" "$STATUS" 0
+assert_equals "Google Maven version returns 1.4.0" "$STDOUT" "1.4.0"
+assert_equals "Google Maven version makes exactly 1 HTTP request" "$CURL_CALLS" "1"
+assert_not_contains "Google Maven version does not touch Maven Central" "$CURL_URLS" "repo1.maven.org"
+
+# --- 2. Maven Central fallback across all coordinate subcommands -----------
+
+run_shimmed version io.insert-koin:koin-core STABLE
+assert_status "Maven Central version falls back and succeeds" "$STATUS" 0
+assert_equals "Maven Central version returns 4.0.2" "$STDOUT" "4.0.2"
+assert_equals "Maven Central version probes GMaven then Maven Central (2 requests)" "$CURL_CALLS" "2"
+assert_contains "Maven Central version logs info notice on stderr" "$STDERR" "Maven Central"
+
+run_shimmed list versions io.insert-koin:koin-core
+assert_status "Maven Central list versions falls back and succeeds" "$STATUS" 0
+assert_contains "Maven Central list versions includes 4.1.0-alpha01" "$STDOUT" "4.1.0-alpha01"
+assert_contains "Maven Central list versions logs info notice on stderr" "$STDERR" "Maven Central"
+
+run_shimmed list dependencies io.insert-koin:koin-core STABLE
+assert_status "Maven Central list dependencies (symbolic) falls back and succeeds" "$STATUS" 0
+assert_contains "Maven Central list dependencies reads POM from Maven Central" "$STDOUT" "io.insert-koin:koin-core-jvm:4.0.2 (compile)"
+assert_contains "Maven Central list dependencies logs info notice on stderr" "$STDERR" "Maven Central"
+
+run_shimmed list dependencies io.insert-koin:koin-core 4.0.2
+assert_status "Maven Central list dependencies (pinned) falls back and succeeds" "$STATUS" 0
+assert_contains "Maven Central list dependencies (pinned) reads POM" "$STDOUT" "io.insert-koin:koin-core-jvm:4.0.2 (compile)"
+assert_contains "Maven Central list dependencies (pinned) logs info notice" "$STDERR" "Maven Central"
+
+run_shimmed source --output "$TEST_TMP/koin-src" io.insert-koin:koin-core STABLE
+assert_status "Maven Central source (KMP) falls back and succeeds" "$STATUS" 0
+assert_contains "Maven Central source logs info notice" "$STDERR" "Maven Central"
+if [[ -f "$TEST_TMP/koin-src/org/koin/core/KoinApplication.kt" && -f "$TEST_TMP/koin-src/org/koin/core/KoinJvm.kt" ]]; then
+  ok "Maven Central source extracts both common and KMP platform sources"
+else
+  not_ok "Maven Central source extracts both common and KMP platform sources" \
+    "Missing expected files under $TEST_TMP/koin-src"
+fi
+
+run_shimmed inspect --output "$TEST_TMP/koin-inspect" io.insert-koin:koin-core
+assert_status "Maven Central inspect GROUP:ARTIFACT falls back and succeeds" "$STATUS" 0
+assert_equals "Maven Central inspect prints extracted directory" "$STDOUT" "$TEST_TMP/koin-inspect"
+assert_contains "Maven Central inspect logs info notice" "$STDERR" "Maven Central"
+
+# --- 3. No fallback for explicit REPO_URL, SNAPSHOT, build IDs, or non-404 -
+
+run_shimmed version io.insert-koin:koin-core STABLE https://dl.google.com/android/maven2
+assert_status "explicit Google Maven REPO_URL fails on 404 without fallback" "$STATUS" 1
+assert_equals "explicit REPO_URL makes only 1 HTTP request" "$CURL_CALLS" "1"
+assert_not_contains "explicit REPO_URL never queries Maven Central" "$CURL_URLS" "repo1.maven.org"
+
+run_shimmed version io.insert-koin:koin-core SNAPSHOT
+assert_status "SNAPSHOT fails on 404 without Maven Central fallback" "$STATUS" 1
+assert_equals "SNAPSHOT makes only 1 HTTP request" "$CURL_CALLS" "1"
+assert_not_contains "SNAPSHOT never queries Maven Central" "$CURL_URLS" "repo1.maven.org"
+
+run_shimmed version io.insert-koin:koin-core 14765146
+assert_status "numeric build ID fails on 404 without Maven Central fallback" "$STATUS" 1
+assert_equals "numeric build ID makes only 1 HTTP request" "$CURL_CALLS" "1"
+assert_not_contains "numeric build ID never queries Maven Central" "$CURL_URLS" "repo1.maven.org"
+
+FORCE_STATUS=429 run_shimmed version io.insert-koin:koin-core STABLE
+assert_status "HTTP 429 on Google Maven fails without fallback" "$STATUS" 1
+assert_equals "HTTP 429 makes only 1 HTTP request" "$CURL_CALLS" "1"
+assert_not_contains "HTTP 429 never queries Maven Central" "$CURL_URLS" "repo1.maven.org"
+
+FORCE_STATUS=000 run_shimmed version io.insert-koin:koin-core STABLE
+assert_status "network failure on Google Maven fails without fallback" "$STATUS" 1
+assert_equals "network failure makes only 1 HTTP request" "$CURL_CALLS" "1"
+assert_not_contains "network failure never queries Maven Central" "$CURL_URLS" "repo1.maven.org"
+
+# --- 4. Offline replay for Maven Central warmed cache ----------------------
+
+AGENT_OFFLINE=1 run_shimmed version io.insert-koin:koin-core STABLE
+assert_status "offline Maven Central version succeeds from cache" "$STATUS" 0
+assert_equals "offline Maven Central version returns 4.0.2" "$STDOUT" "4.0.2"
+assert_equals "offline Maven Central version makes 0 HTTP requests" "$CURL_CALLS" "0"
+assert_contains "offline Maven Central version reports cache age" "$STDERR" "(cached just now)"
+assert_contains "offline Maven Central version notes Maven Central" "$STDERR" "Maven Central"
+
+AGENT_OFFLINE=1 run_shimmed list dependencies io.insert-koin:koin-core STABLE
+assert_status "offline Maven Central list dependencies succeeds from cache" "$STATUS" 0
+assert_equals "offline Maven Central list dependencies makes 0 HTTP requests" "$CURL_CALLS" "0"
+assert_contains "offline Maven Central list dependencies outputs dep" "$STDOUT" "io.insert-koin:koin-core-jvm:4.0.2 (compile)"
+
+AGENT_OFFLINE=1 run_shimmed source --output "$TEST_TMP/koin-offline" io.insert-koin:koin-core STABLE
+assert_status "offline Maven Central source succeeds from cache" "$STATUS" 0
+assert_equals "offline Maven Central source makes 0 HTTP requests" "$CURL_CALLS" "0"
+if [[ -f "$TEST_TMP/koin-offline/org/koin/core/KoinApplication.kt" && -f "$TEST_TMP/koin-offline/org/koin/core/KoinJvm.kt" ]]; then
+  ok "offline Maven Central source extracts cached common and KMP sources"
+else
+  not_ok "offline Maven Central source extracts cached common and KMP sources" \
+    "Missing expected files under $TEST_TMP/koin-offline"
+fi
+
+# --- 5. Multi-artifact source resolves repo & version independently --------
+
+run_shimmed source --output "$TEST_TMP/multi-src" \
+  androidx.wear.tiles:tiles androidx.core:core io.insert-koin:koin-core STABLE
+assert_status "multi-artifact source across mixed repos and version trains succeeds" "$STATUS" 0
+if [[ -f "$TEST_TMP/multi-src/androidx/wear/tiles/TileService.java" &&
+  -f "$TEST_TMP/multi-src/androidx/core/CoreCompat.java" &&
+  -f "$TEST_TMP/multi-src/org/koin/core/KoinApplication.kt" &&
+  -f "$TEST_TMP/multi-src/org/koin/core/KoinJvm.kt" ]]; then
+  ok "multi-artifact source extracts all artifacts at their own versions and repos"
+else
+  not_ok "multi-artifact source extracts all artifacts at their own versions and repos" \
+    "Missing expected extracted files under $TEST_TMP/multi-src"
+fi
+
+# --- 6. Class-index boundary hints -----------------------------------------
+
+AGENT_OFFLINE=1 run_shimmed resolve org.koin.core.KoinApplication
+assert_status "resolve for Maven Central class exits non-zero" "$STATUS" 1
+assert_contains "resolve failure explains Google Maven class index boundary" "$STDERR" "Google Maven"
+assert_contains "resolve failure directs caller to GROUP:ARTIFACT" "$STDERR" "GROUP:ARTIFACT"
+
+AGENT_OFFLINE=1 run_shimmed inspect org.koin.core.KoinApplication
+assert_status "inspect for Maven Central FQCN exits non-zero" "$STATUS" 1
+assert_contains "inspect failure explains Google Maven class index boundary" "$STDERR" "Google Maven"
+assert_contains "inspect failure directs caller to GROUP:ARTIFACT" "$STDERR" "GROUP:ARTIFACT"

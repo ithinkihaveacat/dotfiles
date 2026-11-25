@@ -19,6 +19,7 @@ SCRIPT_NAME=$(basename "$0")
 # =============================================================================
 
 GOOGLE_MAVEN_URL="https://dl.google.com/android/maven2"
+MAVEN_CENTRAL_URL="https://repo1.maven.org/maven2"
 SNAPSHOT_REPO_URL="https://androidx.dev/snapshots/latest/artifacts/repository"
 SNAPSHOT_BUILD_URL_PREFIX="https://androidx.dev/snapshots/builds"
 
@@ -406,19 +407,80 @@ validate_artifact_format() {
   fi
 }
 
-fetch_maven_metadata() {
+# Resolve and fetch maven-metadata.xml for GROUP_ID:ARTIFACT_ID.
+#
+# When allow_fallback=1 and repo_url is GOOGLE_MAVEN_URL:
+#   - Online: probes Google Maven first; only on a genuine HTTP 404/410
+#     probes MAVEN_CENTRAL_URL and logs an info: notice on stderr.
+#   - Offline: checks the Google Maven cache entry first; on cache miss,
+#     checks the Maven Central cache entry before reporting an offline miss.
+#
+# Sets RESOLVED_REPO_URL and leaves BODY_FILE / BODY_TEMP / HTTP_STATUS /
+# HTTP_ERROR / HTTP_HINT for the caller (who must call release_body on exit 0).
+RESOLVED_REPO_URL=""
+
+resolve_maven_metadata() {
   local repo_url="$1"
   local group_id="$2"
   local artifact_id="$3"
-  local group_id_path
-  group_id_path=$(echo "$group_id" | sed 's/\./\//g')
+  local allow_fallback="${4:-0}"
+  local temp_dir="${5:-}"
+  local group_id_path="${group_id//./\/}"
 
   local metadata_url="$repo_url/$group_id_path/$artifact_id/maven-metadata.xml"
+  RESOLVED_REPO_URL="$repo_url"
 
-  # Offline, the cached metadata is readable where it already lies and a miss is
-  # already decided; only the online path needs somewhere to put a response.
   local status=0
-  fetch_body "$metadata_url" || status=$?
+  fetch_body "$metadata_url" "$temp_dir" || status=$?
+  if [[ $status -eq 0 ]]; then
+    return 0
+  fi
+
+  if [[ "$allow_fallback" -eq 1 && "$repo_url" == "$GOOGLE_MAVEN_URL" ]]; then
+    local mc_url="$MAVEN_CENTRAL_URL/$group_id_path/$artifact_id/maven-metadata.xml"
+    if is_offline; then
+      if [[ $status -eq 2 ]]; then
+        local gmaven_error="$HTTP_ERROR"
+        local mc_status=0
+        fetch_body "$mc_url" "$temp_dir" || mc_status=$?
+        if [[ $mc_status -eq 0 ]]; then
+          RESOLVED_REPO_URL="$MAVEN_CENTRAL_URL"
+          echo "info: '$group_id:$artifact_id' not cached from Google Maven; using Maven Central ($MAVEN_CENTRAL_URL)" >&2
+          return 0
+        fi
+        HTTP_STATUS=""
+        HTTP_ERROR="$gmaven_error (also not cached from Maven Central)"
+        HTTP_HINT=""
+        return 2
+      fi
+    elif [[ $status -eq 1 ]]; then
+      local gmaven_status="$HTTP_STATUS"
+      local mc_status=0
+      fetch_body "$mc_url" "$temp_dir" || mc_status=$?
+      if [[ $mc_status -eq 0 ]]; then
+        RESOLVED_REPO_URL="$MAVEN_CENTRAL_URL"
+        echo "info: '$group_id:$artifact_id' not on Google Maven; using Maven Central ($MAVEN_CENTRAL_URL)" >&2
+        return 0
+      fi
+      if [[ $mc_status -eq 1 ]]; then
+        HTTP_ERROR="artifact '$group_id:$artifact_id' not found on Google Maven ($gmaven_status) or Maven Central ($HTTP_STATUS)"
+        return 1
+      fi
+      return "$mc_status"
+    fi
+  fi
+
+  return "$status"
+}
+
+report_metadata_error() {
+  local status="$1"
+  local repo_url="$2"
+  local group_id="$3"
+  local artifact_id="$4"
+  local allow_fallback="${5:-0}"
+  local group_id_path="${group_id//./\/}"
+  local metadata_url="$repo_url/$group_id_path/$artifact_id/maven-metadata.xml"
 
   if [[ $status -eq 2 || $status -eq 3 ]]; then
     # Neither a missing network, an unwarmed cache, nor a server that declined
@@ -430,31 +492,45 @@ fetch_maven_metadata() {
     if is_offline; then
       warm_hint
     fi
-    # Propagate 2/3 so a caller can tell "absent" from "inconclusive"; every
-    # caller treats any non-zero as failure.
     return "$status"
   fi
 
-  if [[ $status -ne 0 ]]; then
+  if [[ "$allow_fallback" -eq 1 && "$repo_url" == "$GOOGLE_MAVEN_URL" ]]; then
+    echo "$SCRIPT_NAME: $HTTP_ERROR" >&2
+  else
     echo "$SCRIPT_NAME: artifact '$group_id:$artifact_id' not found at $metadata_url ($HTTP_STATUS)" >&2
+  fi
 
-    # Suggest alternatives from the local index
-    if [[ "$repo_url" == "$GOOGLE_MAVEN_URL" ]]; then
-      local suggestions
-      # Try searching for artifacts with the same name in other groups (using the new default local search)
-      suggestions=$(cmd_search "$artifact_id" 2>/dev/null | grep ":$artifact_id$" | head -n 5 || true)
-      if [[ -z "$suggestions" ]]; then
-        # Try a broader search if no exact artifact name matches
-        suggestions=$(cmd_search "$artifact_id" 2>/dev/null | head -n 3 || true)
-      fi
-
-      if [[ -n "$suggestions" ]]; then
-        echo "$SCRIPT_NAME: did you mean one of these?" >&2
-        # shellcheck disable=SC2001  # sed needed for multiline prefix
-        echo "$suggestions" | sed 's/^/  /' >&2
-      fi
+  # Suggest alternatives from the local index
+  if [[ "$repo_url" == "$GOOGLE_MAVEN_URL" ]]; then
+    local suggestions
+    # Try searching for artifacts with the same name in other groups (using the new default local search)
+    suggestions=$(cmd_search "$artifact_id" 2>/dev/null | grep ":$artifact_id$" | head -n 5 || true)
+    if [[ -z "$suggestions" ]]; then
+      # Try a broader search if no exact artifact name matches
+      suggestions=$(cmd_search "$artifact_id" 2>/dev/null | head -n 3 || true)
     fi
-    return 1
+
+    if [[ -n "$suggestions" ]]; then
+      echo "$SCRIPT_NAME: did you mean one of these?" >&2
+      # shellcheck disable=SC2001  # sed needed for multiline prefix
+      echo "$suggestions" | sed 's/^/  /' >&2
+    fi
+  fi
+  return 1
+}
+
+fetch_maven_metadata() {
+  local repo_url="$1"
+  local group_id="$2"
+  local artifact_id="$3"
+  local allow_fallback="${4:-0}"
+
+  local status=0
+  resolve_maven_metadata "$repo_url" "$group_id" "$artifact_id" "$allow_fallback" || status=$?
+  if [[ $status -ne 0 ]]; then
+    report_metadata_error "$status" "$repo_url" "$group_id" "$artifact_id" "$allow_fallback"
+    return "$status"
   fi
 
   cat "$BODY_FILE"
@@ -464,6 +540,61 @@ fetch_maven_metadata() {
 
 extract_versions_from_xml() {
   xmllint --xpath "//version/text()" - | tr ' ' '\n' | sort -V
+}
+
+select_version_from_xml() {
+  local xml_file="$1"
+  local version_type="$2"
+  local version="" all_versions
+
+  if [[ "$version_type" == "SNAPSHOT" ]]; then
+    version=$(extract_versions_from_xml <"$xml_file" | grep -E '\-SNAPSHOT$' | tail -n 1 || true)
+    if [[ -z "$version" ]]; then
+      echo "$SCRIPT_NAME version: no snapshot version found" >&2
+      return 1
+    fi
+    echo "$version"
+    return 0
+  fi
+
+  if [[ "$version_type" == "LATEST" ]]; then
+    version=$(xmllint --xpath "//versioning/latest/text()" - <"$xml_file" 2>/dev/null || true)
+    if [[ -z "$version" ]]; then
+      echo "$SCRIPT_NAME version: no latest version found" >&2
+      return 1
+    fi
+    echo "$version"
+    return 0
+  fi
+
+  all_versions=$(extract_versions_from_xml <"$xml_file")
+
+  # ALPHA, BETA, RC and STABLE differ only in the version shape they accept,
+  # so they share one selection step; STABLE alone falls back to the newest
+  # prerelease when no final release exists.
+  local pattern
+  case "$version_type" in
+    ALPHA) pattern='^[0-9]+\.[0-9]+\.[0-9]+-alpha[0-9]+$' ;;
+    BETA) pattern='^[0-9]+\.[0-9]+\.[0-9]+-beta[0-9]+$' ;;
+    RC) pattern='^[0-9]+\.[0-9]+\.[0-9]+-rc[0-9]+$' ;;
+    *) pattern='^[0-9]+\.[0-9]+\.[0-9]+$' ;;
+  esac
+
+  version=$(echo "$all_versions" | grep -E "$pattern" | tail -n 1 || true)
+
+  if [[ -z "$version" && "$version_type" == "STABLE" ]]; then
+    version=$(echo "$all_versions" | tail -n 1)
+    if [[ -n "$version" ]]; then
+      echo "$SCRIPT_NAME version: using prerelease version: $version" >&2
+    fi
+  fi
+
+  if [[ -z "$version" ]]; then
+    echo "$SCRIPT_NAME version: no $(echo "$version_type" | tr '[:upper:]' '[:lower:]') version found" >&2
+    return 1
+  fi
+
+  echo "$version"
 }
 
 # Classify a version string into one of three categories:
@@ -497,9 +628,11 @@ usage() {
   cat <<EOF
 Usage: $SCRIPT_NAME <command> [arguments]
 
-Jetpack library utilities for working with AndroidX packages.
+Jetpack library utilities for working with AndroidX and Maven packages.
 This tool helps resolve Maven artifacts, finding versions, and downloading
-source code for AndroidX libraries, including support for SNAPSHOT builds.
+source code for AndroidX libraries (including SNAPSHOT builds). Coordinate
+commands (version, list, source, inspect GROUP:ARTIFACT) default to Google
+Maven and automatically fall back to Maven Central when no repo URL is given.
 
 Commands:
   version <artifact> [type] [repo]
@@ -858,9 +991,9 @@ Arguments:
   VERSION_TYPE  The version type to retrieve: ALPHA, BETA, RC, STABLE,
                 LATEST, or SNAPSHOT (optional, defaults to STABLE)
                 OR a build ID integer (e.g. 14765146) for a specific snapshot.
-  REPO_URL      The Maven repository URL (optional, defaults to Google Maven)
-                For SNAPSHOT, this is ignored and the androidx.dev snapshot
-                repo is used.
+  REPO_URL      The Maven repository URL (optional; defaults to Google Maven
+                with automatic fallback to Maven Central when omitted).
+                For SNAPSHOT and build IDs, androidx.dev is used with no fallback.
 
 **About SNAPSHOT builds:** These are bleeding-edge versions of Jetpack
 libraries. 'SNAPSHOT' refers to the **latest** available build from
@@ -899,19 +1032,25 @@ cmd_version() {
   validate_artifact_format "$artifact"
 
   # Parse optional arguments
-  local version_type repo_url
+  local version_type repo_url explicit_repo=0
   local arg2="${2:-}"
 
   if [[ -n "$arg2" ]]; then
     if [[ "$arg2" =~ ^https?:// ]]; then
       version_type="STABLE"
       repo_url="$arg2"
+      explicit_repo=1
     elif [[ "$arg2" =~ ^[0-9]+$ ]]; then
       version_type="SNAPSHOT"
       repo_url="${SNAPSHOT_BUILD_URL_PREFIX}/${arg2}/artifacts/repository"
     else
       version_type=$(echo "$arg2" | tr '[:lower:]' '[:upper:]')
-      repo_url="${3:-$GOOGLE_MAVEN_URL}"
+      if [[ -n "${3:-}" ]]; then
+        repo_url="$3"
+        explicit_repo=1
+      else
+        repo_url="$GOOGLE_MAVEN_URL"
+      fi
     fi
   else
     version_type="STABLE"
@@ -928,22 +1067,21 @@ cmd_version() {
       ;;
   esac
 
-  local group_id artifact_id group_id_path
+  local group_id artifact_id
   group_id=$(echo "$artifact" | cut -d: -f1)
   artifact_id=$(echo "$artifact" | cut -d: -f2)
-  group_id_path=$(echo "$group_id" | sed 's/\./\//g')
 
-  local version xml_content all_versions
+  local version fetch_status=0
 
-  # Handle SNAPSHOT separately
+  # Handle SNAPSHOT separately (never falls back to Maven Central)
   if [[ "$version_type" == "SNAPSHOT" ]]; then
     if [[ "$repo_url" == "$GOOGLE_MAVEN_URL" ]]; then
       repo_url="$SNAPSHOT_REPO_URL"
     fi
 
-    local fetch_status=0
-    xml_content=$(fetch_maven_metadata "$repo_url" "$group_id" "$artifact_id") || fetch_status=$?
+    resolve_maven_metadata "$repo_url" "$group_id" "$artifact_id" 0 || fetch_status=$?
     if [[ $fetch_status -ne 0 ]]; then
+      report_metadata_error "$fetch_status" "$repo_url" "$group_id" "$artifact_id" 0 || true
       # Only a genuine absence says anything about the snapshot repository; a
       # declined or unreachable request was already explained.
       if [[ $fetch_status -eq 1 ]]; then
@@ -952,59 +1090,27 @@ cmd_version() {
       exit 1
     fi
 
-    version=$(echo "$xml_content" | extract_versions_from_xml | grep -E '\-SNAPSHOT$' | tail -n 1)
-
-    if [[ -z "$version" ]]; then
-      echo "$SCRIPT_NAME version: no snapshot version found" >&2
+    version=$(select_version_from_xml "$BODY_FILE" "SNAPSHOT") || {
+      release_body
       exit 1
-    fi
-
+    }
+    release_body
     echo "$version"
     return 0
   fi
 
-  if ! xml_content=$(fetch_maven_metadata "$repo_url" "$group_id" "$artifact_id"); then
+  local allow_fallback=$((1 - explicit_repo))
+  resolve_maven_metadata "$repo_url" "$group_id" "$artifact_id" "$allow_fallback" || fetch_status=$?
+  if [[ $fetch_status -ne 0 ]]; then
+    report_metadata_error "$fetch_status" "$repo_url" "$group_id" "$artifact_id" "$allow_fallback" || true
     exit 1
   fi
 
-  all_versions=$(echo "$xml_content" | extract_versions_from_xml)
-
-  case "$version_type" in
-    LATEST)
-      version=$(echo "$xml_content" | xmllint --xpath "//versioning/latest/text()" -)
-      if [[ -z "$version" ]]; then
-        echo "$SCRIPT_NAME version: no latest version found" >&2
-        exit 1
-      fi
-      ;;
-    *)
-      # ALPHA, BETA, RC and STABLE differ only in the version shape they accept,
-      # so they share one selection step; STABLE alone falls back to the newest
-      # prerelease when no final release exists.
-      local pattern
-      case "$version_type" in
-        ALPHA) pattern='^[0-9]+\.[0-9]+\.[0-9]+-alpha[0-9]+$' ;;
-        BETA) pattern='^[0-9]+\.[0-9]+\.[0-9]+-beta[0-9]+$' ;;
-        RC) pattern='^[0-9]+\.[0-9]+\.[0-9]+-rc[0-9]+$' ;;
-        *) pattern='^[0-9]+\.[0-9]+\.[0-9]+$' ;;
-      esac
-
-      version=$(echo "$all_versions" | grep -E "$pattern" | tail -n 1)
-
-      if [[ -z "$version" && "$version_type" == "STABLE" ]]; then
-        version=$(echo "$all_versions" | tail -n 1)
-        if [[ -n "$version" ]]; then
-          echo "$SCRIPT_NAME version: using prerelease version: $version" >&2
-        fi
-      fi
-
-      if [[ -z "$version" ]]; then
-        echo "$SCRIPT_NAME version: no $(echo "$version_type" | tr '[:upper:]' '[:lower:]') version found" >&2
-        exit 1
-      fi
-      ;;
-  esac
-
+  version=$(select_version_from_xml "$BODY_FILE" "$version_type") || {
+    release_body
+    exit 1
+  }
+  release_body
   echo "$version"
 }
 
@@ -1036,7 +1142,8 @@ List all versions for a given Maven artifact.
 
 Arguments:
   ARTIFACT      The Maven artifact (e.g., androidx.wear.tiles:tiles)
-  REPO_URL      The Maven repository URL (optional, defaults to Google Maven)
+  REPO_URL      The Maven repository URL (optional; defaults to Google Maven
+                with automatic fallback to Maven Central when omitted)
 
 Examples:
   $SCRIPT_NAME list versions androidx.wear.tiles:tiles
@@ -1057,13 +1164,20 @@ cmd_versions() {
   local artifact="$1"
   validate_artifact_format "$artifact"
 
-  local repo_url="${2:-$GOOGLE_MAVEN_URL}"
+  local repo_url explicit_repo=0
+  if [[ -n "${2:-}" ]]; then
+    repo_url="$2"
+    explicit_repo=1
+  else
+    repo_url="$GOOGLE_MAVEN_URL"
+  fi
+  local allow_fallback=$((1 - explicit_repo))
   local group_id artifact_id
   group_id=$(echo "$artifact" | cut -d: -f1)
   artifact_id=$(echo "$artifact" | cut -d: -f2)
 
   local xml_content
-  if ! xml_content=$(fetch_maven_metadata "$repo_url" "$group_id" "$artifact_id"); then
+  if ! xml_content=$(fetch_maven_metadata "$repo_url" "$group_id" "$artifact_id" "$allow_fallback"); then
     exit 1
   fi
 
@@ -1154,6 +1268,7 @@ cmd_resolve() {
 
   if [[ -z "$results" ]]; then
     echo "$SCRIPT_NAME resolve: no artifact declares '$input'; for a package or function use '$SCRIPT_NAME search'" >&2
+    echo "$SCRIPT_NAME resolve: note: the class index only covers Google Maven; for Maven Central libraries pass GROUP:ARTIFACT directly to 'version', 'source', or 'inspect'" >&2
     return 1
   fi
 
@@ -1175,7 +1290,8 @@ Arguments:
               (supports brace expansion, e.g., androidx.pkg:{foo,bar})
   VERSION     Version specifier (optional, defaults to STABLE). See below.
   REPO_URL    Maven repository URL
-              (optional, default: https://dl.google.com/android/maven2)
+              (optional; defaults to Google Maven with automatic fallback
+              to Maven Central when omitted).
               Ignored for SNAPSHOT, build IDs, and pinned snapshot versions.
 
 Version Specifiers:
@@ -1265,11 +1381,12 @@ cmd_source() {
   fi
 
   # Parse arguments: ARTIFACT... [VERSION] [REPO_URL]
-  local repo_url version_string version_string_upper
+  local repo_url version_string version_string_upper explicit_repo=0
   local -a artifacts
 
   if [[ "${!#}" =~ ^https?:// ]]; then
     repo_url="${!#}"
+    explicit_repo=1
     local last_non_url_arg="${*: -2:1}"
     if [[ ! "$last_non_url_arg" =~ : ]]; then
       version_string="$last_non_url_arg"
@@ -1298,7 +1415,7 @@ cmd_source() {
   fi
 
   # Classify the version and set up repository URL accordingly
-  local version_class
+  local version_class allow_fallback=0
   version_class=$(classify_version "$version_string")
 
   if [[ "$version_class" == "build_id" ]]; then
@@ -1309,11 +1426,13 @@ cmd_source() {
     # SNAPSHOT: use latest snapshot repository
     repo_url="$SNAPSHOT_REPO_URL"
     echo "info: Using AndroidX snapshot repository (latest)" >&2
+  elif [[ $explicit_repo -eq 0 && ! "$version_string" =~ -SNAPSHOT$ ]]; then
+    allow_fallback=1
   fi
 
   # Validate every artifact before touching the filesystem or the network, so a
   # typo cannot leave a half-built output directory behind.
-  local group_id artifact_id group_id_path metadata_url
+  local group_id artifact_id group_id_path
   for artifact in "${artifacts[@]}"; do
     validate_artifact_format "$artifact"
   done
@@ -1338,17 +1457,17 @@ cmd_source() {
     temp_dir="$build_dir"
   fi
 
-  local status=0
+  # Resolve repository and version independently per artifact before
+  # downloading JARs. Parallel indexed arrays keep Bash 3.2 compatibility.
+  local -a artifact_repos=()
+  local -a artifact_versions=()
+  local status=0 resolved_version=""
   for artifact in "${artifacts[@]}"; do
     group_id=$(echo "$artifact" | cut -d: -f1)
     artifact_id=$(echo "$artifact" | cut -d: -f2)
-    group_id_path=$(echo "$group_id" | sed 's/\./\//g')
-    metadata_url="${repo_url}/${group_id_path}/${artifact_id}/maven-metadata.xml"
 
-    # This body is only ever tested for existence, so a cache hit needs no copy
-    # and, offline, a miss needs no temporary file to report itself.
     status=0
-    fetch_body "$metadata_url" "$temp_dir" || status=$?
+    resolve_maven_metadata "$repo_url" "$group_id" "$artifact_id" "$allow_fallback" "$temp_dir" || status=$?
     if [[ $status -ne 0 ]]; then
       echo "$SCRIPT_NAME source: $HTTP_ERROR" >&2
       http_print_hint
@@ -1357,39 +1476,45 @@ cmd_source() {
       fi
       exit 1
     fi
+
+    artifact_repos+=("$RESOLVED_REPO_URL")
+
+    if [[ "$version_class" == "symbolic" ]]; then
+      resolved_version=$(select_version_from_xml "$BODY_FILE" "$version_string_upper") || {
+        release_body
+        exit 1
+      }
+      echo "info: Resolved $version_string_upper version for ${artifact} to ${resolved_version}" >&2
+    elif [[ "$version_class" == "build_id" ]]; then
+      resolved_version=$(select_version_from_xml "$BODY_FILE" "SNAPSHOT") || {
+        release_body
+        exit 1
+      }
+      echo "info: Resolved SNAPSHOT version for build $version_string to ${resolved_version}" >&2
+    else
+      resolved_version="$version_string"
+    fi
     release_body
+    artifact_versions+=("$resolved_version")
   done
 
   # Download and extract each package
-  local version="" jar_version snapshot_jar_version
+  local i effective_repo_url version jar_version snapshot_jar_version
   local source_jar_url source_jar_filename
   local pom_url pom_content pom_status platform_artifacts
 
-  for artifact in "${artifacts[@]}"; do
+  for ((i = 0; i < ${#artifacts[@]}; i++)); do
+    artifact="${artifacts[$i]}"
+    effective_repo_url="${artifact_repos[$i]}"
+    version="${artifact_versions[$i]}"
     group_id=$(echo "$artifact" | cut -d: -f1)
     artifact_id=$(echo "$artifact" | cut -d: -f2)
-    group_id_path=$(echo "$group_id" | sed 's/\./\//g')
-
-    # Resolve version
-    if [[ -z "$version" ]]; then
-      if [[ "$version_class" == "symbolic" ]]; then
-        # Symbolic version: resolve to actual version number
-        version=$(cmd_version "$artifact" "$version_string_upper" "$repo_url")
-        echo "info: Resolved $version_string_upper version for ${artifact} to ${version}" >&2
-      elif [[ "$version_class" == "build_id" ]]; then
-        # Build ID: resolve SNAPSHOT version from that specific build
-        version=$(cmd_version "$artifact" "SNAPSHOT" "$repo_url")
-        echo "info: Resolved SNAPSHOT version for build $version_string to ${version}" >&2
-      else
-        # Pinned version: use as-is
-        version=$version_string
-      fi
-    fi
+    group_id_path="${group_id//./\/}"
 
     # For SNAPSHOT versions, resolve the timestamped version
     jar_version="$version"
     if [[ "$version" =~ -SNAPSHOT$ ]]; then
-      local version_metadata_url="${repo_url}/${group_id_path}/${artifact_id}/${version}/maven-metadata.xml"
+      local version_metadata_url="${effective_repo_url}/${group_id_path}/${artifact_id}/${version}/maven-metadata.xml"
       snapshot_jar_version=$(http_get_body "$version_metadata_url" |
         xmllint --xpath "//snapshotVersion[classifier='sources' and extension='jar']/value/text()" - 2>/dev/null || true)
 
@@ -1401,7 +1526,7 @@ cmd_source() {
       fi
     fi
 
-    source_jar_url="${repo_url}/${group_id_path}/${artifact_id}/${version}/${artifact_id}-${jar_version}-sources.jar"
+    source_jar_url="${effective_repo_url}/${group_id_path}/${artifact_id}/${version}/${artifact_id}-${jar_version}-sources.jar"
     source_jar_filename="${artifact_id}-${jar_version}-sources.jar"
 
     echo "info: Downloading ${artifact} version ${version}" >&2
@@ -1425,7 +1550,7 @@ cmd_source() {
     # means the cache was never warmed for this version, and carrying on would
     # hand back sources silently missing every platform target — the failure
     # this whole mode exists to prevent — so it is fatal and says how to fix it.
-    pom_url="${repo_url}/${group_id_path}/${artifact_id}/${version}/${artifact_id}-${jar_version}.pom"
+    pom_url="${effective_repo_url}/${group_id_path}/${artifact_id}/${version}/${artifact_id}-${jar_version}.pom"
     pom_status=0
     pom_content=""
     fetch_body "$pom_url" "$temp_dir" || pom_status=$?
@@ -1459,7 +1584,7 @@ cmd_source() {
         for platform_artifact in $platform_artifacts; do
           platform_jar_version="$version"
           if [[ "$version" =~ -SNAPSHOT$ ]]; then
-            local platform_version_metadata_url="${repo_url}/${group_id_path}/${platform_artifact}/${version}/maven-metadata.xml"
+            local platform_version_metadata_url="${effective_repo_url}/${group_id_path}/${platform_artifact}/${version}/maven-metadata.xml"
             platform_snapshot_jar_version=$(http_get_body "$platform_version_metadata_url" |
               xmllint --xpath "//snapshotVersion[classifier='sources' and extension='jar']/value/text()" - 2>/dev/null || true)
             if [[ -n "$platform_snapshot_jar_version" ]]; then
@@ -1467,7 +1592,7 @@ cmd_source() {
             fi
           fi
 
-          platform_source_jar_url="${repo_url}/${group_id_path}/${platform_artifact}/${version}/${platform_artifact}-${platform_jar_version}-sources.jar"
+          platform_source_jar_url="${effective_repo_url}/${group_id_path}/${platform_artifact}/${version}/${platform_artifact}-${platform_jar_version}-sources.jar"
           platform_source_jar_filename="${platform_artifact}-${platform_jar_version}-sources.jar"
 
           if http_get "${platform_source_jar_url}" "${build_dir}/${platform_source_jar_filename}" 2>/dev/null; then
@@ -1532,7 +1657,8 @@ Arguments:
               (e.g., androidx.core.splashscreen.SplashScreen)
               OR Maven coordinate (e.g., androidx.wear.tiles:tiles)
   VERSION     Version specifier (optional, defaults to STABLE). See below.
-  REPO_URL    Maven repository URL (optional, defaults to Google Maven)
+  REPO_URL    Maven repository URL (optional; defaults to Google Maven with
+              automatic fallback to Maven Central when omitted).
               Ignored for SNAPSHOT, build IDs, and pinned snapshot versions.
 
 Version Specifiers:
@@ -1653,6 +1779,9 @@ cmd_inspect() {
 
   if [[ -z "$artifact" ]]; then
     echo "$SCRIPT_NAME inspect: could not resolve or find artifact for '$input'" >&2
+    if [[ "$input" != *:* ]]; then
+      echo "$SCRIPT_NAME inspect: hint: the class index only covers Google Maven; for Maven Central libraries pass GROUP:ARTIFACT (e.g. '$SCRIPT_NAME inspect GROUP:ARTIFACT' or '$SCRIPT_NAME source --find <Class> GROUP:ARTIFACT')" >&2
+    fi
     exit 1
   fi
 
@@ -1723,7 +1852,8 @@ List direct Maven dependencies for a given artifact.
 Arguments:
   ARTIFACT      Maven artifact (e.g., androidx.wear.tiles:tiles)
   VERSION       Version specifier (optional, defaults to STABLE)
-  REPO_URL      Repository URL (optional)
+  REPO_URL      Repository URL (optional; defaults to Google Maven with
+                automatic fallback to Maven Central when omitted)
 
 Examples:
   $SCRIPT_NAME list dependencies androidx.wear.tiles:tiles
@@ -1744,21 +1874,49 @@ cmd_dependencies() {
   validate_artifact_format "$artifact"
 
   local version_string="${2:-STABLE}"
-  local repo_url="${3:-$GOOGLE_MAVEN_URL}"
+  local version_string_upper
+  version_string_upper=$(echo "$version_string" | tr '[:lower:]' '[:upper:]')
+  local repo_url explicit_repo=0
+  if [[ -n "${3:-}" ]]; then
+    repo_url="$3"
+    explicit_repo=1
+  else
+    repo_url="$GOOGLE_MAVEN_URL"
+  fi
 
   local group_id artifact_id group_id_path
   group_id=$(echo "$artifact" | cut -d: -f1)
   artifact_id=$(echo "$artifact" | cut -d: -f2)
-  group_id_path=$(echo "$group_id" | sed 's/\./\//g')
+  group_id_path="${group_id//./\/}"
 
   # Classify first: cmd_version only accepts symbolic types, so routing a
   # pinned version (1.6.1) or a build ID through it fails with "invalid version
   # type" even though the POM for that exact version is what was asked for.
-  local version version_class
+  local version version_class allow_fallback=0
   version_class=$(classify_version "$version_string")
+  if [[ $explicit_repo -eq 0 && "$version_class" != "build_id" && "$version_string_upper" != "SNAPSHOT" && ! "$version_string" =~ -SNAPSHOT$ ]]; then
+    allow_fallback=1
+  fi
+
   case "$version_class" in
     symbolic)
-      version=$(cmd_version "$artifact" "$version_string" "$repo_url") || exit 1
+      if [[ "$version_string_upper" == "SNAPSHOT" ]]; then
+        version=$(cmd_version "$artifact" "$version_string" "$repo_url") || exit 1
+      else
+        local meta_status=0
+        resolve_maven_metadata "$repo_url" "$group_id" "$artifact_id" "$allow_fallback" || meta_status=$?
+        if [[ $meta_status -ne 0 ]]; then
+          report_metadata_error "$meta_status" "$repo_url" "$group_id" "$artifact_id" "$allow_fallback" || true
+          exit 1
+        fi
+        version=$(select_version_from_xml "$BODY_FILE" "$version_string_upper") || {
+          release_body
+          exit 1
+        }
+        release_body
+        repo_url="$RESOLVED_REPO_URL"
+        allow_fallback=0
+      fi
       ;;
     build_id)
       repo_url="$SNAPSHOT_BUILD_URL_PREFIX/$version_string/artifacts/repository"
@@ -1789,6 +1947,29 @@ cmd_dependencies() {
   if [[ $pom_status -eq 0 ]]; then
     pom_content=$(cat "$BODY_FILE")
     release_body
+  elif [[ $allow_fallback -eq 1 && "$repo_url" == "$GOOGLE_MAVEN_URL" ]] && {
+    (is_offline && [[ $pom_status -eq 2 ]]) || (! is_offline && [[ $pom_status -eq 1 ]])
+  }; then
+    local gmaven_pom_error="$HTTP_ERROR"
+    local mc_pom_url="${MAVEN_CENTRAL_URL}/${group_id_path}/${artifact_id}/${version}/${artifact_id}-${jar_version}.pom"
+    local mc_pom_status=0
+    fetch_body "$mc_pom_url" || mc_pom_status=$?
+    if [[ $mc_pom_status -eq 0 ]]; then
+      pom_content=$(cat "$BODY_FILE")
+      release_body
+      if is_offline; then
+        echo "info: '$group_id:$artifact_id' not cached from Google Maven; using Maven Central ($MAVEN_CENTRAL_URL)" >&2
+      else
+        echo "info: '$group_id:$artifact_id' not on Google Maven; using Maven Central ($MAVEN_CENTRAL_URL)" >&2
+      fi
+    else
+      if is_offline; then
+        HTTP_ERROR="$gmaven_pom_error (also not cached from Maven Central)"
+      elif [[ $mc_pom_status -eq 1 ]]; then
+        HTTP_ERROR="$gmaven_pom_error; also not found at $mc_pom_url ($HTTP_STATUS)"
+      fi
+      fetch_failed=1
+    fi
   else
     fetch_failed=1
   fi
