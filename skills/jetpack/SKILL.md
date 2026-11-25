@@ -98,90 +98,94 @@ re-run where there is network; it is never a reason to answer from memory.
 
 ### `version`
 
-**Purpose**: Get specific version type (ALPHA, BETA, SNAPSHOT, etc.) for a
-package. **Usage**: `scripts/jetpack version PACKAGE [TYPE] [REPO]` **Options**:
-`ALPHA`, `BETA`, `RC`, `STABLE`, `LATEST`, `SNAPSHOT`.
+- **Purpose**: Get specific version type (ALPHA, BETA, SNAPSHOT, etc.) for a
+  package.
+- **Usage**: `scripts/jetpack version PACKAGE [TYPE] [REPO]`
+- **Options**: `ALPHA`, `BETA`, `RC`, `STABLE`, `LATEST`, `SNAPSHOT`.
 
 ### `list versions`
 
-**Purpose**: List all versions for a package. **Usage**:
-`scripts/jetpack list versions PACKAGE [REPO]`
+- **Purpose**: List all versions for a package.
+- **Usage**: `scripts/jetpack list versions PACKAGE [REPO]`
 
 ### `resolve`
 
-**Purpose**: Convert an Android class to its Maven coordinate. **Usage**:
-`scripts/jetpack resolve CLASS_NAME` **Note**: Resolves top-level and nested
-classes (`Outer.Inner` or `Outer$Inner`) whose enclosing top-level class is in
-the cached Google Maven index (`androidx.*`, `com.google.android.*`,
-`com.android.billingclient.*`, etc.); use `search` for packages and Kotlin
-top-level functions. Maven Central libraries are not in the class index — pass
-their `GROUP:ARTIFACT` coordinate directly to `version`, `list`, `source`,
-`javadoc`, or `inspect`.
+- **Purpose**: Convert an Android class to its Maven coordinate.
+- **Usage**: `scripts/jetpack resolve CLASS_NAME`
+- **Note**: Resolves top-level and nested classes (`Outer.Inner` or
+  `Outer$Inner`) whose enclosing top-level class is in the cached Google Maven
+  index (`androidx.*`, `com.google.android.*`, `com.android.billingclient.*`,
+  etc.); use `search` for packages and Kotlin top-level functions. Maven Central
+  libraries are not in the class index — pass their `GROUP:ARTIFACT` coordinate
+  directly to `version`, `list`, `source`, `javadoc`, or `inspect`.
 
 ### `search`
 
-**Purpose**: Search for artifacts by package, artifact, or class name.
-**Usage**: `scripts/jetpack search [OPTIONS] QUERY` **Options**: `--force`
-(rebuild cache). **Note**: Searches the cached Google Maven class index only;
-for Maven Central artifacts pass `GROUP:ARTIFACT` directly to coordinate
-commands.
+- **Purpose**: Search for artifacts by package, artifact, or class name.
+- **Usage**: `scripts/jetpack search [OPTIONS] QUERY`
+- **Options**: `--force` (rebuild cache).
+- **Note**: Searches the cached Google Maven class index only; for Maven Central
+  artifacts pass `GROUP:ARTIFACT` directly to coordinate commands.
 
 ### `source`
 
-**Purpose**: Download and extract compilable `-sources.jar` archives. **Usage**:
-`scripts/jetpack source [OPTIONS] PACKAGE... [VERSION] [REPO]` **Options**:
-`-o`/`--output DIR` to specify destination, `--find PATTERN` to locate specific
-files. **Note**: Strictly fetches `-sources.jar`; on HTTP 404 it prints a hint
-pointing to `scripts/jetpack javadoc`.
+- **Purpose**: Download and extract compilable `-sources.jar` archives.
+- **Usage**: `scripts/jetpack source [OPTIONS] PACKAGE... [VERSION] [REPO]`
+- **Options**: `-o`/`--output DIR` to specify destination, `--find PATTERN` to
+  locate specific files.
+- **Note**: Strictly fetches `-sources.jar`; on HTTP 404 it prints a hint
+  pointing to `scripts/jetpack javadoc`.
 
 ### `javadoc`
 
-**Purpose**: Download and extract raw `.html` reference pages from
-`-javadoc.jar` archives (useful for closed-source Google Maven or Maven Central
-SDKs without `-sources.jar`). **Usage**:
-`scripts/jetpack javadoc [OPTIONS] PACKAGE... [VERSION] [REPO]` **Options**:
-`-o`/`--output DIR` to specify destination, `--find PATTERN` to locate matching
-class HTML pages (including `Outer.Inner` / `Outer$Inner`). **Note**: Rejects
-empty placeholder `-javadoc.jar` archives with a non-zero exit status. When
-`--find` resolves to a single `.html` file `≤ 64 KiB`, its contents are printed
-to stdout; larger pages print the extracted file path to stdout (with a size
-note on stderr) so callers can search or read targeted line ranges.
+- **Purpose**: Download and extract raw `.html` reference pages from
+  `-javadoc.jar` archives (useful for closed-source Google Maven or Maven
+  Central SDKs without `-sources.jar`).
+- **Usage**: `scripts/jetpack javadoc [OPTIONS] PACKAGE... [VERSION] [REPO]`
+- **Options**: `-o`/`--output DIR` to specify destination, `--find PATTERN` to
+  locate matching class HTML pages (including `Outer.Inner` / `Outer$Inner`).
+- **Note**: Rejects empty placeholder `-javadoc.jar` archives with a non-zero
+  exit status. When `--find` resolves to a single `.html` file `≤ 64 KiB`, its
+  contents are printed to stdout; larger pages print the extracted file path to
+  stdout (with a size note on stderr) so callers can search or read targeted
+  line ranges.
 
 ### `inspect`
 
-**Purpose**: Convenience wrapper combining `search`/`resolve` + `source` with
-automatic fallback to `javadoc` when `-sources.jar` is not published. **Usage**:
-`scripts/jetpack inspect [OPTIONS] CLASS_NAME|GROUP:ARTIFACT [VERSION] [REPO]`
-**Options**: `-o`/`--output DIR` to specify destination. **Note**: Resolves
-top-level and nested (`Outer.Inner` / `Outer$Inner`) class names; falls back to
-an index search if direct resolution fails, and falls back to `-javadoc.jar`
-(logging an `info:` provenance notice on stderr) when `-sources.jar` returns
-HTTP 404. For Maven Central libraries (which are not in the Google Maven class
-index), pass `GROUP:ARTIFACT` directly (or use
-`scripts/jetpack source --find <Class> GROUP:ARTIFACT` /
-`scripts/jetpack javadoc --find <Class> GROUP:ARTIFACT`).
+- **Purpose**: Convenience wrapper combining `search`/`resolve` + `source` with
+  automatic fallback to `javadoc` when `-sources.jar` is not published.
+- **Usage**:
+  `scripts/jetpack inspect [OPTIONS] CLASS_NAME|GROUP:ARTIFACT [VERSION] [REPO]`
+- **Options**: `-o`/`--output DIR` to specify destination.
+- **Note**: Resolves top-level and nested (`Outer.Inner` / `Outer$Inner`) class
+  names; falls back to an index search if direct resolution fails, and falls
+  back to `-javadoc.jar` (logging an `info:` provenance notice on stderr) when
+  `-sources.jar` returns HTTP 404. For Maven Central libraries (which are not in
+  the Google Maven class index), pass `GROUP:ARTIFACT` directly (or use
+  `scripts/jetpack source --find <Class> GROUP:ARTIFACT` /
+  `scripts/jetpack javadoc --find <Class> GROUP:ARTIFACT`).
 
 ### `list dependencies`
 
-**Purpose**: List direct Maven dependencies for an artifact. **Usage**:
-`scripts/jetpack list dependencies ARTIFACT [VERSION]`
+- **Purpose**: List direct Maven dependencies for an artifact.
+- **Usage**: `scripts/jetpack list dependencies ARTIFACT [VERSION]`
 
 ### `doctor`
 
-**Purpose**: Report dependencies, offline mode, and cache state. **Usage**:
-`scripts/jetpack doctor` **Note**: Read-only; exits non-zero if anything needs
-attention.
+- **Purpose**: Report dependencies, offline mode, and cache state.
+- **Usage**: `scripts/jetpack doctor`
+- **Note**: Read-only; exits non-zero if anything needs attention.
 
 ## Standalone Scripts
 
 ### `scripts/jetpack-samples`
 
-**Purpose**: Download non-published reference samples and integration tests.
-**Usage**: `scripts/jetpack-samples ARTIFACT [VERSION] [--output DIR]`
-**Details**: Extracts sample modules from the AOSP source structure. When
-`VERSION` (or release tier like `STABLE`, `RC`, `BETA`, `ALPHA`) is specified,
-it resolves the exact Git commit SHA from AndroidX release notes to match the
-released artifact. If omitted, extracts samples from `androidx-main` (HEAD).
+- **Purpose**: Download non-published reference samples and integration tests.
+- **Usage**: `scripts/jetpack-samples ARTIFACT [VERSION] [--output DIR]`
+- **Details**: Extracts sample modules from the AOSP source structure. When
+  `VERSION` (or release tier like `STABLE`, `RC`, `BETA`, `ALPHA`) is specified,
+  it resolves the exact Git commit SHA from AndroidX release notes to match the
+  released artifact. If omitted, extracts samples from `androidx-main` (HEAD).
 
 ## Version Types
 
