@@ -11,8 +11,8 @@ description: >-
   general Android tutorials or APIs where no lookup is required.
 compatibility: >-
   Requires curl, xmllint (libxml2-utils), jar (JDK), jq, perl. Needs network
-  access to dl.google.com and androidx.dev, or a cache left by an earlier online
-  run plus AGENT_OFFLINE where there is none.
+  access to dl.google.com, repo1.maven.org, and androidx.dev, or a cache left
+  by an earlier online run plus AGENT_OFFLINE where there is none.
 ---
 
 # Jetpack Library Utilities
@@ -26,6 +26,8 @@ handles complex resolution logic that manual queries miss:
 
 - Class-to-coordinate lookup in the cached GMaven class index
 - Class-name search over that same index
+- Automatic Google Maven → Maven Central (`https://repo1.maven.org/maven2`)
+  fallback for coordinate-addressed commands when no `REPO_URL` is supplied
 - Version type filtering (ALPHA, BETA, STABLE, SNAPSHOT)
 - Kotlin Multiplatform platform-specific source detection
 - Build ID resolution for pinned snapshots
@@ -99,14 +101,18 @@ package. **Usage**: `scripts/jetpack version PACKAGE [TYPE] [REPO]` **Options**:
 
 **Purpose**: Convert an Android class to its Maven coordinate. **Usage**:
 `scripts/jetpack resolve CLASS_NAME` **Note**: Exact top-level class names from
-the cached index; use `search` for packages, Kotlin functions, and nested
-classes.
+the cached Google Maven index only (`androidx.*`, `com.google.android.*`, etc.);
+use `search` for packages, Kotlin functions, and nested classes. Maven Central
+libraries are not in the class index — pass their `GROUP:ARTIFACT` coordinate
+directly to `version`, `list`, `source`, or `inspect`.
 
 ### `search`
 
 **Purpose**: Search for artifacts by package, artifact, or class name.
 **Usage**: `scripts/jetpack search [OPTIONS] QUERY` **Options**: `--force`
-(rebuild cache).
+(rebuild cache). **Note**: Searches the cached Google Maven class index only;
+for Maven Central artifacts pass `GROUP:ARTIFACT` directly to coordinate
+commands.
 
 ### `source`
 
@@ -117,9 +123,11 @@ specify destination, `--find PATTERN` to locate specific files.
 ### `inspect`
 
 **Purpose**: Convenience wrapper combining `search`/`resolve` + `source`.
-**Usage**: `scripts/jetpack inspect CLASS_NAME [VERSION]` **Note**: Best for
-quickly checking implementation details; falls back to an index search if direct
-resolution fails.
+**Usage**: `scripts/jetpack inspect CLASS_NAME|GROUP:ARTIFACT [VERSION]`
+**Note**: Best for quickly checking implementation details; falls back to an
+index search if direct resolution fails. For Maven Central libraries (which are
+not in the Google Maven class index), pass `GROUP:ARTIFACT` directly (or use
+`scripts/jetpack source --find <Class> GROUP:ARTIFACT`).
 
 ### `list dependencies`
 
@@ -240,8 +248,16 @@ See local HTTP caching guidelines (storing response artifacts locally under
 
 ## Safety Notes
 
-- **Network Access**: Requires access to `dl.google.com` and `androidx.dev` — or
-  a cache warmed by an earlier online run, plus `AGENT_OFFLINE=1`.
+- **Network Access**: Requires access to `dl.google.com`, `repo1.maven.org`, and
+  `androidx.dev` — or a cache warmed by an earlier online run, plus
+  `AGENT_OFFLINE=1`.
+- **Repository Fallback & Class Index Boundary**: Coordinate-addressed commands
+  (`version`, `list versions`, `list dependencies`, `source`, and
+  `inspect GROUP:ARTIFACT`) query Google Maven first and automatically fall back
+  to Maven Central (`https://repo1.maven.org/maven2`) on a 404 when no explicit
+  `REPO_URL` is given (never for `SNAPSHOT` or numeric build IDs), logging an
+  `info:` notice on stderr. `resolve` and `search` only query the cached Google
+  Maven class index; pass `GROUP:ARTIFACT` directly for Maven Central libraries.
 - **Cached answers are dated, not current**: offline answers carry their age on
   stderr. Report that age; do not present a stale version as the latest.
 - **SNAPSHOTs**: Change frequently; use pinned versions or Build IDs for

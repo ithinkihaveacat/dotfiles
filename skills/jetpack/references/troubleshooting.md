@@ -69,16 +69,22 @@ it cannot be rebuilt. **Solution**:
 
 ## Resolution Failures
 
-**Symptom**: `no artifact declares 'X'`. **Cause**: `resolve` matches exact
-top-level class names from the cached index. A package, a Kotlin top-level
-function, a nested class, or an artifact Google has not indexed will not match.
-**Solution**:
+**Symptom**: `no artifact declares 'X'` or
+`could not resolve or find artifact for 'X'`. **Cause**: `resolve` and `search`
+query the cached Google Maven class index (`classes-v0.1.json.gz`), which only
+indexes Google Maven (`androidx.*`, `com.google.android.*`, etc.) and lists
+top-level classes only. A package, a Kotlin top-level function, a nested class,
+or a library hosted on Maven Central (such as Horologist, Koin, Ktor, or Coil 3)
+will not match. **Solution**:
 
-1. Search the package, then pick a coordinate:
+1. Search the package on Google Maven, then pick a coordinate:
    `scripts/jetpack search androidx.compose.foundation.layout`.
-1. Use the coordinate directly: `scripts/jetpack source GROUP:ARTIFACT`.
-1. If a top-level class known to exist still misses, refresh the index:
-   `scripts/jetpack search --force QUERY`.
+1. For Maven Central libraries (or any known coordinate), pass `GROUP:ARTIFACT`
+   directly — coordinate commands automatically fall back to Maven Central:
+   `scripts/jetpack source --find KoinApplication io.insert-koin:koin-core` or
+   `scripts/jetpack inspect com.google.android.horologist:horologist-media-ui-material3`.
+1. If a Google Maven top-level class known to exist still misses, refresh the
+   index: `scripts/jetpack search --force QUERY`.
 
 ## Version Not Found
 
