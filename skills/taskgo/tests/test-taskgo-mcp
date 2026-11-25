@@ -626,10 +626,11 @@ else
 fi
 
 # A server stops on SIGINT or SIGTERM with status 0 within a few seconds, over
-# HTTP and over --stdio, the stdio one while its client holds stdin open.
+# HTTP and over --stdio, the stdio one while its client holds stdin open
+# (including when Linux routes the signal to a stdio worker thread).
 MCP_SIGNALS=$(
   "$TASKGO_PY" -c '
-import json, signal, socket, subprocess, sys, time, urllib.request
+import ctypes, json, os, signal, socket, subprocess, sys, time, urllib.request
 
 py, mcp_bin, repo, branch, log = sys.argv[1:]
 init = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}}}
@@ -665,7 +666,20 @@ def wait_http(proc, port):
         time.sleep(0.02)
     raise RuntimeError("server never answered initialize")
 
-def stop(sig, extra, port, name):
+def signal_worker_or_proc(proc, sig):
+    task_dir = f"/proc/{proc.pid}/task"
+    libc = ctypes.CDLL(None) if os.path.isdir(task_dir) else None
+    if libc is not None and hasattr(libc, "tgkill"):
+        for _ in range(50):
+            tids = [int(t) for t in os.listdir(task_dir) if int(t) != proc.pid]
+            if tids:
+                if libc.tgkill(proc.pid, tids[0], int(sig)) == 0:
+                    return
+                break
+            time.sleep(0.01)
+    proc.send_signal(sig)
+
+def stop(sig, extra, port, name, worker_thread=False):
     err = open(f"{log}.{name}.err", "w")
     proc = subprocess.Popen(common + extra, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=err)
     try:
@@ -676,7 +690,10 @@ def stop(sig, extra, port, name):
                 raise RuntimeError("server did not answer initialize")
         else:
             wait_http(proc, port)
-        proc.send_signal(sig)
+        if worker_thread:
+            signal_worker_or_proc(proc, sig)
+        else:
+            proc.send_signal(sig)
         return proc.wait(timeout=30)
     except Exception as e:
         if proc.poll() is None:
@@ -696,6 +713,10 @@ for sig in (signal.SIGINT, signal.SIGTERM):
         print("stdio", sig.name, stop(sig, ["--stdio"], None, f"stdio-{sig.name}"))
     except Exception as e:
         print("stdio", sig.name, repr(e))
+try:
+    print("stdio-worker", "SIGINT", stop(signal.SIGINT, ["--stdio"], None, "stdio-worker-SIGINT", worker_thread=True))
+except Exception as e:
+    print("stdio-worker", "SIGINT", repr(e))
 for sig in (signal.SIGINT, signal.SIGTERM):
     port = free_port()
     try:
@@ -704,7 +725,7 @@ for sig in (signal.SIGINT, signal.SIGTERM):
         print("http", sig.name, repr(e))
 ' "$MCP_PY" "$MCP_BIN" "$TREE_REPO" "$(git -C "$TREE_REPO" branch --show-current)" "$TEST_ROOT/mcp-signals.jsonl" 2>&1
 ) || true
-if [[ $MCP_SIGNALS == $'stdio SIGINT 0\nstdio SIGTERM 0\nhttp SIGINT 0\nhttp SIGTERM 0' ]]; then
+if [[ $MCP_SIGNALS == $'stdio SIGINT 0\nstdio SIGTERM 0\nstdio-worker SIGINT 0\nhttp SIGINT 0\nhttp SIGTERM 0' ]]; then
   echo 'ok 12 - mcp exits 0 on SIGINT and SIGTERM over both transports'
 else
   echo 'not ok 12 - mcp exits 0 on SIGINT and SIGTERM over both transports'
