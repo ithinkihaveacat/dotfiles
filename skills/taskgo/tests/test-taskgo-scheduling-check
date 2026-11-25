@@ -5,7 +5,7 @@ set -euo pipefail
 source "$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 taskgo_test_init
 
-echo "1..21"
+echo "1..25"
 
 # Cost is an optional task field; exercise creation, insertion and replacement.
 COST_REPO="$TEST_ROOT/cost-repo"
@@ -187,10 +187,10 @@ rc_due, out_due, err_due = run_tg("--root", str(wf_repo), "doctor", "proj", toda
 dr_due = out_due + err_due
 report(
     7,
-    "doctor emits [FAIL] on overdue due date and [INFO] within 48h",
-    rc_due != 0
-    and f"[FAIL]  proj/tasks/{due_overdue_id}-overdue.md: overdue (due 2026-10-05" in dr_due
-    and f"[INFO]  proj/tasks/{due_soon_id}-soon.md: due soon (due 2026-10-08" in dr_due,
+    "doctor stays structural on overdue/due-soon tasks and points to triage",
+    rc_due == 0
+    and "2 item(s) due, unblocked, or stale; run taskgo triage proj" in dr_due
+    and "[FAIL]" not in dr_due,
 )
 
 run_tg("--root", str(wf_repo), "update", due_overdue_id, "--status", "done", "--outcome", "Done.")
@@ -200,9 +200,9 @@ rc_st, out_st, err_st = run_tg("--root", str(wf_repo), "doctor", "proj", today="
 run_tg("--root", str(wf_repo), "fix", "proj", "--no-commit", today="2026-10-06")
 report(
     8,
-    "doctor warns on stale_after < today without deleting task",
-    rc_st != 0
-    and f"[WARN]  proj/tasks/{due_soon_id}-soon.md: stale task (stale_after 2026-10-01)" in (out_st + err_st)
+    "doctor stays structural on stale_after < today without deleting task",
+    rc_st == 0
+    and "1 item(s) due, unblocked, or stale; run taskgo triage proj" in (out_st + err_st)
     and (wf_repo / f"proj/tasks/{due_soon_id}-soon.md").is_file(),
 )
 
@@ -338,16 +338,19 @@ print(f"CHK_STALE_ID={shlex.quote(create('beta', 'Stale experiment', '--slug', '
 PY
 )"
 
-# Test 140: check flags elapsed wait_for dates (today >= date) and ignores resolved tasks
-CHK_T146_TXT=$(AGENT_OFFLINE=1 TASKGO_TODAY=2026-10-06 tg --root "$CHK_REPO" check alpha)
-CHK_T146_JSON=$(AGENT_OFFLINE=1 TASKGO_TODAY=2026-10-06 tg --root "$CHK_REPO" check alpha --json)
-if [[ "$CHK_T146_TXT" == *"$CHK_DATE_ID"*"wait_for date 2026-10-06 elapsed"* ]] &&
+# Test 140: triage (and check alias) flags elapsed wait_for dates and ignores resolved tasks
+CHK_T146_TXT=$(AGENT_OFFLINE=1 TASKGO_TODAY=2026-10-06 tg --root "$CHK_REPO" triage alpha)
+CHK_T146_ALIAS=$(AGENT_OFFLINE=1 TASKGO_TODAY=2026-10-06 tg --root "$CHK_REPO" check alpha)
+CHK_T146_JSON=$(AGENT_OFFLINE=1 TASKGO_TODAY=2026-10-06 tg --root "$CHK_REPO" triage alpha --json)
+if [[ "$CHK_T146_TXT" == *"Gates"* ]] &&
+  [[ "$CHK_T146_TXT" == *"$CHK_DATE_ID"*"wait_for 2026-10-06 elapsed"* ]] &&
+  [[ "$CHK_T146_TXT" == "$CHK_T146_ALIAS" ]] &&
   [[ "$CHK_T146_TXT" != *"$CHK_DONE_ID"* ]] &&
   [[ "$CHK_T146_TXT" != *"$CHK_QUIET_ID"* ]] &&
   [[ "$CHK_T146_JSON" == *'"kind": "wait_for_elapsed"'* ]]; then
-  echo 'ok 14 - check flags elapsed wait_for dates and skips resolved tasks'
+  echo 'ok 14 - triage (and check alias) flags elapsed wait_for dates and skips resolved tasks'
 else
-  echo 'not ok 14 - check flags elapsed wait_for dates and skips resolved tasks'
+  echo 'not ok 14 - triage (and check alias) flags elapsed wait_for dates and skips resolved tasks'
 fi
 
 # Test 141 & 142: check flags overdue/approaching due deadlines and stale_after cutoffs
@@ -484,4 +487,80 @@ if CHK_T21_OUT=$(AGENT_OFFLINE=0 PATH="$MOCK_BIN:$PATH" TASKGO_TODAY=2026-10-06 
 else
   echo 'not ok 21 - a WORD/ID gate is accepted and left unpolled'
   printf '# %s\n' "$CHK_T21_OUT"
+fi
+
+# ===========================================================================
+# OKF-aligned reference checks (triage stale_after, doctor frontmatter/deprecated,
+# and checkpoint large-Findings [INFO] hint)
+# ===========================================================================
+
+REF_REPO="$TEST_ROOT/ref-repo"
+create_taskgo_repo "$REF_REPO" alpha
+mkdir -p "$REF_REPO/alpha/references"
+printf '%s\n' '---' 'status: draft' 'stale_after: 2026-10-01' '---' '' '# Price guide' \
+  >"$REF_REPO/alpha/references/prices.md"
+printf '%s\n' '---' 'status: deprecated' 'superseded_by: prices.md' 'stale_after: 2026-09-01' '---' '' '# Old guide' \
+  >"$REF_REPO/alpha/references/old-guide.md"
+printf '%s\n' '# Plain note' '' 'No frontmatter at all.' \
+  >"$REF_REPO/alpha/references/plain.md"
+git -C "$REF_REPO" add -A >/dev/null 2>&1
+git -C "$REF_REPO" commit -qm 'chore(alpha): seed reference files'
+
+# Test 22: triage surfaces stale reference files and skips deprecated references
+REF_TRI_TXT=$(AGENT_OFFLINE=1 TASKGO_TODAY=2026-10-06 tg --root "$REF_REPO" triage alpha)
+REF_TRI_JSON=$(AGENT_OFFLINE=1 TASKGO_TODAY=2026-10-06 tg --root "$REF_REPO" triage alpha --json)
+if [[ "$REF_TRI_TXT" == *"Stale"* ]] &&
+  [[ "$REF_TRI_TXT" == *"alpha/references/prices.md"* ]] &&
+  [[ "$REF_TRI_TXT" != *"old-guide.md"* ]] &&
+  [[ "$REF_TRI_TXT" != *"plain.md"* ]] &&
+  [[ "$REF_TRI_JSON" == *'"kind": "reference"'* ]]; then
+  echo 'ok 22 - triage surfaces stale references and skips deprecated or plain references'
+else
+  echo 'not ok 22 - triage surfaces stale references and skips deprecated or plain references'
+  printf '# txt=%s\n# json=%s\n' "$REF_TRI_TXT" "$REF_TRI_JSON"
+fi
+
+# Test 23: doctor warns on malformed YAML frontmatter in references/ while allowing plain files
+printf '%s\n' '---' 'status: [unclosed' '---' '' '# Broken' \
+  >"$REF_REPO/alpha/references/broken.md"
+set +e
+REF_DOC_BAD=$(AGENT_OFFLINE=1 TASKGO_TODAY=2026-10-06 tg --root "$REF_REPO" doctor alpha 2>&1)
+REF_DOC_BAD_RC=$?
+set -e
+rm -f "$REF_REPO/alpha/references/broken.md"
+if [[ $REF_DOC_BAD_RC -ne 0 ]] &&
+  [[ "$REF_DOC_BAD" == *"[WARN]  alpha/references/broken.md: invalid YAML frontmatter"* ]] &&
+  [[ "$REF_DOC_BAD" != *"plain.md"* ]]; then
+  echo 'ok 23 - doctor warns on malformed reference frontmatter and accepts plain files'
+else
+  echo 'not ok 23 - doctor warns on malformed reference frontmatter and accepts plain files'
+  printf '# rc=%s out=%s\n' "$REF_DOC_BAD_RC" "$REF_DOC_BAD"
+fi
+
+# Test 24: doctor warns when README or an open task links to a deprecated reference
+printf '\nSee [old guide](references/old-guide.md).\n' >>"$REF_REPO/alpha/README.md"
+set +e
+REF_DOC_DEP=$(AGENT_OFFLINE=1 TASKGO_TODAY=2026-10-06 tg --root "$REF_REPO" doctor alpha 2>&1)
+REF_DOC_DEP_RC=$?
+set -e
+git -C "$REF_REPO" checkout -q -- alpha/README.md
+if [[ $REF_DOC_DEP_RC -ne 0 ]] &&
+  [[ "$REF_DOC_DEP" == *"[WARN]  alpha/README.md: links to deprecated reference 'alpha/references/old-guide.md' (superseded by prices.md)"* ]]; then
+  echo 'ok 24 - doctor warns on links to deprecated reference files'
+else
+  echo 'not ok 24 - doctor warns on links to deprecated reference files'
+  printf '# rc=%s out=%s\n' "$REF_DOC_DEP_RC" "$REF_DOC_DEP"
+fi
+
+# Test 25: checkpoint emits non-blocking [INFO] hint when closing a task with >=50 lines of unfolded Findings
+BIG_FINDINGS=$(printf -- '- Finding line %s.\n' {1..55})
+BIG_OUT=$(AGENT_OFFLINE=1 tg --root "$REF_REPO" create alpha 'Big findings task' --slug big-findings --goal 'Test hint' --no-commit)
+BIG_ID="${BIG_OUT%%$'\t'*}"
+AGENT_OFFLINE=1 tg --root "$REF_REPO" update "$BIG_ID" --status 'done' --outcome 'Done.' --findings "$BIG_FINDINGS" >/dev/null
+if BIG_CP_ERR=$(AGENT_OFFLINE=1 tg --root "$REF_REPO" checkpoint "$BIG_ID" 'feat(alpha): close big findings task' 2>&1) &&
+  [[ "$BIG_CP_ERR" == *"[INFO]"*"## Findings has 55 lines with no link to references/, decisions/, or --ref"* ]]; then
+  echo 'ok 25 - checkpoint emits non-blocking [INFO] hint for large unfolded Findings on close'
+else
+  echo 'not ok 25 - checkpoint emits non-blocking [INFO] hint for large unfolded Findings on close'
+  printf '# %s\n' "$BIG_CP_ERR"
 fi

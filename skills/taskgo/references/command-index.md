@@ -15,7 +15,7 @@
 - [status](#status)
 - [handoff](#handoff)
 - [sync](#sync)
-- [check](#check)
+- [triage](#triage)
 - [doctor](#doctor)
 - [fix](#fix)
 - [history](#history)
@@ -66,7 +66,7 @@ Health:
   doctor [PROJECT]                 Run mechanical checks (read-only)
   fix [PROJECT] [OPTIONS]          Auto-heal IDs, statuses, snapshots, AGENTS.md
   sync [PROJECT]                   Update STATUS.md snapshot
-  check [PROJECT] [--json]         Sweep wait_for gates and date horizons
+  triage [PROJECT] [--json]        Sweep due dates, gates, and stale items
 
 Server:
   mcp [OPTIONS]                    Serve the tracker to MCP clients
@@ -480,14 +480,14 @@ Options:
 
 <!-- /generated -->
 
-## check
+## triage
 
-<!-- generated: ../scripts/taskgo check --help -->
+<!-- generated: ../scripts/taskgo triage --help -->
 
 ```text
-Usage: taskgo check [--help] [--json] [PROJECT]
+Usage: taskgo triage [--help] [--json] [PROJECT]
 
-Evaluate wait_for gates, due deadlines, and stale_after cutoffs.
+Sweep wait_for gates, due deadlines, and stale_after cutoffs.
 
 Arguments:
   PROJECT     Optional target project
@@ -497,11 +497,12 @@ Options:
   --json, -j  Output machine-readable JSON
 
 Examples:
-  taskgo check
-  taskgo check my-project --json
+  taskgo triage
+  taskgo triage my-project --json
 
-Scans open tasks declaring wait_for, due, or stale_after against today and each
-task file's Git commit watermark, emitting nothing when no tasks trigger.
+Scans open tasks declaring wait_for, due, or stale_after (and project
+references declaring stale_after) against today and each task file's Git
+commit watermark, emitting nothing when nothing triggers.
 ```
 
 <!-- /generated -->
