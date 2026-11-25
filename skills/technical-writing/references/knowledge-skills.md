@@ -40,8 +40,11 @@ any particular project or task, and more than one piece of work may need it.
 
 Project reference pages do not need a skill wrapper. Consider a knowledge or
 capability skill when material is repeatedly needed outside its originating
-project and topic-based discovery would improve access. Update an existing owner
-regardless of how quickly the information is changing.
+project and topic-based discovery would improve access. When a knowledge skill
+already exists for a system or domain, update it directly regardless of how
+quickly the information is changing, keeping only transient work packets in
+project `references/`. The boundary is intentionally judgment-based: tolerate
+slight drift and repair it opportunistically.
 
 ## Structure
 
@@ -54,6 +57,9 @@ Organize by entity, so each lookup lands on one small file:
 - **`references/` holds one file per entity**, or per small group of similar
   entities (one per machine, one per provider, one per street). Name the file
   after the entity and open it with a one-line statement of what the entity is.
+  Entity files may optionally include short YAML frontmatter (`name` and
+  `description`) so agents can scan what each file covers without reading the
+  full body.
 - **Procedures that span entities** (provisioning a server, rotating every key
   of one kind) get their own reference file rather than being split across
   entity files.
@@ -80,6 +86,21 @@ Within an entity file, keep three kinds of content distinct:
   a fallback copy of data on a retired host.
 - **Do not add administrative metadata** such as `updated:` or `last_reviewed:`
   fields; version control records when a file changed.
+- **Use optional lifecycle and provenance frontmatter only where it earns its
+  keep** (plain files remain valid; existing skills need not be retrofitted):
+  - `stale_after: YYYY-MM-DD`: a forward-looking review or expiry date when a
+    file holds time-bounded facts (warranties, key lifetimes, renewals). Omit
+    when no review cycle exists; never invent a date.
+  - `status: deprecated` and `superseded_by: <relative-path-or-skill>`: when
+    retiring an entity or splitting a skill across domains, update the
+    superseded file itself (frontmatter plus a brief pointer at the top) so
+    inbound links lead to the replacement instead of breaking or misleading
+    readers.
+  - `sources` (`[{ id, resource, title }]`) paired with `[^id]` body footnotes:
+    useful for uncheckable or mined facts (receipts, manuals, vendor specs,
+    mined preferences) where checking a live system is not possible; skip for
+    live-checkable infrastructure where checking reality directly is cheaper and
+    stronger.
 - **Date an observation when its age affects trust in it**: "moved in Feb 2026",
   "the console offered no expiry option (2026-07)". Expiry and renewal dates are
   facts in their own right.
