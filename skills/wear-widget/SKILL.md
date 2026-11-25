@@ -306,6 +306,20 @@ on the public emulator):
      `89.6%` screen width x `70%` screen height; corner radius is `height / 2`
      (full capsule) and padding is `0.3 * cornerRadius`.
 
+   > [!WARNING] **Usable Content Height & Touch-Target Clipping**: Hosts clip
+   > widget content strictly to the padded content box
+   > (`containerSizeDp - 2 * paddingDp`). On renderer `1.6.7.5+`, a
+   > Rounded-Rectangle `SMALL` container (`64dp` outer, `10dp` vertical padding)
+   > provides only **`44dp` of usable height**—so buttons or rows with a hard
+   > `48dp` minimum height (`heightIn(min = 48.dp)`) will clip top and bottom
+   > inside `SMALL`. Likewise, on `1.6.5.41.*`–`1.6.7.4` hosts at `<225dp`
+   > screen width, `LARGE` provides only **`96dp` of usable height** (`112dp`
+   > outer, `8dp` vertical padding)—so two stacked `48dp`-floor rows plus a gap
+   > (`>= 100dp`) will clip top and bottom unless button height is capped to
+   > `(params.heightDp - gapDp) / 2f`. Derive heights from `params.heightDp`
+   > rather than assuming `72dp` (`SMALL`) or `104dp` (`LARGE`) across all
+   > renderer versions.
+
 #### Tray Broadcasts & Workspace Helpers
 
 Launch `WidgetTrayActivity` after waking the display, then send ordered
