@@ -2162,12 +2162,14 @@ def mcp_sdk_server(server: McpServer) -> Any:
 
 def mcp_serve_stdio(server: McpServer) -> None:
     """Newline-delimited JSON-RPC on stdin and stdout, for one local client."""
+    import asyncio
+
     import anyio
     from mcp.server.stdio import stdio_server
 
     sdk = mcp_sdk_server(server)
 
-    def stop(signum: int, frame: Any) -> None:
+    def stop(*_: Any) -> None:
         """The SDK reads stdin in a thread that nothing can interrupt, so a
         clean shutdown would wait for the client to close stdin; instead,
         exit 0 between tool calls, so that no write or push is cut off."""
@@ -2178,6 +2180,13 @@ def mcp_serve_stdio(server: McpServer) -> None:
         signal.signal(sig, stop)
 
     async def serve() -> None:
+        # Register on the running selector loop so Python sets set_wakeup_fd:
+        # without it, a process-directed signal delivered by the OS to one of
+        # stdio_server's worker threads leaves the main thread asleep in
+        # epoll_wait/kevent with the pending signal handler unrun.
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, stop)
         async with stdio_server() as (read, write):
             await sdk.run(read, write, sdk.create_initialization_options())
 
