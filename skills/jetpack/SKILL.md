@@ -1,14 +1,16 @@
 ---
 name: jetpack
 description: >-
-  Looks up AndroidX and Jetpack library facts that change between releases: current
-  artifact versions (ALPHA, BETA, RC, STABLE, SNAPSHOT, build IDs), Maven coordinates
-  for classes/packages, direct dependencies, and published source code. Use when looking
-  up AndroidX/Jetpack library versions, finding Maven coordinates, downloading source
-  JARs,
-  inspecting class implementations, or resolving library dependencies. Do not use
-  for
-  general Android tutorials or APIs where no lookup is required.
+  Looks up AndroidX, Jetpack, Google Maven (Play Services, Play Billing, ML Kit,
+  Firebase), and Maven Central library facts that change between releases:
+  current artifact versions (ALPHA, BETA, RC, STABLE, SNAPSHOT, build IDs),
+  Maven coordinates for top-level and nested classes, direct dependencies,
+  published source code (-sources.jar), and Javadoc API reference HTML
+  (-javadoc.jar) for closed-source SDKs. Use when looking up Android or JVM
+  library versions, finding Maven coordinates, downloading source or Javadoc
+  JARs, inspecting class implementations or API contracts, or resolving library
+  dependencies. Do not use for general Android tutorials or platform framework
+  APIs where no Maven lookup is required.
 compatibility: >-
   Requires curl, xmllint (libxml2-utils), jar (JDK), jq, perl. Needs network
   access to dl.google.com, repo1.maven.org, and androidx.dev, or a cache left
@@ -19,17 +21,21 @@ compatibility: >-
 
 ## Using the Jetpack Script vs. Raw Maven Queries
 
-Use `scripts/jetpack` as the primary interface for resolving AndroidX and
-Jetpack library coordinates, versions, and source locations. References to
-`scripts/...` in this skill are relative to this skill directory. The script
-handles complex resolution logic that manual queries miss:
+Use `scripts/jetpack` as the primary interface for resolving AndroidX, Jetpack,
+Google Maven, and Maven Central library coordinates, versions, source locations,
+and published Javadoc HTML. References to `scripts/...` in this skill are
+relative to this skill directory. The script handles complex resolution logic
+that manual queries miss:
 
-- Class-to-coordinate lookup in the cached GMaven class index
+- Class-to-coordinate lookup in the cached GMaven class index (including nested
+  `Outer.Inner` and `Outer$Inner` classes)
 - Class-name search over that same index
 - Automatic Google Maven → Maven Central (`https://repo1.maven.org/maven2`)
   fallback for coordinate-addressed commands when no `REPO_URL` is supplied
 - Version type filtering (ALPHA, BETA, STABLE, SNAPSHOT)
 - Kotlin Multiplatform platform-specific source detection
+- Raw `-javadoc.jar` HTML extraction (`javadoc`) and automatic `inspect`
+  fallback for closed-source SDKs that do not publish `-sources.jar`
 - Build ID resolution for pinned snapshots
 
 **The cache is the script's storage, not an interface.** `curl` and `xmllint`
@@ -70,8 +76,12 @@ re-run where there is network; it is never a reason to answer from memory.
 
 ### Highest-Value Commands
 
-- **Inspect a class (most common):**
+- **Inspect a class (most common, auto-falls back to Javadoc if source-less):**
   `scripts/jetpack inspect androidx.wear.tiles.TileService`
+- **Inspect a closed-source SDK or nested class:**
+  `scripts/jetpack inspect com.google.android.gms.wearable.NodeClient.OnNodeMigratedListener`
+- **Extract Javadoc HTML directly:**
+  `scripts/jetpack javadoc --find BillingClient com.android.billingclient:billing`
 - **Search for a library:** `scripts/jetpack search androidx.wear.compose`
 - **Check stable version:**
   `scripts/jetpack version androidx.wear.tiles:tiles STABLE`
@@ -88,68 +98,94 @@ re-run where there is network; it is never a reason to answer from memory.
 
 ### `version`
 
-**Purpose**: Get specific version type (ALPHA, BETA, SNAPSHOT, etc.) for a
-package. **Usage**: `scripts/jetpack version PACKAGE [TYPE] [REPO]` **Options**:
-`ALPHA`, `BETA`, `RC`, `STABLE`, `LATEST`, `SNAPSHOT`.
+- **Purpose**: Get specific version type (ALPHA, BETA, SNAPSHOT, etc.) for a
+  package.
+- **Usage**: `scripts/jetpack version PACKAGE [TYPE] [REPO]`
+- **Options**: `ALPHA`, `BETA`, `RC`, `STABLE`, `LATEST`, `SNAPSHOT`.
 
 ### `list versions`
 
-**Purpose**: List all versions for a package. **Usage**:
-`scripts/jetpack list versions PACKAGE [REPO]`
+- **Purpose**: List all versions for a package.
+- **Usage**: `scripts/jetpack list versions PACKAGE [REPO]`
 
 ### `resolve`
 
-**Purpose**: Convert an Android class to its Maven coordinate. **Usage**:
-`scripts/jetpack resolve CLASS_NAME` **Note**: Exact top-level class names from
-the cached Google Maven index only (`androidx.*`, `com.google.android.*`, etc.);
-use `search` for packages, Kotlin functions, and nested classes. Maven Central
-libraries are not in the class index — pass their `GROUP:ARTIFACT` coordinate
-directly to `version`, `list`, `source`, or `inspect`.
+- **Purpose**: Convert an Android class to its Maven coordinate.
+- **Usage**: `scripts/jetpack resolve CLASS_NAME`
+- **Note**: Resolves top-level and nested classes (`Outer.Inner` or
+  `Outer$Inner`) whose enclosing top-level class is in the cached Google Maven
+  index (`androidx.*`, `com.google.android.*`, `com.android.billingclient.*`,
+  etc.); use `search` for packages and Kotlin top-level functions. Maven Central
+  libraries are not in the class index — pass their `GROUP:ARTIFACT` coordinate
+  directly to `version`, `list`, `source`, `javadoc`, or `inspect`.
 
 ### `search`
 
-**Purpose**: Search for artifacts by package, artifact, or class name.
-**Usage**: `scripts/jetpack search [OPTIONS] QUERY` **Options**: `--force`
-(rebuild cache). **Note**: Searches the cached Google Maven class index only;
-for Maven Central artifacts pass `GROUP:ARTIFACT` directly to coordinate
-commands.
+- **Purpose**: Search for artifacts by package, artifact, or class name.
+- **Usage**: `scripts/jetpack search [OPTIONS] QUERY`
+- **Options**: `--force` (rebuild cache).
+- **Note**: Searches the cached Google Maven class index only; for Maven Central
+  artifacts pass `GROUP:ARTIFACT` directly to coordinate commands.
 
 ### `source`
 
-**Purpose**: Download and extract source JARs. **Usage**:
-`scripts/jetpack source PACKAGE... [VERSION]` **Options**: `--output DIR` to
-specify destination, `--find PATTERN` to locate specific files.
+- **Purpose**: Download and extract compilable `-sources.jar` archives.
+- **Usage**: `scripts/jetpack source [OPTIONS] PACKAGE... [VERSION] [REPO]`
+- **Options**: `-o`/`--output DIR` to specify destination, `--find PATTERN` to
+  locate specific files.
+- **Note**: Strictly fetches `-sources.jar`; on HTTP 404 it prints a hint
+  pointing to `scripts/jetpack javadoc`.
+
+### `javadoc`
+
+- **Purpose**: Download and extract raw `.html` reference pages from
+  `-javadoc.jar` archives (useful for closed-source Google Maven or Maven
+  Central SDKs without `-sources.jar`).
+- **Usage**: `scripts/jetpack javadoc [OPTIONS] PACKAGE... [VERSION] [REPO]`
+- **Options**: `-o`/`--output DIR` to specify destination, `--find PATTERN` to
+  locate matching class HTML pages (including `Outer.Inner` / `Outer$Inner`).
+- **Note**: Rejects empty placeholder `-javadoc.jar` archives with a non-zero
+  exit status. When `--find` resolves to a single `.html` file `≤ 64 KiB`, its
+  contents are printed to stdout; larger pages print the extracted file path to
+  stdout (with a size note on stderr) so callers can search or read targeted
+  line ranges.
 
 ### `inspect`
 
-**Purpose**: Convenience wrapper combining `search`/`resolve` + `source`.
-**Usage**: `scripts/jetpack inspect CLASS_NAME|GROUP:ARTIFACT [VERSION]`
-**Note**: Best for quickly checking implementation details; falls back to an
-index search if direct resolution fails. For Maven Central libraries (which are
-not in the Google Maven class index), pass `GROUP:ARTIFACT` directly (or use
-`scripts/jetpack source --find <Class> GROUP:ARTIFACT`).
+- **Purpose**: Convenience wrapper combining `search`/`resolve` + `source` with
+  automatic fallback to `javadoc` when `-sources.jar` is not published.
+- **Usage**:
+  `scripts/jetpack inspect [OPTIONS] CLASS_NAME|GROUP:ARTIFACT [VERSION] [REPO]`
+- **Options**: `-o`/`--output DIR` to specify destination.
+- **Note**: Resolves top-level and nested (`Outer.Inner` / `Outer$Inner`) class
+  names; falls back to an index search if direct resolution fails, and falls
+  back to `-javadoc.jar` (logging an `info:` provenance notice on stderr) when
+  `-sources.jar` returns HTTP 404. For Maven Central libraries (which are not in
+  the Google Maven class index), pass `GROUP:ARTIFACT` directly (or use
+  `scripts/jetpack source --find <Class> GROUP:ARTIFACT` /
+  `scripts/jetpack javadoc --find <Class> GROUP:ARTIFACT`).
 
 ### `list dependencies`
 
-**Purpose**: List direct Maven dependencies for an artifact. **Usage**:
-`scripts/jetpack list dependencies ARTIFACT [VERSION]`
+- **Purpose**: List direct Maven dependencies for an artifact.
+- **Usage**: `scripts/jetpack list dependencies ARTIFACT [VERSION]`
 
 ### `doctor`
 
-**Purpose**: Report dependencies, offline mode, and cache state. **Usage**:
-`scripts/jetpack doctor` **Note**: Read-only; exits non-zero if anything needs
-attention.
+- **Purpose**: Report dependencies, offline mode, and cache state.
+- **Usage**: `scripts/jetpack doctor`
+- **Note**: Read-only; exits non-zero if anything needs attention.
 
 ## Standalone Scripts
 
 ### `scripts/jetpack-samples`
 
-**Purpose**: Download non-published reference samples and integration tests.
-**Usage**: `scripts/jetpack-samples ARTIFACT [VERSION] [--output DIR]`
-**Details**: Extracts sample modules from the AOSP source structure. When
-`VERSION` (or release tier like `STABLE`, `RC`, `BETA`, `ALPHA`) is specified,
-it resolves the exact Git commit SHA from AndroidX release notes to match the
-released artifact. If omitted, extracts samples from `androidx-main` (HEAD).
+- **Purpose**: Download non-published reference samples and integration tests.
+- **Usage**: `scripts/jetpack-samples ARTIFACT [VERSION] [--output DIR]`
+- **Details**: Extracts sample modules from the AOSP source structure. When
+  `VERSION` (or release tier like `STABLE`, `RC`, `BETA`, `ALPHA`) is specified,
+  it resolves the exact Git commit SHA from AndroidX release notes to match the
+  released artifact. If omitted, extracts samples from `androidx-main` (HEAD).
 
 ## Version Types
 
@@ -239,9 +275,9 @@ just failed.
 The sandbox that denies egress usually denies writes too, so the lookups read
 straight from the cache and need no writable filesystem at all: `version`,
 `list versions`, `list dependencies`, `resolve`, and `search` all answer with
-nowhere to write. `source` and `inspect` are the exception — they extract a JAR,
-so they need somewhere to put it; pass `--output DIR` naming a writable
-directory when the default temp location is not one.
+nowhere to write. `source`, `javadoc`, and `inspect` are the exception — they
+extract a JAR, so they need somewhere to put it; pass `--output DIR` naming a
+writable directory when the default temp location is not one.
 
 See local HTTP caching guidelines (storing response artifacts locally under
 `$XDG_CACHE_HOME`) for the repo-wide convention.
@@ -252,7 +288,7 @@ See local HTTP caching guidelines (storing response artifacts locally under
   `androidx.dev` — or a cache warmed by an earlier online run, plus
   `AGENT_OFFLINE=1`.
 - **Repository Fallback & Class Index Boundary**: Coordinate-addressed commands
-  (`version`, `list versions`, `list dependencies`, `source`, and
+  (`version`, `list versions`, `list dependencies`, `source`, `javadoc`, and
   `inspect GROUP:ARTIFACT`) query Google Maven first and automatically fall back
   to Maven Central (`https://repo1.maven.org/maven2`) on a 404 when no explicit
   `REPO_URL` is given (never for `SNAPSHOT` or numeric build IDs), logging an

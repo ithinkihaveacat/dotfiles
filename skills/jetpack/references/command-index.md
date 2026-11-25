@@ -11,6 +11,7 @@
 - [resolve](#resolve)
 - [search](#search)
 - [source](#source)
+- [javadoc](#javadoc)
 - [inspect](#inspect)
 - [doctor](#doctor)
 
@@ -27,9 +28,10 @@ Usage: jetpack <command> [arguments]
 
 Jetpack library utilities for working with AndroidX and Maven packages.
 This tool helps resolve Maven artifacts, finding versions, and downloading
-source code for AndroidX libraries (including SNAPSHOT builds). Coordinate
-commands (version, list, source, inspect GROUP:ARTIFACT) default to Google
-Maven and automatically fall back to Maven Central when no repo URL is given.
+source code or Javadoc HTML for AndroidX and Maven libraries (including
+SNAPSHOT builds). Coordinate commands (version, list, source, javadoc,
+inspect GROUP:ARTIFACT) default to Google Maven and automatically fall back
+to Maven Central when no repo URL is given.
 
 Commands:
   version <artifact> [type] [repo]
@@ -40,26 +42,32 @@ Commands:
                       List all versions for a given Maven artifact.
   list dependencies <artifact> [version]
                       List direct Maven dependencies for a given Maven artifact.
-  resolve <class>     Convert a fully qualified class name to its Maven
-                      artifact (GROUP_ID:ARTIFACT_ID), from the cached class
-                      index. For a package or function, use 'search'.
+  resolve <class>     Convert a fully qualified class name (including nested
+                      Outer.Inner or Outer$Inner) to its Maven artifact
+                      (GROUP_ID:ARTIFACT_ID), from the cached class index.
+                      For a package or function, use 'search'.
   search <query> [--force]
                       Search for artifacts by package, artifact, or class name
                       (using the cached GMaven index).
                       Use --force to rebuild the local package index.
-  source <artifact>... [version]
+  source <artifact>... [version] [repo]
                       Download and extract source JARs for one or more Maven artifacts.
                       Supports symbolic versions (e.g. ALPHA) or pinned versions.
                       Handles Kotlin Multiplatform platform sources automatically.
-                      Options: --output <dir>, --find <pattern>
-  inspect <name> [version]
+                      Options: -o/--output <dir>, --find <pattern>
+  javadoc <artifact>... [version] [repo]
+                      Download and extract Javadoc HTML JARs (-javadoc.jar) for
+                      one or more Maven artifacts (e.g. closed-source SDKs).
+                      Options: -o/--output <dir>, --find <pattern>
+  inspect <name> [version] [repo]
                       Convenience wrapper that resolves a class name to an artifact
-                      and then downloads its source.
+                      and downloads its source (falling back to javadoc if needed).
+                      Options: -o/--output <dir>
   doctor              Report dependencies, offline mode, and cache state.
                       Exits non-zero if anything needs attention.
 
 Options:
-  --help              Display this help message and exit
+  -h, --help          Display this help message and exit
 
 Environment Variables:
   AGENT_OFFLINE       Set to 1 to answer only from the local cache and never
@@ -93,6 +101,9 @@ Examples:
   # Inspect source code for a class (downloads and extracts)
   jetpack inspect androidx.lifecycle.ViewModel
 
+  # Extract Javadoc HTML for a closed-source SDK class
+  jetpack javadoc --find NodeClient com.google.android.gms:play-services-wearable
+
   # List all versions
   jetpack list versions androidx.wear.tiles:tiles
 
@@ -109,8 +120,10 @@ Examples:
 
 ## version
 
-**Purpose**: Get specific version type for a Jetpack package. **Synopsis**:
-`scripts/jetpack version PACKAGE_NAME [VERSION_TYPE_OR_BUILD_ID] [REPO_URL]`
+- **Purpose**: Get specific version type for a Jetpack package.
+- **Synopsis**:
+  `scripts/jetpack version PACKAGE_NAME [VERSION_TYPE_OR_BUILD_ID] [REPO_URL]`
+
 **Arguments**:
 
 - `PACKAGE_NAME`: Maven coordinate (e.g., `androidx.wear.tiles:tiles`).
@@ -118,7 +131,9 @@ Examples:
   `SNAPSHOT`, or a specific build ID integer (e.g., `14765146`) for a pinned
   snapshot (default: `STABLE`).
 - `REPO_URL`: Custom Maven repo URL (ignored for SNAPSHOT or build ID).
-  **Examples**:
+
+**Examples**:
+
 - `scripts/jetpack version androidx.wear.tiles:tiles`
 - `scripts/jetpack version androidx.wear.tiles:tiles ALPHA`
 - `scripts/jetpack version androidx.wear.tiles:tiles 14765146`
@@ -135,43 +150,67 @@ xmllint --xpath "//version/text()" - | tr ' ' '\n' | grep -E '^[0-9]+\.[0-9]+\.[
 
 ## list versions
 
-**Purpose**: List all versions for a package. **Synopsis**:
-`scripts/jetpack list versions PACKAGE_NAME [REPO_URL]` **Arguments**:
+- **Purpose**: List all versions for a package.
+- **Synopsis**: `scripts/jetpack list versions PACKAGE_NAME [REPO_URL]`
+
+**Arguments**:
 
 - `PACKAGE_NAME`: Maven coordinate.
-- `REPO_URL`: Custom Maven repo URL. **Examples**:
+- `REPO_URL`: Custom Maven repo URL.
+
+**Examples**:
+
 - `scripts/jetpack list versions androidx.wear.tiles:tiles`
 
 ## list dependencies
 
-**Purpose**: List direct Maven dependencies for an artifact. **Synopsis**:
-`scripts/jetpack list dependencies ARTIFACT [VERSION] [REPO_URL]` **Arguments**:
+- **Purpose**: List direct Maven dependencies for an artifact.
+- **Synopsis**:
+  `scripts/jetpack list dependencies ARTIFACT [VERSION] [REPO_URL]`
+
+**Arguments**:
 
 - `ARTIFACT`: Maven coordinate.
 - `VERSION`: Version specifier (optional, defaults to `STABLE`).
-- `REPO_URL`: Custom Maven repo URL. **Examples**:
+- `REPO_URL`: Custom Maven repo URL.
+
+**Examples**:
+
 - `scripts/jetpack list dependencies androidx.wear.tiles:tiles`
 
 ## resolve
 
-**Purpose**: Convert Android package/class name to Maven coordinate.
-**Synopsis**: `scripts/jetpack resolve PACKAGE_NAME` **Arguments**:
+- **Purpose**: Convert Android class name (including nested `Outer.Inner` or
+  `Outer$Inner`) to Maven coordinate.
+- **Synopsis**: `scripts/jetpack resolve CLASS_NAME`
 
-- `PACKAGE_NAME`: Fully qualified class or package name. **Examples**:
+**Arguments**:
+
+- `CLASS_NAME`: Fully qualified class name (top-level or nested).
+
+**Examples**:
+
 - `scripts/jetpack resolve androidx.lifecycle.ViewModel`
-- `scripts/jetpack resolve androidx.compose.ui.Modifier`
+- `scripts/jetpack resolve com.google.android.gms.wearable.NodeClient.OnNodeMigratedListener`
 
 **Raw Commands**: N/A (logic is the script's class matching over the cached
 GMaven index).
 
 ## search
 
-**Purpose**: Search for artifacts by package or class name. **Synopsis**:
-`scripts/jetpack search [OPTIONS] QUERY` **Arguments**:
+- **Purpose**: Search for artifacts by package or class name.
+- **Synopsis**: `scripts/jetpack search [OPTIONS] QUERY`
+
+**Arguments**:
 
 - `QUERY`: Substring to search for (e.g., `androidx.wear` or `RemoteImage`).
-  **Options**:
-- `--force`: Force cache rebuild (ignore existing index). **Examples**:
+
+**Options**:
+
+- `--force`: Force cache rebuild (ignore existing index).
+
+**Examples**:
+
 - `scripts/jetpack search androidx.wear.compose`
 - `scripts/jetpack search RemoteImage`
 - `scripts/jetpack search --force androidx.wear`
@@ -180,16 +219,24 @@ GMaven index).
 
 ## source
 
-**Purpose**: Download and extract source JARs. **Synopsis**:
-`scripts/jetpack source [OPTIONS] PACKAGE... [VERSION] [REPO_URL]`
+- **Purpose**: Download and extract source JARs.
+- **Synopsis**:
+  `scripts/jetpack source [OPTIONS] PACKAGE... [VERSION] [REPO_URL]`
+
 **Arguments**:
 
 - `PACKAGE`: Maven coordinate(s).
 - `VERSION`: Version specifier (symbolic or pinned).
-- `REPO_URL`: Custom Maven repo URL. **Options**:
-- `--output DIR`: Directory to extract to (default: temp dir).
+- `REPO_URL`: Custom Maven repo URL.
+
+**Options**:
+
+- `-o`, `--output DIR`: Directory to extract to (default: temp dir).
 - `--find PATTERN`: Locate files matching PATTERN in the source and print their
-  path. **Examples**:
+  contents (single match) or paths (multiple matches).
+
+**Examples**:
+
 - `scripts/jetpack source androidx.wear.tiles:tiles`
 - `scripts/jetpack source --output src_dir androidx.core:core 1.6.0`
 - `scripts/jetpack source --find "TileService.java" androidx.wear.tiles:tiles`
@@ -204,25 +251,76 @@ curl -sSLf "https://dl.google.com/android/maven2/GROUP/PATH/ARTIFACT/VERSION/ART
 jar xf sources.jar
 ```
 
-## inspect
+## javadoc
 
-**Purpose**: Convenience wrapper combining `search`/`resolve` + `source`.
-**Synopsis**:
-`scripts/jetpack inspect [OPTIONS] CLASS_NAME [VERSION] [REPO_URL]`
+- **Purpose**: Download and extract raw `.html` reference documentation from
+  `-javadoc.jar` archives (for closed-source Google Maven or Maven Central
+  libraries that do not publish `-sources.jar`).
+- **Synopsis**:
+  `scripts/jetpack javadoc [OPTIONS] PACKAGE... [VERSION] [REPO_URL]`
+
 **Arguments**:
 
-- `CLASS_NAME`: Class name (resolved to coordinate) OR coordinate.
-- `VERSION`: Version specifier. **Options**:
-- `--output DIR`: Directory to extract to. **Examples**:
+- `PACKAGE`: Maven coordinate(s).
+- `VERSION`: Version specifier (symbolic or pinned).
+- `REPO_URL`: Custom Maven repo URL.
+
+**Options**:
+
+- `-o`, `--output DIR`: Directory to extract to (default: temp dir).
+- `--find PATTERN`: Locate matching `.html` page(s). Prints HTML contents when a
+  single match `≤ 64 KiB` (`65536` bytes) is found, or prints the extracted file
+  path(s) when larger or when several pages match.
+
+**Examples**:
+
+- `scripts/jetpack javadoc com.google.android.gms:play-services-wearable`
+- `scripts/jetpack javadoc --find NodeClient.OnNodeMigratedListener com.google.android.gms:play-services-wearable`
+- `scripts/jetpack javadoc -o /tmp/gson-docs com.google.code.gson:gson 2.11.0`
+
+**Raw Commands**:
+
+```bash
+# Download Javadoc JAR
+curl -sSLf "https://dl.google.com/android/maven2/GROUP/PATH/ARTIFACT/VERSION/ARTIFACT-VERSION-javadoc.jar" -o javadoc.jar
+
+# Extract
+jar xf javadoc.jar
+```
+
+## inspect
+
+- **Purpose**: Convenience wrapper combining `search`/`resolve` + `source` (with
+  automatic fallback to `javadoc` when `-sources.jar` is absent).
+- **Synopsis**:
+  `scripts/jetpack inspect [OPTIONS] CLASS_NAME [VERSION] [REPO_URL]`
+
+**Arguments**:
+
+- `CLASS_NAME`: Class name (top-level or nested, resolved to coordinate) OR
+  coordinate.
+- `VERSION`: Version specifier.
+- `REPO_URL`: Custom Maven repo URL.
+
+**Options**:
+
+- `-o`, `--output DIR`: Directory to extract to.
+
+**Examples**:
+
 - `scripts/jetpack inspect androidx.core.splashscreen.SplashScreen`
+- `scripts/jetpack inspect com.google.android.gms.wearable.NodeClient.OnNodeMigratedListener`
 - `scripts/jetpack inspect RemoteImage SNAPSHOT`
 
-**Raw Commands**: Combines logic from `resolve`, `search`, and `source`.
+**Raw Commands**: Combines logic from `resolve`, `search`, `source`, and
+`javadoc`.
 
 ## doctor
 
-**Purpose**: Report whether this environment can answer, and from what.
-**Synopsis**: `scripts/jetpack doctor` **Examples**:
+- **Purpose**: Report whether this environment can answer, and from what.
+- **Synopsis**: `scripts/jetpack doctor`
+
+**Examples**:
 
 - `scripts/jetpack doctor`
 - `AGENT_OFFLINE=1 scripts/jetpack doctor`

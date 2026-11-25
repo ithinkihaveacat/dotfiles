@@ -6,9 +6,10 @@
 #   version           Get version for a package (ALPHA/BETA/RC/STABLE/SNAPSHOT)
 #   resolve           Convert package name to Maven coordinate
 #   source            Download and extract source JARs
-#   inspect           Convenience wrapper: resolve + source
+#   javadoc           Download and extract Javadoc HTML JARs
+#   inspect           Convenience wrapper: resolve + source (or javadoc fallback)
 #
-# Tests: skills/jetpack/tests/test-jetpack
+# Tests: skills/jetpack/tests/test-jetpack, skills/jetpack/tests/test-jetpack-javadoc
 
 set -euo pipefail
 
@@ -29,6 +30,12 @@ CACHE_DIR="${JETPACK_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/jetpack}"
 INDEX_FILE="$CACHE_DIR/androidx-index.json"
 HTTP_CACHE_DIR="$CACHE_DIR/http"
 MAX_AGE_SECONDS=$((24 * 3600)) # 24 hours
+
+# Single-file stdout cap for `javadoc --find` (and `inspect` fallback): HTML
+# pages up to 64 KiB print directly to stdout; larger pages (such as Android
+# Context/View subclasses that inline thousands of inherited constants) print
+# their extracted file path instead so callers can read targeted ranges.
+JAVADOC_MAX_CAT_BYTES=65536
 
 # =============================================================================
 # SHARED HELPERS
@@ -225,7 +232,10 @@ http_get() {
 
   if is_offline; then
     if [[ -n "$cache_file" && -f "$cache_file" ]]; then
-      cp "$cache_file" "$outfile"
+      if ! cp "$cache_file" "$outfile"; then
+        HTTP_ERROR="failed to write cached response to $outfile"
+        return 2
+      fi
       echo "$SCRIPT_NAME: offline: using cached $url (cached $(file_age_human "$cache_file"))" >&2
       HTTP_STATUS="200"
       return 0
@@ -357,11 +367,11 @@ release_body() {
   BODY_TEMP=0
 }
 
-# http_get_body URL -- print the response body on stdout. Same exit codes and
-# HTTP_STATUS/HTTP_ERROR contract as http_get, for callers that want a string.
+# http_get_body URL [DIR] -- print the response body on stdout. Same exit codes
+# and HTTP_STATUS/HTTP_ERROR contract as http_get, for callers that want a string.
 http_get_body() {
   local status=0
-  fetch_body "$1" || status=$?
+  fetch_body "$1" "${2:-}" || status=$?
   if [[ $status -ne 0 ]]; then
     return $status
   fi
@@ -384,8 +394,17 @@ http_print_hint() {
 INVOCATION=("$@")
 
 warm_hint() {
+  local line="  $SCRIPT_NAME" arg escaped
+  for arg in ${INVOCATION[@]+"${INVOCATION[@]}"}; do
+    if [[ "$arg" =~ ^[A-Za-z0-9_./:=+-]+$ ]]; then
+      line="$line $arg"
+    else
+      escaped="${arg//\'/\'\\\'\'}"
+      line="$line '$escaped'"
+    fi
+  done
   echo "$SCRIPT_NAME: run this where there is network to populate the cache:" >&2
-  echo "  $SCRIPT_NAME ${INVOCATION[*]:-}" >&2
+  printf '%s\n' "$line" >&2
 }
 
 # Verify external dependencies. Deferred until a real command runs so that
@@ -630,9 +649,10 @@ Usage: $SCRIPT_NAME <command> [arguments]
 
 Jetpack library utilities for working with AndroidX and Maven packages.
 This tool helps resolve Maven artifacts, finding versions, and downloading
-source code for AndroidX libraries (including SNAPSHOT builds). Coordinate
-commands (version, list, source, inspect GROUP:ARTIFACT) default to Google
-Maven and automatically fall back to Maven Central when no repo URL is given.
+source code or Javadoc HTML for AndroidX and Maven libraries (including
+SNAPSHOT builds). Coordinate commands (version, list, source, javadoc,
+inspect GROUP:ARTIFACT) default to Google Maven and automatically fall back
+to Maven Central when no repo URL is given.
 
 Commands:
   version <artifact> [type] [repo]
@@ -643,26 +663,32 @@ Commands:
                       List all versions for a given Maven artifact.
   list dependencies <artifact> [version]
                       List direct Maven dependencies for a given Maven artifact.
-  resolve <class>     Convert a fully qualified class name to its Maven
-                      artifact (GROUP_ID:ARTIFACT_ID), from the cached class
-                      index. For a package or function, use 'search'.
+  resolve <class>     Convert a fully qualified class name (including nested
+                      Outer.Inner or Outer\$Inner) to its Maven artifact
+                      (GROUP_ID:ARTIFACT_ID), from the cached class index.
+                      For a package or function, use 'search'.
   search <query> [--force]
                       Search for artifacts by package, artifact, or class name
                       (using the cached GMaven index).
                       Use --force to rebuild the local package index.
-  source <artifact>... [version]
+  source <artifact>... [version] [repo]
                       Download and extract source JARs for one or more Maven artifacts.
                       Supports symbolic versions (e.g. ALPHA) or pinned versions.
                       Handles Kotlin Multiplatform platform sources automatically.
-                      Options: --output <dir>, --find <pattern>
-  inspect <name> [version]
+                      Options: -o/--output <dir>, --find <pattern>
+  javadoc <artifact>... [version] [repo]
+                      Download and extract Javadoc HTML JARs (-javadoc.jar) for
+                      one or more Maven artifacts (e.g. closed-source SDKs).
+                      Options: -o/--output <dir>, --find <pattern>
+  inspect <name> [version] [repo]
                       Convenience wrapper that resolves a class name to an artifact
-                      and then downloads its source.
+                      and downloads its source (falling back to javadoc if needed).
+                      Options: -o/--output <dir>
   doctor              Report dependencies, offline mode, and cache state.
                       Exits non-zero if anything needs attention.
 
 Options:
-  --help              Display this help message and exit
+  -h, --help          Display this help message and exit
 
 Environment Variables:
   AGENT_OFFLINE       Set to 1 to answer only from the local cache and never
@@ -695,6 +721,9 @@ Examples:
 
   # Inspect source code for a class (downloads and extracts)
   $SCRIPT_NAME inspect androidx.lifecycle.ViewModel
+
+  # Extract Javadoc HTML for a closed-source SDK class
+  $SCRIPT_NAME javadoc --find NodeClient com.google.android.gms:play-services-wearable
 
   # List all versions
   $SCRIPT_NAME list versions androidx.wear.tiles:tiles
@@ -1188,6 +1217,91 @@ cmd_versions() {
 # RESOLVE SUBCOMMAND
 # =============================================================================
 
+# Split a class/package input into its enclosing top-level FQCN, --find target,
+# and GMaven search query. Handles nested classes written as either
+# pkg.Outer.Inner or pkg.Outer$Inner while leaving lowercase package and
+# function names untouched.
+PARSED_TOP_FQCN=""
+PARSED_FIND_TARGET=""
+PARSED_SEARCH_QUERY=""
+
+parse_class_target() {
+  local input="$1"
+  PARSED_TOP_FQCN=""
+  PARSED_FIND_TARGET=""
+  PARSED_SEARCH_QUERY="$input"
+
+  if [[ -z "$input" ]]; then
+    return 0
+  fi
+
+  local IFS='.'
+  local -a segs=()
+  read -r -a segs <<<"$input"
+
+  local i cap_idx=-1 seg
+  for ((i = 0; i < ${#segs[@]}; i++)); do
+    seg="${segs[$i]}"
+    if [[ "$seg" =~ ^[A-Z] ]]; then
+      cap_idx=$i
+      break
+    fi
+  done
+
+  if [[ $cap_idx -lt 0 ]]; then
+    if [[ "$input" != *.* ]]; then
+      PARSED_FIND_TARGET="$input"
+    fi
+    return 0
+  fi
+
+  # Every segment from the enclosing class onward (and every $-separated nested
+  # component) must be a capitalized type identifier; otherwise this is a
+  # member/method reference (e.g. pkg.Class.methodName), not a class.
+  local -a class_segs=() subsegs=()
+  local norm_seg subseg j
+  for ((i = cap_idx; i < ${#segs[@]}; i++)); do
+    norm_seg="${segs[$i]//\$/\.}"
+    if [[ -z "$norm_seg" || "$norm_seg" == .* || "$norm_seg" == *. || "$norm_seg" == *..* ]]; then
+      return 0
+    fi
+    read -r -a subsegs <<<"$norm_seg"
+    for ((j = 0; j < ${#subsegs[@]}; j++)); do
+      subseg="${subsegs[$j]}"
+      if [[ ! "$subseg" =~ ^[A-Z][A-Za-z0-9_]*$ ]]; then
+        return 0
+      fi
+    done
+    class_segs+=("$norm_seg")
+  done
+
+  local outer_class="${segs[$cap_idx]%%\$*}"
+  local joined_class=""
+  for ((i = 0; i < ${#class_segs[@]}; i++)); do
+    if [[ $i -eq 0 ]]; then
+      joined_class="${class_segs[$i]}"
+    else
+      joined_class="${joined_class}.${class_segs[$i]}"
+    fi
+  done
+  PARSED_FIND_TARGET="$joined_class"
+
+  if [[ $cap_idx -gt 0 ]]; then
+    local pkg=""
+    for ((i = 0; i < cap_idx; i++)); do
+      if [[ $i -eq 0 ]]; then
+        pkg="${segs[$i]}"
+      else
+        pkg="${pkg}.${segs[$i]}"
+      fi
+    done
+    PARSED_TOP_FQCN="${pkg}.${outer_class}"
+    PARSED_SEARCH_QUERY="$PARSED_TOP_FQCN"
+  else
+    PARSED_SEARCH_QUERY="$outer_class"
+  fi
+}
+
 usage_resolve() {
   cat <<EOF
 Usage: $SCRIPT_NAME resolve CLASS_NAME
@@ -1195,17 +1309,22 @@ Usage: $SCRIPT_NAME resolve CLASS_NAME
 Convert a fully qualified Android class name to its Maven artifact.
 
 Arguments:
-  CLASS_NAME    Fully qualified class name
-                (e.g., androidx.core.splashscreen.SplashScreen)
+  CLASS_NAME    Fully qualified class name, including nested classes
+                (e.g., androidx.core.splashscreen.SplashScreen or
+                com.google.android.gms.wearable.NodeClient.OnNodeMigratedListener)
+
+Options:
+  -h, --help    Display this help message
 
 Examples:
   $SCRIPT_NAME resolve androidx.core.splashscreen.SplashScreen
   $SCRIPT_NAME resolve androidx.wear.ambient.AmbientLifecycleObserver
-  $SCRIPT_NAME resolve androidx.lifecycle.ViewModel
+  $SCRIPT_NAME resolve com.google.android.gms.wearable.NodeClient.OnNodeMigratedListener
 
-The class must appear in the cached Google Maven class index, which lists
-top-level classes only. For a package, a Kotlin top-level function, or a
-nested class, search for the package and pick a coordinate:
+The enclosing top-level class must appear in the cached Google Maven class
+index. Nested classes (Outer.Inner or Outer\$Inner) resolve to their enclosing
+class's artifact. For a package or a Kotlin top-level function, search for the
+package and pick a coordinate:
   $SCRIPT_NAME search androidx.compose.foundation.layout
 Output format is GROUP_ID:ARTIFACT_ID (e.g., androidx.core:core-splashscreen).
 EOF
@@ -1240,16 +1359,20 @@ cmd_resolve() {
 
   note_index_age
 
-  # The index states which artifacts declare a class, so a fully qualified class
-  # name needs no scoring or prefix guessing. Package names and Kotlin functions
-  # are not classes: 'search' lists candidates for those.
+  parse_class_target "$input"
+
+  # The index states which artifacts declare a top-level class, so a fully
+  # qualified class name (or nested Outer.Inner / Outer$Inner normalized to its
+  # enclosing top-level class) needs no scoring or prefix guessing. Package
+  # names and Kotlin functions are not classes: 'search' lists candidates.
   local results
-  results=$(jq -r --arg q "$input" '
+  results=$(jq -r --arg q "$input" --arg top "$PARSED_TOP_FQCN" '
     "-(jvm|android|desktop|ios[a-z0-9]+|macos[a-z0-9]+|linux[a-z0-9]+|tvos[a-z0-9]+|watchos[a-z0-9]+|js|wasmjs|wasmwasi|mingw[a-z0-9]+)$" as $kmp_regex |
     .Index as $index |
     ($index | map({key: "\(.groupId):\(.artifactId)", value: true}) | from_entries) as $lookup |
-    ($q | split(".") | .[:-1] | join(".")) as $pkg |
-    [ $index[] | select(any(.fqcns[]?; . == $q)) |
+    (if $top != "" then ($top | split(".") | .[:-1] | join("."))
+     else ($q | split(".") | .[:-1] | join(".")) end) as $pkg |
+    [ $index[] | select(any(.fqcns[]?; . == $q or ($top != "" and . == $top))) |
       .groupId as $g | .artifactId as $a |
       # When several artifacts declare the class, prefer the group that is the
       # class package itself, then a parent group, then anything else; the
@@ -1260,15 +1383,16 @@ cmd_resolve() {
              ($a | sub($kmp_regex; ""; "i")) as $base |
              if $lookup["\($g):\($base)"] then "\($g):\($base)" else "\($g):\($a)" end
            else "\($g):\($a)" end),
+        exact: (if any(.fqcns[]?; . == $q) then 0 else 1 end),
         own: (if $g == $pkg then 0
               elif ($pkg | startswith($g + ".")) then 1
               else 2 end) }
-    ] | group_by(.coord) | map(.[0]) | sort_by(.own, (.coord | length)) | .[0].coord // empty
+    ] | group_by(.coord) | map(.[0]) | sort_by(.exact, .own, (.coord | length)) | .[0].coord // empty
   ' "$INDEX_FILE")
 
   if [[ -z "$results" ]]; then
     echo "$SCRIPT_NAME resolve: no artifact declares '$input'; for a package or function use '$SCRIPT_NAME search'" >&2
-    echo "$SCRIPT_NAME resolve: note: the class index only covers Google Maven; for Maven Central libraries pass GROUP:ARTIFACT directly to 'version', 'source', or 'inspect'" >&2
+    echo "$SCRIPT_NAME resolve: note: the class index only covers Google Maven; for Maven Central libraries pass GROUP:ARTIFACT directly to 'version', 'source', 'javadoc', or 'inspect'" >&2
     return 1
   fi
 
@@ -1317,8 +1441,10 @@ Version Specifiers:
                Find build IDs at: https://androidx.dev/snapshots/builds
 
 Options:
-  --help        Display this help message
-  --output DIR  Specify output directory (default: create temporary directory)
+  -h, --help         Display this help message
+  -o, --output DIR   Specify output directory (default: create temporary directory)
+  --find PATTERN     Locate matching file(s); prints file contents when one
+                     match is found, or matching paths when several are found
 
 Examples:
   # Symbolic (floating) versions
@@ -1342,20 +1468,29 @@ EOF
   exit "${1:-0}"
 }
 
-cmd_source() {
+# Internal implementation shared by `cmd_source` (probe_sources=0) and
+# `cmd_inspect` (probe_sources=1). When probe_sources=1:
+#   - returns 10 when -sources.jar is genuinely absent (HTTP 404/410 online, or
+#     uncached offline while -javadoc.jar is cached)
+#   - returns 11 when -sources.jar extracted cleanly and --find matched 0 files
+#   - returns 1 on usage, transport, metadata, offline-miss, or extract errors
+_source_impl() {
+  local probe_sources="$1"
+  shift
+
   local output_dir=""
   local find_pattern=""
   local -a remaining_args=()
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --help)
+      --help | -h)
         usage_source
         ;;
-      --output)
+      --output | -o)
         if [[ -z "${2:-}" ]]; then
-          echo "$SCRIPT_NAME source: option '--output' requires an argument" >&2
-          exit 1
+          echo "$SCRIPT_NAME source: option '$1' requires an argument" >&2
+          return 1
         fi
         output_dir="$2"
         shift 2
@@ -1363,10 +1498,21 @@ cmd_source() {
       --find)
         if [[ -z "${2:-}" ]]; then
           echo "$SCRIPT_NAME source: option '--find' requires an argument" >&2
-          exit 1
+          return 1
         fi
         find_pattern="$2"
         shift 2
+        ;;
+      --)
+        shift
+        while [[ $# -gt 0 ]]; do
+          remaining_args+=("$1")
+          shift
+        done
+        ;;
+      -*)
+        echo "$SCRIPT_NAME source: unknown option: $1" >&2
+        return 1
         ;;
       *)
         remaining_args+=("$1")
@@ -1374,33 +1520,46 @@ cmd_source() {
         ;;
     esac
   done
-  set -- "${remaining_args[@]}"
+  if [[ ${#remaining_args[@]} -gt 0 ]]; then
+    set -- "${remaining_args[@]}"
+  else
+    set --
+  fi
 
   if [[ $# -lt 1 ]]; then
-    usage_source
+    usage_source 1 >&2
   fi
 
   # Parse arguments: ARTIFACT... [VERSION] [REPO_URL]
   local repo_url version_string version_string_upper explicit_repo=0
-  local -a artifacts
+  local -a artifacts=()
 
   if [[ "${!#}" =~ ^https?:// ]]; then
     repo_url="${!#}"
     explicit_repo=1
-    local last_non_url_arg="${*: -2:1}"
-    if [[ ! "$last_non_url_arg" =~ : ]]; then
-      version_string="$last_non_url_arg"
-      artifacts=("${@:1:$#-2}")
-    else
+    if [[ $# -lt 2 ]]; then
       version_string="STABLE"
-      artifacts=("${@:1:$#-1}")
+    else
+      local penultimate_idx=$(($# - 1))
+      local last_non_url_arg="${!penultimate_idx}"
+      if [[ ! "$last_non_url_arg" =~ : ]]; then
+        version_string="$last_non_url_arg"
+        if [[ $# -gt 2 ]]; then
+          artifacts=("${@:1:$#-2}")
+        fi
+      else
+        version_string="STABLE"
+        artifacts=("${@:1:$#-1}")
+      fi
     fi
   else
     repo_url="$GOOGLE_MAVEN_URL"
     local last_arg="${!#}"
     if [[ ! "$last_arg" =~ : ]]; then
       version_string="$last_arg"
-      artifacts=("${@:1:$#-1}")
+      if [[ $# -gt 1 ]]; then
+        artifacts=("${@:1:$#-1}")
+      fi
     else
       version_string="STABLE"
       artifacts=("$@")
@@ -1411,7 +1570,7 @@ cmd_source() {
 
   if [[ ${#artifacts[@]} -eq 0 ]]; then
     echo "$SCRIPT_NAME source: no artifacts specified" >&2
-    exit 1
+    return 1
   fi
 
   # Classify the version and set up repository URL accordingly
@@ -1432,7 +1591,7 @@ cmd_source() {
 
   # Validate every artifact before touching the filesystem or the network, so a
   # typo cannot leave a half-built output directory behind.
-  local group_id artifact_id group_id_path
+  local artifact group_id artifact_id group_id_path
   for artifact in "${artifacts[@]}"; do
     validate_artifact_format "$artifact"
   done
@@ -1442,18 +1601,23 @@ cmd_source() {
   # writable, so it has to be the place the bodies fetched along the way land
   # too. Otherwise an online `source --output /writable` would still die on the
   # first metadata allocation, having been told to pass the flag it just passed.
-  local build_dir temp_dir="${TMPDIR:-/tmp}"
+  local build_dir temp_dir="${TMPDIR:-/tmp}" created_build_dir=0
   if [[ -n "$output_dir" ]]; then
-    build_dir="$output_dir"
-    mkdir -p "$build_dir"
+    if [[ "$output_dir" == "/" ]]; then
+      build_dir="/"
+    else
+      build_dir="${output_dir%/}"
+    fi
+    mkdir -p "$build_dir" || return 1
     temp_dir="$build_dir"
   else
     # Extracted sources have to land somewhere writable; --output names that
     # directory when the default temp location is not one.
     build_dir=$(make_temp -d) || {
       echo "$SCRIPT_NAME source: pass --output DIR to extract somewhere writable" >&2
-      exit 1
+      return 1
     }
+    created_build_dir=1
     temp_dir="$build_dir"
   fi
 
@@ -1474,7 +1638,8 @@ cmd_source() {
       if is_offline; then
         warm_hint
       fi
-      exit 1
+      [[ $created_build_dir -eq 1 ]] && rm -rf "$build_dir"
+      return 1
     fi
 
     artifact_repos+=("$RESOLVED_REPO_URL")
@@ -1482,13 +1647,15 @@ cmd_source() {
     if [[ "$version_class" == "symbolic" ]]; then
       resolved_version=$(select_version_from_xml "$BODY_FILE" "$version_string_upper") || {
         release_body
-        exit 1
+        [[ $created_build_dir -eq 1 ]] && rm -rf "$build_dir"
+        return 1
       }
       echo "info: Resolved $version_string_upper version for ${artifact} to ${resolved_version}" >&2
     elif [[ "$version_class" == "build_id" ]]; then
       resolved_version=$(select_version_from_xml "$BODY_FILE" "SNAPSHOT") || {
         release_body
-        exit 1
+        [[ $created_build_dir -eq 1 ]] && rm -rf "$build_dir"
+        return 1
       }
       echo "info: Resolved SNAPSHOT version for build $version_string to ${resolved_version}" >&2
     else
@@ -1500,7 +1667,7 @@ cmd_source() {
 
   # Download and extract each package
   local i effective_repo_url version jar_version snapshot_jar_version
-  local source_jar_url source_jar_filename
+  local source_jar_url source_jar_filename dl_status
   local pom_url pom_content pom_status platform_artifacts
 
   for ((i = 0; i < ${#artifacts[@]}; i++)); do
@@ -1515,7 +1682,7 @@ cmd_source() {
     jar_version="$version"
     if [[ "$version" =~ -SNAPSHOT$ ]]; then
       local version_metadata_url="${effective_repo_url}/${group_id_path}/${artifact_id}/${version}/maven-metadata.xml"
-      snapshot_jar_version=$(http_get_body "$version_metadata_url" |
+      snapshot_jar_version=$(http_get_body "$version_metadata_url" "$temp_dir" |
         xmllint --xpath "//snapshotVersion[classifier='sources' and extension='jar']/value/text()" - 2>/dev/null || true)
 
       if [[ -n "$snapshot_jar_version" ]]; then
@@ -1530,20 +1697,50 @@ cmd_source() {
     source_jar_filename="${artifact_id}-${jar_version}-sources.jar"
 
     echo "info: Downloading ${artifact} version ${version}" >&2
-    if ! http_get "${source_jar_url}" "${build_dir}/${source_jar_filename}"; then
+    dl_status=0
+    http_get "${source_jar_url}" "${build_dir}/${source_jar_filename}" || dl_status=$?
+    if [[ $dl_status -ne 0 ]]; then
+      rm -f "${build_dir}/${source_jar_filename}"
+      if [[ $probe_sources -eq 1 && ${#artifacts[@]} -eq 1 ]]; then
+        if [[ $dl_status -eq 1 ]]; then
+          [[ $created_build_dir -eq 1 ]] && rm -rf "$build_dir"
+          return 10
+        elif [[ $dl_status -eq 2 ]] && is_offline; then
+          local javadoc_probe_url="${effective_repo_url}/${group_id_path}/${artifact_id}/${version}/${artifact_id}-${jar_version}-javadoc.jar"
+          local javadoc_probe_cache=""
+          javadoc_probe_cache=$(cache_path_for_url "$javadoc_probe_url" 2>/dev/null) || javadoc_probe_cache=""
+          if [[ -n "$javadoc_probe_cache" && -f "$javadoc_probe_cache" ]]; then
+            [[ $created_build_dir -eq 1 ]] && rm -rf "$build_dir"
+            return 10
+          fi
+        fi
+      fi
       echo "$SCRIPT_NAME source: failed to download $source_jar_url: $HTTP_ERROR" >&2
+      if [[ $dl_status -eq 1 ]]; then
+        local repo_suffix=""
+        if [[ $explicit_repo -eq 1 ]]; then
+          repo_suffix=" ${effective_repo_url}"
+        fi
+        echo "$SCRIPT_NAME source: hint: no -sources.jar published for ${artifact}; try '$SCRIPT_NAME javadoc ${artifact} ${version}${repo_suffix}'" >&2
+      fi
       http_print_hint
       if is_offline; then
         warm_hint
       fi
-      exit 1
+      [[ $created_build_dir -eq 1 ]] && rm -rf "$build_dir"
+      return 1
     fi
 
-    (
-      cd "${build_dir}"
-      jar xf "${source_jar_filename}"
-      rm "${source_jar_filename}"
-    )
+    if ! (
+      cd "${build_dir}" &&
+        jar xf "${source_jar_filename}" &&
+        rm -f "${source_jar_filename}"
+    ); then
+      rm -f "${build_dir}/${source_jar_filename}"
+      [[ $created_build_dir -eq 1 ]] && rm -rf "$build_dir"
+      echo "$SCRIPT_NAME source: failed to extract ${source_jar_filename}" >&2
+      return 1
+    fi
 
     # Check for Kotlin Multiplatform platform-specific sources. Online, a
     # missing POM stays tolerable (it costs only KMP detection). Offline it
@@ -1562,12 +1759,14 @@ cmd_source() {
       # POM here cannot be fixed by the caller; carrying on would return
       # sources with every platform target silently missing.
       echo "$SCRIPT_NAME source: $HTTP_ERROR" >&2
-      exit 1
+      [[ $created_build_dir -eq 1 ]] && rm -rf "$build_dir"
+      return 1
     elif [[ $pom_status -eq 2 ]] && is_offline; then
       echo "$SCRIPT_NAME source: $HTTP_ERROR" >&2
       echo "$SCRIPT_NAME source: without it, whether $artifact has Kotlin Multiplatform sources cannot be determined, and the extracted sources may be incomplete" >&2
       warm_hint
-      exit 1
+      [[ $created_build_dir -eq 1 ]] && rm -rf "$build_dir"
+      return 1
     fi
 
     if [[ -n "$pom_content" ]]; then
@@ -1585,7 +1784,7 @@ cmd_source() {
           platform_jar_version="$version"
           if [[ "$version" =~ -SNAPSHOT$ ]]; then
             local platform_version_metadata_url="${effective_repo_url}/${group_id_path}/${platform_artifact}/${version}/maven-metadata.xml"
-            platform_snapshot_jar_version=$(http_get_body "$platform_version_metadata_url" |
+            platform_snapshot_jar_version=$(http_get_body "$platform_version_metadata_url" "$temp_dir" |
               xmllint --xpath "//snapshotVersion[classifier='sources' and extension='jar']/value/text()" - 2>/dev/null || true)
             if [[ -n "$platform_snapshot_jar_version" ]]; then
               platform_jar_version="$platform_snapshot_jar_version"
@@ -1597,17 +1796,25 @@ cmd_source() {
 
           if http_get "${platform_source_jar_url}" "${build_dir}/${platform_source_jar_filename}" 2>/dev/null; then
             echo "info: Downloaded ${platform_artifact} platform sources" >&2
-            (
-              cd "${build_dir}"
-              jar xf "${platform_source_jar_filename}"
-              rm "${platform_source_jar_filename}"
-            )
-          elif is_offline; then
-            # Warn rather than fail: not every KMP target publishes a sources
-            # JAR, so a warmed cache can be legitimately missing this one and a
-            # hard error would be unfixable. Silence is what is not acceptable.
-            echo "$SCRIPT_NAME source: warning: no cached sources for platform artifact ${platform_artifact}; the extracted sources are missing its classes" >&2
-            echo "$SCRIPT_NAME source: re-run this where there is network to cache them" >&2
+            if ! (
+              cd "${build_dir}" &&
+                jar xf "${platform_source_jar_filename}" &&
+                rm -f "${platform_source_jar_filename}"
+            ); then
+              rm -f "${build_dir}/${platform_source_jar_filename}"
+              [[ $created_build_dir -eq 1 ]] && rm -rf "$build_dir"
+              echo "$SCRIPT_NAME source: failed to extract ${platform_source_jar_filename}" >&2
+              return 1
+            fi
+          else
+            rm -f "${build_dir}/${platform_source_jar_filename}"
+            if is_offline; then
+              # Warn rather than fail: not every KMP target publishes a sources
+              # JAR, so a warmed cache can be legitimately missing this one and a
+              # hard error would be unfixable. Silence is what is not acceptable.
+              echo "$SCRIPT_NAME source: warning: no cached sources for platform artifact ${platform_artifact}; the extracted sources are missing its classes" >&2
+              echo "$SCRIPT_NAME source: re-run this where there is network to cache them" >&2
+            fi
           fi
         done
       fi
@@ -1619,17 +1826,493 @@ cmd_source() {
 
   if [[ -n "$find_pattern" ]]; then
     local -a matches=()
+    local match
     # Deliberately simulating `mapfile` (bash 4+) with a read loop so this
     # script runs unmodified under macOS's default bash (3.2).
     while IFS= read -r -d '' match; do
       matches+=("$match")
     done < <(find "$build_dir" -name "*$find_pattern*" -type f -print0)
 
+    # In Java/Kotlin sources, nested classes (Outer.Inner or Outer$Inner) live
+    # inside the enclosing Outer.kt / Outer.*.kt / Outer.java source file
+    # rather than a separate Outer.Inner.kt file.
+    if [[ ${#matches[@]} -eq 0 && "$find_pattern" =~ ^[A-Z][A-Za-z0-9_]*([.\$][A-Z][A-Za-z0-9_]*)+$ ]]; then
+      local outer_pattern="${find_pattern%%[.\$]*}"
+      while IFS= read -r -d '' match; do
+        matches+=("$match")
+      done < <(find "$build_dir" \( -name "${outer_pattern}.kt" -o -name "${outer_pattern}.*.kt" -o -name "${outer_pattern}.java" \) -type f -print0)
+    fi
+
     if [[ ${#matches[@]} -eq 0 ]]; then
-      echo "error: No files matching '$find_pattern' found in $build_dir" >&2
+      if [[ $created_build_dir -eq 1 ]]; then
+        echo "$SCRIPT_NAME source: no files matching '$find_pattern' found" >&2
+        rm -rf "$build_dir"
+      else
+        echo "$SCRIPT_NAME source: no files matching '$find_pattern' found in $build_dir" >&2
+      fi
+      if [[ $probe_sources -eq 1 ]]; then
+        return 11
+      fi
       return 1
     elif [[ ${#matches[@]} -eq 1 ]]; then
-      cat "${matches[0]}"
+      local cat_status=0
+      cat "${matches[0]}" || cat_status=$?
+      [[ $created_build_dir -eq 1 ]] && rm -rf "$build_dir"
+      return "$cat_status"
+    else
+      echo "info: Multiple matches found:" >&2
+      printf '%s\n' "${matches[@]}"
+    fi
+  else
+    echo "${build_dir}"
+  fi
+}
+
+cmd_source() {
+  _source_impl 0 "$@"
+}
+
+# =============================================================================
+# JAVADOC SUBCOMMAND
+# =============================================================================
+
+usage_javadoc() {
+  cat <<EOF
+Usage: $SCRIPT_NAME javadoc [OPTIONS] ARTIFACT... [VERSION] [REPO_URL]
+
+Download and extract Javadoc HTML JARs (-javadoc.jar) for one or more Maven
+artifacts. Useful for closed-source SDKs (such as Google Play Services, Play
+Billing, ML Kit, or Firebase) that publish API reference HTML instead of
+-sources.jar.
+
+Arguments:
+  ARTIFACT    One or more Maven artifacts in the format GROUP_ID:ARTIFACT_ID
+              (supports brace expansion, e.g., com.google.android.gms:{play-services-wearable,play-services-base})
+  VERSION     Version specifier (optional, defaults to STABLE).
+              Supports symbolic versions (ALPHA, BETA, RC, STABLE, LATEST,
+              SNAPSHOT), pinned versions (e.g., 19.0.0), or AndroidX build IDs.
+  REPO_URL    Maven repository URL
+              (optional; defaults to Google Maven with automatic fallback
+              to Maven Central when omitted).
+              Ignored for SNAPSHOT, build IDs, and pinned snapshot versions.
+
+Options:
+  -h, --help         Display this help message
+  -o, --output DIR   Specify output directory (default: create temporary directory)
+  --find PATTERN     Locate matching HTML page(s); prints HTML contents to
+                     stdout when one match <= 64 KiB is found, or prints the
+                     extracted file path(s) when larger or when multiple match
+
+Examples:
+  $SCRIPT_NAME javadoc com.google.android.gms:play-services-wearable
+  $SCRIPT_NAME javadoc --find NodeClient com.google.android.gms:play-services-wearable
+  $SCRIPT_NAME javadoc --find NodeClient.OnNodeMigratedListener com.google.android.gms:play-services-wearable
+  $SCRIPT_NAME javadoc -o /tmp/gson-docs com.google.code.gson:gson 2.11.0
+
+Extracts raw .html files from <artifact>-<version>-javadoc.jar (removing
+META-INF). Rejects empty placeholder -javadoc.jar archives that contain zero
+class documentation pages.
+EOF
+  exit "${1:-0}"
+}
+
+# Return 0 if DIR contains at least one non-empty class documentation .html
+# page (excluding top-level index/navigation boilerplate and javadoc -use
+# cross-reference pages). Works across Doclava, Dackka, Dokka, and JDK javadoc.
+has_class_html() {
+  local dir="${1%/}" found
+  [[ -z "$dir" ]] && dir="/"
+  found=$(find "$dir" -type f -name '*.html' ! -size 0 \
+    ! -path "$dir/index.html" \
+    ! -path "$dir/*/index.html" \
+    ! -name 'packages.html' \
+    ! -name 'module-summary.html' \
+    ! -name 'overview-*.html' \
+    ! -name 'allclasses*.html' \
+    ! -name 'allpackages-*.html' \
+    ! -name 'package-*.html' \
+    ! -name 'constant-values.html' \
+    ! -name 'deprecated-list.html' \
+    ! -name 'help-doc.html' \
+    ! -name 'index-all.html' \
+    ! -name 'serialized-form.html' \
+    ! -name 'search.html' \
+    ! -name 'classes.html' \
+    ! -path '*/class-use/*' \
+    ! -path '*/doc-files/*' \
+    -print -quit 2>/dev/null || true)
+  [[ -n "$found" ]]
+}
+
+cmd_javadoc() {
+  local output_dir=""
+  local find_pattern=""
+  local -a remaining_args=()
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --help | -h)
+        usage_javadoc
+        ;;
+      --output | -o)
+        if [[ -z "${2:-}" ]]; then
+          echo "$SCRIPT_NAME javadoc: option '$1' requires an argument" >&2
+          return 1
+        fi
+        output_dir="$2"
+        shift 2
+        ;;
+      --find)
+        if [[ -z "${2:-}" ]]; then
+          echo "$SCRIPT_NAME javadoc: option '--find' requires an argument" >&2
+          return 1
+        fi
+        find_pattern="$2"
+        shift 2
+        ;;
+      --)
+        shift
+        while [[ $# -gt 0 ]]; do
+          remaining_args+=("$1")
+          shift
+        done
+        ;;
+      -*)
+        echo "$SCRIPT_NAME javadoc: unknown option: $1" >&2
+        return 1
+        ;;
+      *)
+        remaining_args+=("$1")
+        shift
+        ;;
+    esac
+  done
+  if [[ ${#remaining_args[@]} -gt 0 ]]; then
+    set -- "${remaining_args[@]}"
+  else
+    set --
+  fi
+
+  if [[ $# -lt 1 ]]; then
+    usage_javadoc 1 >&2
+  fi
+
+  # Parse arguments: ARTIFACT... [VERSION] [REPO_URL]
+  local repo_url version_string version_string_upper explicit_repo=0
+  local -a artifacts=()
+
+  if [[ "${!#}" =~ ^https?:// ]]; then
+    repo_url="${!#}"
+    explicit_repo=1
+    if [[ $# -lt 2 ]]; then
+      version_string="STABLE"
+    else
+      local penultimate_idx=$(($# - 1))
+      local last_non_url_arg="${!penultimate_idx}"
+      if [[ ! "$last_non_url_arg" =~ : ]]; then
+        version_string="$last_non_url_arg"
+        if [[ $# -gt 2 ]]; then
+          artifacts=("${@:1:$#-2}")
+        fi
+      else
+        version_string="STABLE"
+        artifacts=("${@:1:$#-1}")
+      fi
+    fi
+  else
+    repo_url="$GOOGLE_MAVEN_URL"
+    local last_arg="${!#}"
+    if [[ ! "$last_arg" =~ : ]]; then
+      version_string="$last_arg"
+      if [[ $# -gt 1 ]]; then
+        artifacts=("${@:1:$#-1}")
+      fi
+    else
+      version_string="STABLE"
+      artifacts=("$@")
+    fi
+  fi
+
+  version_string_upper=$(echo "$version_string" | tr '[:lower:]' '[:upper:]')
+
+  if [[ ${#artifacts[@]} -eq 0 ]]; then
+    echo "$SCRIPT_NAME javadoc: no artifacts specified" >&2
+    return 1
+  fi
+
+  local version_class allow_fallback=0
+  version_class=$(classify_version "$version_string")
+
+  if [[ "$version_class" == "build_id" ]]; then
+    repo_url="$SNAPSHOT_BUILD_URL_PREFIX/$version_string/artifacts/repository"
+    echo "info: Using AndroidX snapshot build $version_string" >&2
+  elif [[ "$version_string_upper" == "SNAPSHOT" ]]; then
+    repo_url="$SNAPSHOT_REPO_URL"
+    echo "info: Using AndroidX snapshot repository (latest)" >&2
+  elif [[ $explicit_repo -eq 0 && ! "$version_string" =~ -SNAPSHOT$ ]]; then
+    allow_fallback=1
+  fi
+
+  local artifact group_id artifact_id group_id_path
+  for artifact in "${artifacts[@]}"; do
+    validate_artifact_format "$artifact"
+  done
+
+  local build_dir abs_build_dir temp_dir="${TMPDIR:-/tmp}" created_build_dir=0
+  if [[ -n "$output_dir" ]]; then
+    if [[ "$output_dir" == "/" ]]; then
+      build_dir="/"
+    else
+      build_dir="${output_dir%/}"
+    fi
+    mkdir -p "$build_dir" || return 1
+    temp_dir="$build_dir"
+  else
+    build_dir=$(make_temp -d) || {
+      echo "$SCRIPT_NAME javadoc: pass --output DIR to extract somewhere writable" >&2
+      return 1
+    }
+    created_build_dir=1
+    temp_dir="$build_dir"
+  fi
+  abs_build_dir=$(cd "$build_dir" && pwd) || {
+    [[ $created_build_dir -eq 1 ]] && rm -rf "$build_dir"
+    return 1
+  }
+
+  local -a artifact_repos=()
+  local -a artifact_versions=()
+  local status=0 resolved_version=""
+  for artifact in "${artifacts[@]}"; do
+    group_id=$(echo "$artifact" | cut -d: -f1)
+    artifact_id=$(echo "$artifact" | cut -d: -f2)
+
+    status=0
+    resolve_maven_metadata "$repo_url" "$group_id" "$artifact_id" "$allow_fallback" "$temp_dir" || status=$?
+    if [[ $status -ne 0 ]]; then
+      echo "$SCRIPT_NAME javadoc: $HTTP_ERROR" >&2
+      http_print_hint
+      if is_offline; then
+        warm_hint
+      fi
+      [[ $created_build_dir -eq 1 ]] && rm -rf "$build_dir"
+      return 1
+    fi
+
+    artifact_repos+=("$RESOLVED_REPO_URL")
+
+    if [[ "$version_class" == "symbolic" ]]; then
+      resolved_version=$(select_version_from_xml "$BODY_FILE" "$version_string_upper") || {
+        release_body
+        [[ $created_build_dir -eq 1 ]] && rm -rf "$build_dir"
+        return 1
+      }
+      echo "info: Resolved $version_string_upper version for ${artifact} to ${resolved_version}" >&2
+    elif [[ "$version_class" == "build_id" ]]; then
+      resolved_version=$(select_version_from_xml "$BODY_FILE" "SNAPSHOT") || {
+        release_body
+        [[ $created_build_dir -eq 1 ]] && rm -rf "$build_dir"
+        return 1
+      }
+      echo "info: Resolved SNAPSHOT version for build $version_string to ${resolved_version}" >&2
+    else
+      resolved_version="$version_string"
+    fi
+    release_body
+    artifact_versions+=("$resolved_version")
+  done
+
+  local i effective_repo_url version jar_version snapshot_jar_version
+  local javadoc_jar_url javadoc_jar_filename stage_dir
+
+  for ((i = 0; i < ${#artifacts[@]}; i++)); do
+    artifact="${artifacts[$i]}"
+    effective_repo_url="${artifact_repos[$i]}"
+    version="${artifact_versions[$i]}"
+    group_id=$(echo "$artifact" | cut -d: -f1)
+    artifact_id=$(echo "$artifact" | cut -d: -f2)
+    group_id_path="${group_id//./\/}"
+
+    jar_version="$version"
+    if [[ "$version" =~ -SNAPSHOT$ ]]; then
+      local version_metadata_url="${effective_repo_url}/${group_id_path}/${artifact_id}/${version}/maven-metadata.xml"
+      snapshot_jar_version=$(http_get_body "$version_metadata_url" "$temp_dir" |
+        xmllint --xpath "//snapshotVersion[classifier='javadoc' and extension='jar']/value/text()" - 2>/dev/null || true)
+
+      if [[ -n "$snapshot_jar_version" ]]; then
+        jar_version="$snapshot_jar_version"
+        echo "info: Resolved snapshot Javadoc JAR version to ${jar_version}" >&2
+      else
+        echo "$SCRIPT_NAME javadoc: warning: could not resolve timestamped version, trying ${version}" >&2
+      fi
+    fi
+
+    javadoc_jar_url="${effective_repo_url}/${group_id_path}/${artifact_id}/${version}/${artifact_id}-${jar_version}-javadoc.jar"
+    javadoc_jar_filename="${artifact_id}-${jar_version}-javadoc.jar"
+
+    echo "info: Downloading Javadoc for ${artifact} version ${version}" >&2
+    if ! http_get "${javadoc_jar_url}" "${abs_build_dir}/${javadoc_jar_filename}"; then
+      rm -f "${abs_build_dir}/${javadoc_jar_filename}"
+      echo "$SCRIPT_NAME javadoc: failed to download $javadoc_jar_url: $HTTP_ERROR" >&2
+      http_print_hint
+      if is_offline; then
+        warm_hint
+      fi
+      [[ $created_build_dir -eq 1 ]] && rm -rf "$build_dir"
+      return 1
+    fi
+
+    stage_dir=$(make_temp -d "$abs_build_dir") || {
+      rm -f "${abs_build_dir}/${javadoc_jar_filename}"
+      [[ $created_build_dir -eq 1 ]] && rm -rf "$build_dir"
+      return 1
+    }
+
+    if ! (
+      cd "${stage_dir}" &&
+        jar xf "${abs_build_dir}/${javadoc_jar_filename}"
+    ); then
+      rm -f "${abs_build_dir}/${javadoc_jar_filename}"
+      rm -rf "${stage_dir}"
+      [[ $created_build_dir -eq 1 ]] && rm -rf "$build_dir"
+      echo "$SCRIPT_NAME javadoc: failed to extract ${javadoc_jar_filename}" >&2
+      return 1
+    fi
+    rm -f "${abs_build_dir}/${javadoc_jar_filename}"
+    rm -rf "${stage_dir}/META-INF"
+
+    if ! has_class_html "$stage_dir"; then
+      rm -rf "${stage_dir}"
+      [[ $created_build_dir -eq 1 ]] && rm -rf "$build_dir"
+      echo "$SCRIPT_NAME javadoc: $javadoc_jar_url contains no class documentation HTML pages (empty or placeholder -javadoc.jar)" >&2
+      return 1
+    fi
+
+    if ! (cd "$stage_dir" && cp -Rf . "${abs_build_dir}/"); then
+      rm -rf "${stage_dir}"
+      [[ $created_build_dir -eq 1 ]] && rm -rf "$build_dir"
+      echo "$SCRIPT_NAME javadoc: failed to copy extracted files to $build_dir" >&2
+      return 1
+    fi
+    rm -rf "${stage_dir}"
+  done
+
+  if [[ -n "$find_pattern" ]]; then
+    local norm_pattern="${find_pattern//\$/\.}"
+    local base_pattern="${norm_pattern%.html}"
+    local -a raw_matches=()
+    local match
+
+    if [[ "$find_pattern" == *class-use* || "$find_pattern" == *doc-files* ]]; then
+      while IFS= read -r match; do
+        [[ -n "$match" ]] && raw_matches+=("$match")
+      done < <(find "$build_dir" -type f -path "*$norm_pattern*" | LC_ALL=C sort)
+    else
+      # Prefer an exact <Class>.html (or <Outer>.<Inner>.html) match before
+      # falling back to substring matches, so `--find BillingClient` returns
+      # BillingClient.html rather than all BillingClient*.html pages.
+      if [[ "$base_pattern" == */* ]]; then
+        while IFS= read -r match; do
+          [[ -n "$match" ]] && raw_matches+=("$match")
+        done < <(find "$build_dir" -type f -path "*/${base_pattern}.html" \
+          ! -path '*/class-use/*' ! -path '*/doc-files/*' | LC_ALL=C sort)
+      else
+        while IFS= read -r match; do
+          [[ -n "$match" ]] && raw_matches+=("$match")
+        done < <(find "$build_dir" -type f -name "${base_pattern}.html" \
+          ! -path '*/class-use/*' ! -path '*/doc-files/*' | LC_ALL=C sort)
+      fi
+
+      if [[ ${#raw_matches[@]} -eq 0 ]]; then
+        if [[ "$norm_pattern" == */* ]]; then
+          while IFS= read -r match; do
+            [[ -n "$match" ]] && raw_matches+=("$match")
+          done < <(find "$build_dir" -type f -path "*${norm_pattern}*" \
+            ! -path '*/class-use/*' ! -path '*/doc-files/*' | LC_ALL=C sort)
+        else
+          while IFS= read -r match; do
+            [[ -n "$match" ]] && raw_matches+=("$match")
+          done < <(find "$build_dir" -type f -name "*${norm_pattern}*" \
+            ! -path '*/class-use/*' ! -path '*/doc-files/*' | LC_ALL=C sort)
+        fi
+      fi
+
+      if [[ ${#raw_matches[@]} -eq 0 && "$norm_pattern" != "$find_pattern" ]]; then
+        if [[ "$find_pattern" == */* ]]; then
+          while IFS= read -r match; do
+            [[ -n "$match" ]] && raw_matches+=("$match")
+          done < <(find "$build_dir" -type f -path "*${find_pattern}*" \
+            ! -path '*/class-use/*' ! -path '*/doc-files/*' | LC_ALL=C sort)
+        else
+          while IFS= read -r match; do
+            [[ -n "$match" ]] && raw_matches+=("$match")
+          done < <(find "$build_dir" -type f -name "*${find_pattern}*" \
+            ! -path '*/class-use/*' ! -path '*/doc-files/*' | LC_ALL=C sort)
+        fi
+      fi
+    fi
+
+    # Deduplicate dual-language `/kotlin/` mirror pages (root `kotlin/`,
+    # `<prefix>/kotlin/`, or `android/reference/kotlin/`) when the
+    # corresponding non-`/kotlin/` relative path is already present in the
+    # match set, without dropping genuine `.kotlin` Java subpackages.
+    local -a matches=()
+    if [[ ${#raw_matches[@]} -gt 1 ]]; then
+      local rel alt_rel prefix candidate is_dup
+      for match in "${raw_matches[@]}"; do
+        if [[ "$build_dir" == "/" ]]; then
+          rel="${match#/}"
+        else
+          rel="${match#"$build_dir/"}"
+        fi
+        alt_rel=""
+        if [[ "$rel" == kotlin/* ]]; then
+          alt_rel="${rel#kotlin/}"
+        elif [[ "$rel" == */kotlin/* ]]; then
+          prefix="${rel%%/kotlin/*}"
+          if [[ "$prefix" != */* || "$prefix" == "android/reference" ]]; then
+            alt_rel="${rel/\/kotlin\///}"
+          fi
+        fi
+        is_dup=0
+        if [[ -n "$alt_rel" ]]; then
+          local expected_twin="$build_dir/$alt_rel"
+          [[ "$build_dir" == "/" ]] && expected_twin="/$alt_rel"
+          for candidate in "${raw_matches[@]}"; do
+            if [[ "$candidate" == "$expected_twin" ]]; then
+              is_dup=1
+              break
+            fi
+          done
+        fi
+        if [[ $is_dup -eq 0 ]]; then
+          matches+=("$match")
+        fi
+      done
+    else
+      matches=("${raw_matches[@]+"${raw_matches[@]}"}")
+    fi
+
+    if [[ ${#matches[@]} -eq 0 ]]; then
+      if [[ $created_build_dir -eq 1 ]]; then
+        echo "$SCRIPT_NAME javadoc: no files matching '$find_pattern' found" >&2
+        rm -rf "$build_dir"
+      else
+        echo "$SCRIPT_NAME javadoc: no files matching '$find_pattern' found in $build_dir" >&2
+      fi
+      return 1
+    elif [[ ${#matches[@]} -eq 1 ]]; then
+      local file_size
+      file_size=$(wc -c <"${matches[0]}" | tr -d ' ')
+      if [[ "$file_size" -gt "$JAVADOC_MAX_CAT_BYTES" ]]; then
+        echo "info: ${matches[0]} is ${file_size} bytes (> ${JAVADOC_MAX_CAT_BYTES} bytes); printing path instead of contents" >&2
+        printf '%s\n' "${matches[0]}"
+      else
+        local cat_status=0
+        cat "${matches[0]}" || cat_status=$?
+        [[ $created_build_dir -eq 1 ]] && rm -rf "$build_dir"
+        return "$cat_status"
+      fi
     else
       echo "info: Multiple matches found:" >&2
       printf '%s\n' "${matches[@]}"
@@ -1647,14 +2330,17 @@ usage_inspect() {
   cat <<EOF
 Usage: $SCRIPT_NAME inspect [OPTIONS] CLASS_NAME [VERSION] [REPO_URL]
 
-Download and inspect source code for a Jetpack class or package.
+Download and inspect source code (or Javadoc HTML when -sources.jar is not
+published) for an AndroidX, Google Maven, or Maven Central class or package.
 
-This is a convenience wrapper that combines resolve and source to map from
-a package/class name directly to source code.
+This is a convenience wrapper that combines resolve, source, and automatic
+javadoc fallback to map from a package/class name directly to source or API
+reference documentation.
 
 Arguments:
-  CLASS_NAME  Fully qualified package/class name
-              (e.g., androidx.core.splashscreen.SplashScreen)
+  CLASS_NAME  Fully qualified package/class name, including nested classes
+              (e.g., androidx.core.splashscreen.SplashScreen or
+              com.google.android.gms.wearable.NodeClient.OnNodeMigratedListener)
               OR Maven coordinate (e.g., androidx.wear.tiles:tiles)
   VERSION     Version specifier (optional, defaults to STABLE). See below.
   REPO_URL    Maven repository URL (optional; defaults to Google Maven with
@@ -1684,12 +2370,13 @@ Version Specifiers:
                Find build IDs at: https://androidx.dev/snapshots/builds
 
 Options:
-  --help        Display this help message
-  --output DIR  Specify output directory (default: create temporary directory)
+  -h, --help         Display this help message
+  -o, --output DIR   Specify output directory (default: create temporary directory)
 
 Examples:
   # Symbolic (floating) versions
   $SCRIPT_NAME inspect androidx.core.splashscreen.SplashScreen
+  $SCRIPT_NAME inspect com.google.android.gms.wearable.NodeClient.OnNodeMigratedListener
   $SCRIPT_NAME inspect androidx.wear.tiles:tiles
   $SCRIPT_NAME inspect androidx.wear.ambient.AmbientLifecycleObserver ALPHA
   $SCRIPT_NAME inspect androidx.glance.wear.tiles.GlanceTileService SNAPSHOT
@@ -1699,10 +2386,11 @@ Examples:
   $SCRIPT_NAME inspect androidx.wear.tiles.TileService 1.4.0
   $SCRIPT_NAME inspect androidx.wear.tiles.TileService 14710011
 
-  pushd "\$($SCRIPT_NAME inspect androidx.wear.tiles.TileService)"
+  pushd "\$($SCRIPT_NAME inspect androidx.wear.tiles:tiles)"
 
 For Kotlin Multiplatform libraries, both common and platform-specific sources
-are automatically downloaded.
+are automatically downloaded. When -sources.jar is absent (closed-source SDKs),
+inspect automatically falls back to -javadoc.jar.
 EOF
   exit "${1:-0}"
 }
@@ -1713,16 +2401,27 @@ cmd_inspect() {
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --help)
+      --help | -h)
         usage_inspect
         ;;
-      --output)
+      --output | -o)
         if [[ -z "${2:-}" ]]; then
-          echo "$SCRIPT_NAME inspect: option '--output' requires an argument" >&2
-          exit 1
+          echo "$SCRIPT_NAME inspect: option '$1' requires an argument" >&2
+          return 1
         fi
         output_dir="$2"
         shift 2
+        ;;
+      --)
+        shift
+        while [[ $# -gt 0 ]]; do
+          remaining_args+=("$1")
+          shift
+        done
+        ;;
+      -*)
+        echo "$SCRIPT_NAME inspect: unknown option: $1" >&2
+        return 1
         ;;
       *)
         remaining_args+=("$1")
@@ -1730,10 +2429,14 @@ cmd_inspect() {
         ;;
     esac
   done
-  set -- "${remaining_args[@]}"
+  if [[ ${#remaining_args[@]} -gt 0 ]]; then
+    set -- "${remaining_args[@]}"
+  else
+    set --
+  fi
 
   if [[ $# -lt 1 ]]; then
-    usage_inspect
+    usage_inspect 1 >&2
   fi
 
   local input="$1"
@@ -1747,31 +2450,38 @@ cmd_inspect() {
     # Input is already a coordinate
     artifact="$input"
   else
-    # Extract potential class name if input looks like FQCN
-    if [[ "$input" =~ \.([A-Z][a-zA-Z0-9]*)$ ]]; then
-      find_target="${BASH_REMATCH[1]}"
-    elif [[ ! "$input" =~ \. ]]; then
-      # Simple class name
-      find_target="$input"
-    fi
+    parse_class_target "$input"
+    find_target="$PARSED_FIND_TARGET"
+    local search_query="$PARSED_SEARCH_QUERY"
 
     # Try to resolve or search
     if [[ "$input" =~ \. ]]; then
       # It looks like a FQCN or package
+      local resolved
       if resolved=$(cmd_resolve "$input" 2>/dev/null); then
-        # Check if this resolved artifact actually exists
         local gid="${resolved%%:*}"
         local aid="${resolved##*:}"
-        if fetch_maven_metadata "$GOOGLE_MAVEN_URL" "$gid" "$aid" >/dev/null 2>&1; then
+        local check_repo="${repo_url:-$GOOGLE_MAVEN_URL}"
+        local meta_check_dir="" meta_status=0
+        if [[ -n "$output_dir" ]]; then
+          mkdir -p "$output_dir" || return 1
+          meta_check_dir="$output_dir"
+        fi
+        # Only fall through to substring search on a genuine 404/410 (status 1);
+        # preserve the resolved coordinate on success or offline/network errors
+        # so `_source_impl` reports the exact cold-cache or transport failure.
+        resolve_maven_metadata "$check_repo" "$gid" "$aid" 0 "$meta_check_dir" >/dev/null 2>&1 || meta_status=$?
+        release_body
+        if [[ $meta_status -ne 1 ]]; then
           artifact="$resolved"
         fi
       fi
     fi
 
-    # If resolve failed, didn't apply, or 404'd, try search
+    # If resolve failed, didn't apply, or genuinely 404'd, try search
     if [[ -z "$artifact" ]]; then
       local search_results
-      if search_results=$(cmd_search "$input"); then
+      if search_results=$(cmd_search "$search_query"); then
         artifact=$(echo "$search_results" | head -n 1)
       fi
     fi
@@ -1780,20 +2490,18 @@ cmd_inspect() {
   if [[ -z "$artifact" ]]; then
     echo "$SCRIPT_NAME inspect: could not resolve or find artifact for '$input'" >&2
     if [[ "$input" != *:* ]]; then
-      echo "$SCRIPT_NAME inspect: hint: the class index only covers Google Maven; for Maven Central libraries pass GROUP:ARTIFACT (e.g. '$SCRIPT_NAME inspect GROUP:ARTIFACT' or '$SCRIPT_NAME source --find <Class> GROUP:ARTIFACT')" >&2
+      echo "$SCRIPT_NAME inspect: hint: the class index only covers Google Maven; for Maven Central libraries pass GROUP:ARTIFACT (e.g. '$SCRIPT_NAME inspect GROUP:ARTIFACT', '$SCRIPT_NAME source --find <Class> GROUP:ARTIFACT', or '$SCRIPT_NAME javadoc --find <Class> GROUP:ARTIFACT')" >&2
     fi
-    exit 1
+    return 1
   fi
 
-  # Build source arguments
+  # Build source/javadoc arguments
   local -a source_args=()
   if [[ -n "$output_dir" ]]; then
     source_args+=(--output "$output_dir")
   fi
 
   if [[ -n "$find_target" ]]; then
-    # Only append --find if we have a target (simple class name or extracted class name)
-    # AND the filename looks like a source file (or we assume .kt/.java will be matched by *target*)
     source_args+=(--find "$find_target")
   fi
 
@@ -1802,34 +2510,42 @@ cmd_inspect() {
     source_args+=("$repo_url")
   fi
 
-  local status=0
+  local status=0 fell_back_to_javadoc=0
   if [[ -n "$find_target" ]]; then
-    cmd_source "${source_args[@]}" || status=$?
+    _source_impl 1 "${source_args[@]}" || status=$?
+    if [[ $status -eq 10 ]]; then
+      fell_back_to_javadoc=1
+      echo "info: no -sources.jar published for ${artifact}; falling back to -javadoc.jar" >&2
+      status=0
+      cmd_javadoc "${source_args[@]}" || status=$?
+    fi
     if [[ $status -ne 0 ]]; then
-      if [[ "$input" == *.* && "$input" != *:* && "$version_type" == "STABLE" ]]; then
+      if [[ $status -eq 11 && $fell_back_to_javadoc -eq 0 && "$artifact" == androidx.* && "$input" == *.* && "$input" != *:* && "$version_type" == "STABLE" ]]; then
         echo "$SCRIPT_NAME inspect: hint: '$input' was not found in STABLE; it may be in a newer pre-release track; try:" >&2
         echo "  $SCRIPT_NAME inspect $input SNAPSHOT" >&2
       fi
-      return $status
+      return 1
     fi
     return 0
   fi
 
   local build_dir
-  build_dir=$(cmd_source "${source_args[@]}") || status=$?
+  build_dir=$(_source_impl 1 "${source_args[@]}") || status=$?
+  if [[ $status -eq 10 ]]; then
+    fell_back_to_javadoc=1
+    echo "info: no -sources.jar published for ${artifact}; falling back to -javadoc.jar" >&2
+    status=0
+    build_dir=$(cmd_javadoc "${source_args[@]}") || status=$?
+  fi
   if [[ $status -ne 0 ]]; then
-    if [[ "$input" == *.* && "$input" != *:* && "$version_type" == "STABLE" ]]; then
-      echo "$SCRIPT_NAME inspect: hint: '$input' was not found in STABLE; it may be in a newer pre-release track; try:" >&2
-      echo "  $SCRIPT_NAME inspect $input SNAPSHOT" >&2
-    fi
-    return $status
+    return 1
   fi
 
   if [[ "$input" == *.* && "$input" != *:* ]]; then
     local check_path="${input//.//}"
     if [[ -d "$build_dir" ]] && [[ -z "$(find "$build_dir" -path "*/$check_path*" -print -quit 2>/dev/null)" ]]; then
       echo "$SCRIPT_NAME inspect: warning: '$input' was not found in ${version_type} of ${artifact}" >&2
-      if [[ "$version_type" == "STABLE" ]]; then
+      if [[ $fell_back_to_javadoc -eq 0 && "$artifact" == androidx.* && "$version_type" == "STABLE" ]]; then
         echo "$SCRIPT_NAME inspect: hint: it may be in a newer pre-release track; try:" >&2
         echo "  $SCRIPT_NAME inspect $input SNAPSHOT" >&2
       fi
@@ -2106,7 +2822,7 @@ cmd_doctor() {
     doctor_report INFO "GMaven index: not downloaded yet (fetched on first search or resolve)"
   fi
 
-  # --- Cached HTTP responses (version, list dependencies, source, inspect)
+  # --- Cached HTTP responses (version, list dependencies, source, javadoc, inspect)
   local responses=0
   if [[ -d "$HTTP_CACHE_DIR" ]]; then
     responses=$(find "$HTTP_CACHE_DIR" -type f | wc -l | tr -d ' ')
@@ -2140,18 +2856,22 @@ fi
 # Help is dependency-free, and doctor reports missing dependencies rather than
 # dying on them; everything else needs the external tools up front.
 case "$1" in
-  help | --help | doctor) ;;
+  help | --help | -h | doctor) ;;
   *) check_deps ;;
 esac
 
 case "$1" in
-  help | --help)
+  help | --help | -h)
     if [[ -n "${2:-}" ]]; then
       case "$2" in
         version) usage_version ;;
         resolve) usage_resolve ;;
+        search) usage_search ;;
         source) usage_source ;;
+        javadoc) usage_javadoc ;;
         inspect) usage_inspect ;;
+        list) usage_list ;;
+        versions) usage_versions ;;
         dependencies) usage_dependencies ;;
         doctor) usage_doctor ;;
         *)
@@ -2200,6 +2920,10 @@ case "$1" in
   source)
     shift
     cmd_source "$@"
+    ;;
+  javadoc)
+    shift
+    cmd_javadoc "$@"
     ;;
   inspect)
     shift

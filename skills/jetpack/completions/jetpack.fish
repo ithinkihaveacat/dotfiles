@@ -11,7 +11,8 @@ complete -c jetpack -n __fish_use_subcommand -a version -d 'Get version for a pa
 complete -c jetpack -n __fish_use_subcommand -a list -d 'List versions or dependencies'
 complete -c jetpack -n __fish_use_subcommand -a resolve -d 'Convert package name to Maven coordinate'
 complete -c jetpack -n __fish_use_subcommand -a source -d 'Download and extract source JARs'
-complete -c jetpack -n __fish_use_subcommand -a inspect -d 'Resolve class name and download source'
+complete -c jetpack -n __fish_use_subcommand -a javadoc -d 'Download and extract Javadoc HTML JARs'
+complete -c jetpack -n __fish_use_subcommand -a inspect -d 'Resolve class name and download source or Javadoc'
 complete -c jetpack -n __fish_use_subcommand -a search -d 'Search for artifacts by package or class name'
 complete -c jetpack -n __fish_use_subcommand -a doctor -d 'Report dependencies, offline mode, and cache state'
 
@@ -24,12 +25,19 @@ complete -c jetpack -n '__fish_seen_subcommand_from resolve' -s h -l help -d 'Di
 
 # source subcommand
 complete -c jetpack -n '__fish_seen_subcommand_from source' -s h -l help -d 'Display help'
-complete -c jetpack -n '__fish_seen_subcommand_from source' -l output -r -d 'Specify output directory'
+complete -c jetpack -n '__fish_seen_subcommand_from source' -s o -l output -r -d 'Specify output directory'
+complete -c jetpack -n '__fish_seen_subcommand_from source' -l find -r -d 'Locate matching file'
 complete -c jetpack -n '__fish_seen_subcommand_from source' -a 'ALPHA BETA RC STABLE LATEST SNAPSHOT' -d 'Symbolic (floating) version'
+
+# javadoc subcommand
+complete -c jetpack -n '__fish_seen_subcommand_from javadoc' -s h -l help -d 'Display help'
+complete -c jetpack -n '__fish_seen_subcommand_from javadoc' -s o -l output -r -d 'Specify output directory'
+complete -c jetpack -n '__fish_seen_subcommand_from javadoc' -l find -r -d 'Locate matching HTML page'
+complete -c jetpack -n '__fish_seen_subcommand_from javadoc' -a 'ALPHA BETA RC STABLE LATEST SNAPSHOT' -d 'Symbolic (floating) version'
 
 # inspect subcommand
 complete -c jetpack -n '__fish_seen_subcommand_from inspect' -s h -l help -d 'Display help'
-complete -c jetpack -n '__fish_seen_subcommand_from inspect' -l output -r -d 'Specify output directory'
+complete -c jetpack -n '__fish_seen_subcommand_from inspect' -s o -l output -r -d 'Specify output directory'
 complete -c jetpack -n '__fish_seen_subcommand_from inspect' -a 'ALPHA BETA RC STABLE LATEST SNAPSHOT' -d 'Symbolic (floating) version'
 
 # list subcommands
