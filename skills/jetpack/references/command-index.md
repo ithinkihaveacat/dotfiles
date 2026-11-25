@@ -50,18 +50,19 @@ Commands:
                       Search for artifacts by package, artifact, or class name
                       (using the cached GMaven index).
                       Use --force to rebuild the local package index.
-  source <artifact>... [version]
+  source <artifact>... [version] [repo]
                       Download and extract source JARs for one or more Maven artifacts.
                       Supports symbolic versions (e.g. ALPHA) or pinned versions.
                       Handles Kotlin Multiplatform platform sources automatically.
                       Options: -o/--output <dir>, --find <pattern>
-  javadoc <artifact>... [version]
+  javadoc <artifact>... [version] [repo]
                       Download and extract Javadoc HTML JARs (-javadoc.jar) for
                       one or more Maven artifacts (e.g. closed-source SDKs).
                       Options: -o/--output <dir>, --find <pattern>
-  inspect <name> [version]
+  inspect <name> [version] [repo]
                       Convenience wrapper that resolves a class name to an artifact
                       and downloads its source (falling back to javadoc if needed).
+                      Options: -o/--output <dir>
   doctor              Report dependencies, offline mode, and cache state.
                       Exits non-zero if anything needs attention.
 
@@ -99,6 +100,9 @@ Examples:
 
   # Inspect source code for a class (downloads and extracts)
   jetpack inspect androidx.lifecycle.ViewModel
+
+  # Extract Javadoc HTML for a closed-source SDK class
+  jetpack javadoc --find NodeClient com.google.android.gms:play-services-wearable
 
   # List all versions
   jetpack list versions androidx.wear.tiles:tiles
@@ -250,7 +254,8 @@ automatic fallback to `javadoc` when `-sources.jar` is absent). **Synopsis**:
 
 - `CLASS_NAME`: Class name (top-level or nested, resolved to coordinate) OR
   coordinate.
-- `VERSION`: Version specifier. **Options**:
+- `VERSION`: Version specifier.
+- `REPO_URL`: Custom Maven repo URL. **Options**:
 - `-o`, `--output DIR`: Directory to extract to. **Examples**:
 - `scripts/jetpack inspect androidx.core.splashscreen.SplashScreen`
 - `scripts/jetpack inspect com.google.android.gms.wearable.NodeClient.OnNodeMigratedListener`

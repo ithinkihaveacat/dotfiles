@@ -23,7 +23,7 @@ SERVE_DIR="$TEST_TMP/serve"
 CURL_LOG="$TEST_TMP/curl.log"
 mkdir -p "$SHIM_DIR" "$SERVE_DIR" "$JETPACK_CACHE_DIR"
 
-TOTAL_TESTS=64
+TOTAL_TESTS=94
 TEST_NUM=0
 echo "1..$TOTAL_TESTS"
 
@@ -508,3 +508,134 @@ run_shimmed inspect "androidx.lifecycle.Lifecycle\$State"
 assert_status "inspect open-source Outer\$Inner finds enclosing Lifecycle.kt" "$STATUS" 0
 assert_contains "inspect open-source Outer\$Inner prints Lifecycle.kt" \
   "$STDOUT" "enum class State { CREATED, STARTED, RESUMED }"
+
+# --- 9. Relative & trailing-slash `--output`, CLI validation, & sandboxes ---
+
+ABS_JETPACK=$(cd "$(dirname "$BIN_JETPACK")" && pwd)/$(basename "$BIN_JETPACK")
+
+REL_OUT=$(cd "$TEST_TMP" && PATH="$SHIM_DIR:$PATH" "$ABS_JETPACK" javadoc -o rel-docs \
+  com.google.android.gms:play-services-wearable 2>"$TEST_TMP/rel.err")
+REL_RC=$?
+assert_status "javadoc with relative -o path succeeds" "$REL_RC" 0
+if [[ -f "$TEST_TMP/rel-docs/com/google/android/gms/wearable/NodeClient.html" ]]; then
+  ok "javadoc with relative -o extracts HTML into relative target"
+else
+  not_ok "javadoc with relative -o extracts HTML into relative target" \
+    "Missing NodeClient.html under $TEST_TMP/rel-docs (stdout=$REL_OUT)"
+fi
+
+REL_INSP=$(cd "$TEST_TMP" && PATH="$SHIM_DIR:$PATH" "$ABS_JETPACK" inspect -o rel-inspect \
+  com.google.android.gms:play-services-wearable 2>"$TEST_TMP/rel2.err")
+REL_INSP_RC=$?
+assert_status "inspect fallback with relative -o path succeeds" "$REL_INSP_RC" 0
+if [[ -f "$TEST_TMP/rel-inspect/com/google/android/gms/wearable/NodeClient.html" ]]; then
+  ok "inspect fallback with relative -o extracts HTML into relative target"
+else
+  not_ok "inspect fallback with relative -o extracts HTML into relative target" \
+    "Missing NodeClient.html under $TEST_TMP/rel-inspect (stdout=$REL_INSP)"
+fi
+
+run_shimmed javadoc -o "$TEST_TMP/billing-slash/" --find BillingClient com.android.billingclient:billing
+assert_status "javadoc with trailing-slash --output succeeds" "$STATUS" 0
+assert_contains "trailing-slash --output still deduplicates /kotlin/ mirror" \
+  "$STDOUT" "<h1>BillingClient (Java)</h1>"
+
+run_shimmed javadoc
+assert_status "javadoc with 0 arguments exits 1" "$STATUS" 1
+if [[ -z "$STDOUT" && "$STDERR" == *"Usage:"* ]]; then
+  ok "javadoc with 0 arguments writes usage to stderr only"
+else
+  not_ok "javadoc with 0 arguments writes usage to stderr only" \
+    "stdout=$STDOUT stderr=$STDERR"
+fi
+
+run_shimmed javadoc -o "$TEST_TMP/opt-only"
+assert_status "javadoc with options only and no artifacts exits 1" "$STATUS" 1
+
+run_shimmed javadoc https://repo1.maven.org/maven2
+assert_status "javadoc with URL only exits 1 without slice crash" "$STATUS" 1
+if [[ "$STDERR" == *"no artifacts specified"* && "$STDERR" != *"substring expression"* ]]; then
+  ok "javadoc with URL only reports no artifacts specified cleanly"
+else
+  not_ok "javadoc with URL only reports no artifacts specified cleanly" "stderr=$STDERR"
+fi
+
+run_shimmed javadoc com.google.code.gson:gson --bogus
+assert_status "javadoc rejects unknown --bogus option" "$STATUS" 1
+assert_contains "unknown option message names --bogus" "$STDERR" "unknown option: --bogus"
+
+run_shimmed javadoc --find wearable/Node com.google.android.gms:play-services-wearable
+assert_status "slash-qualified --find substring succeeds" "$STATUS" 0
+assert_contains "slash-qualified --find lists matching paths" "$STDOUT" "NodeClient.html"
+assert_not_contains "slash-qualified --find emits no find -name warning" "$STDERR" "warning:"
+
+run_shimmed javadoc --find class-use/Gson com.google.code.gson:gson
+assert_status "explicit --find class-use/... matches cross-reference page" "$STATUS" 0
+assert_contains "explicit --find class-use/... prints class-use HTML" \
+  "$STDOUT" "Uses of Class Gson"
+
+rm -rf "${CLEAN_TMP:?}"/*
+run_shimmed javadoc --find NodeClient com.google.android.gms:play-services-wearable
+assert_status "inline --find without --output succeeds" "$STATUS" 0
+if [[ -z "$(ls -A "$CLEAN_TMP")" ]]; then
+  ok "inline --find without --output cleans up temporary directory"
+else
+  not_ok "inline --find without --output cleans up temporary directory" \
+    "Leftover in CLEAN_TMP: $(ls -A "$CLEAN_TMP")"
+fi
+
+rm -rf "${CLEAN_TMP:?}"/*
+run_shimmed javadoc --find WearableListenerService com.google.android.gms:play-services-wearable
+assert_status "oversized --find without --output exits 0" "$STATUS" 0
+if [[ -f "$STDOUT" && "$STDOUT" == "$CLEAN_TMP/"* ]]; then
+  ok "oversized --find without --output retains temp file so caller can read it"
+else
+  not_ok "oversized --find without --output retains temp file so caller can read it" \
+    "Missing or unexpected path: $STDOUT"
+fi
+rm -rf "${CLEAN_TMP:?}"/*
+
+# Cold-cache offline miss: keep index, wipe HTTP cache
+COLD_CACHE="$TEST_TMP/cold_cache"
+mkdir -p "$COLD_CACHE"
+cp "$JETPACK_CACHE_DIR/androidx-index.json" "$COLD_CACHE/androidx-index.json"
+COLD_ERR_FILE="$TEST_TMP/cold.err"
+COLD_OUT=$(AGENT_OFFLINE=1 JETPACK_CACHE_DIR="$COLD_CACHE" PATH="$SHIM_DIR:$PATH" \
+  "$ABS_JETPACK" inspect "com.google.android.gms.wearable.NodeClient\$OnNodeMigratedListener" \
+  2>"$COLD_ERR_FILE")
+COLD_RC=$?
+COLD_ERR=$(cat "$COLD_ERR_FILE")
+assert_status "cold-cache offline inspect exits 1" "$COLD_RC" 1
+assert_contains "cold-cache warm_hint single-quotes Outer\$Inner safely" \
+  "$COLD_ERR" "'com.google.android.gms.wearable.NodeClient\$OnNodeMigratedListener'"
+assert_not_contains "cold-cache offline inspect is not reported as not found" \
+  "$COLD_ERR" "not found"
+assert_not_contains "cold-cache offline inspect does not suggest AndroidX SNAPSHOT" \
+  "$COLD_ERR" "SNAPSHOT"
+: "$COLD_OUT"
+
+# Read-only $TMPDIR sandbox checks
+RO_TMP="$TEST_TMP/ro_tmpdir"
+mkdir -p "$RO_TMP"
+chmod 500 "$RO_TMP"
+
+RO_ERR_FILE="$TEST_TMP/ro1.err"
+TMPDIR="$RO_TMP" AGENT_OFFLINE=1 PATH="$SHIM_DIR:$PATH" \
+  "$ABS_JETPACK" javadoc com.google.android.gms:play-services-wearable \
+  >"$TEST_TMP/ro1.out" 2>"$RO_ERR_FILE"
+RO1_RC=$?
+RO1_ERR=$(cat "$RO_ERR_FILE")
+assert_status "javadoc fails cleanly when TMPDIR is read-only and --output omitted" "$RO1_RC" 1
+assert_contains "read-only TMPDIR error points to --output" "$RO1_ERR" "--output"
+
+TMPDIR="$RO_TMP" AGENT_OFFLINE=1 PATH="$SHIM_DIR:$PATH" \
+  "$ABS_JETPACK" javadoc -o "$TEST_TMP/ro-ok-javadoc" --find NodeClient \
+  com.google.android.gms:play-services-wearable >"$TEST_TMP/ro2.out" 2>"$TEST_TMP/ro2.err"
+assert_status "offline javadoc with -o succeeds when TMPDIR is read-only" "$?" 0
+
+TMPDIR="$RO_TMP" AGENT_OFFLINE=1 PATH="$SHIM_DIR:$PATH" \
+  "$ABS_JETPACK" inspect -o "$TEST_TMP/ro-ok-inspect" \
+  com.google.android.gms.wearable.NodeClient.OnNodeMigratedListener \
+  >"$TEST_TMP/ro3.out" 2>"$TEST_TMP/ro3.err"
+assert_status "offline inspect fallback with -o succeeds when TMPDIR is read-only" "$?" 0
+chmod 700 "$RO_TMP"

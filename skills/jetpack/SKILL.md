@@ -151,12 +151,13 @@ note on stderr) so callers can search or read targeted line ranges.
 
 **Purpose**: Convenience wrapper combining `search`/`resolve` + `source` with
 automatic fallback to `javadoc` when `-sources.jar` is not published. **Usage**:
-`scripts/jetpack inspect [OPTIONS] CLASS_NAME|GROUP:ARTIFACT [VERSION]`
-**Note**: Resolves top-level and nested (`Outer.Inner` / `Outer$Inner`) class
-names; falls back to an index search if direct resolution fails, and falls back
-to `-javadoc.jar` (logging an `info:` provenance notice on stderr) when
-`-sources.jar` returns HTTP 404. For Maven Central libraries (which are not in
-the Google Maven class index), pass `GROUP:ARTIFACT` directly (or use
+`scripts/jetpack inspect [OPTIONS] CLASS_NAME|GROUP:ARTIFACT [VERSION] [REPO]`
+**Options**: `-o`/`--output DIR` to specify destination. **Note**: Resolves
+top-level and nested (`Outer.Inner` / `Outer$Inner`) class names; falls back to
+an index search if direct resolution fails, and falls back to `-javadoc.jar`
+(logging an `info:` provenance notice on stderr) when `-sources.jar` returns
+HTTP 404. For Maven Central libraries (which are not in the Google Maven class
+index), pass `GROUP:ARTIFACT` directly (or use
 `scripts/jetpack source --find <Class> GROUP:ARTIFACT` /
 `scripts/jetpack javadoc --find <Class> GROUP:ARTIFACT`).
 
