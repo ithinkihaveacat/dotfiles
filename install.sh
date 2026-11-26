@@ -871,14 +871,20 @@ git_up() {
 
   default_ref=$(git -C "$dir" symbolic-ref --quiet --short "refs/remotes/$remote/HEAD" 2>/dev/null || true)
   if [ -n "$default_ref" ]; then
-    if [ "$upstream" != "$default_ref" ] &&
-      ! { [ "$default_ref" = "$remote/master" ] && [ "$branch" = "main" ]; }; then
+    if [ "$upstream" != "$default_ref" ] && [ "$branch" != "main" ]; then
       echo "error: $dir is on branch '$branch' tracking '$upstream' instead of '$default_ref'" >&2
       return 1
     fi
   elif [ "$branch" != "main" ] && [ "$branch" != "master" ]; then
     echo "error: $dir is on non-default branch '$branch' (expected main or master)" >&2
     return 1
+  fi
+
+  if [ "$branch" = "main" ] && [ -n "$default_ref" ] &&
+    [ "$default_ref" != "$upstream" ] && [ "$default_ref" != "$remote/master" ] &&
+    git -C "$dir" rev-parse --verify --quiet "refs/remotes/$default_ref" >/dev/null 2>&1 &&
+    [ "$(git -C "$dir" rev-list --count "$upstream..refs/remotes/$default_ref" 2>/dev/null || echo 0)" -gt 0 ]; then
+    echo "warning: $dir is on '$branch', while remote default '$default_ref' has newer commits" >&2
   fi
 
   if [ "$branch" = "master" ] &&
