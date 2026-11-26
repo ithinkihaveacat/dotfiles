@@ -288,15 +288,18 @@ on the public emulator):
    category `com.google.android.clockwork.tiles.category.PROVIDER_CONFIG` and
    extras `com.google.android.clockwork.EXTRA_PROVIDER_CONFIG_TILE_ID` and
    `com.google.android.clockwork.EXTRA_CONFIG_PROVIDER_COMPONENT`).
+
 1. **Available Providers Screen**: Lists all installed
    `androidx.glance.wear.action.BIND_WIDGET_PROVIDER` services and their
    declared `SMALL` / `LARGE` container variants for manual tap-to-add.
+
 1. **Configuration Screen**: Switches the active container shape specification
    for the entire tray between **Rounded Rectangle** and **Pill**, and (on
    renderer `1.6.7.0+`) toggles the **Content Outline** overlay (`1px` magenta
    border around the inner content box `containerSizeDp - 2 * paddingDp`).
    Switching shapes triggers an immediate `updateWidgetContainerSpec` pass so
    every active widget re-queries its provider at the new dimensions:
+
    - **Rounded Rectangle**: Width `89.6%` of screen width (`5.2%` side margins).
      On `1.6.5.41.*`–`1.6.7.4`, heights are `88dp` (`SMALL`) and `112dp`
      (`<225dp` screen) or `128dp` (`>=225dp` screen) with `26dp` corner radius
@@ -305,6 +308,20 @@ on the public emulator):
    - **Pill**: `SMALL` is `80%` screen width x `32%` screen height; `LARGE` is
      `89.6%` screen width x `70%` screen height; corner radius is `height / 2`
      (full capsule) and padding is `0.3 * cornerRadius`.
+
+   > [!WARNING] **Usable Content Height & Touch-Target Clipping**: Hosts clip
+   > widget content strictly to the padded content box
+   > (`containerSizeDp - 2 * paddingDp`). On renderer `1.6.7.5+`, a
+   > Rounded-Rectangle `SMALL` container (`64dp` outer, `10dp` vertical padding)
+   > provides only **`44dp` of usable height**—so buttons or rows with a hard
+   > `48dp` minimum height (`heightIn(min = 48.dp)`) will clip top and bottom
+   > inside `SMALL`. Likewise, on `1.6.5.41.*`–`1.6.7.4` hosts at `<225dp`
+   > screen width, `LARGE` provides only **`96dp` of usable height** (`112dp`
+   > outer, `8dp` vertical padding)—so two stacked `48dp`-floor rows plus a gap
+   > (`>= 100dp`) will clip top and bottom unless button height is capped to
+   > `(params.heightDp - gapDp) / 2f`. Derive heights from `params.heightDp`
+   > rather than assuming `72dp` (`SMALL`) or `104dp` (`LARGE`) across all
+   > renderer versions.
 
 #### Tray Broadcasts & Workspace Helpers
 
