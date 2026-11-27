@@ -5,8 +5,8 @@ description: >-
   engineering documents with a factual, collegial, and constructive tone. Covers
   analytical reports, bug reports, known issues, friction logs, PR descriptions,
   commit message prose, comments, emails, TODO/task lists, Getting Started
-  guides, and Agent Skills (SKILL.md), both capability skills and knowledge
-  skills that record facts about systems, people, and places. Use when drafting
+  guides, and Agent Skills (SKILL.md)—workflow skills, criterion skills, and
+  knowledge skills. Use when drafting
   or reviewing technical documentation, empirical analyses or position memos,
   friction logs, issue reports, PR descriptions, emails, onboarding guides, or
   agent skill files, or when reorganizing a knowledge skill.
@@ -44,8 +44,8 @@ structural principles:
   factual outcomes. Save technical reasoning, hypotheses, and root cause
   analysis for dedicated "Analysis" or "Rationale" sections (or, in TODO items,
   the "Sketch" field; for labeled projections and mechanisms under study in
-  capability skills, see
-  [Capability Skills](references/capability-skills.md#empirical-claims-approximate-figures--external-evidence-logging)).
+  reusable skills, see
+  [Workflow Skills](references/workflow-skills.md#empirical-claims-approximate-figures--external-evidence-logging)).
 
 ## Document Types & Reference Material
 
@@ -74,10 +74,16 @@ relevant reference guide:
   and Sketch fields without hardening into premature plans.
 - **[Getting Started Guides](references/getting-started-guides.md)** — Building
   action-oriented onboarding golden paths from zero to first result.
-- **[Capability Skills](references/capability-skills.md)** — Deciding what earns
-  a place in a skill, and authoring modular, decoupled, and self-contained
-  `SKILL.md` files and reference documents for skills that teach a class of
-  task. Clarifies and expands on [agentskills.io](https://agentskills.io/).
+- **[Workflow Skills](references/workflow-skills.md)** — Deciding what earns a
+  place in a reusable skill, and authoring modular, decoupled `SKILL.md` files
+  and reference documents for skills that teach how to perform a class of task
+  or operate a tool. Clarifies and expands on
+  [agentskills.io](https://agentskills.io/).
+- **[Criterion Skills](references/criterion-skills.md)** — Authoring
+  verification-first skills built around a verifiable bar an app or system
+  should satisfy (Goal → Verification → Implementation), including device-tier
+  testing matrices and platform blind spots. Clarifies and expands on
+  [agentskills.io](https://agentskills.io/).
 - **[Knowledge Skills](references/knowledge-skills.md)** — Structuring and
   maintaining skills that record current facts about particular systems,
   accounts, people, and places. Clarifies and expands on
