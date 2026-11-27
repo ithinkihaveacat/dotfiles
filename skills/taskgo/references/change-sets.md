@@ -42,8 +42,10 @@ one key, `changes`:
   `README.md` and, unless one with content is there, `STATUS.md`. A directory
   without a README that holds `STATUS.md` or `tasks/`, which `doctor` warns
   about, becomes a project this way. An existing project, any other existing
-  directory, and an invalid name are refused. Later changes in the set can
-  create its tasks.
+  directory, and an invalid name are refused. Because `write_file` refuses paths
+  outside an existing project, put `create` (`kind` `project`) first in a change
+  set before writing project files (`write_file` for new files, or `edit_file`
+  to expand the generated `README.md`) or creating its tasks.
 - **Records:** A task ID, a decision path, a project's `STATUS.md`, or `$name`
   for a record an earlier `create` named with `ref`. `$name` also works in
   `blocked_by` and `supersedes` values, so one set can create a task and the

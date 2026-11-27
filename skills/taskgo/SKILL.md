@@ -205,7 +205,10 @@ extra task staged in the same `checkpoint`).
 Everything else, including every option, is in
 [the command index](references/command-index.md) and `taskgo <command> --help`.
 `read`, `search`, `edit`, and `apply` mirror the MCP tools for agents without a
-checkout; with a checkout, your own file tools are fine for reading.
+checkout; with a checkout, your own file tools are fine for reading. To create a
+new project, use MCP `create` with `kind: "project"` (or a `create` change in
+`apply_changes` / `taskgo apply` before any `write_file` or task creation), or
+add `<project>/README.md` and `STATUS.md` in a checkout.
 
 ## Scheduling
 
