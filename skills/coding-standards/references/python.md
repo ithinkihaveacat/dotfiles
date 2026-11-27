@@ -87,6 +87,20 @@ where `~/.local` is read-only or network access is blocked. By contrast,
 `$XDG_CACHE_HOME/uv/environments-v2/` and verifies installed package metadata
 locally once synced via `uv sync --script`.
 
+To run or import a script with its declared dependencies outside its shebang
+(for example, a test that loads it with `SourceFileLoader`), sync its
+environment before asking uv for the interpreter:
+
+```bash
+PY=$(uv sync -q --script "$BIN" </dev/null && uv python find --script "$BIN")
+```
+
+`uv python find --script` returns the script environment's interpreter only
+after that environment exists. Before the first sync it returns the base
+interpreter that satisfies `requires-python`, and importing a declared
+dependency there fails with `ModuleNotFoundError`. Scripts without
+`dependencies` can skip the sync.
+
 For when a third-party dependency is warranted, and when to lazy-import it in
 the main script rather than split out a sibling executable, see "Script
 Self-Containment and Sibling Files" in
