@@ -1,7 +1,7 @@
 # Agent Operational Guidelines
 
-**Precedence:** Explicit user instructions > activated skills > general training
-knowledge.
+**Precedence:** Explicit user instructions > repository instructions
+(`AGENTS.md`, `CLAUDE.md`) > activated skills > general training knowledge.
 
 ## Agent Skills
 
@@ -27,10 +27,11 @@ conventions.
   (`../<sibling>/...`) via `metadata.source`, `skill --offline resolve <NAME>`,
   or symlink `realpath`. `~/.dotfiles` and active overlays (`~/.private`,
   `~/.corp`) are pull-only runtime checkouts—never edit, stage, or commit inside
-  them, even when a symlink or `metadata.source` resolves there. Edit a separate
-  development checkout instead (check the project tracker `README.md` or ask
-  where it lives), and update live installs only by fast-forwarding after
-  publication.
+  them, even when a symlink or `metadata.source` resolves there. Make changes
+  from a separate development checkout instead (check the project tracker
+  `README.md` or ask where it lives), in a worktree as described in
+  [Git Workflow and Publishing](#git-workflow-and-publishing), and update live
+  installs only by fast-forwarding after publication.
 - **Common skill triggers**:
   - **Android & Wear OS**: Use the device skill's exact `adb` commands and
     scripts (e.g., screenshots, UI interaction).
@@ -43,12 +44,6 @@ conventions.
     `uv sync --script <script>` or `~/.dotfiles/install.sh --apply --only uv`
     (online, without `--force`; set `UV_CACHE_DIR` to a writable scratch dir if
     `~/.cache/uv` is read-only) instead of editing the shebang.
-  - **Version control & commits**: Follow the active VCS/standards skill. In
-    owned repos without symlinked `.git/hooks` (if not already applied), run
-    `hook apply` or `hook -C <repo> apply` before committing. The `agent`
-    `commit-msg` hook strips attribution trailers, auto-rewraps body prose to 72
-    chars, and rejects bad Conventional Commits syntax, >50-char subjects, or a
-    missing blank line 2.
 
 ## Writing Style
 
@@ -114,17 +109,40 @@ timeout 30s find ./skills -name "zipline"
 rg --files ./skills | grep zipline
 ```
 
-## External Notifications and Review Requests
+## Git Workflow and Publishing
 
-- **Stage silently, notify only on explicit command**: Separate creating or
-  uploading work (pushing a branch, opening a **draft** PR, uploading a change)
-  from actions that notify other people (marking ready-for-review, publishing,
-  or requesting reviewers). Keep silent staging and notification as separate
-  options when proposing next steps.
-- **Echoes are not authorization**: Never treat an echoed summary, a pasted task
-  plan, or a blanket "yes" to a multi-step proposal as permission to notify
-  others. Require an unmistakable, user-originated instruction naming who to
-  notify.
+Repository instructions (`AGENTS.md`, `CLAUDE.md`) override this section.
+
+- **Prefer a worktree.** When a change can be made and checked from committed
+  files alone (text and documentation edits, or code whose tests run from a
+  fresh clone), work in a worktree of an up-to-date default branch at
+  `~/.worktrees/<repo>/<slug>`, not in the original checkout.
+- **Use the original checkout when you must**: when the work depends on files
+  that aren't committed (large or generated artifacts, local data, untracked
+  configuration, or uncommitted changes already there). Don't block on this; say
+  in your next reply that you worked in the original checkout and why.
+- **Commit to the repository's conventions.** Follow the active VCS/standards
+  skill. In owned repos without symlinked `.git/hooks`, run `hook apply` (or
+  `hook -C <repo> apply`) before committing; worktrees share these hooks. The
+  `agent` `commit-msg` hook strips attribution trailers, rewraps body prose to
+  72 characters, and rejects bad Conventional Commits syntax, subjects over 50
+  characters, or a missing blank line 2.
+- **Push the branch by default**, so a lost worktree doesn't lose work. Skip it
+  when there is a reason (unfinished experiments, sensitive content, no remote)
+  and say so.
+- **Stage silently; notify only on explicit command.** Pushing a branch,
+  uploading a change, and opening a draft change request (pull request, merge
+  request, CL) notify nobody, so they are yours to decide. Marking ready for
+  review, requesting reviewers, merging or pushing to a default branch that
+  others watch, and publishing anything need an unmistakable instruction from
+  the user naming who or what it reaches. An echoed summary, a pasted plan, or a
+  blanket "yes" to a multi-step proposal is not that instruction. When you
+  propose next steps, keep staging and notifying as separate options.
+- **Sync the original checkout only safely**: `git pull --ff-only`, only when it
+  is clean and on the target branch. Never stash, reset, or switch branches
+  there: other sessions may be using it.
+- **Clean up**: `git worktree remove` once the branch has landed or been
+  abandoned.
 
 ## Subagents and Prior Agent Sessions
 
