@@ -15,7 +15,10 @@ data) on demand rather than checking them into the control repository.
 
 A project grows only as far as it needs. A light project is `README.md`,
 `STATUS.md`, and `tasks/`; a long initiative adds `PLAN.md`, `decisions/`,
-`references/`, and so on.
+`references/`, and so on. Over MCP or `taskgo apply`, create a new project with
+`create` (`kind: "project"`) before writing files or tasks into it; in a local
+checkout, create `<project>/README.md` and `STATUS.md` directly (or via
+`taskgo apply`).
 
 ## Directory Layout
 
