@@ -1,12 +1,20 @@
-# Capability Skill Guidelines
+# Workflow Skill Guidelines
 
-This guide covers authoring, refactoring, and reviewing capability skills
-(`SKILL.md` files and their accompanying reference guides). A capability skill
-teaches an agent how to do a class of task: workflows, decision rules, and
-bundled tools. Skills that instead record facts about particular systems,
-people, or places are knowledge skills; see
-[Knowledge Skill Guidelines](knowledge-skills.md). Scripts bundled with a
-knowledge skill still follow this guide.
+This guide covers authoring, refactoring, and reviewing workflow skills
+(`SKILL.md` files and their accompanying reference guides), as well as the
+shared rules that apply to all reusable skills.
+
+Skills in this taxonomy fall into three types:
+
+- **Workflow skills** (this guide) teach an agent how to perform a class of task
+  or operate a tool: procedures, decision rules, and bundled scripts.
+- **Criterion skills** define a verifiable bar an app or system should satisfy,
+  how to check it, and how to build toward it; see
+  [Criterion Skill Guidelines](criterion-skills.md). They follow all shared
+  reusable-skill rules in this guide.
+- **Knowledge skills** record current facts about particular systems, people, or
+  places; see [Knowledge Skill Guidelines](knowledge-skills.md). Scripts bundled
+  with a knowledge skill still follow this guide.
 
 This guide clarifies and expands on the canonical Agent Skills specification and
 authoring documentation at [agentskills.io](https://agentskills.io/); it is not
@@ -17,23 +25,23 @@ here.
 
 ## Intent and Audience
 
-Capability skills provide instructions, workflows, and tools for AI agents
+Workflow skills provide instructions, procedures, and tools for AI agents
 operating in specific domains or codebases.
 
-- **Goal:** Equip AI agents with self-contained, modular capabilities while
-  keeping instructions portable across workspaces.
+- **Goal:** Equip AI agents with self-contained, modular workflows while keeping
+  instructions portable across workspaces.
 - **Audience:** AI agents (as primary executors) and engineers (as authors and
   maintainers).
-- **Tone:** Direct, explanatory, and capability-focused. Prioritize clear
-  decision rules, underlying rationale, and task-appropriate degrees of freedom
-  over heavy-handed imperatives.
+- **Tone:** Direct, explanatory, and practical. Prioritize clear decision rules,
+  underlying rationale, and task-appropriate degrees of freedom over
+  heavy-handed imperatives.
 
-## What Belongs in a Capability Skill
+## What Belongs in a Reusable Skill
 
-A capability skill competes with what frontier models (and their near-equivalent
-distilled variants) already know from pretraining, public docs, and `--help`.
-Target only that tier, and keep only what a frontier model cannot readily
-discover or routinely gets wrong:
+A reusable skill (whether a workflow skill or a criterion skill) competes with
+what frontier models (and their near-equivalent distilled variants) already know
+from pretraining, public docs, and `--help`. Target only that tier, and keep
+only what a frontier model cannot readily discover or routinely gets wrong:
 
 | Belongs here                                                                       | Omit                                              |
 | ---------------------------------------------------------------------------------- | ------------------------------------------------- |
@@ -166,7 +174,7 @@ external evidence repository):
   reader would act: sample size (*"in a single cold-cache benchmark"*),
   conditions that differ from production use (*"on an in-memory dataset"*), and
   what was not measured.
-- **Label Projections and Mechanisms Under Study:** In capability skills, causal
+- **Label Projections and Mechanisms Under Study:** In reusable skills, causal
   mechanisms under active study and model-based projections are permitted when
   explicitly labeled (*"model estimate"*, *"projected"*, *"under
   investigation"*) and kept distinct from direct measurements and measured

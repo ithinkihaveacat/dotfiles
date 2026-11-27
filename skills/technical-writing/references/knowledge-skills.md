@@ -4,8 +4,10 @@ This guide covers authoring, reorganizing, and maintaining knowledge skills. A
 knowledge skill records facts about particular things the user owns, operates,
 or deals with: machines, services, accounts, domains, devices, households,
 people, and places. Any agent in any workspace can load it by topic. Skills that
-teach how to do a class of task are capability skills; see
-[Capability Skill Guidelines](capability-skills.md).
+teach how to perform a class of task or operate a tool are workflow skills; see
+[Workflow Skill Guidelines](workflow-skills.md). Skills that define a verifiable
+bar an app or system should satisfy are criterion skills; see
+[Criterion Skill Guidelines](criterion-skills.md).
 
 This guide clarifies and expands on the canonical Agent Skills specification and
 authoring documentation at [agentskills.io](https://agentskills.io/); it is not
@@ -38,13 +40,13 @@ any particular project or task, and more than one piece of work may need it.
 | People, households, and places, to the extent needed         | The history of how things changed (version control)                              |
 | Standing preferences that apply across many requests         | Decisions or evolving domain notes specific to one project (that project's docs) |
 
-Project reference pages do not need a skill wrapper. Consider a knowledge or
-capability skill when material is repeatedly needed outside its originating
-project and topic-based discovery would improve access. When a knowledge skill
-already exists for a system or domain, update it directly regardless of how
-quickly the information is changing, keeping only transient work packets in
-project `references/`. The boundary is intentionally judgment-based: tolerate
-slight drift and repair it opportunistically.
+Project reference pages do not need a skill wrapper. Consider a knowledge,
+workflow, or criterion skill when material is repeatedly needed outside its
+originating project and topic-based discovery would improve access. When a
+knowledge skill already exists for a system or domain, update it directly
+regardless of how quickly the information is changing, keeping only transient
+work packets in project `references/`. The boundary is intentionally
+judgment-based: tolerate slight drift and repair it opportunistically.
 
 ## Structure
 
@@ -65,7 +67,7 @@ Organize by entity, so each lookup lands on one small file:
   entity files.
 - **`assets/`** holds verbatim captured material, such as configuration files
   copied from a host. Record where each file came from (host and path).
-- **`scripts/`** holds automation, written to the capability skill rules. List
+- **`scripts/`** holds automation, written to the workflow skill rules. List
   destructive scripts in `permissions/unsafe`.
 
 Within an entity file, keep three kinds of content distinct:
