@@ -154,9 +154,13 @@ def serve_http(handler_cls):
         thread.join(timeout=2.0)
 
 
+def sse_event(obj: dict) -> bytes:
+    return b"data: " + json.dumps(obj).encode("utf-8") + b"\r\n\r\n"
+
+
 def main() -> int:
     oracle = load_oracle()
-    tap = Tap(27)
+    tap = Tap(29)
 
     with tempfile.TemporaryDirectory(prefix="test-oracle-") as tmp:
         work = Path(tmp).resolve()
@@ -537,10 +541,39 @@ def main() -> int:
                 self.send_header("Content-Type", "text/event-stream")
                 self.end_headers()
                 payload = (
-                    b'data: {"candidates": [{"content": {"parts": [{"text":'
-                    b' "Recovered oracle answer"}], "role": "model"}}],'
-                    b' "usageMetadata": {"promptTokenCount": 12,'
-                    b' "candidatesTokenCount": 3}}\r\n\r\n'
+                    sse_event(
+                        {
+                            "event_type": "interaction.created",
+                            "interaction": {
+                                "id": "inter-recover-1",
+                                "status": "in_progress",
+                            },
+                        }
+                    )
+                    + sse_event(
+                        {
+                            "event_type": "step.delta",
+                            "index": 0,
+                            "event_id": "evt-1",
+                            "delta": {
+                                "type": "text",
+                                "text": "Recovered oracle answer",
+                            },
+                        }
+                    )
+                    + sse_event(
+                        {
+                            "event_type": "interaction.completed",
+                            "interaction": {
+                                "id": "inter-recover-1",
+                                "status": "completed",
+                                "usage": {
+                                    "total_input_tokens": 12,
+                                    "total_output_tokens": 3,
+                                },
+                            },
+                        }
+                    )
                 )
                 self.wfile.write(payload)
                 self.wfile.flush()
@@ -573,9 +606,9 @@ def main() -> int:
 
         class AlwaysTimeoutClient:
             def __init__(self, api_key=None):
-                self.models = self
+                self.interactions = self
 
-            def generate_content_stream(self, **kwargs):
+            def create(self, **kwargs):
                 raise httpx.ReadTimeout("stalled")
 
         with (
@@ -736,10 +769,36 @@ def main() -> int:
                 self.send_header("Content-Type", "text/event-stream")
                 self.end_headers()
                 payload = (
-                    b'data: {"candidates": [{"content": {"parts": [{"text":'
-                    b' "Stub answer"}], "role": "model"}}],'
-                    b' "usageMetadata": {"promptTokenCount": 10,'
-                    b' "candidatesTokenCount": 2}}\r\n\r\n'
+                    sse_event(
+                        {
+                            "event_type": "interaction.created",
+                            "interaction": {
+                                "id": f"inter-cap-{len(captured_reqs)}",
+                                "status": "in_progress",
+                            },
+                        }
+                    )
+                    + sse_event(
+                        {
+                            "event_type": "step.delta",
+                            "index": 0,
+                            "event_id": "evt-1",
+                            "delta": {"type": "text", "text": "Stub answer"},
+                        }
+                    )
+                    + sse_event(
+                        {
+                            "event_type": "interaction.completed",
+                            "interaction": {
+                                "id": f"inter-cap-{len(captured_reqs)}",
+                                "status": "completed",
+                                "usage": {
+                                    "total_input_tokens": 10,
+                                    "total_output_tokens": 2,
+                                },
+                            },
+                        }
+                    )
                 )
                 self.wfile.write(payload)
                 self.wfile.flush()
@@ -776,29 +835,23 @@ def main() -> int:
             )
 
         def thinking_level_of(req: dict) -> str:
-            cfg = req.get("generationConfig", {}).get("thinkingConfig", {})
-            return str(cfg.get("thinkingLevel", cfg.get("thinking_level", ""))).upper()
+            cfg = req.get("generation_config", {})
+            return str(cfg.get("thinking_level", "")).upper()
 
         wire_ok = (
             all(r[0] == 0 for r in (c1, c2, c3, c4))
             and len(captured_reqs) == 4
-            and (
-                "googleSearch" in json.dumps(captured_reqs[0].get("tools"))
-                or "google_search" in json.dumps(captured_reqs[0].get("tools"))
-            )
-            and "codeExecution" not in json.dumps(captured_reqs[0].get("tools"))
+            and "google_search" in json.dumps(captured_reqs[0].get("tools"))
             and "code_execution" not in json.dumps(captured_reqs[0].get("tools"))
             and not captured_reqs[1].get("tools")
             and "Google Search"
-            not in json.dumps(captured_reqs[1].get("systemInstruction", ""))
-            and (
-                "codeExecution" in json.dumps(captured_reqs[2].get("tools"))
-                or "code_execution" in json.dumps(captured_reqs[2].get("tools"))
-            )
-            and "googleSearch" not in json.dumps(captured_reqs[2].get("tools"))
+            not in json.dumps(captured_reqs[1].get("system_instruction", ""))
+            and "code_execution" in json.dumps(captured_reqs[2].get("tools"))
             and "google_search" not in json.dumps(captured_reqs[2].get("tools"))
             and thinking_level_of(captured_reqs[0]) == "HIGH"
             and thinking_level_of(captured_reqs[3]) == "MEDIUM"
+            and captured_reqs[0].get("background") is True
+            and captured_reqs[0].get("store") is True
             and captured_reqs[0].get("_x_server_timeout") == "1800"
             and captured_reqs[3].get("_x_server_timeout") == "2400"
             and "| search | thinking=high |" in c1[2]
@@ -916,28 +969,67 @@ def main() -> int:
                     limit_reqs.append(json.loads(body))
                     idx = min(len(limit_reqs), len(limit_script)) - 1
                     line = limit_script[idx]
-                text, reason, token = line.split("|")
-                parts = [{"text": "Planning the answer.", "thought": True}]
+                text, status, token = line.split("|")
+                inter_id = f"inter-hop-{idx + 1}"
+                events = [
+                    sse_event(
+                        {
+                            "event_type": "interaction.created",
+                            "interaction": {
+                                "id": inter_id,
+                                "status": "in_progress",
+                            },
+                        }
+                    ),
+                    sse_event(
+                        {
+                            "event_type": "step.delta",
+                            "index": 0,
+                            "event_id": f"evt-thought-{idx + 1}",
+                            "delta": {
+                                "type": "thought_summary",
+                                "content": {
+                                    "type": "text",
+                                    "text": "Planning the answer.",
+                                },
+                            },
+                        }
+                    ),
+                ]
                 if text:
-                    parts.append({"text": text})
-                candidate: dict = {
-                    "content": {"parts": parts, "role": "model"},
-                    "finishReason": reason,
-                }
-                if token:
-                    candidate["continuationToken"] = token
-                chunk = {
-                    "candidates": [candidate],
-                    "usageMetadata": {
-                        "promptTokenCount": 10,
-                        "candidatesTokenCount": 5,
-                        "thoughtsTokenCount": 7,
+                    events.append(
+                        sse_event(
+                            {
+                                "event_type": "step.delta",
+                                "index": 1,
+                                "event_id": f"evt-text-{idx + 1}",
+                                "delta": {"type": "text", "text": text},
+                            }
+                        )
+                    )
+                completed_inter: dict = {
+                    "id": inter_id,
+                    "status": status,
+                    "usage": {
+                        "total_input_tokens": 10,
+                        "total_output_tokens": 5,
+                        "total_thought_tokens": 7,
                     },
                 }
+                if token:
+                    completed_inter["continuation_token"] = token
+                events.append(
+                    sse_event(
+                        {
+                            "event_type": "interaction.completed",
+                            "interaction": completed_inter,
+                        }
+                    )
+                )
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.end_headers()
-                self.wfile.write(b"data: " + json.dumps(chunk).encode() + b"\r\n\r\n")
+                self.wfile.write(b"".join(events))
                 self.wfile.flush()
 
             def log_message(self, *args):
@@ -966,9 +1058,13 @@ def main() -> int:
                     },
                 )
 
-            # Test 24: CONTINUATION hops merged into one streamed answer
+            # Test 24: requires_continuation hops merged into one streamed answer (--no-store)
             rc24, out24, err24 = run_limited(
-                ["Part one, |CONTINUATION|dG9rZW4tMQ==", "part two.|STOP|"], []
+                [
+                    "Part one, |requires_continuation|dG9rZW4tMQ==",
+                    "part two.|completed|",
+                ],
+                ["--no-store"],
             )
             ans24_p = extract_answer_path(err24)
             tel24 = (
@@ -981,15 +1077,15 @@ def main() -> int:
                 rc24 == 0
                 and len(reqs24) == 2
                 and all(
-                    r["generationConfig"]["maxOutputTokens"] == 131072
-                    and len(r["contents"]) == 1
+                    r["generation_config"]["max_output_tokens"] == 131072
                     for r in reqs24
                 )
-                and "continuationToken" not in reqs24[0]
-                and reqs24[1].get("continuationToken") == "dG9rZW4tMQ=="
+                and "continuation_token" not in reqs24[0]
+                and reqs24[1].get("continuation_token") == "dG9rZW4tMQ=="
                 and tel24.get("status") == "Succeeded"
                 and tel24.get("max_output_tokens") == 131072
                 and tel24.get("finish_reason") == "STOP"
+                and tel24.get("interaction_status") == "completed"
                 and tel24.get("continuation_tokens") == 1
                 and tel24.get("truncated") is False
                 and tel24.get("candidate_tokens") == 10
@@ -999,14 +1095,14 @@ def main() -> int:
                 and ans24_p.read_text(encoding="utf-8") == "Part one, part two."
             )
             tap.check(
-                "Sends max_output_tokens and streams CONTINUATION hops as one answer",
+                "Sends max_output_tokens and streams continuation hops as one answer",
                 ok24,
                 f"rc={rc24} reqs={len(reqs24)} tel={tel24!r}\n{out24}\n{err24}",
             )
 
-            # Test 25: MAX_TOKENS keeps partial answer, warns, and exits 1
+            # Test 25: incomplete keeps partial answer, warns, and exits 1
             rc25, out25, err25 = run_limited(
-                ["Cut off mid-sent|MAX_TOKENS|"], ["--max-output-tokens", "70000"]
+                ["Cut off mid-sent|incomplete|"], ["--max-output-tokens", "70000"]
             )
             ans25_p = extract_answer_path(err25)
             ans25_txt = ans25_p.read_text(encoding="utf-8") if ans25_p else ""
@@ -1019,12 +1115,13 @@ def main() -> int:
             ok25 = (
                 rc25 == 1
                 and len(reqs25) == 1
-                and reqs25[0]["generationConfig"]["maxOutputTokens"] == 70000
+                and reqs25[0]["generation_config"]["max_output_tokens"] == 70000
                 and "Cut off mid-sent" in out25.splitlines()
                 and "warning: answer is incomplete: the response reached --max-output-tokens (70000, thinking included)"
                 in err25
                 and tel25.get("truncated") is True
                 and tel25.get("finish_reason") == "MAX_TOKENS"
+                and tel25.get("interaction_status") == "incomplete"
                 and tel25.get("status") == "Error"
                 and "answer is incomplete" in tel25.get("error", "")
                 and "Cut off mid-sent" in ans25_txt.splitlines()
@@ -1037,8 +1134,8 @@ def main() -> int:
             )
 
             # Test 26: empty answer exits 1 with a warning
-            rc26a, _, err26a = run_limited(["|MAX_TOKENS|"], [])
-            rc26b, _, err26b = run_limited(["|STOP|"], [])
+            rc26a, _, err26a = run_limited(["|incomplete|"], [])
+            rc26b, _, err26b = run_limited(["|completed|"], [])
             tel26b = (
                 json.loads(limit_tel.read_text(encoding="utf-8"))
                 if limit_tel.is_file()
@@ -1113,6 +1210,198 @@ def main() -> int:
             and "oracle: error: --max-output-tokens requires an argument"
             in r27_miss[2],
             f"rcs={[r[0] for r in (r27_def, r27_env, r27_both, r27_bad, r27_badenv, r27_miss)]}",
+        )
+
+        # Test 28: Background stream drop resumes via GET with last_event_id without losing text
+        resume_posts = 0
+        resume_gets: list[str] = []
+        resume_lock = threading.Lock()
+
+        class DropThenResumeHandler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                nonlocal resume_posts
+                self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                with resume_lock:
+                    resume_posts += 1
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.end_headers()
+                partial = sse_event(
+                    {
+                        "event_type": "interaction.created",
+                        "interaction": {
+                            "id": "inter-resume-42",
+                            "status": "in_progress",
+                        },
+                    }
+                ) + sse_event(
+                    {
+                        "event_type": "step.delta",
+                        "index": 0,
+                        "event_id": "evt-part-1",
+                        "delta": {"type": "text", "text": "First half, "},
+                    }
+                )
+                self.wfile.write(partial)
+                self.wfile.flush()
+                # Close cleanly before interaction.completed to simulate mid-stream drop
+
+            def do_GET(self):
+                with resume_lock:
+                    resume_gets.append(self.path)
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.end_headers()
+                rest = sse_event(
+                    {
+                        "event_type": "step.delta",
+                        "index": 0,
+                        "event_id": "evt-part-2",
+                        "delta": {"type": "text", "text": "second half."},
+                    }
+                ) + sse_event(
+                    {
+                        "event_type": "interaction.completed",
+                        "interaction": {
+                            "id": "inter-resume-42",
+                            "status": "completed",
+                            "usage": {
+                                "total_input_tokens": 20,
+                                "total_output_tokens": 8,
+                                "total_cached_tokens": 12,
+                            },
+                        },
+                    }
+                )
+                self.wfile.write(rest)
+                self.wfile.flush()
+
+            def log_message(self, *args):
+                pass
+
+        resume_tel = work / "resume_tel.json"
+        resume_sleeps: list[float] = []
+        with (
+            serve_http(DropThenResumeHandler) as (_, resume_url),
+            mock.patch.object(oracle.time, "sleep", side_effect=resume_sleeps.append),
+        ):
+            rc28, out28, err28 = run_inproc(
+                oracle,
+                ["--no-serialize", "Long reasoning"],
+                env={
+                    **base_env,
+                    "GEMINI_API_KEY": "stub",
+                    "GOOGLE_GEMINI_BASE_URL": resume_url,
+                    "AGENT_TELEMETRY_JSON": str(resume_tel),
+                },
+            )
+        tel28 = (
+            json.loads(resume_tel.read_text(encoding="utf-8"))
+            if resume_tel.is_file()
+            else {}
+        )
+        tap.check(
+            "Resumes a dropped background stream via GET with last_event_id",
+            rc28 == 0
+            and resume_posts == 1
+            and len(resume_gets) == 1
+            and "inter-resume-42" in resume_gets[0]
+            and "last_event_id=evt-part-1" in resume_gets[0]
+            and "stream=true" in resume_gets[0]
+            and "First half, second half." in out28.splitlines()
+            and tel28.get("stream_resumes") == 1
+            and tel28.get("interaction_id") == "inter-resume-42"
+            and tel28.get("cached_tokens") == 12
+            and resume_sleeps == [2.0],
+            f"rc={rc28} posts={resume_posts} gets={resume_gets} sleeps={resume_sleeps}\n"
+            f"tel={tel28!r}\n{out28}\n{err28}",
+        )
+
+        # Test 29: --continue and --no-store wire behavior and mutual-exclusion check
+        opts_reqs: list[dict] = []
+        opts_lock = threading.Lock()
+
+        class OptsCaptureHandler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                with opts_lock:
+                    opts_reqs.append(json.loads(body))
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.end_headers()
+                payload = (
+                    sse_event(
+                        {
+                            "event_type": "interaction.created",
+                            "interaction": {
+                                "id": "inter-opt-1",
+                                "status": "in_progress",
+                            },
+                        }
+                    )
+                    + sse_event(
+                        {
+                            "event_type": "step.delta",
+                            "index": 0,
+                            "event_id": "evt-opt-1",
+                            "delta": {"type": "text", "text": "Opt answer"},
+                        }
+                    )
+                    + sse_event(
+                        {
+                            "event_type": "interaction.completed",
+                            "interaction": {
+                                "id": "inter-opt-1",
+                                "status": "completed",
+                                "usage": {
+                                    "total_input_tokens": 5,
+                                    "total_output_tokens": 2,
+                                },
+                            },
+                        }
+                    )
+                )
+                self.wfile.write(payload)
+                self.wfile.flush()
+
+            def log_message(self, *args):
+                pass
+
+        with serve_http(OptsCaptureHandler) as (_, opts_url):
+            opts_env = {
+                **base_env,
+                "GEMINI_API_KEY": "stub",
+                "GOOGLE_GEMINI_BASE_URL": opts_url,
+            }
+            r29_cont = run_inproc(
+                oracle,
+                ["--no-serialize", "--continue", "prev-123", "Follow up"],
+                env=opts_env,
+            )
+            r29_nostore = run_inproc(
+                oracle,
+                ["--no-serialize", "--no-store", "Ephemeral question"],
+                env=opts_env,
+            )
+            r29_both = run_inproc(
+                oracle,
+                ["--no-serialize", "--continue", "prev-123", "--no-store", "Conflict"],
+                env=opts_env,
+            )
+        tap.check(
+            "--continue sends previous_interaction_id, --no-store disables storage/background, and combining them fails",
+            r29_cont[0] == 0
+            and r29_nostore[0] == 0
+            and r29_both[0] != 0
+            and len(opts_reqs) == 2
+            and opts_reqs[0].get("previous_interaction_id") == "prev-123"
+            and opts_reqs[0].get("store") is True
+            and opts_reqs[0].get("background") is True
+            and opts_reqs[1].get("store") is False
+            and opts_reqs[1].get("background") is False
+            and "previous_interaction_id" not in opts_reqs[1]
+            and "--continue cannot be combined with --no-store" in r29_both[2],
+            f"rcs=({r29_cont[0]},{r29_nostore[0]},{r29_both[0]}) reqs={opts_reqs!r}\n{r29_both[2]}",
         )
 
     return 1 if tap.failed else 0

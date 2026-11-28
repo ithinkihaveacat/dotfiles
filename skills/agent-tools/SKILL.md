@@ -159,13 +159,12 @@ and synthesis requiring external data or massive repository context.
 1. **Not for Quick Q&A:** The Oracle is designed for deep, context-heavy
    reasoning. It takes longer to run and consumes more tokens than standard
    tools. Do not use it for simple questions or basic syntax lookups.
-1. **Stateless — One-Shot Consultations:** Every invocation is independent. The
-   Oracle retains nothing between calls — including your own earlier Oracle
-   calls in the same session. Never write "as you suggested earlier" or refer to
-   a previous consultation; the Oracle has never seen it. To follow up, attach
-   the previous answer as a context file (answers are saved automatically to
-   `~/.local/state/oracle/answer_*.md`; the path is printed after each run)
-   along with your new question and any critique.
+1. **Stateless by Default (Optional `--continue`):** Every invocation is
+   independent unless you pass `--continue ID` with the interaction ID printed
+   after a prior run. Never write "as you suggested earlier" unless you pass
+   `--continue ID` or attach the previous answer as a context file (answers are
+   saved automatically to `~/.local/state/oracle/answer_*.md`; both the path and
+   the interaction ID are printed after each run).
 1. **Self-Contained Prompts:** Write the prompt as if explaining the problem to
    an expert who has zero prior knowledge of your task. Do not use references
    like "the solution we implemented" without explaining exactly what that
@@ -272,18 +271,26 @@ scripts/oracle [OPTIONS] "PROMPT" [FILE_OR_DIR ...]
   131072; env `ORACLE_MAX_OUTPUT_TOKENS`). See "Output limit" below.
 - `--serialize` / `--no-serialize`: Save request payload and answer to files in
   the state directory (`~/.local/state/oracle/`) (default: on).
+- `--continue ID`: Continue a previous stored interaction
+  (`previous_interaction_id`) without resending prior context. Cannot be
+  combined with `--no-store`.
+- `--no-store`: Disable server-side interaction storage (`store=false`,
+  `background=false`). Disables resumable background streaming and `--continue`
+  follow-ups.
 
-**Output limit:** Thinking tokens count toward `max_output_tokens`, and without
-it a streamed response stops at the 64k per-request cap. Oracle sets it to
-131072 by default. Above 65,536 the API ends each 64k hop with finish reason
-`CONTINUATION` and a continuation token, and `google-genai`'s automatic
-continuation resends the request with that token and streams the next hop as
-part of the same answer (the request timeout applies to each hop). If the
-ceiling is still reached (finish reason `MAX_TOKENS`), or there is no answer
-text at all, the partial answer is printed and saved, a warning is printed, and
-the exit status is 1; raise `--max-output-tokens` or lower `--thinking`.
-Telemetry records `max_output_tokens`, `finish_reason`, `continuation_tokens`,
-and `truncated`.
+**Output limit & background streaming:** Oracle uses the Gemini Interactions API
+with `background=True` and `stream=True` by default: the server executes
+persistently past the 64k per-request cap (up to 1M output tokens), and if a
+network drop or client read timeout interrupts the stream after the interaction
+starts, Oracle automatically resumes from `last_event_id` without losing prior
+progress. With `--no-store` (stateless), `google-genai`'s automatic continuation
+follows `requires_continuation` hops in-stream. Thinking tokens count toward
+`max_output_tokens` (default: 131072). If the ceiling is still reached
+(`incomplete` / `MAX_TOKENS`), or there is no answer text at all, the partial
+answer is printed and saved, a warning is printed, and the exit status is 1;
+raise `--max-output-tokens` or lower `--thinking`. Telemetry records
+`interaction_id`, `interaction_status`, `cached_tokens`, `stream_resumes`,
+`max_output_tokens`, `finish_reason`, `continuation_tokens`, and `truncated`.
 
 **Environment:** `GEMINI_API_KEY` (Required), `GEMINI_MODEL` (Optional),
 `ORACLE_THINKING` (Optional), `ORACLE_REQUEST_TIMEOUT` (Optional),

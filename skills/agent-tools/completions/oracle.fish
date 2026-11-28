@@ -11,4 +11,6 @@ complete -c oracle -l request-timeout -x -d "Seconds to wait for one API respons
 complete -c oracle -l max-output-tokens -x -d "Ceiling on thinking plus answer tokens (default: 131072)"
 complete -c oracle -l serialize -d "Save payload and answer to state directory (default: on)"
 complete -c oracle -l no-serialize -d "Disable saving payload and answer to state directory"
+complete -c oracle -l continue -x -d "Continue a previous interaction by ID"
+complete -c oracle -l no-store -d "Disable server-side storage (disables background resume and --continue)"
 complete -c oracle -s h -l help -d "Display help message and exit"
