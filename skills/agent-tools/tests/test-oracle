@@ -218,7 +218,7 @@ def sse_interaction(
 
 def main() -> int:
     oracle = load_oracle()
-    tap = Tap(28)
+    tap = Tap(30)
 
     with tempfile.TemporaryDirectory(prefix="test-oracle-") as tmp:
         work = Path(tmp).resolve()
@@ -596,6 +596,16 @@ def main() -> int:
                     stall_release.wait(timeout=10.0)
                     return
                 self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(
+                    json.dumps(
+                        {"id": "inter-recover-1", "status": "in_progress"}
+                    ).encode()
+                )
+
+            def do_GET(self):
+                self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.end_headers()
                 payload = sse_interaction(
@@ -605,6 +615,12 @@ def main() -> int:
                 )
                 self.wfile.write(payload)
                 self.wfile.flush()
+
+            def do_DELETE(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b"{}")
 
             def log_message(self, *args):
                 pass
@@ -782,27 +798,47 @@ def main() -> int:
             f"stdin_rc={p_stdin.returncode} unk_rc={p_unk.returncode}\n{p_stdin.stdout}\n{p_unk.stderr}",
         )
 
-        # Test 21: Wire API requests attach exact expected tools, thinking level, and X-Server-Timeout
+        # Test 21: Wire API requests attach exact expected tools and thinking level
         captured_reqs: list[dict] = []
+        captured_deletes: list[str] = []
         cap_lock = threading.Lock()
 
         class CaptureHandler(http.server.BaseHTTPRequestHandler):
             def do_POST(self):
                 body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
                 obj = json.loads(body)
-                obj["_x_server_timeout"] = self.headers.get("X-Server-Timeout")
                 with cap_lock:
                     captured_reqs.append(obj)
+                    idx = len(captured_reqs)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(
+                    json.dumps(
+                        {"id": f"inter-cap-{idx}", "status": "in_progress"}
+                    ).encode()
+                )
+
+            def do_GET(self):
+                inter_id = self.path.split("?")[0].rsplit("/", 1)[-1]
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.end_headers()
                 payload = sse_interaction(
-                    f"inter-cap-{len(captured_reqs)}",
+                    inter_id,
                     ["Stub answer"],
                     usage={"total_input_tokens": 10, "total_output_tokens": 2},
                 )
                 self.wfile.write(payload)
                 self.wfile.flush()
+
+            def do_DELETE(self):
+                with cap_lock:
+                    captured_deletes.append(self.path)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b"{}")
 
             def log_message(self, *args):
                 pass
@@ -842,6 +878,7 @@ def main() -> int:
         wire_ok = (
             all(r[0] == 0 for r in (c1, c2, c3, c4))
             and len(captured_reqs) == 4
+            and len(captured_deletes) == 4
             and "google_search" in json.dumps(captured_reqs[0].get("tools"))
             and "code_execution" not in json.dumps(captured_reqs[0].get("tools"))
             and not captured_reqs[1].get("tools")
@@ -853,8 +890,7 @@ def main() -> int:
             and thinking_level_of(captured_reqs[3]) == "MEDIUM"
             and captured_reqs[0].get("background") is True
             and captured_reqs[0].get("store") is True
-            and captured_reqs[0].get("_x_server_timeout") == "1800"
-            and captured_reqs[3].get("_x_server_timeout") == "2400"
+            and captured_reqs[0].get("stream") is False
             and "| search | thinking=high |" in c1[2]
             and "| none | thinking=high |" in c2[2]
             and "| code | thinking=high |" in c3[2]
@@ -968,6 +1004,18 @@ def main() -> int:
                 body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
                 with limit_lock:
                     limit_reqs.append(json.loads(body))
+                    idx = len(limit_reqs)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(
+                    json.dumps(
+                        {"id": f"inter-lim-{idx}", "status": "in_progress"}
+                    ).encode()
+                )
+
+            def do_GET(self):
+                with limit_lock:
                     idx = min(len(limit_reqs), len(limit_script)) - 1
                     line = limit_script[idx]
                 raw_texts, status = line.split("|")
@@ -988,6 +1036,12 @@ def main() -> int:
                 self.end_headers()
                 self.wfile.write(payload)
                 self.wfile.flush()
+
+            def do_DELETE(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b"{}")
 
             def log_message(self, *args):
                 pass
@@ -1158,9 +1212,10 @@ def main() -> int:
             f"rcs={[r[0] for r in (r27_def, r27_env, r27_both, r27_bad, r27_badenv, r27_miss)]}",
         )
 
-        # Test 28: Background stream drop resumes via GET with last_event_id without losing text
+        # Test 28: Background stream drop resumes via GET with last_event_id, including --request-timeout 0
         resume_posts = 0
         resume_gets: list[str] = []
+        resume_deletes: list[str] = []
         resume_lock = threading.Lock()
 
         class DropThenResumeHandler(http.server.BaseHTTPRequestHandler):
@@ -1170,38 +1225,53 @@ def main() -> int:
                 with resume_lock:
                     resume_posts += 1
                 self.send_response(200)
-                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Content-Type", "application/json")
                 self.end_headers()
                 self.wfile.write(
-                    sse_interaction(
-                        "inter-resume-42",
-                        ["First half, "],
-                        include_completed=False,
-                        event_prefix="evt-part",
-                    )
+                    json.dumps(
+                        {"id": "inter-resume-42", "status": "in_progress"}
+                    ).encode()
                 )
-                self.wfile.flush()
 
             def do_GET(self):
                 with resume_lock:
                     resume_gets.append(self.path)
+                    get_num = len(resume_gets)
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.end_headers()
-                self.wfile.write(
-                    sse_interaction(
-                        "inter-resume-42",
-                        ["second half."],
-                        include_created=False,
-                        event_prefix="evt-rest",
-                        usage={
-                            "total_input_tokens": 20,
-                            "total_output_tokens": 8,
-                            "total_cached_tokens": 12,
-                        },
+                if get_num == 1:
+                    self.wfile.write(
+                        sse_interaction(
+                            "inter-resume-42",
+                            ["First half, "],
+                            include_completed=False,
+                            event_prefix="evt-part",
+                        )
                     )
-                )
+                else:
+                    self.wfile.write(
+                        sse_interaction(
+                            "inter-resume-42",
+                            ["second half."],
+                            include_created=False,
+                            event_prefix="evt-rest",
+                            usage={
+                                "total_input_tokens": 20,
+                                "total_output_tokens": 8,
+                                "total_cached_tokens": 12,
+                            },
+                        )
+                    )
                 self.wfile.flush()
+
+            def do_DELETE(self):
+                with resume_lock:
+                    resume_deletes.append(self.path)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b"{}")
 
             def log_message(self, *args):
                 pass
@@ -1214,7 +1284,7 @@ def main() -> int:
         ):
             rc28, out28, err28 = run_inproc(
                 oracle,
-                ["--no-serialize", "Long reasoning"],
+                ["--no-serialize", "--request-timeout", "0", "Long reasoning"],
                 env={
                     **base_env,
                     "GEMINI_API_KEY": "stub",
@@ -1228,20 +1298,143 @@ def main() -> int:
             else {}
         )
         tap.check(
-            "Resumes a dropped background stream via GET with last_event_id",
+            "Resumes a dropped background stream with --request-timeout 0 and deletes interaction",
             rc28 == 0
             and resume_posts == 1
-            and len(resume_gets) == 1
-            and "inter-resume-42" in resume_gets[0]
-            and "last_event_id=evt-part-1" in resume_gets[0]
-            and "stream=true" in resume_gets[0]
+            and len(resume_gets) == 2
+            and len(resume_deletes) == 1
+            and "inter-resume-42" in resume_gets[1]
+            and "last_event_id=evt-part-1" in resume_gets[1]
+            and "stream=true" in resume_gets[1]
+            and "API stream closed before completion" in err28
             and "First half, second half." in out28.splitlines()
             and tel28.get("stream_resumes") == 1
             and tel28.get("interaction_id") == "inter-resume-42"
             and tel28.get("cached_tokens") == 12
             and resume_sleeps == [2.0],
-            f"rc={rc28} posts={resume_posts} gets={resume_gets} sleeps={resume_sleeps}\n"
+            f"rc={rc28} posts={resume_posts} gets={resume_gets} dels={resume_deletes} sleeps={resume_sleeps}\n"
             f"tel={tel28!r}\n{out28}\n{err28}",
+        )
+
+        # Test 29: SSE error event aborts and cancels unfinished background interaction
+        abort_cancels: list[str] = []
+        abort_deletes: list[str] = []
+        abort_lock = threading.Lock()
+
+        class ErrorAndCancelHandler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                if self.path.endswith("/cancel"):
+                    with abort_lock:
+                        abort_cancels.append(self.path)
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(
+                        json.dumps(
+                            {"id": "inter-err-1", "status": "cancelled"}
+                        ).encode()
+                    )
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(
+                    json.dumps({"id": "inter-err-1", "status": "in_progress"}).encode()
+                )
+
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.end_headers()
+                self.wfile.write(
+                    sse_event(
+                        {
+                            "event_type": "error",
+                            "error": {"code": "internal", "message": "boom"},
+                        }
+                    )
+                )
+                self.wfile.flush()
+
+            def do_DELETE(self):
+                with abort_lock:
+                    abort_deletes.append(self.path)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b"{}")
+
+            def log_message(self, *args):
+                pass
+
+        with serve_http(ErrorAndCancelHandler) as (_, abort_url):
+            rc29, _, err29 = run_inproc(
+                oracle,
+                ["--no-serialize", "Fail mid-stream"],
+                env={
+                    **base_env,
+                    "GEMINI_API_KEY": "stub",
+                    "GOOGLE_GEMINI_BASE_URL": abort_url,
+                },
+            )
+        tap.check(
+            "Cancels and deletes unfinished background interaction on SSE error event",
+            rc29 == 1
+            and "Interaction error (internal): boom" in err29
+            and len(abort_cancels) == 1
+            and "inter-err-1/cancel" in abort_cancels[0]
+            and len(abort_deletes) == 1,
+            f"rc={rc29} cancels={abort_cancels} dels={abort_deletes}\n{err29}",
+        )
+
+        # Test 30: Failed terminal status exits 1 without calling cancel
+        fail_cancels: list[str] = []
+
+        class FailedStatusHandler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                if self.path.endswith("/cancel"):
+                    fail_cancels.append(self.path)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(
+                    json.dumps({"id": "inter-fail-1", "status": "in_progress"}).encode()
+                )
+
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.end_headers()
+                self.wfile.write(sse_interaction("inter-fail-1", status="failed"))
+                self.wfile.flush()
+
+            def do_DELETE(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b"{}")
+
+            def log_message(self, *args):
+                pass
+
+        with serve_http(FailedStatusHandler) as (_, fail_url):
+            rc30, _, err30 = run_inproc(
+                oracle,
+                ["--no-serialize", "Failed status"],
+                env={
+                    **base_env,
+                    "GEMINI_API_KEY": "stub",
+                    "GOOGLE_GEMINI_BASE_URL": fail_url,
+                },
+            )
+        tap.check(
+            "Exits 1 on failed terminal interaction status without redundant cancel",
+            rc30 == 1
+            and "interaction ended with status 'failed'" in err30
+            and not fail_cancels,
+            f"rc={rc30} cancels={fail_cancels}\n{err30}",
         )
 
     return 1 if tap.failed else 0

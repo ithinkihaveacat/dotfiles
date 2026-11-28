@@ -274,17 +274,20 @@ scripts/oracle [OPTIONS] "PROMPT" [FILE_OR_DIR ...]
   the state directory (`~/.local/state/oracle/`) (default: on).
 
 **Output limit & background streaming:** Oracle uses the Gemini Interactions API
-with `background=True` and `stream=True`: the server executes persistently past
-the 64k per-request cap (up to 1M output tokens), and if a network drop or
-client read timeout interrupts the stream after the interaction starts, Oracle
-automatically resumes from `last_event_id` without losing prior progress.
-Thinking tokens count toward `max_output_tokens` (default: 131072). If the
-ceiling is still reached (`incomplete` / `MAX_TOKENS`), or there is no answer
-text at all, the partial answer is printed and saved, a warning is printed, and
-the exit status is 1; raise `--max-output-tokens` or lower `--thinking`.
-Telemetry records `interaction_id`, `interaction_status`, `cached_tokens`,
-`stream_resumes`, `max_output_tokens`, `finish_reason`, `continuation_tokens`,
-and `truncated`.
+in background mode (`background=True`, `store=True`) and streams via
+`interactions.get(..., stream=True)`: the server handles long-running generation
+past the 64k per-request cap with implicit caching, and if a network drop or
+client read timeout interrupts the stream, Oracle automatically resumes from
+`last_event_id` without losing prior progress. Because Oracle is stateless, it
+cancels any unfinished background job on abort and deletes the stored
+interaction on exit (best-effort; if deletion fails, Google retains interactions
+under your project's AI Studio retention window). Thinking tokens count toward
+`max_output_tokens` (default: 131072). If the ceiling is still reached
+(`incomplete` / `MAX_TOKENS`), or there is no answer text at all, the partial
+answer is printed and saved, a warning is printed, and the exit status is 1;
+raise `--max-output-tokens` or lower `--thinking`. Telemetry records
+`interaction_id`, `interaction_status`, `cached_tokens`, `stream_resumes`,
+`max_output_tokens`, `finish_reason`, and `truncated`.
 
 **Environment:** `GEMINI_API_KEY` (Required), `GEMINI_MODEL` (Optional),
 `ORACLE_THINKING` (Optional), `ORACLE_REQUEST_TIMEOUT` (Optional),
