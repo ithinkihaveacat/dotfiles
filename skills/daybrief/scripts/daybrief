@@ -100,6 +100,7 @@ DEFAULT_GUIDANCE = """\
 
 DEFAULT_CONFIG_TEMPLATE = """\
 # Daybrief configuration (all settings optional; DAYBRIEF_* env vars override).
+# Keep this file mode 0600 when storing secret .ics capability URLs.
 
 timezone = "Europe/London"
 
@@ -111,6 +112,13 @@ timezone = "Europe/London"
 # calendar_ics = []
 # tripit_ics = []
 # owner_emails = []
+#
+# Named calendar feeds (trust = "invite_filtered" for personal primary calendars,
+# or "curated" for shared household/child calendars and public holiday feeds):
+# [[sources.calendars]]
+# label = "Personal"
+# url = "https://..."
+# trust = "invite_filtered"
 
 [weather]
 # latitude = 51.56
@@ -316,6 +324,13 @@ def write_output(content: str, output_arg: str | None) -> None:
 
 
 @dataclass(slots=True)
+class CalendarFeed:
+    entry: str
+    label: str | None = None
+    trust: str = "invite_filtered"
+
+
+@dataclass(slots=True)
 class SourceConfig:
     timezone: str
     taskgo_root: Path | None
@@ -328,6 +343,44 @@ class SourceConfig:
     weather_lat: float | None
     weather_lon: float | None
     weather_label: str
+    calendars: list[CalendarFeed] | None = None
+
+
+VALID_CALENDAR_TRUST = {
+    "invite_filtered": "invite_filtered",
+    "curated": "curated",
+    "household": "curated",
+    "public": "curated",
+}
+
+
+def _normalize_calendar_trust(raw: str | None, source_desc: str) -> str:
+    if raw is None or not str(raw).strip():
+        return "invite_filtered"
+    key = str(raw).strip().lower()
+    if key not in VALID_CALENDAR_TRUST:
+        raise Error(
+            f"invalid calendar trust {raw!r} in {source_desc} "
+            "(expected invite_filtered, curated, household, or public)"
+        )
+    return VALID_CALENDAR_TRUST[key]
+
+
+def _parse_calendar_spec(spec: str) -> CalendarFeed:
+    text = spec.strip()
+    eq_idx = text.find("=")
+    slash_idx = text.find("/")
+    if eq_idx > 0 and (slash_idx < 0 or eq_idx < slash_idx):
+        prefix = text[:eq_idx].strip()
+        target = text[eq_idx + 1 :].strip()
+        if prefix and target:
+            if "|" in prefix:
+                lbl, raw_trust = prefix.split("|", 1)
+                trust = _normalize_calendar_trust(raw_trust, f"calendar spec {lbl!r}")
+            else:
+                lbl, trust = prefix, "invite_filtered"
+            return CalendarFeed(entry=target, label=lbl.strip() or None, trust=trust)
+    return CalendarFeed(entry=text)
 
 
 def _opt_path(raw: str | None, fallback: Path | None = None) -> Path | None:
@@ -399,9 +452,31 @@ def load_config(store_dir: Path) -> SourceConfig:
     chalk_db = _opt_path(env_chalk if env_chalk is not None else cfg_chalk, None)
 
     env_ics = os.environ.get("DAYBRIEF_CALENDAR_ICS")
-    calendar_ics = _split_list(
-        env_ics if env_ics is not None else sources_tbl.get("calendar_ics")
-    )
+    calendars: list[CalendarFeed] = []
+    if env_ics is not None:
+        calendars = [_parse_calendar_spec(s) for s in _split_list(env_ics)]
+    else:
+        for s in _split_list(sources_tbl.get("calendar_ics")):
+            calendars.append(_parse_calendar_spec(s))
+        raw_cal_tables = sources_tbl.get("calendars") or []
+        if not isinstance(raw_cal_tables, list):
+            raise Error(
+                "invalid config: [sources].calendars must be an array of tables"
+            )
+        for idx, tbl in enumerate(raw_cal_tables, 1):
+            if not isinstance(tbl, dict):
+                raise Error(f"invalid config: sources.calendars[{idx}] must be a table")
+            target = str(tbl.get("url") or tbl.get("path") or "").strip()
+            if not target:
+                raise Error(
+                    f"invalid config: sources.calendars[{idx}] requires 'url' or 'path'"
+                )
+            lbl = str(tbl.get("label") or "").strip() or None
+            trust = _normalize_calendar_trust(
+                tbl.get("trust"), f"sources.calendars[{idx}]"
+            )
+            calendars.append(CalendarFeed(entry=target, label=lbl, trust=trust))
+    calendar_ics = [c.entry for c in calendars]
 
     env_tripit = os.environ.get("DAYBRIEF_TRIPIT_ICS")
     tripit_ics = _split_list(
@@ -434,10 +509,16 @@ def load_config(store_dir: Path) -> SourceConfig:
         weather_lat=lat,
         weather_lon=lon,
         weather_label=label,
+        calendars=calendars,
     )
 
 
 # --- Caching & HTTP Fetch ----------------------------------------------------
+
+
+def _redact_secret_urls(text: str) -> str:
+    """Strip URL paths/queries from error text so secret .ics tokens never leak."""
+    return re.sub(r"(https?://[^/\s'\"]+)/\S+", r"\1/[redacted]", text)
 
 
 def fetch_cached_bytes(
@@ -449,7 +530,8 @@ def fetch_cached_bytes(
 ) -> tuple[bytes, dict[str, Any]]:
     """Fetch a GET URL with write-through caching and AGENT_OFFLINE support."""
     key = sha256_text(url)[:24]
-    cdir = default_cache_dir() / cache_namespace
+    cache_root = default_cache_dir()
+    cdir = cache_root / cache_namespace
     data_path = cdir / f"{key}.dat"
     meta_path = cdir / f"{key}.json"
     now = time.time()
@@ -479,20 +561,26 @@ def fetch_cached_bytes(
             body = resp.read(8 * 1024 * 1024)
     except (urllib.error.URLError, TimeoutError, OSError) as e:
         host = urllib.parse.urlsplit(url).hostname or "remote host"
+        safe_err = _redact_secret_urls(str(e))
         raise Error(
-            f"failed to fetch {cache_namespace} from {host}: {e} "
+            f"failed to fetch {cache_namespace} from {host}: {safe_err} "
             "(set AGENT_OFFLINE=1 to use cached data if available)"
         ) from None
 
     with contextlib.suppress(OSError):
+        cache_root.mkdir(parents=True, exist_ok=True)
+        cache_root.chmod(0o700)
         cdir.mkdir(parents=True, exist_ok=True)
+        cdir.chmod(0o700)
         tmp = cdir / f".tmp-{os.getpid()}-{key}"
         tmp.write_bytes(body)
+        tmp.chmod(0o600)
         os.replace(tmp, data_path)
         meta_path.write_text(
             json.dumps({"fetched_at": utc_iso(), "bytes": len(body)}) + "\n",
             encoding="utf-8",
         )
+        meta_path.chmod(0o600)
     return body, {"cached": False, "age_seconds": 0}
 
 
@@ -676,11 +764,14 @@ def parse_and_sanitize_ics(
     tz: ZoneInfo,
     owner_emails: frozenset[str],
     source_label: str,
+    explicit_label: bool = False,
+    feed_trust: str = "invite_filtered",
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
     """Parse RFC 5545 VEVENTs and enforce upstream prompt-injection sanitization."""
     lines = _unfold_ics(ics_text)
     raw_events: list[list[tuple[str, dict[str, str], str]]] = []
     current: list[tuple[str, dict[str, str], str]] | None = None
+    cal_name = ""
     for line in lines:
         name, params, val = _parse_ics_prop(line)
         if name == "BEGIN" and val.strip().upper() == "VEVENT":
@@ -691,6 +782,10 @@ def parse_and_sanitize_ics(
             current = None
         elif current is not None:
             current.append((name, params, val))
+        elif name == "X-WR-CALNAME" and not cal_name:
+            cal_name = _clean_plain_text(_unescape_ics(val), 40)
+
+    effective_label = source_label if (explicit_label or not cal_name) else cal_name
 
     win_start = ref_date - datetime.timedelta(days=1)
     win_regular_end = ref_date + datetime.timedelta(days=21)
@@ -744,20 +839,25 @@ def parse_and_sanitize_ics(
 
         org_raw = prop_map.get("ORGANIZER", ({}, ""))[1].strip().lower()
         org_email = org_raw.removeprefix("mailto:").strip()
-        trusted = (not org_email) or (org_email in owner_emails)
-
-        if not trusted:
-            # Drop unaccepted or declined external invites so unsolicited calendar
-            # spam can never inject text into the briefing pipeline.
-            owner_partstats = [
-                p.get("PARTSTAT", "").upper()
-                for p, v in attendees
-                if not owner_emails
-                or v.strip().lower().removeprefix("mailto:") in owner_emails
-            ]
-            if any(ps in ("NEEDS-ACTION", "DECLINED") for ps in owner_partstats) or (
-                not attendees and status == "TENTATIVE"
+        owner_partstats = [
+            p.get("PARTSTAT", "").upper()
+            for p, v in attendees
+            if not owner_emails
+            or v.strip().lower().removeprefix("mailto:") in owner_emails
+        ]
+        if feed_trust == "curated":
+            if any(ps == "DECLINED" for ps in owner_partstats):
+                stats["dropped_unaccepted_external"] += 1
+                continue
+            trusted = True
+        else:
+            trusted = (not org_email) or (org_email in owner_emails)
+            if not trusted and (
+                any(ps in ("NEEDS-ACTION", "DECLINED") for ps in owner_partstats)
+                or (not attendees and status == "TENTATIVE")
             ):
+                # Drop unaccepted or declined external invites so unsolicited
+                # calendar spam can never inject text into the briefing pipeline.
                 stats["dropped_unaccepted_external"] += 1
                 continue
 
@@ -797,14 +897,14 @@ def parse_and_sanitize_ics(
                 time_suffix = "T" + start_repr.split("T", 1)[1]
             occ_start = occ_date.isoformat() + time_suffix
             event_rec: dict[str, Any] = {
-                "uid_hash": sha256_text(f"{source_label}:{uid}:{occ_start}")[:12],
+                "uid_hash": sha256_text(f"{effective_label}:{uid}:{occ_start}")[:12],
                 "date": occ_date.isoformat(),
                 "start": occ_start,
                 "all_day": all_day,
                 "summary": summary or "(Event)",
                 "trusted_organizer": trusted,
                 "sanitized_external": sanitized,
-                "source": source_label,
+                "source": effective_label,
             }
             if end_repr and occ_date == start_date:
                 event_rec["end"] = end_repr
@@ -1327,33 +1427,41 @@ def collect_weather(cfg: SourceConfig) -> dict[str, Any]:
 def collect_calendars(
     cfg: SourceConfig, ref_date: datetime.date, tz: ZoneInfo
 ) -> dict[str, Any]:
-    if not cfg.calendar_ics:
+    feeds = (
+        cfg.calendars
+        if cfg.calendars is not None
+        else [_parse_calendar_spec(s) for s in cfg.calendar_ics]
+    )
+    if not feeds:
         return {"available": False, "reason": "no calendar_ics configured"}
     all_events: list[dict[str, Any]] = []
-    agg_stats = {
-        "sources": len(cfg.calendar_ics),
+    agg_stats: dict[str, Any] = {
+        "sources": len(feeds),
         "parsed_vevents": 0,
         "dropped_cancelled": 0,
         "dropped_unaccepted_external": 0,
         "sanitized_external": 0,
         "included": 0,
     }
-    for idx, entry in enumerate(cfg.calendar_ics, 1):
-        label = f"cal-{idx}"
+    for idx, feed in enumerate(feeds, 1):
+        entry = feed.entry
+        fallback_label = feed.label or f"cal-{idx}"
         if entry.startswith(("http://", "https://")):
             raw_bytes, _ = fetch_cached_bytes(entry, "calendar", ttl_seconds=900)
             ics_text = raw_bytes.decode("utf-8", errors="replace")
         else:
             p = Path(entry).expanduser()
             if not p.is_file():
-                raise Error(f"calendar .ics file not found: {entry}")
+                raise Error(f"calendar .ics file not found: {p.name}")
             ics_text = p.read_text(encoding="utf-8", errors="replace")
         evs, st = parse_and_sanitize_ics(
             ics_text,
             ref_date=ref_date,
             tz=tz,
             owner_emails=cfg.owner_emails,
-            source_label=label,
+            source_label=fallback_label,
+            explicit_label=bool(feed.label),
+            feed_trust=feed.trust,
         )
         all_events.extend(evs)
         for k in (
@@ -3251,13 +3359,30 @@ class Store:
             findings.append(item)
 
         if self.root.is_dir():
-            add("PASS", f"State directory exists: {self.root}")
+            root_mode = stat.S_IMODE(self.root.stat().st_mode)
+            if root_mode & 0o077:
+                add(
+                    "WARN",
+                    f"State directory has group/other permissions ({oct(root_mode)}): {self.root}",
+                    f"Run 'chmod 0700 {self.root}' to protect briefings and secret .ics URLs.",
+                )
+            else:
+                add("PASS", f"State directory exists: {self.root}")
         else:
             add(
                 "INFO",
                 f"State directory not initialized yet: {self.root}",
                 f"Run '{PROG} init' to create constitution, guidance, and memory.db.",
             )
+
+        if self.config_path.is_file():
+            cfg_mode = stat.S_IMODE(self.config_path.stat().st_mode)
+            if cfg_mode & 0o077:
+                add(
+                    "WARN",
+                    f"config.toml has group/other permissions ({oct(cfg_mode)})",
+                    f"Run 'chmod 0600 {self.config_path}' before storing secret .ics URLs.",
+                )
 
         if self.constitution_path.is_file():
             mode = stat.S_IMODE(self.constitution_path.stat().st_mode)

@@ -77,11 +77,16 @@ configured sources without calling a model:
 
 - **Taskgo (`DAYBRIEF_TASKGO_ROOT`):** active, ready, blocked, due-soon, and
   dormant projects/tasks plus recent commit activity.
-- **Calendar (`DAYBRIEF_CALENDAR_ICS`):** local `.ics` files or private Secret
-  `.ics` URLs. Upstream sanitization keeps descriptions only for events whose
-  `ORGANIZER` matches `DAYBRIEF_OWNER_EMAILS` (or has no external organizer),
-  drops unaccepted `PARTSTAT=NEEDS-ACTION` invites from unknown senders, and
-  strips `DESCRIPTION` and URLs from third-party events.
+- **Calendar (`DAYBRIEF_CALENDAR_ICS` or `[[sources.calendars]]`):** local
+  `.ics` files, curated public holiday/clock-change feeds, or private Secret
+  `.ics` URLs (kept strictly `0600` in `config.toml` or host environment—never
+  logged or written into snapshots). Supports per-feed `label` (or automatic
+  `X-WR-CALNAME` fallback) and `trust`: `"invite_filtered"` (default: enforces
+  `DAYBRIEF_OWNER_EMAILS`, drops unaccepted `PARTSTAT=NEEDS-ACTION` external
+  invites, and strips `DESCRIPTION`/URLs on external organizers) or `"curated"`
+  (aliases `"household"` / `"public"`: preserves descriptions on shared
+  household/child calendars and official holiday feeds while dropping cancelled
+  or declined events).
 - **TripIt (`DAYBRIEF_TRIPIT_ICS`):** private TripIt `.ics` travel feeds
   spanning upcoming trips (`+365d`) and compact past trips (`-18m`), stripping
   PNRs/confirmation codes, 13-digit e-ticket numbers, loyalty/KTN numbers, PINs,
