@@ -311,13 +311,18 @@ def quota_ids(exc: Exception) -> list[str]:
             for value in node:
                 walk(value)
 
-    walk(getattr(exc, "details", None))
-    body = getattr(exc, "body", None)
-    if isinstance(body, str) and body:
-        try:
-            walk(json.loads(body))
-        except json.JSONDecodeError:
-            pass
+    for err in (exc, exc.__cause__):
+        if err is None:
+            continue
+        walk(getattr(err, "details", None))
+        body = getattr(err, "body", None)
+        if isinstance(body, (dict, list)):
+            walk(body)
+        elif isinstance(body, str) and body:
+            try:
+                walk(json.loads(body))
+            except json.JSONDecodeError:
+                pass
     return found
 
 
@@ -1134,6 +1139,7 @@ class Telemetry:
     candidate_tokens: int = 0
     input_limit: int = 0
     input_tokens_total: int = 0
+    cached_tokens: int = 0
     wait_seconds: float = 0.0
     rate_limit_events: list = dataclasses.field(default_factory=list)
     request_timeouts: list = dataclasses.field(default_factory=list)
@@ -1142,19 +1148,17 @@ class Telemetry:
 
 
 # max_output_tokens caps thinking and output together for each model turn.
-# Without it a turn stops at the per-request cap (32k tokens for non-streaming
-# generateContent), and thinking at 'high' plus a long complete_task report
-# can exceed that. Above 65,536 the API ends each hop with finish reason
-# CONTINUATION and a continuation token, and google-genai
-# (automatic_continuation, on by default) resends the request with that token
-# and merges the hops into one response, function calls included.
+# Above 65,536 the Interactions API ends each hop with status
+# requires_continuation and a continuation token, and google-genai
+# (automatic_continuation, on by default) resends the turn with that token
+# and merges the hops into one Interaction, function calls included.
 DEFAULT_MAX_OUTPUT_TOKENS = 131072
 
 
 def status_to_finish_reason(status: str) -> str:
     """Map an Interactions API status string to a canonical finish reason."""
     s = status.strip().lower()
-    if s == "completed":
+    if s in ("completed", "requires_action"):
         return "STOP"
     if s in ("incomplete", "budget_exceeded"):
         return "MAX_TOKENS"
@@ -1162,11 +1166,16 @@ def status_to_finish_reason(status: str) -> str:
 
 
 def error_status_code(exc: Exception) -> int | None:
-    """Extract an HTTP status code from APIError or Interactions GenAiError."""
-    code = getattr(exc, "code", None)
-    if code is None:
-        code = getattr(exc, "status_code", None)
-    return code if isinstance(code, int) else None
+    """Extract an HTTP status code from APIError, Interactions GenAiError, or its cause."""
+    for err in (exc, exc.__cause__):
+        if err is None:
+            continue
+        code = getattr(err, "code", None)
+        if code is None:
+            code = getattr(err, "status_code", None)
+        if isinstance(code, int):
+            return code
+    return None
 
 
 def is_timeout_error(exc: Exception) -> bool:
@@ -2686,13 +2695,26 @@ Once your work is complete, you MUST call complete_task(success=True, report="..
     if args.code:
         interaction_tools.append({"type": "code_execution"})
 
+    if args.thinking == "none":
+        if args.model.startswith("gemini-4") or "-pro" in args.model:
+            resolved_thinking = "low"
+            print(
+                f"[caxton] note: {args.model} does not support minimal thinking; using 'low'",
+                file=sys.stderr,
+            )
+        else:
+            resolved_thinking = "minimal"
+    else:
+        resolved_thinking = args.thinking
+
     generation_config: dict[str, Any] = {
-        "thinking_level": "minimal" if args.thinking == "none" else args.thinking,
+        "thinking_level": resolved_thinking,
         "temperature": 1.0,
         "max_output_tokens": args.max_output_tokens,
         "tool_choice": "any",
     }
     previous_interaction_id: str | None = None
+    created_interaction_ids: list[str] = []
 
     # Initial prompt construction
     scope_lines = [f"Repository root: {root} (all paths are relative to it)"]
@@ -2850,6 +2872,9 @@ Once your work is complete, you MUST call complete_task(success=True, report="..
                 resp = client.interactions.create(**create_kwargs)
                 if getattr(resp, "id", None):
                     previous_interaction_id = resp.id
+                    for cid in getattr(resp, "continuation_ids", None) or [resp.id]:
+                        if cid not in created_interaction_ids:
+                            created_interaction_ids.append(cid)
                 prompt_tokens = estimate
                 billed_tokens = estimate
                 usage = getattr(resp, "usage", None)
@@ -2866,6 +2891,9 @@ Once your work is complete, you MUST call complete_task(success=True, report="..
                         telemetry.long_decode_turns += 1
                     out_tokens = getattr(usage, "total_output_tokens", None) or 0
                     telemetry.candidate_tokens += out_tokens
+                    telemetry.cached_tokens += (
+                        getattr(usage, "total_cached_tokens", None) or 0
+                    )
                     last_call["reply"] = out_tokens
                 telemetry.prompt_tokens = prompt_tokens
                 telemetry.input_tokens_total += billed_tokens
@@ -3088,6 +3116,7 @@ Once your work is complete, you MUST call complete_task(success=True, report="..
                     "candidate_tokens": telemetry.candidate_tokens,
                     "input_limit": telemetry.input_limit,
                     "input_tokens_total": telemetry.input_tokens_total,
+                    "cached_tokens": telemetry.cached_tokens,
                     "wait_seconds": round(telemetry.wait_seconds, 3),
                     "rate_limit_events": telemetry.rate_limit_events,
                     "request_timeouts": telemetry.request_timeouts,
@@ -3395,6 +3424,11 @@ Once your work is complete, you MUST call complete_task(success=True, report="..
         # exactly the cases that leave a partly transformed tree behind.
         if args.timeout and hasattr(signal, "SIGALRM"):
             signal.alarm(0)
+        for cid in reversed(created_interaction_ids):
+            try:
+                client.interactions.delete(cid, timeout=15.0)
+            except Exception:
+                pass
         print_telemetry_report()
 
 

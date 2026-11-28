@@ -13,6 +13,7 @@
 #   "apkutils",
 # ]
 # ///
+# Tests: skills/agent-tools/tests/test-popper
 """AI-driven semantic UI interaction for Android via ADB."""
 
 import argparse
@@ -40,6 +41,41 @@ DEFAULT_MODEL = "gemini-3.8-flash"
 # for mFocusedApp, "ActivityRecord{113077881 u0 PKG/ACTIVITY t21}". System windows
 # such as "Window{... u0 NotificationShade}" have no "/" and do not match.
 _FOCUS_RE = re.compile(r"\bu\d+ ([A-Za-z0-9_.]+)/")
+
+
+def callable_to_interaction_tool(client: genai.Client, fn) -> dict:
+    """Convert a Python tool function into an Interactions API function tool dict."""
+    fd = types.FunctionDeclaration.from_callable(
+        client=client, callable=fn, use_json_schema=True
+    )
+    return {
+        "type": "function",
+        "name": fd.name,
+        "description": fd.description or "",
+        "parameters": fd.parameters_json_schema or {"type": "object", "properties": {}},
+    }
+
+
+def error_status_code(exc: Exception) -> int | None:
+    """Extract an HTTP status code from APIError, Interactions GenAiError, or its cause."""
+    for err in (exc, exc.__cause__):
+        if err is None:
+            continue
+        code = getattr(err, "code", None)
+        if code is None:
+            code = getattr(err, "status_code", None)
+        if isinstance(code, int):
+            return code
+    return None
+
+
+def is_retryable_interaction_error(exc: Exception) -> bool:
+    """Whether an Interactions API error or timeout should be retried."""
+    if isinstance(exc, TimeoutError) or type(exc).__name__ == "APITimeoutError":
+        return True
+    if isinstance(exc.__cause__, TimeoutError):
+        return True
+    return error_status_code(exc) in (429, 500, 502, 503, 504)
 
 
 def foreground_package(d) -> str:
@@ -951,20 +987,7 @@ Constraints:
 {interstitial_instruction}
 """
 
-    interaction_tools = []
-    for fn in ui_tools:
-        fd = types.FunctionDeclaration.from_callable(
-            client=client, callable=fn, use_json_schema=True
-        )
-        interaction_tools.append(
-            {
-                "type": "function",
-                "name": fd.name,
-                "description": fd.description or "",
-                "parameters": fd.parameters_json_schema
-                or {"type": "object", "properties": {}},
-            }
-        )
+    interaction_tools = [callable_to_interaction_tool(client, fn) for fn in ui_tools]
     # temperature=1.0 is required by Gemini 3 and later models, which were
     # trained at this temperature; lower values degrade output quality.
     generation_config = {
@@ -973,6 +996,7 @@ Constraints:
         "tool_choice": "any",
     }
     previous_interaction_id: str | None = None
+    created_interaction_ids: list[str] = []
 
     print(f"[goal] {args.goal}", file=sys.stderr)
 
@@ -1025,11 +1049,9 @@ What is your first action?""",
         )
 
     def should_retry(exception: Exception) -> bool:
-        """Retry on rate limits (429) and server errors (500, 503)."""
-        code = getattr(exception, "code", None)
-        if code is None:
-            code = getattr(exception, "status_code", None)
-        if code in (429, 500, 503):
+        """Retry on rate limits (429), server errors (5xx), and timeouts."""
+        if is_retryable_interaction_error(exception):
+            code = error_status_code(exception) or type(exception).__name__
             msg = getattr(exception, "status", None) or getattr(
                 exception, "message", str(exception)
             )
@@ -1062,10 +1084,16 @@ What is your first action?""",
         resp = client.interactions.create(**kwargs)
         if getattr(resp, "id", None):
             previous_interaction_id = resp.id
+            for cid in getattr(resp, "continuation_ids", None) or [resp.id]:
+                if cid not in created_interaction_ids:
+                    created_interaction_ids.append(cid)
         usage = getattr(resp, "usage", None)
         if usage:
-            if getattr(usage, "total_input_tokens", None):
-                context_usage["prompt_tokens"] = usage.total_input_tokens
+            prompt_toks = getattr(usage, "initial_input_tokens", None) or getattr(
+                usage, "total_input_tokens", None
+            )
+            if prompt_toks:
+                context_usage["prompt_tokens"] = prompt_toks
             if getattr(usage, "total_output_tokens", None):
                 context_usage["candidate_tokens"] += usage.total_output_tokens
 
@@ -1175,7 +1203,7 @@ What is your first action?""",
                                 result["message"] = task_result["reason"]
 
                         if img_part:
-                            result["screenshot"] = {"$ref": f"step_{step:03d}.jpg"}
+                            result["screenshot"] = "attached"
 
                 result_payload = (
                     [{"type": "text", "text": json.dumps(result)}, img_part]
@@ -1219,6 +1247,12 @@ What is your first action?""",
             file=sys.stderr,
         )
         sys.exit(1)
+    finally:
+        for cid in reversed(created_interaction_ids):
+            try:
+                client.interactions.delete(cid, timeout=15.0)
+            except Exception:
+                pass
 
 
 def sigterm_handler(signum, frame):

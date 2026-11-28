@@ -1,0 +1,263 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#   "uiautomator2",
+#   "google-genai>=2.31.0",
+#   "google-api-core",
+#   "pillow",
+#   "apkutils",
+# ]
+# ///
+"""TAP tests for skills/agent-tools/scripts/popper."""
+
+import base64
+import contextlib
+import http.server
+import importlib.machinery
+import importlib.util
+import io
+import json
+import os
+import sys
+import tempfile
+import threading
+from pathlib import Path
+from unittest import mock
+
+from PIL import Image
+
+BIN = Path(__file__).resolve().parent.parent / "scripts" / "popper"
+
+
+def load_popper():
+    loader = importlib.machinery.SourceFileLoader("popper_under_test", str(BIN))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    assert spec is not None
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[loader.name] = mod
+    loader.exec_module(mod)
+    return mod
+
+
+class Tap:
+    def __init__(self, total: int):
+        print(f"1..{total}", flush=True)
+        self.n = 0
+        self.failed = 0
+
+    def check(self, desc: str, ok: bool, detail: object = "") -> None:
+        self.n += 1
+        if not ok:
+            self.failed += 1
+        print(f"{'ok' if ok else 'not ok'} {self.n} - {desc}", flush=True)
+        if not ok and detail:
+            for line in str(detail).splitlines()[:20]:
+                print(f"# {line}", flush=True)
+
+
+@contextlib.contextmanager
+def serve_http(handler_cls):
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler_cls)
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server, f"http://127.0.0.1:{server.server_address[1]}"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)
+
+
+def main() -> int:
+    popper = load_popper()
+    tap = Tap(3)
+
+    # Test 1: callable_to_interaction_tool converts Python callables to JSON schema dicts
+    def sample_tool(target: str, count: int = 1) -> dict:
+        """Tap a target element."""
+        return {"target": target, "count": count}
+
+    dummy_client = popper.genai.Client(api_key="stub")
+    tool_dict = popper.callable_to_interaction_tool(dummy_client, sample_tool)
+    tap.check(
+        "callable_to_interaction_tool produces Interactions function schema",
+        tool_dict.get("type") == "function"
+        and tool_dict.get("name") == "sample_tool"
+        and tool_dict.get("description") == "Tap a target element."
+        and tool_dict.get("parameters", {}).get("type") == "object"
+        and "target" in tool_dict.get("parameters", {}).get("properties", {}),
+        repr(tool_dict),
+    )
+
+    # Test 2: is_retryable_interaction_error handles status_code, __cause__, and timeouts
+    class FakeStatusError(Exception):
+        def __init__(self, status_code: int):
+            self.status_code = status_code
+
+    wrapped_503 = RuntimeError("hop failed")
+    wrapped_503.__cause__ = FakeStatusError(503)
+    wrapped_400 = RuntimeError("bad req")
+    wrapped_400.__cause__ = FakeStatusError(400)
+    tap.check(
+        "is_retryable_interaction_error classifies 429/5xx, __cause__, and timeouts",
+        popper.is_retryable_interaction_error(FakeStatusError(429))
+        and popper.is_retryable_interaction_error(FakeStatusError(502))
+        and popper.is_retryable_interaction_error(wrapped_503)
+        and popper.is_retryable_interaction_error(TimeoutError("stalled"))
+        and not popper.is_retryable_interaction_error(FakeStatusError(400))
+        and not popper.is_retryable_interaction_error(wrapped_400),
+    )
+
+    # Test 3: End-to-end mocked 2-turn loop with screenshots, previous_interaction_id, and cleanup
+    reqs: list[dict] = []
+    deletes: list[str] = []
+    lock = threading.Lock()
+
+    class MockInteractionsHandler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(404)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"error": {"code": 404, "message": "stub"}}')
+
+        def do_DELETE(self):
+            with lock:
+                deletes.append(self.path)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+        def do_POST(self):
+            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            with lock:
+                reqs.append(json.loads(body))
+                turn = len(reqs)
+            if turn == 1:
+                payload = {
+                    "id": "pop-turn-1",
+                    "status": "requires_action",
+                    "steps": [
+                        {
+                            "type": "function_call",
+                            "id": "fc-1",
+                            "name": "observe",
+                            "arguments": {},
+                        }
+                    ],
+                    "usage": {"total_input_tokens": 50, "total_output_tokens": 5},
+                }
+            else:
+                payload = {
+                    "id": "pop-turn-2",
+                    "status": "requires_action",
+                    "steps": [
+                        {
+                            "type": "function_call",
+                            "id": "fc-2",
+                            "name": "complete_task",
+                            "arguments": {"success": True, "reason": "done"},
+                        }
+                    ],
+                    "usage": {"total_input_tokens": 60, "total_output_tokens": 6},
+                }
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(payload).encode())
+
+        def log_message(self, *args):
+            pass
+
+    class FakeDevice:
+        def __init__(self):
+            self.device_info = {"model": "Pixel", "version": "15", "sdk": 35}
+
+        def shell(self, cmd: str):
+            return type("ShellResult", (), {"output": "10000", "exit_code": 0})()
+
+        def window_size(self):
+            return (1080, 2400)
+
+        def dump_hierarchy(self):
+            return (
+                '<hierarchy><node index="0" text="Start" resource-id="btn"'
+                ' class="android.widget.Button" clickable="true"'
+                ' bounds="[0,0][100,100]" /></hierarchy>'
+            )
+
+        def screenshot(self):
+            return Image.new("RGB", (8, 8), color="red")
+
+        def app_current(self):
+            return {"package": "com.example.app"}
+
+    with (
+        tempfile.TemporaryDirectory(prefix="test-popper-") as tmp,
+        serve_http(MockInteractionsHandler) as (_, url),
+        mock.patch.object(popper.u2, "connect", return_value=FakeDevice()),
+        mock.patch.object(popper.time, "sleep"),
+    ):
+        stdout_buf = io.StringIO()
+        stderr_buf = io.StringIO()
+        old_argv = sys.argv
+        old_env = {
+            k: os.environ.get(k)
+            for k in (
+                "AGENT_OFFLINE",
+                "GEMINI_API_KEY",
+                "GOOGLE_GEMINI_BASE_URL",
+                "XDG_STATE_HOME",
+            )
+        }
+        rc = 0
+        try:
+            os.environ["AGENT_OFFLINE"] = "0"
+            os.environ["GEMINI_API_KEY"] = "stub"
+            os.environ["GOOGLE_GEMINI_BASE_URL"] = url
+            os.environ["XDG_STATE_HOME"] = tmp
+            sys.argv = ["popper", "--agent-screenshots", "Tap start"]
+            with (
+                contextlib.redirect_stdout(stdout_buf),
+                contextlib.redirect_stderr(stderr_buf),
+            ):
+                popper.main()
+        except SystemExit as exc:
+            rc = int(exc.code) if exc.code is not None else 0
+        finally:
+            sys.argv = old_argv
+            for k, v in old_env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+    turn1_content = reqs[0]["input"][0]["content"] if reqs else []
+    turn2_res = reqs[1]["input"][0]["result"] if len(reqs) >= 2 else []
+    img_ok = (
+        len(reqs) == 2
+        and len(turn1_content) == 2
+        and turn1_content[1]["type"] == "image"
+        and base64.b64decode(turn1_content[1]["data"]).startswith(b"\xff\xd8")
+        and reqs[1].get("previous_interaction_id") == "pop-turn-1"
+        and reqs[1]["input"][0]["type"] == "function_result"
+        and reqs[1]["input"][0]["call_id"] == "fc-1"
+        and isinstance(turn2_res, list)
+        and len(turn2_res) == 2
+        and turn2_res[0]["type"] == "text"
+        and turn2_res[1]["type"] == "image"
+        and len(deletes) == 2
+    )
+    tap.check(
+        "Runs 2-turn mocked popper loop with base64 screenshots, previous_interaction_id, and cleanup",
+        rc == 0 and img_ok,
+        f"rc={rc} reqs={len(reqs)} dels={deletes}\n{stderr_buf.getvalue()}",
+    )
+
+    return 1 if tap.failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

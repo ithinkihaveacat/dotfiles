@@ -234,7 +234,7 @@ def serve_http(handler_cls):
 
 def main() -> int:
     caxton = load_caxton()
-    tap = Tap(79)
+    tap = Tap(80)
 
     with tempfile.TemporaryDirectory(prefix="test-caxton-") as tmp:
         work = Path(tmp).resolve()
@@ -1894,6 +1894,7 @@ def main() -> int:
         # Tests 77-78 (was T76-T77): Wire CONTINUATION + MAX_TOKENS against shared local HTTP server
         limit_script: list[str] = []
         limit_reqs: list[dict] = []
+        limit_deletes: list[str] = []
         limit_lock = threading.Lock()
 
         class ScriptedHandler(http.server.BaseHTTPRequestHandler):
@@ -1902,6 +1903,14 @@ def main() -> int:
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
                 self.wfile.write(b'{"error": {"code": 404, "message": "stub"}}')
+
+            def do_DELETE(self):
+                with limit_lock:
+                    limit_deletes.append(self.path)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b"{}")
 
             def do_POST(self):
                 body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
@@ -1914,7 +1923,11 @@ def main() -> int:
                 payload.setdefault("id", f"inter-{idx + 1}")
                 payload.setdefault(
                     "usage",
-                    {"total_input_tokens": 100, "total_output_tokens": 10},
+                    {
+                        "total_input_tokens": 100,
+                        "total_output_tokens": 10,
+                        "total_cached_tokens": 40,
+                    },
                 )
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
@@ -1929,17 +1942,24 @@ def main() -> int:
 
         with serve_http(ScriptedHandler) as (_, limit_url):
 
-            def run_limited(lines: list[str]):
+            def run_limited(lines: list[str], extra_args: list[str] | None = None):
                 with limit_lock:
                     limit_script[:] = lines
                     limit_reqs.clear()
+                    limit_deletes.clear()
                 if limit_tel.exists():
                     limit_tel.unlink()
                 if limit_state.exists():
                     shutil.rmtree(limit_state)
                 return run_inproc(
                     caxton,
-                    ["Audit the notes", "--no-search", "--timeout", "60"],
+                    [
+                        "Audit the notes",
+                        "--no-search",
+                        "--timeout",
+                        "60",
+                        *(extra_args or []),
+                    ],
                     cwd=single_repo,
                     env={
                         "CAXTON_MAX_OUTPUT_TOKENS": None,
@@ -1970,7 +1990,7 @@ def main() -> int:
                     json.dumps(
                         {
                             "id": "inter-hop-2",
-                            "status": "completed",
+                            "status": "requires_action",
                             "steps": [
                                 {
                                     "type": "function_call",
@@ -1984,7 +2004,7 @@ def main() -> int:
                     json.dumps(
                         {
                             "id": "inter-turn-2",
-                            "status": "completed",
+                            "status": "requires_action",
                             "steps": [
                                 {
                                     "type": "function_call",
@@ -2006,10 +2026,12 @@ def main() -> int:
                 else {}
             )
             reqs77 = list(limit_reqs)
+            dels77 = list(limit_deletes)
             tap.check(
-                "Sends max_output_tokens, merges continuation hops, and chains turns via previous_interaction_id",
+                "Sends max_output_tokens, merges continuation hops, chains turns, and cleans up",
                 rc77 == 0
                 and len(reqs77) == 3
+                and len(dels77) == 3
                 and all(
                     r["generation_config"]["max_output_tokens"] == 131072
                     and r.get("_x_server_timeout") == "1800"
@@ -2027,10 +2049,11 @@ def main() -> int:
                 and tel77.get("finish_reason") == "STOP"
                 and tel77.get("prompt_tokens") == 100
                 and tel77.get("input_tokens_total") == 300
+                and tel77.get("cached_tokens") == 120
                 and tel77.get("partial_report") is None
                 and "Long report." in out77.splitlines()
                 and "complete_task(success=True) -> OK" in err77,
-                f"rc={rc77} reqs={len(reqs77)} tel={tel77!r}\n{out77}\n{err77}",
+                f"rc={rc77} reqs={len(reqs77)} dels={len(dels77)} tel={tel77!r}\n{out77}\n{err77}",
             )
 
             # Test 78 (was T77): MAX_TOKENS without tool call exits 1 and keeps partial text
@@ -2080,6 +2103,62 @@ def main() -> int:
                 and tel78.get("partial_report") == "## Partial findings"
                 and tel78.get("finish_reason") == "MAX_TOKENS",
                 f"rc={rc78} tel={tel78!r}\n{out78}\n{err78}",
+            )
+
+            # Test 80: dict-body quota_ids, __cause__ status codes, and --thinking none on Gemini 4 vs Flash
+            class FakeDictBodyError(Exception):
+                def __init__(self):
+                    self.status_code = 429
+                    self.body = {
+                        "error": {
+                            "details": [
+                                {
+                                    "violations": [
+                                        {"quotaId": "GenerateRequestsPerDayPerProject"}
+                                    ]
+                                }
+                            ]
+                        }
+                    }
+
+            wrapped_err = RuntimeError("continuation failed")
+            wrapped_err.__cause__ = FakeDictBodyError()
+
+            done_turn = json.dumps(
+                {
+                    "status": "requires_action",
+                    "steps": [
+                        {
+                            "type": "function_call",
+                            "id": "call-done",
+                            "name": "complete_task",
+                            "arguments": {"success": True, "report": "ok"},
+                        }
+                    ],
+                }
+            )
+            rc80a, _, err80a = run_limited(
+                [done_turn], ["--thinking", "none", "--model", "gemini-4-carbon"]
+            )
+            req80a = limit_reqs[0] if limit_reqs else {}
+            rc80b, _, _ = run_limited(
+                [done_turn], ["--thinking", "none", "--model", "gemini-3.8-flash"]
+            )
+            req80b = limit_reqs[0] if limit_reqs else {}
+            tap.check(
+                "Parses dict-body quota_ids, walks __cause__ status codes, and maps --thinking none safely",
+                caxton.quota_ids(FakeDictBodyError())
+                == ["GenerateRequestsPerDayPerProject"]
+                and caxton.quota_ids(wrapped_err)
+                == ["GenerateRequestsPerDayPerProject"]
+                and caxton.error_status_code(wrapped_err) == 429
+                and rc80a == 0
+                and req80a.get("generation_config", {}).get("thinking_level") == "low"
+                and "does not support minimal thinking; using 'low'" in err80a
+                and rc80b == 0
+                and req80b.get("generation_config", {}).get("thinking_level")
+                == "minimal",
+                f"rc=({rc80a},{rc80b}) req80a={req80a.get('generation_config')} req80b={req80b.get('generation_config')}",
             )
 
         # Test 79 (was T78): --max-output-tokens default, env, precedence, validation (reuse REPO!)
