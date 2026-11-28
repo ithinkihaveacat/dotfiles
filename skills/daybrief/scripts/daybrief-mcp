@@ -1,0 +1,1022 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11,<3.15"
+# dependencies = [
+#     "PyJWT==2.15.1",
+#     "anyio==4.15.1",
+#     "cffi==2.1.1",
+#     "cryptography==50.0.2",
+#     "mcp==2.3.0",
+#     "mcp-types==2.3.0",
+#     "pycparser==3.12",
+#     "pydantic==2.14.1",
+#     "pydantic-core==2.50.1",
+#     "starlette==1.10.0",
+#     "uvicorn==0.54.0",
+# ]
+# ///
+# Tests: skills/daybrief/tests/test-daybrief
+"""The 'daybrief mcp' server, launched by 'daybrief mcp' so the CLI stays
+dependency-free."""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import contextvars
+import datetime
+import hashlib
+import importlib.util
+import json
+import os
+import re
+import signal
+import sys
+import threading
+import time
+from dataclasses import dataclass, field
+from importlib.machinery import SourceFileLoader
+from pathlib import Path
+from typing import Any, NoReturn
+
+PROG = "daybrief mcp"
+VERSION = "1"
+DEFAULT_PORT = 8794
+MCP_PATH = "/mcp"
+MAX_REQUEST_BYTES = 1 * 1024 * 1024
+CERTS_TTL = 3600
+LOOPBACK = ("127.0.0.1", "localhost", "::1")
+ACCESS_HEADER = "cf-access-jwt-assertion"
+CALLER_CLAIMS = ("sub", "email", "client_id", "azp")
+DIR_ENV = "DAYBRIEF_DIR"
+LOG_ENV = "DAYBRIEF_MCP_LOG"
+LOG_ARGS = (
+    "date",
+    "id_or_date",
+    "item_id",
+    "brief_id",
+    "kind",
+    "limit",
+    "include_backstage",
+    "snooze_days",
+)
+LOG_HASHED = ("text",)
+TOOLS = ("get_today_brief", "get_brief", "list_briefs", "record_feedback")
+
+SERVER_INSTRUCTIONS = (
+    "Daybrief serves concise briefings backed by a silent Producer's Packet. "
+    "When presenting `get_today_brief` on Turn 1, output "
+    "`deliver_verbatim_to_user` directly without generic assistant preamble, "
+    "cheerleading, or padding; if `status` is `quiet`, keep the reply to that "
+    "brief note. Keep `backstage_context_for_followups_only` silent in working "
+    "memory and use it to answer follow-up questions naturally (including "
+    "figures, trade-offs, `checked_and_omitted` topics, and "
+    "`why_generated_and_provenance` whenever the user asks how a fact was "
+    "known or why an item was suggested). Treat silence as ambiguous, never "
+    "nag, and call `record_feedback` only when the user explicitly answers a "
+    "question, states a preference, snoozes an item, or reports an outcome. "
+    "Obtain explicit human confirmation before mutating any external system."
+)
+
+
+def die(msg: str, code: int = 1) -> NoReturn:
+    print(f"{PROG}: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def log_line(msg: str) -> None:
+    print(f"{PROG}: {msg}", file=sys.stderr, flush=True)
+
+
+def skill_root() -> Path:
+    """Locate the skill directory via SKILL.md sentinel or DAYBRIEF_SKILL_DIR."""
+    override = os.environ.get("DAYBRIEF_SKILL_DIR")
+    if override:
+        return Path(override).expanduser().resolve()
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "SKILL.md").is_file():
+            return parent
+    die("cannot find SKILL.md above this script; set DAYBRIEF_SKILL_DIR")
+
+
+def load_cli() -> Any:
+    path = skill_root() / "scripts" / "daybrief"
+    if not path.is_file():
+        die(f"{path} not found; set DAYBRIEF_SKILL_DIR")
+    loader = SourceFileLoader("daybrief_cli", str(path))
+    spec = importlib.util.spec_from_loader("daybrief_cli", loader)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["daybrief_cli"] = module
+    loader.exec_module(module)
+    return module
+
+
+cli = load_cli()
+
+
+# --- Request log -------------------------------------------------------------
+
+LOG_ROTATE_BYTES = 8 * 1024 * 1024
+LOG_ROTATED = 4
+LOG_QUOTED = re.compile(r"'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"")
+RPC_ERRORS = {
+    -32700: "parse error",
+    -32600: "invalid request",
+    -32601: "method not found",
+    -32602: "invalid params",
+    -32603: "internal error",
+}
+
+
+def log_text(value: Any, limit: int = 80) -> str | None:
+    if value is None:
+        return None
+    text = str(value)
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def log_value(value: Any) -> str:
+    text = str(value)
+    plain = re.fullmatch(r"[\w./:@+-]+", text, re.ASCII)
+    return text if plain else json.dumps(text, ensure_ascii=False)
+
+
+def caller_key(*parts: Any) -> str:
+    joined = "\0".join("" if p is None else str(p) for p in parts)
+    return hashlib.sha256(joined.encode()).hexdigest()[:10]
+
+
+def log_args(args: dict[str, Any]) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for k, v in args.items():
+        if k in LOG_ARGS and isinstance(v, (str, int, float, bool, list)):
+            v = " ".join(str(x) for x in v) if isinstance(v, list) else v
+            out[k] = log_text(" ".join(str(v).split()), 60) or ""
+        elif k in LOG_HASHED and v not in (None, "", []):
+            text = json.dumps(v, ensure_ascii=False, sort_keys=True)
+            out[k] = "#" + hashlib.sha256(text.encode()).hexdigest()[:12]
+    return out
+
+
+@dataclass
+class Event:
+    transport: str
+    started: float = field(default_factory=time.monotonic)
+    at: float = field(default_factory=time.time)
+    event: str | None = None
+    http: str | None = None
+    method: Any = None
+    tool: Any = None
+    args: dict[str, str] | None = None
+    outcome: str = "ok"
+    status: int | None = None
+    size: int | None = None
+    reason: str | None = None
+    agent: str | None = None
+    caller: str | None = None
+    commit: str | None = None
+    extra: dict[str, Any] = field(default_factory=dict)
+
+    def fail(self, outcome: str, reason: str) -> None:
+        self.outcome, self.reason = outcome, reason
+
+    def record(self) -> dict[str, Any]:
+        stamp = datetime.datetime.fromtimestamp(self.at, datetime.UTC)
+        rec = {
+            "ts": stamp.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+            "transport": self.transport,
+            "event": self.event,
+            "http": self.http,
+            "method": log_text(self.method),
+            "tool": log_text(self.tool),
+            "args": self.args or None,
+            "outcome": self.outcome,
+            "status": self.status,
+            "ms": int((time.monotonic() - self.started) * 1000),
+            "bytes": self.size,
+            "reason": log_text(self.reason, 200),
+            "agent": log_text(self.agent),
+            "caller": self.caller,
+            "commit": self.commit,
+            **self.extra,
+            "version": VERSION,
+        }
+        return {k: v for k, v in rec.items() if v is not None}
+
+
+EVENT: contextvars.ContextVar[Event | None] = contextvars.ContextVar(
+    "EVENT", default=None
+)
+
+
+class RequestLog:
+    """Append content-free JSONL records with rotation; never fail a request."""
+
+    def __init__(self, path: Path | None):
+        self.path = path
+        self.warned = False
+        self.lock = threading.Lock()
+
+    def emit(self, event: Event) -> None:
+        rec = event.record()
+        line = " ".join(
+            f"{k}={log_value(v)}"
+            for k, v in rec.items()
+            if k not in ("ts", "args", "version")
+        )
+        print(f"{PROG}: request {line}", file=sys.stderr, flush=True)
+        if self.path is None:
+            return
+        with self.lock:
+            try:
+                self.append(json.dumps(rec, ensure_ascii=False) + "\n")
+            except OSError as e:
+                if not self.warned:
+                    self.warned = True
+                    print(
+                        f"{PROG}: cannot use the request log {self.path}: {e}",
+                        file=sys.stderr,
+                    )
+
+    def append(self, line: str) -> None:
+        import fcntl
+
+        assert self.path is not None
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        for _ in range(3):
+            with self.path.open("a", encoding="utf-8") as fh:
+                fcntl.flock(fh, fcntl.LOCK_EX)
+                st = os.fstat(fh.fileno())
+                try:
+                    current = os.stat(self.path).st_ino == st.st_ino
+                except FileNotFoundError:
+                    current = False
+                if not current:
+                    continue
+                if st.st_size and st.st_size + len(line) > LOG_ROTATE_BYTES:
+                    for i in range(LOG_ROTATED - 1, 0, -1):
+                        if Path(f"{self.path}.{i}").exists():
+                            os.replace(f"{self.path}.{i}", f"{self.path}.{i + 1}")
+                    os.replace(self.path, f"{self.path}.1")
+                    with self.path.open("a", encoding="utf-8") as fresh:
+                        fcntl.flock(fresh, fcntl.LOCK_EX)
+                        fresh.write(line)
+                else:
+                    fh.write(line)
+                return
+        raise OSError(f"{self.path} kept being rotated")
+
+
+def default_log() -> Path:
+    base = os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local" / "state")
+    return Path(base) / "daybrief" / "mcp.jsonl"
+
+
+def source_commit() -> str | None:
+    import subprocess
+
+    with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+        proc = subprocess.run(
+            ["git", "-C", str(Path(__file__).resolve().parent), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        return proc.stdout.strip()[:12] if proc.returncode == 0 else None
+    return None
+
+
+def request_logging(log: RequestLog) -> Any:
+    from mcp.shared.exceptions import MCPError
+    from pydantic import ValidationError
+
+    stdio_caller = caller_key("stdio", os.getpid(), time.time())
+
+    async def logged(ctx: Any, call_next: Any) -> Any:
+        event = EVENT.get()
+        own = event is None
+        if own:
+            event = Event("stdio", caller=stdio_caller)
+        event.method = ctx.method
+        token = EVENT.set(event)
+        try:
+            return await call_next(ctx)
+        except MCPError as e:
+            event.fail("rpc-error", RPC_ERRORS.get(e.code, f"error {e.code}"))
+            raise
+        except ValidationError:
+            event.fail("rpc-error", RPC_ERRORS[-32602])
+            raise
+        except Exception:
+            event.fail("rpc-error", RPC_ERRORS[-32603])
+            raise
+        finally:
+            EVENT.reset(token)
+            if own:
+                log.emit(event)
+
+    return logged
+
+
+# --- HTTP & Cloudflare Access ------------------------------------------------
+
+
+class AccessError(Exception):
+    """Request carries no valid Cloudflare Access assertion."""
+
+
+class AccessVerifier:
+    """Validate RS256 Cf-Access-Jwt-Assertion tokens."""
+
+    def __init__(self, team: str, audience: str, certs_url: str | None = None):
+        import jwt
+
+        self.jwt = jwt
+        self.team, self.audience = team, audience
+        self.jwks = jwt.PyJWKClient(
+            certs_url or f"https://{team}/cdn-cgi/access/certs",
+            cache_keys=True,
+            lifespan=CERTS_TTL,
+            headers={"User-Agent": f"daybrief-mcp/{VERSION}"},
+            timeout=10,
+        )
+
+    def verify(self, token: str) -> dict[str, Any]:
+        jwt = self.jwt
+        try:
+            key = self.jwks.get_signing_key_from_jwt(token)
+            return jwt.decode(
+                token,
+                key.key,
+                algorithms=["RS256"],
+                audience=self.audience,
+                issuer=f"https://{self.team}",
+                leeway=60,
+                options={"require": ["exp", "iss", "aud"]},
+            )
+        except jwt.ExpiredSignatureError:
+            raise AccessError("Access token expired") from None
+        except jwt.InvalidAudienceError:
+            raise AccessError("Access token for another application") from None
+        except jwt.InvalidIssuerError:
+            raise AccessError("Access token from another team") from None
+        except jwt.PyJWKClientError as e:
+            raise AccessError(f"Access token key not usable: {e}") from None
+        except jwt.PyJWTError as e:
+            raise AccessError(f"Access token refused: {e}") from None
+
+
+async def reply(
+    send: Any,
+    status: int,
+    body: bytes,
+    ctype: str,
+    extra: Any = (),
+    head: bool = False,
+) -> None:
+    headers = [(b"content-type", ctype.encode())]
+    headers += [(b"content-length", str(len(body)).encode())]
+    headers += [(k.encode(), v.encode()) for k, v in extra]
+    await send({"type": "http.response.start", "status": status, "headers": headers})
+    await send({"type": "http.response.body", "body": b"" if head else body})
+
+
+def method_allowed(path: str, method: str) -> tuple[bool, str]:
+    if path == MCP_PATH:
+        return method == "POST", "POST"
+    return True, ""
+
+
+def host_allowed(value: str, allowed: list[str]) -> bool:
+    value = value.strip().lower().rstrip(".")
+    for pattern in allowed:
+        pattern = pattern.lower()
+        if pattern.endswith(":*"):
+            base = pattern[:-2]
+            if value == base or value.startswith(base + ":"):
+                return True
+        elif value == pattern:
+            return True
+    return False
+
+
+class Gate:
+    """ASGI wrapper: /up health check, Host allowlist, Access JWT, and logging."""
+
+    def __init__(
+        self,
+        app: Any,
+        verifier: AccessVerifier | None,
+        log: RequestLog,
+        allowed_hosts: list[str],
+    ):
+        self.app, self.verifier, self.log = app, verifier, log
+        self.allowed_hosts = allowed_hosts
+        health = {"status": "ok", "version": VERSION, "commit": source_commit()}
+        self.health = json.dumps(health).encode()
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        headers = {
+            k.decode("latin-1").lower(): v.decode("latin-1")
+            for k, v in scope["headers"]
+        }
+        path, method = scope["path"], scope["method"]
+        if path == "/up" and method in ("GET", "HEAD"):
+            await reply(
+                send,
+                200,
+                self.health,
+                "application/json",
+                head=method == "HEAD",
+            )
+            return
+        event = Event("http", http=method, agent=headers.get("user-agent"))
+        token = EVENT.set(event)
+        try:
+            if not host_allowed(headers.get("host", ""), self.allowed_hosts):
+                event.fail("refused", "untrusted host")
+                event.status = 421
+                await reply(
+                    send, 421, b"misdirected request\n", "text/plain; charset=utf-8"
+                )
+                return
+            allowed, allow = method_allowed(path, method)
+            refusal: tuple[int, str, Any] | None = None
+            if self.verifier is not None:
+                presented = headers.get(ACCESS_HEADER, "").strip()
+                if not presented:
+                    refusal = 401, "unauthorized", ()
+                else:
+                    try:
+                        claims = self.verifier.verify(presented)
+                    except AccessError:
+                        refusal = 401, "unauthorized", ()
+                    else:
+                        event.caller = caller_key(
+                            *(claims.get(c) for c in CALLER_CLAIMS)
+                        )
+            if refusal is None and not allowed:
+                refusal = 405, "method not allowed", (("allow", allow),)
+
+            async def sending(message: dict[str, Any]) -> None:
+                if message["type"] == "http.response.start":
+                    event.status = message["status"]
+                    if event.status >= 400 and event.outcome == "ok":
+                        event.fail(
+                            "rpc-error" if event.status == 400 else "tool-error",
+                            f"HTTP {event.status}",
+                        )
+                await send(message)
+
+            if refusal:
+                event.fail("refused", refusal[1])
+                body = (refusal[1] + "\n").encode()
+                await reply(
+                    sending, refusal[0], body, "text/plain; charset=utf-8", refusal[2]
+                )
+            else:
+                await self.app(scope, receive, sending)
+        except BaseException as e:
+            event.fail("error", type(e).__name__)
+            raise
+        finally:
+            EVENT.reset(token)
+            self.log.emit(event)
+
+
+# --- MCP Server --------------------------------------------------------------
+
+
+def tool_listing() -> list[dict[str, Any]]:
+    return [
+        {
+            "name": "get_today_brief",
+            "description": (
+                "Return the latest morning briefing (or a specific YYYY-MM-DD), "
+                "including `deliver_verbatim_to_user` for Turn 1 and "
+                "`backstage_context_for_followups_only` (the silent Producer's "
+                "Packet) for answering conversational follow-ups."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "date": {
+                        "type": "string",
+                        "description": "Optional YYYY-MM-DD date; defaults to latest",
+                    },
+                    "include_backstage": {
+                        "type": "boolean",
+                        "description": "Include silent Producer's Packet (default: true)",
+                    },
+                },
+                "additionalProperties": False,
+            },
+            "annotations": {
+                "readOnlyHint": True,
+                "destructiveHint": False,
+                "idempotentHint": True,
+                "openWorldHint": False,
+                "title": "Get today's briefing",
+            },
+        },
+        {
+            "name": "get_brief",
+            "description": (
+                "Inspect a stored briefing by ID or YYYY-MM-DD, optionally "
+                "narrowed to a single `item_id` dossier."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id_or_date": {
+                        "type": "string",
+                        "description": "Brief ID (DB-YYYYMMDD-...) or YYYY-MM-DD",
+                    },
+                    "item_id": {
+                        "type": "string",
+                        "description": "Optional item ID to return its dossier",
+                    },
+                },
+                "required": ["id_or_date"],
+                "additionalProperties": False,
+            },
+            "annotations": {
+                "readOnlyHint": True,
+                "destructiveHint": False,
+                "idempotentHint": True,
+                "openWorldHint": False,
+                "title": "Get briefing or item dossier",
+            },
+        },
+        {
+            "name": "list_briefs",
+            "description": (
+                "List recent stored briefings as metadata (presentation history, "
+                "not an unread backlog)."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum briefings to return (default: 10)",
+                    }
+                },
+                "additionalProperties": False,
+            },
+            "annotations": {
+                "readOnlyHint": True,
+                "destructiveHint": False,
+                "idempotentHint": True,
+                "openWorldHint": False,
+                "title": "List briefings",
+            },
+        },
+        {
+            "name": "record_feedback",
+            "description": (
+                "Record explicit user feedback, an answer to a high-leverage "
+                "question, a durable preference, an outcome, or an item snooze "
+                "in Daybrief's operational memory."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "description": "Explicit user note, answer, or preference",
+                    },
+                    "brief_id": {
+                        "type": "string",
+                        "description": "Briefing ID (defaults to latest)",
+                    },
+                    "item_id": {
+                        "type": "string",
+                        "description": "Related item ID within the briefing",
+                    },
+                    "kind": {
+                        "type": "string",
+                        "enum": list(cli.FEEDBACK_KINDS),
+                        "description": "Feedback kind (default: note)",
+                    },
+                    "snooze_days": {
+                        "type": "integer",
+                        "description": "Cooldown days when kind is snooze (default: 14)",
+                    },
+                },
+                "required": ["text"],
+                "additionalProperties": False,
+            },
+            "annotations": {
+                "readOnlyHint": False,
+                "destructiveHint": False,
+                "idempotentHint": False,
+                "openWorldHint": False,
+                "title": "Record briefing feedback",
+            },
+        },
+    ]
+
+
+ACTIVE = 0
+ACTIVE_LOCK = threading.Lock()
+
+
+def sdk_server(store: Any, log: RequestLog) -> Any:
+    import anyio
+    import mcp_types as types
+    from mcp.server.lowlevel import Server
+    from mcp.shared.exceptions import MCPError
+
+    def ok_result(payload: dict[str, Any]) -> Any:
+        encoded = json.dumps(payload, ensure_ascii=False)
+        event = EVENT.get()
+        if event:
+            event.size = len(encoded.encode("utf-8"))
+        return types.CallToolResult(
+            content=[types.TextContent(type="text", text=encoded)],
+            structured_content=payload,
+        )
+
+    def fail_result(message: str, reason: str = "invalid request") -> Any:
+        event = EVENT.get()
+        if event:
+            event.fail("tool-error", reason)
+        return types.CallToolResult(
+            content=[types.TextContent(type="text", text=f"error: {message}")],
+            is_error=True,
+        )
+
+    async def list_tools(ctx: Any, params: Any) -> Any:
+        return types.ListToolsResult(
+            tools=[types.Tool.model_validate(t) for t in tool_listing()]
+        )
+
+    async def list_prompts(ctx: Any, params: Any) -> Any:
+        return types.ListPromptsResult(
+            prompts=[
+                types.Prompt(
+                    name="morning-brief",
+                    title="Present today's Daybrief",
+                    description=(
+                        "Fetch today's Daybrief and present `deliver_verbatim_to_user` "
+                        "while holding the Producer's Packet in working memory."
+                    ),
+                    arguments=[
+                        types.PromptArgument(
+                            name="date",
+                            description="Optional YYYY-MM-DD override",
+                            required=False,
+                        )
+                    ],
+                )
+            ]
+        )
+
+    async def get_prompt(ctx: Any, params: Any) -> Any:
+        if params.name != "morning-brief":
+            raise MCPError(
+                code=types.INVALID_PARAMS, message=f"unknown prompt: {params.name}"
+            )
+        date_arg = (params.arguments or {}).get("date")
+        call_hint = (
+            f"Call `get_today_brief` with date='{date_arg}'."
+            if date_arg
+            else "Call `get_today_brief`."
+        )
+        prompt_text = (
+            f"{call_hint} Output `deliver_verbatim_to_user` directly with no "
+            "preamble, cheerleading, or extra bullets. Keep "
+            "`backstage_context_for_followups_only` silent in working memory "
+            "until the user asks a follow-up question."
+        )
+        return types.GetPromptResult(
+            description="Present today's morning briefing",
+            messages=[
+                types.PromptMessage(
+                    role="user",
+                    content=types.TextContent(type="text", text=prompt_text),
+                )
+            ],
+        )
+
+    async def call_tool(ctx: Any, params: Any) -> Any:
+        if params.name not in TOOLS:
+            raise MCPError(
+                code=types.INVALID_PARAMS, message=f"unknown tool: {params.name}"
+            )
+        global ACTIVE
+        with ACTIVE_LOCK:
+            ACTIVE += 1
+        try:
+            return await _call_tool(params)
+        finally:
+            with ACTIVE_LOCK:
+                ACTIVE -= 1
+
+    async def _call_tool(params: Any) -> Any:
+        args = params.arguments or {}
+        event = EVENT.get()
+        if event:
+            event.tool = params.name
+            event.args = log_args(args)
+        try:
+            if params.name == "get_today_brief":
+                include_bg = bool(args.get("include_backstage", True))
+                payload = await anyio.to_thread.run_sync(
+                    lambda: store.get_brief(
+                        args.get("date"), include_backstage=include_bg
+                    )
+                )
+                return ok_result(payload)
+            if params.name == "get_brief":
+                payload = await anyio.to_thread.run_sync(
+                    lambda: store.get_brief(
+                        str(args["id_or_date"]),
+                        item_id=args.get("item_id"),
+                        include_backstage=True,
+                    )
+                )
+                return ok_result(payload)
+            if params.name == "list_briefs":
+                limit = int(args.get("limit", 10))
+                rows = await anyio.to_thread.run_sync(
+                    lambda: store.list_briefs(limit=limit)
+                )
+                return ok_result({"briefs": rows})
+            rec = await anyio.to_thread.run_sync(
+                lambda: store.record_feedback(
+                    str(args["text"]),
+                    brief_id=args.get("brief_id"),
+                    item_id=args.get("item_id"),
+                    kind=str(args.get("kind") or "note"),
+                    snooze_days=int(args.get("snooze_days", 14)),
+                )
+            )
+            return ok_result(rec)
+        except KeyError as e:
+            return fail_result(f"missing argument: {e.args[0]}")
+        except cli.NotFoundError as e:
+            return fail_result(str(e), reason="not found")
+        except (cli.Error, ValueError) as e:
+            return fail_result(str(e), reason="invalid request")
+
+    sdk = Server(
+        "daybrief",
+        version=VERSION,
+        title="Daybrief",
+        instructions=SERVER_INSTRUCTIONS,
+        on_list_tools=list_tools,
+        on_call_tool=call_tool,
+        on_list_prompts=list_prompts,
+        on_get_prompt=get_prompt,
+    )
+    sdk.middleware.append(request_logging(log))
+    return sdk
+
+
+def build_app(
+    store: Any,
+    verifier: AccessVerifier | None,
+    log: RequestLog,
+    allow_hosts: list[str],
+) -> Any:
+    from mcp.server.transport_security import TransportSecuritySettings
+    from starlette.applications import Starlette
+    from starlette.responses import JSONResponse, Response
+    from starlette.routing import Route
+
+    sdk = sdk_server(store, log)
+    hosts = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
+    hosts += [h if ":" in h else f"{h}:*" for h in allow_hosts] + allow_hosts
+    hosts = [h.lower() for h in hosts]
+    security = TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=hosts,
+        allowed_origins=["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"],
+    )
+    mcp_app = sdk.streamable_http_app(
+        streamable_http_path=MCP_PATH,
+        stateless_http=True,
+        json_response=True,
+        max_request_body_size=MAX_REQUEST_BYTES,
+        transport_security=security,
+    )
+
+    async def health(request: Any) -> Response:
+        return JSONResponse(
+            {"status": "ok", "version": VERSION, "commit": source_commit()}
+        )
+
+    @contextlib.asynccontextmanager
+    async def lifespan(app: Any) -> Any:
+        async with sdk.session_manager.run():
+            yield
+
+    routes = [Route("/up", health, methods=["GET", "HEAD"]), *mcp_app.routes]
+    app = Starlette(routes=routes, lifespan=lifespan)
+    return Gate(app, verifier, log, hosts)
+
+
+def serve_http(
+    store: Any,
+    host: str,
+    port: int,
+    verifier: AccessVerifier | None,
+    log: RequestLog,
+    allow_hosts: list[str],
+) -> None:
+    import uvicorn
+
+    auth = f"Access {verifier.team}" if verifier else "no authentication"
+    log_line(
+        f"serving {MCP_PATH} on http://{host}:{port} ({auth}); request log {log.path}"
+    )
+    uvicorn.run(
+        build_app(store, verifier, log, allow_hosts),
+        host=host,
+        port=port,
+        log_level="warning",
+        access_log=False,
+        server_header=False,
+    )
+
+
+def serve_stdio(store: Any, log: RequestLog) -> None:
+    import anyio
+    from mcp.server.stdio import stdio_server
+
+    def wait_idle() -> None:
+        deadline = time.monotonic() + 30.0
+        while time.monotonic() < deadline:
+            with ACTIVE_LOCK:
+                if not ACTIVE:
+                    os._exit(0)
+            time.sleep(0.1)
+        os._exit(0)
+
+    def stop(signum: int, frame: Any) -> None:
+        threading.Thread(target=wait_idle, daemon=True).start()
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(sig, stop)
+
+    async def serve() -> None:
+        sdk = sdk_server(store, log)
+        async with stdio_server() as (read, write):
+            await sdk.run(read, write, sdk.create_initialization_options())
+
+    anyio.run(serve)
+
+
+# --- Command line ------------------------------------------------------------
+
+EPILOG = """\
+Tools:
+  get_today_brief   latest (or dated) briefing with silent Producer's Packet
+  get_brief         inspect a briefing or single item dossier by ID or date
+  list_briefs       metadata list of recent briefings, newest first
+  record_feedback   record explicit user note, answer, preference, or snooze
+
+Environment:
+  DAYBRIEF_DIR                  State directory (default: ~/.local/state/daybrief)
+  DAYBRIEF_MCP_LOG              Request log (default: $XDG_STATE_HOME/daybrief/mcp.jsonl)
+  DAYBRIEF_MCP_ACCESS_TEAM      Cloudflare Access team domain
+  DAYBRIEF_MCP_ACCESS_AUD       Cloudflare Access application audience tag
+  DAYBRIEF_MCP_ACCESS_CERTS_URL Team certificate URL, for testing
+
+Examples:
+  claude mcp add daybrief -- daybrief mcp
+  daybrief mcp --http
+  daybrief mcp --http --host 0.0.0.0 --allow-host daybrief.example.com \\
+    --access-team example.cloudflareaccess.com --access-aud AUD
+  mcp logs --server daybrief --since 1d
+
+GET /up is open for a proxy health check and is not logged. With both Access
+flags, every other HTTP request must carry a valid Cf-Access-Jwt-Assertion
+token; without them --http binds loopback only."""
+
+
+class Parser(argparse.ArgumentParser):
+    def error(self, message: str) -> NoReturn:
+        self.print_usage(sys.stderr)
+        print(
+            f"{self.prog}: {message}\nTry '{self.prog} --help' for more information.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    def format_help(self) -> str:
+        return (
+            super()
+            .format_help()
+            .replace("usage:", "Usage:", 1)
+            .replace("options:", "Options:", 1)
+            .replace(
+                "show this help message and exit",
+                "Display this help message and exit",
+                1,
+            )
+        )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = Parser(
+        prog=PROG,
+        description=(
+            "Serve stored Daybrief morning briefings and Producer's Packets "
+            "over MCP, and record explicit owner feedback."
+        ),
+        epilog=EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--dir",
+        metavar="DIR",
+        help=f"State directory (default: ${DIR_ENV}, else ~/.local/state/daybrief)",
+    )
+    parser.add_argument(
+        "--http", action="store_true", help=f"Serve HTTP at {MCP_PATH}, not stdio"
+    )
+    parser.add_argument("--host", default="127.0.0.1", help="HTTP address")
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=DEFAULT_PORT,
+        help=f"HTTP port (default: {DEFAULT_PORT})",
+    )
+    parser.add_argument(
+        "--allow-host",
+        action="append",
+        default=[],
+        metavar="HOST",
+        help="Also accept requests addressed to HOST, such as a tunnel's hostname",
+    )
+    parser.add_argument(
+        "--access-team",
+        metavar="HOST",
+        help="Cloudflare Access team domain (default: DAYBRIEF_MCP_ACCESS_TEAM)",
+    )
+    parser.add_argument(
+        "--access-aud",
+        metavar="AUD",
+        help="Cloudflare Access application audience tag "
+        "(default: DAYBRIEF_MCP_ACCESS_AUD)",
+    )
+    parser.add_argument(
+        "--log", metavar="FILE", help=f"Request log (default: ${LOG_ENV})"
+    )
+    return parser
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+    log_path = Path(args.log or os.environ.get(LOG_ENV) or default_log()).expanduser()
+    log = RequestLog(log_path)
+    team = args.access_team or os.environ.get("DAYBRIEF_MCP_ACCESS_TEAM")
+    audience = args.access_aud or os.environ.get("DAYBRIEF_MCP_ACCESS_AUD")
+    if bool(team) != bool(audience):
+        die(
+            "Access needs both --access-team and --access-aud "
+            "(or DAYBRIEF_MCP_ACCESS_TEAM and DAYBRIEF_MCP_ACCESS_AUD)"
+        )
+    verifier = None
+    if args.http:
+        if team and audience:
+            verifier = AccessVerifier(
+                team,
+                audience,
+                os.environ.get("DAYBRIEF_MCP_ACCESS_CERTS_URL") or None,
+            )
+        elif args.host not in LOOPBACK:
+            die(f"--http without Access serves loopback only, not {args.host}")
+    elif args.access_team or args.access_aud:
+        die("--access-team and --access-aud apply only to --http")
+
+    path = args.dir or os.environ.get(DIR_ENV) or cli.default_dir()
+    store = cli.Store(path)
+    store.ensure()
+    if args.http:
+        serve_http(store, args.host, args.port, verifier, log, args.allow_host)
+    else:
+        serve_stdio(store, log)
+    return 0
+
+
+def sigterm_handler(signum: int, frame: Any) -> NoReturn:
+    raise KeyboardInterrupt
+
+
+if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, sigterm_handler)
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        sys.exit(0)
