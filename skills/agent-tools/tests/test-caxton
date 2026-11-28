@@ -1780,24 +1780,19 @@ def main() -> int:
         sleep_log: list[float] = []
         exhaust_tel = work / "exhaust_stall.json"
 
-        class FakeStallChat:
-            def __init__(self):
-                self.calls = 0
-
-            def send_message(self, message, config=None):
-                self.calls += 1
-                raise httpx.ReadTimeout("stalled")
-
         class FakeStallClient:
             def __init__(self, api_key=None):
                 self.models = self
-                self.chats = self
+                self.interactions = self
+                self.vertexai = False
+                self.calls = 0
 
             def get(self, **kwargs):
                 raise RuntimeError("404 stub")
 
             def create(self, **kwargs):
-                return FakeStallChat()
+                self.calls += 1
+                raise httpx.ReadTimeout("stalled")
 
         real_sleep = time.sleep
 
@@ -1915,14 +1910,12 @@ def main() -> int:
                 with limit_lock:
                     limit_reqs.append(obj)
                     idx = min(len(limit_reqs), len(limit_script)) - 1
-                    candidate = json.loads(limit_script[idx])
-                payload = {
-                    "candidates": [candidate],
-                    "usageMetadata": {
-                        "promptTokenCount": 100,
-                        "candidatesTokenCount": 10,
-                    },
-                }
+                    payload = json.loads(limit_script[idx])
+                payload.setdefault("id", f"inter-{idx + 1}")
+                payload.setdefault(
+                    "usage",
+                    {"total_input_tokens": 100, "total_output_tokens": 10},
+                )
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
@@ -1958,11 +1951,53 @@ def main() -> int:
                     },
                 )
 
-            # Test 77 (was T76): max_output_tokens + CONTINUATION hops merged
+            # Test 77 (was T76): max_output_tokens + continuation hops + multi-turn previous_interaction_id
             rc77, out77, err77 = run_limited(
                 [
-                    '{"content": {"role": "model", "parts": [{"text": "Planning.", "thought": true}]}, "finishReason": "CONTINUATION", "continuationToken": "dG9rZW4tMQ=="}',
-                    '{"content": {"role": "model", "parts": [{"functionCall": {"name": "complete_task", "args": {"success": true, "report": "Long report."}}}]}, "finishReason": "STOP"}',
+                    json.dumps(
+                        {
+                            "id": "inter-hop-1",
+                            "status": "requires_continuation",
+                            "continuation_token": "dG9rZW4tMQ==",
+                            "steps": [
+                                {
+                                    "type": "thought",
+                                    "summary": [{"type": "text", "text": "Planning."}],
+                                }
+                            ],
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "id": "inter-hop-2",
+                            "status": "completed",
+                            "steps": [
+                                {
+                                    "type": "function_call",
+                                    "id": "call-1",
+                                    "name": "list_files",
+                                    "arguments": {},
+                                }
+                            ],
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "id": "inter-turn-2",
+                            "status": "completed",
+                            "steps": [
+                                {
+                                    "type": "function_call",
+                                    "id": "call-2",
+                                    "name": "complete_task",
+                                    "arguments": {
+                                        "success": True,
+                                        "report": "Long report.",
+                                    },
+                                }
+                            ],
+                        }
+                    ),
                 ]
             )
             tel77 = (
@@ -1972,23 +2007,26 @@ def main() -> int:
             )
             reqs77 = list(limit_reqs)
             tap.check(
-                "Sends max_output_tokens and merges CONTINUATION hops into one turn",
+                "Sends max_output_tokens, merges continuation hops, and chains turns via previous_interaction_id",
                 rc77 == 0
-                and len(reqs77) == 2
+                and len(reqs77) == 3
                 and all(
-                    r["generationConfig"]["maxOutputTokens"] == 131072
+                    r["generation_config"]["max_output_tokens"] == 131072
                     and r.get("_x_server_timeout") == "1800"
                     for r in reqs77
                 )
-                and "continuationToken" not in reqs77[0]
-                and reqs77[1].get("continuationToken") == "dG9rZW4tMQ=="
-                and reqs77[1]["contents"] == reqs77[0]["contents"]
+                and "continuation_token" not in reqs77[0]
+                and reqs77[1].get("continuation_token") == "dG9rZW4tMQ=="
+                and reqs77[1].get("previous_interaction_id") == "inter-hop-1"
+                and reqs77[2].get("previous_interaction_id") == "inter-hop-2"
+                and reqs77[2]["input"][0]["type"] == "function_result"
+                and reqs77[2]["input"][0]["call_id"] == "call-1"
                 and tel77.get("status") == "Succeeded"
                 and tel77.get("max_output_tokens") == 131072
                 and tel77.get("long_decode_turns") == 1
                 and tel77.get("finish_reason") == "STOP"
                 and tel77.get("prompt_tokens") == 100
-                and tel77.get("input_tokens_total") == 200
+                and tel77.get("input_tokens_total") == 300
                 and tel77.get("partial_report") is None
                 and "Long report." in out77.splitlines()
                 and "complete_task(success=True) -> OK" in err77,
@@ -1998,7 +2036,24 @@ def main() -> int:
             # Test 78 (was T77): MAX_TOKENS without tool call exits 1 and keeps partial text
             rc78, out78, err78 = run_limited(
                 [
-                    '{"content": {"role": "model", "parts": [{"text": "Thinking.", "thought": true}, {"text": "## Partial findings"}]}, "finishReason": "MAX_TOKENS"}'
+                    json.dumps(
+                        {
+                            "status": "incomplete",
+                            "steps": [
+                                {
+                                    "type": "thought",
+                                    "summary": [{"type": "text", "text": "Thinking."}],
+                                },
+                                {
+                                    "type": "model_output",
+                                    "content": [
+                                        {"type": "text", "text": "## Partial findings"}
+                                    ],
+                                },
+                            ],
+                            "output_text": "## Partial findings",
+                        }
+                    )
                 ]
             )
             resp_files = list(limit_state.glob("response_*.md"))
