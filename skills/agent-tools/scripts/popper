@@ -13,10 +13,12 @@
 #   "apkutils",
 # ]
 # ///
+# Tests: skills/agent-tools/tests/test-popper
 """AI-driven semantic UI interaction for Android via ADB."""
 
 import argparse
 import atexit
+import base64
 import datetime
 import io
 import json
@@ -31,7 +33,6 @@ import xml.etree.ElementTree as ET
 import uiautomator2 as u2
 from google import genai
 from google.api_core import retry
-from google.genai import errors as genai_errors
 from google.genai import types
 
 DEFAULT_MODEL = "gemini-3.8-flash"
@@ -40,6 +41,41 @@ DEFAULT_MODEL = "gemini-3.8-flash"
 # for mFocusedApp, "ActivityRecord{113077881 u0 PKG/ACTIVITY t21}". System windows
 # such as "Window{... u0 NotificationShade}" have no "/" and do not match.
 _FOCUS_RE = re.compile(r"\bu\d+ ([A-Za-z0-9_.]+)/")
+
+
+def callable_to_interaction_tool(client: genai.Client, fn) -> dict:
+    """Convert a Python tool function into an Interactions API function tool dict."""
+    fd = types.FunctionDeclaration.from_callable(
+        client=client, callable=fn, use_json_schema=True
+    )
+    return {
+        "type": "function",
+        "name": fd.name,
+        "description": fd.description or "",
+        "parameters": fd.parameters_json_schema or {"type": "object", "properties": {}},
+    }
+
+
+def error_status_code(exc: Exception) -> int | None:
+    """Extract an HTTP status code from APIError, Interactions GenAiError, or its cause."""
+    for err in (exc, exc.__cause__):
+        if err is None:
+            continue
+        code = getattr(err, "code", None)
+        if code is None:
+            code = getattr(err, "status_code", None)
+        if isinstance(code, int):
+            return code
+    return None
+
+
+def is_retryable_interaction_error(exc: Exception) -> bool:
+    """Whether an Interactions API error or timeout should be retried."""
+    if isinstance(exc, TimeoutError) or type(exc).__name__ == "APITimeoutError":
+        return True
+    if isinstance(exc.__cause__, TimeoutError):
+        return True
+    return error_status_code(exc) in (429, 500, 502, 503, 504)
 
 
 def foreground_package(d) -> str:
@@ -494,10 +530,11 @@ Environment:
                 img_bytes = img_byte_arr.getvalue()
 
                 if args.agent_screenshots:
-                    img_part = types.FunctionResponsePart.from_bytes(
-                        data=img_bytes, mime_type="image/jpeg"
-                    )
-                    img_part.inline_data.display_name = f"step_{current_step:03d}.jpg"
+                    img_part = {
+                        "type": "image",
+                        "data": base64.b64encode(img_bytes).decode("ascii"),
+                        "mime_type": "image/jpeg",
+                    }
 
                 if args.local_screenshots:
                     screenshot_path = os.path.join(
@@ -950,36 +987,37 @@ Constraints:
 {interstitial_instruction}
 """
 
-    config = types.GenerateContentConfig(
-        tools=ui_tools,
-        system_instruction=system_instruction,
-        # temperature=1.0 is required by Gemini 3 and later models, which were
-        # trained at this temperature; lower values degrade output quality.
-        temperature=1.0,
-        tool_config=types.ToolConfig(
-            function_calling_config=types.FunctionCallingConfig(mode="ANY")
-        ),
-        automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
-        thinking_config=types.ThinkingConfig(thinking_level="low"),
-    )
-
-    chat = client.chats.create(model=args.model, config=config)
+    interaction_tools = [callable_to_interaction_tool(client, fn) for fn in ui_tools]
+    # temperature=1.0 is required by Gemini 3 and later models, which were
+    # trained at this temperature; lower values degrade output quality.
+    generation_config = {
+        "temperature": 1.0,
+        "thinking_level": "low",
+        "tool_choice": "any",
+    }
+    previous_interaction_id: str | None = None
+    created_interaction_ids: list[str] = []
 
     print(f"[goal] {args.goal}", file=sys.stderr)
 
     # Send the initial UI state and goal to the model
-    # For the initial prompt, we must send the raw PIL Image if available.
     initial_xml = get_ui_state()
 
     initial_screenshot_path = None
-    initial_img = None
+    initial_img_b64 = None
 
     if args.agent_screenshots or args.local_screenshots:
         try:
             initial_img = d.screenshot()
+            img_buf = io.BytesIO()
+            initial_img.save(img_buf, format="JPEG", quality=85)
+            initial_img_bytes = img_buf.getvalue()
+            if args.agent_screenshots:
+                initial_img_b64 = base64.b64encode(initial_img_bytes).decode("ascii")
             if args.local_screenshots:
                 initial_screenshot_path = os.path.join(session_dir, "step_000.jpg")
-                initial_img.save(initial_screenshot_path, format="JPEG", quality=85)
+                with open(initial_screenshot_path, "wb") as f:
+                    f.write(initial_img_bytes)
                 print(
                     f"[local] Saved screenshot: {initial_screenshot_path}",
                     file=sys.stderr,
@@ -989,10 +1027,12 @@ Constraints:
                 f"[local] Warning: Failed to process initial screenshot: {e}",
                 file=sys.stderr,
             )
-            initial_img = None
+            initial_img_b64 = None
 
-    prompt = [
-        f"""Goal: {args.goal}
+    prompt: list[dict] = [
+        {
+            "type": "text",
+            "text": f"""Goal: {args.goal}
 
 Current UI State:
 {initial_xml}
@@ -1000,20 +1040,23 @@ Current UI State:
 Element IDs use 'step:index' format such as '0:12'. When calling tap_by_id,
 use IDs from the latest UI state.
 
-What is your first action?"""
+What is your first action?""",
+        }
     ]
-    if args.agent_screenshots and initial_img:
-        prompt.append(initial_img)
+    if args.agent_screenshots and initial_img_b64:
+        prompt.append(
+            {"type": "image", "data": initial_img_b64, "mime_type": "image/jpeg"}
+        )
 
     def should_retry(exception: Exception) -> bool:
-        """Retry on rate limits (429) and server errors (500, 503)."""
-        if isinstance(exception, genai_errors.APIError) and exception.code in (
-            429,
-            500,
-            503,
-        ):
+        """Retry on rate limits (429), server errors (5xx), and timeouts."""
+        if is_retryable_interaction_error(exception):
+            code = error_status_code(exception) or type(exception).__name__
+            msg = getattr(exception, "status", None) or getattr(
+                exception, "message", str(exception)
+            )
             print(
-                f"[local] Warning: API error {exception.code} ({exception.status}). Retrying with backoff...",
+                f"[local] Warning: API error {code} ({msg}). Retrying with backoff...",
                 file=sys.stderr,
             )
             return True
@@ -1027,12 +1070,32 @@ What is your first action?"""
         timeout=300.0,
     )
     def send_with_retry(message):
-        resp = chat.send_message(message)
-        if resp.usage_metadata:
-            context_usage["prompt_tokens"] = resp.usage_metadata.prompt_token_count
-            context_usage["candidate_tokens"] += (
-                resp.usage_metadata.candidates_token_count
+        nonlocal previous_interaction_id
+        kwargs = {
+            "model": args.model,
+            "input": message,
+            "system_instruction": system_instruction,
+            "tools": interaction_tools,
+            "generation_config": generation_config,
+            "store": True,
+        }
+        if previous_interaction_id:
+            kwargs["previous_interaction_id"] = previous_interaction_id
+        resp = client.interactions.create(**kwargs)
+        if getattr(resp, "id", None):
+            previous_interaction_id = resp.id
+            for cid in getattr(resp, "continuation_ids", None) or [resp.id]:
+                if cid not in created_interaction_ids:
+                    created_interaction_ids.append(cid)
+        usage = getattr(resp, "usage", None)
+        if usage:
+            prompt_toks = getattr(usage, "initial_input_tokens", None) or getattr(
+                usage, "total_input_tokens", None
             )
+            if prompt_toks:
+                context_usage["prompt_tokens"] = prompt_toks
+            if getattr(usage, "total_output_tokens", None):
+                context_usage["candidate_tokens"] += usage.total_output_tokens
 
             # Print reactive usage to stderr for human readability
             rem_pct = 100 * (
@@ -1043,14 +1106,6 @@ What is your first action?"""
                 file=sys.stderr,
             )
         return resp
-
-    def extract_text(response):
-        text_output = ""
-        if response.candidates and response.candidates[0].content.parts:
-            for part in response.candidates[0].content.parts:
-                if part.text:
-                    text_output += part.text
-        return text_output.strip()
 
     try:
         session_start = time.perf_counter()
@@ -1066,16 +1121,14 @@ What is your first action?"""
         task_result = None
 
         while task_result is None:
-            function_calls = []
-            if response.candidates and response.candidates[0].content.parts:
-                function_calls = [
-                    part.function_call
-                    for part in response.candidates[0].content.parts
-                    if part.function_call
-                ]
+            function_calls = [
+                s
+                for s in (getattr(response, "steps", None) or [])
+                if getattr(s, "type", None) == "function_call"
+            ]
 
             if not function_calls:
-                text = extract_text(response)
+                text = (getattr(response, "output_text", None) or "").strip()
                 print(
                     f"[agent] Model responded without tool call: {text}",
                     file=sys.stderr,
@@ -1089,7 +1142,7 @@ What is your first action?"""
 
                 step_start = time.perf_counter()
 
-                args_dict = dict(fc.args) if fc.args else {}
+                args_dict = dict(fc.arguments) if fc.arguments else {}
                 result = fn(**args_dict)
 
                 elapsed_ms = int((time.perf_counter() - step_start) * 1000)
@@ -1109,6 +1162,7 @@ What is your first action?"""
                 )
 
                 # Check if it is a dictionary (our tools return dicts)
+                img_part = None
                 if isinstance(result, dict):
                     if fc.name == "complete_task":
                         task_result = result
@@ -1118,7 +1172,6 @@ What is your first action?"""
                     result["session_elapsed_ms"] = session_elapsed_ms
 
                     # Capture state for the function response (unless complete)
-                    parts_list = []
                     if fc.name != "complete_task":
                         xml_str, img_part, screenshot_path = capture_state_as_parts(
                             step
@@ -1150,17 +1203,20 @@ What is your first action?"""
                                 result["message"] = task_result["reason"]
 
                         if img_part:
-                            result["screenshot"] = {"$ref": f"step_{step:03d}.jpg"}
-                            parts_list.append(img_part)
+                            result["screenshot"] = "attached"
 
+                result_payload = (
+                    [{"type": "text", "text": json.dumps(result)}, img_part]
+                    if img_part
+                    else result
+                )
                 tool_results.append(
-                    types.Part.from_function_response(
-                        name=fc.name,
-                        response=result,
-                        parts=parts_list
-                        if "parts_list" in locals() and parts_list
-                        else None,
-                    )
+                    {
+                        "type": "function_result",
+                        "call_id": fc.id,
+                        "name": fc.name,
+                        "result": result_payload,
+                    }
                 )
 
                 if task_result is not None:
@@ -1191,6 +1247,12 @@ What is your first action?"""
             file=sys.stderr,
         )
         sys.exit(1)
+    finally:
+        for cid in reversed(created_interaction_ids):
+            try:
+                client.interactions.delete(cid, timeout=15.0)
+            except Exception:
+                pass
 
 
 def sigterm_handler(signum, frame):

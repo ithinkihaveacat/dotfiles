@@ -234,7 +234,7 @@ def serve_http(handler_cls):
 
 def main() -> int:
     caxton = load_caxton()
-    tap = Tap(79)
+    tap = Tap(80)
 
     with tempfile.TemporaryDirectory(prefix="test-caxton-") as tmp:
         work = Path(tmp).resolve()
@@ -1780,24 +1780,19 @@ def main() -> int:
         sleep_log: list[float] = []
         exhaust_tel = work / "exhaust_stall.json"
 
-        class FakeStallChat:
-            def __init__(self):
-                self.calls = 0
-
-            def send_message(self, message, config=None):
-                self.calls += 1
-                raise httpx.ReadTimeout("stalled")
-
         class FakeStallClient:
             def __init__(self, api_key=None):
                 self.models = self
-                self.chats = self
+                self.interactions = self
+                self.vertexai = False
+                self.calls = 0
 
             def get(self, **kwargs):
                 raise RuntimeError("404 stub")
 
             def create(self, **kwargs):
-                return FakeStallChat()
+                self.calls += 1
+                raise httpx.ReadTimeout("stalled")
 
         real_sleep = time.sleep
 
@@ -1899,6 +1894,7 @@ def main() -> int:
         # Tests 77-78 (was T76-T77): Wire CONTINUATION + MAX_TOKENS against shared local HTTP server
         limit_script: list[str] = []
         limit_reqs: list[dict] = []
+        limit_deletes: list[str] = []
         limit_lock = threading.Lock()
 
         class ScriptedHandler(http.server.BaseHTTPRequestHandler):
@@ -1908,6 +1904,14 @@ def main() -> int:
                 self.end_headers()
                 self.wfile.write(b'{"error": {"code": 404, "message": "stub"}}')
 
+            def do_DELETE(self):
+                with limit_lock:
+                    limit_deletes.append(self.path)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b"{}")
+
             def do_POST(self):
                 body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
                 obj = json.loads(body)
@@ -1915,14 +1919,16 @@ def main() -> int:
                 with limit_lock:
                     limit_reqs.append(obj)
                     idx = min(len(limit_reqs), len(limit_script)) - 1
-                    candidate = json.loads(limit_script[idx])
-                payload = {
-                    "candidates": [candidate],
-                    "usageMetadata": {
-                        "promptTokenCount": 100,
-                        "candidatesTokenCount": 10,
+                    payload = json.loads(limit_script[idx])
+                payload.setdefault("id", f"inter-{idx + 1}")
+                payload.setdefault(
+                    "usage",
+                    {
+                        "total_input_tokens": 100,
+                        "total_output_tokens": 10,
+                        "total_cached_tokens": 40,
                     },
-                }
+                )
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
@@ -1936,17 +1942,24 @@ def main() -> int:
 
         with serve_http(ScriptedHandler) as (_, limit_url):
 
-            def run_limited(lines: list[str]):
+            def run_limited(lines: list[str], extra_args: list[str] | None = None):
                 with limit_lock:
                     limit_script[:] = lines
                     limit_reqs.clear()
+                    limit_deletes.clear()
                 if limit_tel.exists():
                     limit_tel.unlink()
                 if limit_state.exists():
                     shutil.rmtree(limit_state)
                 return run_inproc(
                     caxton,
-                    ["Audit the notes", "--no-search", "--timeout", "60"],
+                    [
+                        "Audit the notes",
+                        "--no-search",
+                        "--timeout",
+                        "60",
+                        *(extra_args or []),
+                    ],
                     cwd=single_repo,
                     env={
                         "CAXTON_MAX_OUTPUT_TOKENS": None,
@@ -1958,11 +1971,53 @@ def main() -> int:
                     },
                 )
 
-            # Test 77 (was T76): max_output_tokens + CONTINUATION hops merged
+            # Test 77 (was T76): max_output_tokens + continuation hops + multi-turn previous_interaction_id
             rc77, out77, err77 = run_limited(
                 [
-                    '{"content": {"role": "model", "parts": [{"text": "Planning.", "thought": true}]}, "finishReason": "CONTINUATION", "continuationToken": "dG9rZW4tMQ=="}',
-                    '{"content": {"role": "model", "parts": [{"functionCall": {"name": "complete_task", "args": {"success": true, "report": "Long report."}}}]}, "finishReason": "STOP"}',
+                    json.dumps(
+                        {
+                            "id": "inter-hop-1",
+                            "status": "requires_continuation",
+                            "continuation_token": "dG9rZW4tMQ==",
+                            "steps": [
+                                {
+                                    "type": "thought",
+                                    "summary": [{"type": "text", "text": "Planning."}],
+                                }
+                            ],
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "id": "inter-hop-2",
+                            "status": "requires_action",
+                            "steps": [
+                                {
+                                    "type": "function_call",
+                                    "id": "call-1",
+                                    "name": "list_files",
+                                    "arguments": {},
+                                }
+                            ],
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "id": "inter-turn-2",
+                            "status": "requires_action",
+                            "steps": [
+                                {
+                                    "type": "function_call",
+                                    "id": "call-2",
+                                    "name": "complete_task",
+                                    "arguments": {
+                                        "success": True,
+                                        "report": "Long report.",
+                                    },
+                                }
+                            ],
+                        }
+                    ),
                 ]
             )
             tel77 = (
@@ -1971,34 +2026,57 @@ def main() -> int:
                 else {}
             )
             reqs77 = list(limit_reqs)
+            dels77 = list(limit_deletes)
             tap.check(
-                "Sends max_output_tokens and merges CONTINUATION hops into one turn",
+                "Sends max_output_tokens, merges continuation hops, chains turns, and cleans up",
                 rc77 == 0
-                and len(reqs77) == 2
+                and len(reqs77) == 3
+                and len(dels77) == 3
                 and all(
-                    r["generationConfig"]["maxOutputTokens"] == 131072
+                    r["generation_config"]["max_output_tokens"] == 131072
                     and r.get("_x_server_timeout") == "1800"
                     for r in reqs77
                 )
-                and "continuationToken" not in reqs77[0]
-                and reqs77[1].get("continuationToken") == "dG9rZW4tMQ=="
-                and reqs77[1]["contents"] == reqs77[0]["contents"]
+                and "continuation_token" not in reqs77[0]
+                and reqs77[1].get("continuation_token") == "dG9rZW4tMQ=="
+                and reqs77[1].get("previous_interaction_id") == "inter-hop-1"
+                and reqs77[2].get("previous_interaction_id") == "inter-hop-2"
+                and reqs77[2]["input"][0]["type"] == "function_result"
+                and reqs77[2]["input"][0]["call_id"] == "call-1"
                 and tel77.get("status") == "Succeeded"
                 and tel77.get("max_output_tokens") == 131072
                 and tel77.get("long_decode_turns") == 1
                 and tel77.get("finish_reason") == "STOP"
                 and tel77.get("prompt_tokens") == 100
-                and tel77.get("input_tokens_total") == 200
+                and tel77.get("input_tokens_total") == 300
+                and tel77.get("cached_tokens") == 120
                 and tel77.get("partial_report") is None
                 and "Long report." in out77.splitlines()
                 and "complete_task(success=True) -> OK" in err77,
-                f"rc={rc77} reqs={len(reqs77)} tel={tel77!r}\n{out77}\n{err77}",
+                f"rc={rc77} reqs={len(reqs77)} dels={len(dels77)} tel={tel77!r}\n{out77}\n{err77}",
             )
 
             # Test 78 (was T77): MAX_TOKENS without tool call exits 1 and keeps partial text
             rc78, out78, err78 = run_limited(
                 [
-                    '{"content": {"role": "model", "parts": [{"text": "Thinking.", "thought": true}, {"text": "## Partial findings"}]}, "finishReason": "MAX_TOKENS"}'
+                    json.dumps(
+                        {
+                            "status": "incomplete",
+                            "steps": [
+                                {
+                                    "type": "thought",
+                                    "summary": [{"type": "text", "text": "Thinking."}],
+                                },
+                                {
+                                    "type": "model_output",
+                                    "content": [
+                                        {"type": "text", "text": "## Partial findings"}
+                                    ],
+                                },
+                            ],
+                            "output_text": "## Partial findings",
+                        }
+                    )
                 ]
             )
             resp_files = list(limit_state.glob("response_*.md"))
@@ -2025,6 +2103,62 @@ def main() -> int:
                 and tel78.get("partial_report") == "## Partial findings"
                 and tel78.get("finish_reason") == "MAX_TOKENS",
                 f"rc={rc78} tel={tel78!r}\n{out78}\n{err78}",
+            )
+
+            # Test 80: dict-body quota_ids, __cause__ status codes, and --thinking none on Gemini 4 vs Flash
+            class FakeDictBodyError(Exception):
+                def __init__(self):
+                    self.status_code = 429
+                    self.body = {
+                        "error": {
+                            "details": [
+                                {
+                                    "violations": [
+                                        {"quotaId": "GenerateRequestsPerDayPerProject"}
+                                    ]
+                                }
+                            ]
+                        }
+                    }
+
+            wrapped_err = RuntimeError("continuation failed")
+            wrapped_err.__cause__ = FakeDictBodyError()
+
+            done_turn = json.dumps(
+                {
+                    "status": "requires_action",
+                    "steps": [
+                        {
+                            "type": "function_call",
+                            "id": "call-done",
+                            "name": "complete_task",
+                            "arguments": {"success": True, "report": "ok"},
+                        }
+                    ],
+                }
+            )
+            rc80a, _, err80a = run_limited(
+                [done_turn], ["--thinking", "none", "--model", "gemini-4-carbon"]
+            )
+            req80a = limit_reqs[0] if limit_reqs else {}
+            rc80b, _, _ = run_limited(
+                [done_turn], ["--thinking", "none", "--model", "gemini-3.8-flash"]
+            )
+            req80b = limit_reqs[0] if limit_reqs else {}
+            tap.check(
+                "Parses dict-body quota_ids, walks __cause__ status codes, and maps --thinking none safely",
+                caxton.quota_ids(FakeDictBodyError())
+                == ["GenerateRequestsPerDayPerProject"]
+                and caxton.quota_ids(wrapped_err)
+                == ["GenerateRequestsPerDayPerProject"]
+                and caxton.error_status_code(wrapped_err) == 429
+                and rc80a == 0
+                and req80a.get("generation_config", {}).get("thinking_level") == "low"
+                and "does not support minimal thinking; using 'low'" in err80a
+                and rc80b == 0
+                and req80b.get("generation_config", {}).get("thinking_level")
+                == "minimal",
+                f"rc=({rc80a},{rc80b}) req80a={req80a.get('generation_config')} req80b={req80b.get('generation_config')}",
             )
 
         # Test 79 (was T78): --max-output-tokens default, env, precedence, validation (reuse REPO!)

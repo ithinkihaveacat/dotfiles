@@ -459,14 +459,14 @@ initial prompt — is controlled by `--inline`/`--no-inline`.
   s plus 1 s per 1k input tokens, so a single stalled request cannot use the
   whole `--timeout`.
 - `--max-output-tokens N`: Ceiling on thinking plus output tokens for each model
-  turn (e.g. `256k`; default 131072; env `CAXTON_MAX_OUTPUT_TOKENS`). Without
-  it, a turn stops at the 32k non-streaming per-request cap, which thinking plus
-  a long `complete_task` report can exceed. Above 65,536 the API ends each hop
-  with finish reason `CONTINUATION`, and `google-genai`'s automatic continuation
-  resends the turn with the continuation token and merges the hops (function
-  calls included) into one response. A turn that still reaches the ceiling
-  without a tool call ends the run with exit status 1; any text it wrote is
-  printed and saved as a partial report.
+  turn (e.g. `256k`; default 131072; env `CAXTON_MAX_OUTPUT_TOKENS`). Above
+  65,536 the Interactions API ends each hop with status `requires_continuation`,
+  and `google-genai`'s automatic continuation resends the turn with the
+  continuation token and merges the hops (function calls included) into one
+  response. Caxton chains turns server-side with `previous_interaction_id`
+  (`store=True`) and deletes stored interactions best-effort on exit. A turn
+  that still reaches the ceiling without a tool call ends the run with exit
+  status 1; any text it wrote is printed and saved as a partial report.
 
 `PROMPT` is the only positional argument and must come before the path options,
 which each consume every following path.
