@@ -216,14 +216,10 @@ def extract_retry_delay(exc: Exception) -> float | None:
 
 THINKING_LEVELS = ("high", "medium", "low")
 
-# max_output_tokens caps thinking and answer together. Without it a response
-# stops at the per-request cap (64k tokens streamed), which thinking at 'high'
-# on a large prompt can nearly exhaust. With background=True (the default),
-# the Interactions API continues server-side past 64k (up to 1M output tokens);
-# with --no-store (stateless), google-genai's automatic_continuation follows
-# requires_continuation hops in-stream.
+# max_output_tokens caps thinking and answer together. With background=True on
+# the Interactions API, the server continues past the 64k per-request cap (up
+# to 1M output tokens) without client-side continuation hops.
 DEFAULT_MAX_OUTPUT_TOKENS = 131072
-
 TERMINAL_INTERACTION_STATUSES = {
     "completed",
     "incomplete",
@@ -235,18 +231,16 @@ TERMINAL_INTERACTION_STATUSES = {
 
 def status_to_finish_reason(status: str) -> str:
     """Map an Interactions API status string to a canonical finish reason."""
-    normalized = status.strip().lower()
-    if not normalized:
-        return ""
-    if normalized == "completed":
+    s = status.strip().lower()
+    if s == "completed":
         return "STOP"
-    if normalized in ("incomplete", "budget_exceeded"):
+    if s in ("incomplete", "budget_exceeded"):
         return "MAX_TOKENS"
-    return normalized.upper()
+    return s.upper()
 
 
 def error_status_code(exc: Exception) -> int | None:
-    """Extract an HTTP status code from either APIError or Interactions GenAiError."""
+    """Extract an HTTP status code from APIError or Interactions GenAiError."""
     code = getattr(exc, "code", None)
     if code is None:
         code = getattr(exc, "status_code", None)
@@ -255,36 +249,27 @@ def error_status_code(exc: Exception) -> int | None:
 
 def is_timeout_error(exc: Exception) -> bool:
     """Whether exc represents a client-side request or stream read timeout."""
-    if isinstance(exc, (TimeoutError, httpx.TimeoutException, httpx2.TimeoutException)):
-        return True
-    if type(exc).__name__ == "APITimeoutError":
-        return True
-    cause = exc.__cause__
-    return isinstance(
-        cause, (TimeoutError, httpx.TimeoutException, httpx2.TimeoutException)
+    timeout_types = (TimeoutError, httpx.TimeoutException, httpx2.TimeoutException)
+    return (
+        isinstance(exc, timeout_types)
+        or type(exc).__name__ == "APITimeoutError"
+        or isinstance(exc.__cause__, timeout_types)
     )
 
 
 def is_transport_error(exc: Exception) -> bool:
     """Whether exc represents a non-timeout connection or transport drop."""
-    if is_timeout_error(exc):
-        return False
-    if isinstance(exc, httpx.TransportError):
-        return True
-    if type(exc).__name__ == "APIConnectionError":
-        return True
-    return isinstance(exc.__cause__, httpx.TransportError)
+    return not is_timeout_error(exc) and (
+        isinstance(exc, httpx.TransportError)
+        or type(exc).__name__ == "APIConnectionError"
+        or isinstance(exc.__cause__, httpx.TransportError)
+    )
 
 
 def content_type_for_mime(mime_type: str) -> str:
     """Map a MIME type to the Interactions API input content type."""
-    if mime_type.startswith("image/"):
-        return "image"
-    if mime_type.startswith("audio/"):
-        return "audio"
-    if mime_type.startswith("video/"):
-        return "video"
-    return "document"
+    prefix = mime_type.split("/", 1)[0]
+    return prefix if prefix in ("image", "audio", "video") else "document"
 
 
 def raise_interaction_error(err_obj: Any) -> None:
@@ -527,7 +512,6 @@ def wants_help(argv: list[str]) -> bool:
             "--thinking",
             "--request-timeout",
             "--max-output-tokens",
-            "--continue",
         ):
             skip_next = True
     return False
@@ -546,10 +530,10 @@ Google Search (or Google Maps) and optional sandboxed Python code execution.
 The Oracle is purely analytical; it processes massive context payloads to
 synthesize authoritative answers and reports without mutating files on disk.
 
-Stateless by default: every invocation is an independent consultation unless
---continue ID is passed to resume a stored interaction. Never write "as you
-suggested earlier" unless you pass --continue ID or attach the earlier answer
-from the state directory (see --serialize).
+Stateless: every invocation is an independent, one-shot consultation. The
+Oracle retains nothing between calls — including your own earlier oracle calls
+in the same session. Never write "as you suggested earlier"; attach the earlier
+answer instead (answers are saved to the state directory, see --serialize).
 
 Best Practices for Context:
   To get the most out of the Oracle, you must provide comprehensive context.
@@ -569,9 +553,9 @@ Best Practices for Context:
   - Session Brief: Much of what the Oracle needs is not in any file —
     requirements, decisions, and history from your conversation. Write them
     into a notes file and pass it as context; do not rely on the prompt alone.
-  - Follow-ups: To continue a previous consultation, pass --continue ID using
-    the interaction ID printed after the prior run (avoids resending context),
-    or attach the saved answer from the state directory as a context file.
+  - Follow-ups: To continue a previous consultation, attach the saved answer
+    (and, if useful, the saved payload) from the state directory as context files
+    alongside your new question.
   - Persona & Audience: Who are you, and who is this answer for?
   - Goals & Intent: What is the ultimate objective of this request?
   - Success Criteria: How will you know the answer is correct or useful?
@@ -611,18 +595,11 @@ Options:
                         1k input tokens).
   --max-output-tokens N
                         Ceiling on thinking plus answer tokens for the response
-                        (default: 131072). With background execution enabled
-                        (default), the server continues past 64k automatically;
-                        with --no-store, continuation hops are issued in-stream.
+                        (default: 131072). Above 65536 the server continues
+                        long-running generation automatically in the background.
   --serialize           Save the request payload and the answer to files in the state
                         directory (~/.local/state/oracle/). (Default: on).
   --no-serialize        Disable saving the payload and answer to the state directory.
-  --continue ID         Continue a previous stored interaction by ID
-                        (previous_interaction_id) without resending prior context.
-                        Cannot be combined with --no-store.
-  --no-store            Disable server-side interaction storage (store=false,
-                        background=false). Disables resumable background streaming
-                        and --continue follow-ups.
   -h, --help            Display this help message and exit.
 
 Environment:
@@ -699,8 +676,6 @@ def main():
     use_code = False
     dry_run = False
     serialize = True
-    store = True
-    continue_id: str | None = None
     tools_str = "search"
     model_id = os.environ.get("GEMINI_MODEL", "gemini-4-carbon")
     thinking_level = os.environ.get("ORACLE_THINKING") or "high"
@@ -795,29 +770,6 @@ def main():
                 serialize = True
             elif arg == "--no-serialize":
                 serialize = False
-            elif arg == "--no-store":
-                store = False
-            elif arg == "--continue":
-                if i + 1 >= len(argv):
-                    print(
-                        f"{os.path.basename(sys.argv[0])}: error: --continue requires an argument",
-                        file=sys.stderr,
-                    )
-                    telemetry_status = "Error"
-                    telemetry_error = "--continue requires an argument"
-                    sys.exit(1)
-                continue_id = argv[i + 1]
-                i += 1
-            elif arg.startswith("--continue="):
-                continue_id = arg.split("=", 1)[1]
-                if not continue_id:
-                    print(
-                        f"{os.path.basename(sys.argv[0])}: error: --continue requires an argument",
-                        file=sys.stderr,
-                    )
-                    telemetry_status = "Error"
-                    telemetry_error = "--continue requires an argument"
-                    sys.exit(1)
             elif arg == "--model":
                 if i + 1 >= len(argv):
                     print(
@@ -944,16 +896,6 @@ def main():
                 telemetry_error = err
                 sys.exit(1)
             max_output_tokens = int(raw_max_output_tokens)
-
-        if continue_id is not None and not store:
-            err = "--continue cannot be combined with --no-store"
-            print(
-                f"{os.path.basename(sys.argv[0])}: error: {err}",
-                file=sys.stderr,
-            )
-            telemetry_status = "Error"
-            telemetry_error = err
-            sys.exit(1)
 
         if not args:
             print(
@@ -1276,11 +1218,7 @@ def main():
             f"{os.path.basename(sys.argv[0])}: {model_id} | {tools_str} | thinking={thinking_level} | {context_str}",
             file=sys.stderr,
         )
-        if (
-            total_text_size < SMALL_PAYLOAD_SIZE
-            and total_media_count == 0
-            and not continue_id
-        ):
+        if total_text_size < SMALL_PAYLOAD_SIZE and total_media_count == 0:
             print(
                 f"{os.path.basename(sys.argv[0])}: note: payload is small"
                 f" ({total_text_size / 1024:.0f} KB); the Oracle handles hundreds"
@@ -1375,7 +1313,6 @@ def main():
         timeout_retries = 0
         in_thought = False
         last_event_id: str | None = None
-        use_background = store
         estimate = approx_tokens(system_instruction) + approx_tokens(parts)
         timeout_sec = request_timeout(estimate, request_timeout_override)
         call_timeout = httpx.Timeout(timeout_sec) if timeout_sec else None
@@ -1396,53 +1333,45 @@ def main():
             if not usage:
                 return
             if prompt_tokens == 0:
-                init_in = getattr(usage, "initial_input_tokens", None)
-                tot_in = getattr(usage, "total_input_tokens", None)
-                if init_in:
-                    prompt_tokens = init_in
-                elif tot_in:
-                    prompt_tokens = tot_in
-            tot_out = getattr(usage, "total_output_tokens", None)
-            if tot_out:
-                candidate_tokens += tot_out
-            tot_thought = getattr(usage, "total_thought_tokens", None)
-            if tot_thought:
-                thinking_tokens += tot_thought
-            tot_cached = getattr(usage, "total_cached_tokens", None)
-            if tot_cached:
-                cached_tokens += tot_cached
+                prompt_tokens = (
+                    getattr(usage, "initial_input_tokens", None)
+                    or getattr(usage, "total_input_tokens", None)
+                    or 0
+                )
+            candidate_tokens += getattr(usage, "total_output_tokens", None) or 0
+            thinking_tokens += getattr(usage, "total_thought_tokens", None) or 0
+            cached_tokens += getattr(usage, "total_cached_tokens", None) or 0
 
         def consume_stream(stream: Any) -> None:
             nonlocal interaction_id, interaction_status, in_thought, last_event_id
             for event in stream:
-                ev_id = getattr(event, "event_id", None)
-                if ev_id:
-                    last_event_id = ev_id
-
+                if getattr(event, "event_id", None):
+                    last_event_id = event.event_id
                 ev_type = getattr(event, "event_type", None)
-                if ev_type == "interaction.created":
+                if ev_type in ("interaction.created", "interaction.completed"):
                     inter = getattr(event, "interaction", None)
                     if inter:
-                        if getattr(inter, "id", None):
-                            interaction_id = inter.id
+                        interaction_id = getattr(inter, "id", None) or interaction_id
                         if getattr(inter, "status", None):
                             interaction_status = str(inter.status)
+                        if getattr(inter, "continuation_token", None):
+                            continuation_tokens.add(str(inter.continuation_token))
+                        if ev_type == "interaction.completed":
+                            record_usage(getattr(inter, "usage", None))
                 elif ev_type == "interaction.status_update":
-                    if getattr(event, "interaction_id", None):
-                        interaction_id = event.interaction_id
+                    interaction_id = (
+                        getattr(event, "interaction_id", None) or interaction_id
+                    )
                     if getattr(event, "status", None):
                         interaction_status = str(event.status)
-                    cont_tok = getattr(event, "continuation_token", None)
-                    if cont_tok:
-                        continuation_tokens.add(str(cont_tok))
+                    if getattr(event, "continuation_token", None):
+                        continuation_tokens.add(str(event.continuation_token))
                 elif ev_type == "step.delta":
                     delta = getattr(event, "delta", None)
                     delta_type = getattr(delta, "type", None)
                     if delta_type == "thought_summary":
                         content = getattr(delta, "content", None)
-                        thought_text = (
-                            getattr(content, "text", None) if content else None
-                        )
+                        thought_text = getattr(content, "text", None)
                         if thought_text:
                             if not in_thought:
                                 print(
@@ -1453,43 +1382,24 @@ def main():
                                 )
                                 in_thought = True
                             print(thought_text, end="", file=sys.stderr, flush=True)
-                    elif delta_type == "text":
-                        text = getattr(delta, "text", None)
-                        if text:
-                            if in_thought:
-                                print(
-                                    "\033[0m\n\n",
-                                    end="",
-                                    file=sys.stderr,
-                                    flush=True,
-                                )  # Dim end
-                                in_thought = False
-                            print(text, end="", flush=True)
-                            answer_chunks.append(text)
-                elif ev_type == "interaction.completed":
-                    inter = getattr(event, "interaction", None)
-                    if inter:
-                        if getattr(inter, "id", None):
-                            interaction_id = inter.id
-                        if getattr(inter, "status", None):
-                            interaction_status = str(inter.status)
-                        cont_tok = getattr(inter, "continuation_token", None)
-                        if cont_tok:
-                            continuation_tokens.add(str(cont_tok))
-                        record_usage(getattr(inter, "usage", None))
+                    elif delta_type == "text" and getattr(delta, "text", None):
+                        if in_thought:
+                            print("\033[0m\n\n", end="", file=sys.stderr, flush=True)
+                            in_thought = False
+                        print(delta.text, end="", flush=True)
+                        answer_chunks.append(delta.text)
                 elif ev_type == "error":
                     raise_interaction_error(getattr(event, "error", None))
 
             if (
-                use_background
-                and interaction_id
+                interaction_id
                 and interaction_status not in TERMINAL_INTERACTION_STATUSES
             ):
                 raise_incomplete_background_stream()
 
         while True:
             try:
-                if use_background and interaction_id:
+                if interaction_id:
                     stream = client.interactions.get(
                         interaction_id,
                         stream=True,
@@ -1503,17 +1413,14 @@ def main():
                         "input": parts,
                         "system_instruction": system_instruction,
                         "generation_config": generation_config,
-                        "background": use_background,
+                        "background": True,
                         "stream": True,
-                        "store": store,
-                        "automatic_continuation": True,
+                        "store": True,
                         "timeout": call_timeout,
                         "extra_headers": extra_headers,
                     }
                     if tools_config:
                         create_kwargs["tools"] = tools_config
-                    if continue_id:
-                        create_kwargs["previous_interaction_id"] = continue_id
                     stream = client.interactions.create(**create_kwargs)
 
                 consume_stream(stream)
@@ -1532,7 +1439,7 @@ def main():
                 transport_dropped = is_transport_error(e)
                 status_code = error_status_code(e)
                 delay = extract_retry_delay(e)
-                can_resume = bool(use_background and interaction_id)
+                can_resume = bool(interaction_id)
 
                 # Retry 429 only if a deterministic retry delay is provided (transient rate limit).
                 # Hard quota errors (plan/billing limits without a retry window) fail immediately.
@@ -1629,11 +1536,6 @@ def main():
                 time.sleep(sleep_sec)
 
         finish_reason = status_to_finish_reason(interaction_status)
-        if store and interaction_id:
-            print(
-                f"{os.path.basename(sys.argv[0])}: interaction id: {interaction_id} (pass --continue {interaction_id} to follow up)",
-                file=sys.stderr,
-            )
 
         incomplete = None
         if finish_reason == "MAX_TOKENS":

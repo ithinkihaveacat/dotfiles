@@ -158,9 +158,67 @@ def sse_event(obj: dict) -> bytes:
     return b"data: " + json.dumps(obj).encode("utf-8") + b"\r\n\r\n"
 
 
+def sse_interaction(
+    inter_id: str,
+    texts: list[str] | tuple[str, ...] = (),
+    *,
+    thought: str | None = None,
+    status: str = "completed",
+    usage: dict | None = None,
+    include_created: bool = True,
+    include_completed: bool = True,
+    event_prefix: str = "evt",
+) -> bytes:
+    events: list[bytes] = []
+    if include_created:
+        events.append(
+            sse_event(
+                {
+                    "event_type": "interaction.created",
+                    "interaction": {"id": inter_id, "status": "in_progress"},
+                }
+            )
+        )
+    idx = 0
+    if thought:
+        events.append(
+            sse_event(
+                {
+                    "event_type": "step.delta",
+                    "index": idx,
+                    "event_id": f"{event_prefix}-thought",
+                    "delta": {
+                        "type": "thought_summary",
+                        "content": {"type": "text", "text": thought},
+                    },
+                }
+            )
+        )
+        idx += 1
+    for i, text in enumerate(texts, 1):
+        events.append(
+            sse_event(
+                {
+                    "event_type": "step.delta",
+                    "index": idx,
+                    "event_id": f"{event_prefix}-{i}",
+                    "delta": {"type": "text", "text": text},
+                }
+            )
+        )
+    if include_completed:
+        inter: dict = {"id": inter_id, "status": status}
+        if usage is not None:
+            inter["usage"] = usage
+        events.append(
+            sse_event({"event_type": "interaction.completed", "interaction": inter})
+        )
+    return b"".join(events)
+
+
 def main() -> int:
     oracle = load_oracle()
-    tap = Tap(29)
+    tap = Tap(28)
 
     with tempfile.TemporaryDirectory(prefix="test-oracle-") as tmp:
         work = Path(tmp).resolve()
@@ -540,40 +598,10 @@ def main() -> int:
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.end_headers()
-                payload = (
-                    sse_event(
-                        {
-                            "event_type": "interaction.created",
-                            "interaction": {
-                                "id": "inter-recover-1",
-                                "status": "in_progress",
-                            },
-                        }
-                    )
-                    + sse_event(
-                        {
-                            "event_type": "step.delta",
-                            "index": 0,
-                            "event_id": "evt-1",
-                            "delta": {
-                                "type": "text",
-                                "text": "Recovered oracle answer",
-                            },
-                        }
-                    )
-                    + sse_event(
-                        {
-                            "event_type": "interaction.completed",
-                            "interaction": {
-                                "id": "inter-recover-1",
-                                "status": "completed",
-                                "usage": {
-                                    "total_input_tokens": 12,
-                                    "total_output_tokens": 3,
-                                },
-                            },
-                        }
-                    )
+                payload = sse_interaction(
+                    "inter-recover-1",
+                    ["Recovered oracle answer"],
+                    usage={"total_input_tokens": 12, "total_output_tokens": 3},
                 )
                 self.wfile.write(payload)
                 self.wfile.flush()
@@ -768,37 +796,10 @@ def main() -> int:
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.end_headers()
-                payload = (
-                    sse_event(
-                        {
-                            "event_type": "interaction.created",
-                            "interaction": {
-                                "id": f"inter-cap-{len(captured_reqs)}",
-                                "status": "in_progress",
-                            },
-                        }
-                    )
-                    + sse_event(
-                        {
-                            "event_type": "step.delta",
-                            "index": 0,
-                            "event_id": "evt-1",
-                            "delta": {"type": "text", "text": "Stub answer"},
-                        }
-                    )
-                    + sse_event(
-                        {
-                            "event_type": "interaction.completed",
-                            "interaction": {
-                                "id": f"inter-cap-{len(captured_reqs)}",
-                                "status": "completed",
-                                "usage": {
-                                    "total_input_tokens": 10,
-                                    "total_output_tokens": 2,
-                                },
-                            },
-                        }
-                    )
+                payload = sse_interaction(
+                    f"inter-cap-{len(captured_reqs)}",
+                    ["Stub answer"],
+                    usage={"total_input_tokens": 10, "total_output_tokens": 2},
                 )
                 self.wfile.write(payload)
                 self.wfile.flush()
@@ -969,67 +970,23 @@ def main() -> int:
                     limit_reqs.append(json.loads(body))
                     idx = min(len(limit_reqs), len(limit_script)) - 1
                     line = limit_script[idx]
-                text, status, token = line.split("|")
-                inter_id = f"inter-hop-{idx + 1}"
-                events = [
-                    sse_event(
-                        {
-                            "event_type": "interaction.created",
-                            "interaction": {
-                                "id": inter_id,
-                                "status": "in_progress",
-                            },
-                        }
-                    ),
-                    sse_event(
-                        {
-                            "event_type": "step.delta",
-                            "index": 0,
-                            "event_id": f"evt-thought-{idx + 1}",
-                            "delta": {
-                                "type": "thought_summary",
-                                "content": {
-                                    "type": "text",
-                                    "text": "Planning the answer.",
-                                },
-                            },
-                        }
-                    ),
-                ]
-                if text:
-                    events.append(
-                        sse_event(
-                            {
-                                "event_type": "step.delta",
-                                "index": 1,
-                                "event_id": f"evt-text-{idx + 1}",
-                                "delta": {"type": "text", "text": text},
-                            }
-                        )
-                    )
-                completed_inter: dict = {
-                    "id": inter_id,
-                    "status": status,
-                    "usage": {
+                raw_texts, status = line.split("|")
+                texts = [t for t in raw_texts.split("::") if t]
+                payload = sse_interaction(
+                    f"inter-lim-{idx + 1}",
+                    texts,
+                    thought="Planning the answer.",
+                    status=status,
+                    usage={
                         "total_input_tokens": 10,
-                        "total_output_tokens": 5,
-                        "total_thought_tokens": 7,
+                        "total_output_tokens": 10,
+                        "total_thought_tokens": 14,
                     },
-                }
-                if token:
-                    completed_inter["continuation_token"] = token
-                events.append(
-                    sse_event(
-                        {
-                            "event_type": "interaction.completed",
-                            "interaction": completed_inter,
-                        }
-                    )
                 )
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.end_headers()
-                self.wfile.write(b"".join(events))
+                self.wfile.write(payload)
                 self.wfile.flush()
 
             def log_message(self, *args):
@@ -1058,14 +1015,8 @@ def main() -> int:
                     },
                 )
 
-            # Test 24: requires_continuation hops merged into one streamed answer (--no-store)
-            rc24, out24, err24 = run_limited(
-                [
-                    "Part one, |requires_continuation|dG9rZW4tMQ==",
-                    "part two.|completed|",
-                ],
-                ["--no-store"],
-            )
+            # Test 24: background streaming sends max_output_tokens and merges deltas
+            rc24, out24, err24 = run_limited(["Part one, ::part two.|completed"], [])
             ans24_p = extract_answer_path(err24)
             tel24 = (
                 json.loads(limit_tel.read_text(encoding="utf-8"))
@@ -1075,18 +1026,13 @@ def main() -> int:
             reqs24 = list(limit_reqs)
             ok24 = (
                 rc24 == 0
-                and len(reqs24) == 2
-                and all(
-                    r["generation_config"]["max_output_tokens"] == 131072
-                    for r in reqs24
-                )
-                and "continuation_token" not in reqs24[0]
-                and reqs24[1].get("continuation_token") == "dG9rZW4tMQ=="
+                and len(reqs24) == 1
+                and reqs24[0]["generation_config"]["max_output_tokens"] == 131072
+                and reqs24[0].get("background") is True
                 and tel24.get("status") == "Succeeded"
                 and tel24.get("max_output_tokens") == 131072
                 and tel24.get("finish_reason") == "STOP"
                 and tel24.get("interaction_status") == "completed"
-                and tel24.get("continuation_tokens") == 1
                 and tel24.get("truncated") is False
                 and tel24.get("candidate_tokens") == 10
                 and tel24.get("thinking_tokens") == 14
@@ -1095,14 +1041,14 @@ def main() -> int:
                 and ans24_p.read_text(encoding="utf-8") == "Part one, part two."
             )
             tap.check(
-                "Sends max_output_tokens and streams continuation hops as one answer",
+                "Sends max_output_tokens and streams background interaction deltas as one answer",
                 ok24,
                 f"rc={rc24} reqs={len(reqs24)} tel={tel24!r}\n{out24}\n{err24}",
             )
 
             # Test 25: incomplete keeps partial answer, warns, and exits 1
             rc25, out25, err25 = run_limited(
-                ["Cut off mid-sent|incomplete|"], ["--max-output-tokens", "70000"]
+                ["Cut off mid-sent|incomplete"], ["--max-output-tokens", "70000"]
             )
             ans25_p = extract_answer_path(err25)
             ans25_txt = ans25_p.read_text(encoding="utf-8") if ans25_p else ""
@@ -1134,8 +1080,8 @@ def main() -> int:
             )
 
             # Test 26: empty answer exits 1 with a warning
-            rc26a, _, err26a = run_limited(["|incomplete|"], [])
-            rc26b, _, err26b = run_limited(["|completed|"], [])
+            rc26a, _, err26a = run_limited(["|incomplete"], [])
+            rc26b, _, err26b = run_limited(["|completed"], [])
             tel26b = (
                 json.loads(limit_tel.read_text(encoding="utf-8"))
                 if limit_tel.is_file()
@@ -1226,25 +1172,15 @@ def main() -> int:
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.end_headers()
-                partial = sse_event(
-                    {
-                        "event_type": "interaction.created",
-                        "interaction": {
-                            "id": "inter-resume-42",
-                            "status": "in_progress",
-                        },
-                    }
-                ) + sse_event(
-                    {
-                        "event_type": "step.delta",
-                        "index": 0,
-                        "event_id": "evt-part-1",
-                        "delta": {"type": "text", "text": "First half, "},
-                    }
+                self.wfile.write(
+                    sse_interaction(
+                        "inter-resume-42",
+                        ["First half, "],
+                        include_completed=False,
+                        event_prefix="evt-part",
+                    )
                 )
-                self.wfile.write(partial)
                 self.wfile.flush()
-                # Close cleanly before interaction.completed to simulate mid-stream drop
 
             def do_GET(self):
                 with resume_lock:
@@ -1252,28 +1188,19 @@ def main() -> int:
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.end_headers()
-                rest = sse_event(
-                    {
-                        "event_type": "step.delta",
-                        "index": 0,
-                        "event_id": "evt-part-2",
-                        "delta": {"type": "text", "text": "second half."},
-                    }
-                ) + sse_event(
-                    {
-                        "event_type": "interaction.completed",
-                        "interaction": {
-                            "id": "inter-resume-42",
-                            "status": "completed",
-                            "usage": {
-                                "total_input_tokens": 20,
-                                "total_output_tokens": 8,
-                                "total_cached_tokens": 12,
-                            },
+                self.wfile.write(
+                    sse_interaction(
+                        "inter-resume-42",
+                        ["second half."],
+                        include_created=False,
+                        event_prefix="evt-rest",
+                        usage={
+                            "total_input_tokens": 20,
+                            "total_output_tokens": 8,
+                            "total_cached_tokens": 12,
                         },
-                    }
+                    )
                 )
-                self.wfile.write(rest)
                 self.wfile.flush()
 
             def log_message(self, *args):
@@ -1315,93 +1242,6 @@ def main() -> int:
             and resume_sleeps == [2.0],
             f"rc={rc28} posts={resume_posts} gets={resume_gets} sleeps={resume_sleeps}\n"
             f"tel={tel28!r}\n{out28}\n{err28}",
-        )
-
-        # Test 29: --continue and --no-store wire behavior and mutual-exclusion check
-        opts_reqs: list[dict] = []
-        opts_lock = threading.Lock()
-
-        class OptsCaptureHandler(http.server.BaseHTTPRequestHandler):
-            def do_POST(self):
-                body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
-                with opts_lock:
-                    opts_reqs.append(json.loads(body))
-                self.send_response(200)
-                self.send_header("Content-Type", "text/event-stream")
-                self.end_headers()
-                payload = (
-                    sse_event(
-                        {
-                            "event_type": "interaction.created",
-                            "interaction": {
-                                "id": "inter-opt-1",
-                                "status": "in_progress",
-                            },
-                        }
-                    )
-                    + sse_event(
-                        {
-                            "event_type": "step.delta",
-                            "index": 0,
-                            "event_id": "evt-opt-1",
-                            "delta": {"type": "text", "text": "Opt answer"},
-                        }
-                    )
-                    + sse_event(
-                        {
-                            "event_type": "interaction.completed",
-                            "interaction": {
-                                "id": "inter-opt-1",
-                                "status": "completed",
-                                "usage": {
-                                    "total_input_tokens": 5,
-                                    "total_output_tokens": 2,
-                                },
-                            },
-                        }
-                    )
-                )
-                self.wfile.write(payload)
-                self.wfile.flush()
-
-            def log_message(self, *args):
-                pass
-
-        with serve_http(OptsCaptureHandler) as (_, opts_url):
-            opts_env = {
-                **base_env,
-                "GEMINI_API_KEY": "stub",
-                "GOOGLE_GEMINI_BASE_URL": opts_url,
-            }
-            r29_cont = run_inproc(
-                oracle,
-                ["--no-serialize", "--continue", "prev-123", "Follow up"],
-                env=opts_env,
-            )
-            r29_nostore = run_inproc(
-                oracle,
-                ["--no-serialize", "--no-store", "Ephemeral question"],
-                env=opts_env,
-            )
-            r29_both = run_inproc(
-                oracle,
-                ["--no-serialize", "--continue", "prev-123", "--no-store", "Conflict"],
-                env=opts_env,
-            )
-        tap.check(
-            "--continue sends previous_interaction_id, --no-store disables storage/background, and combining them fails",
-            r29_cont[0] == 0
-            and r29_nostore[0] == 0
-            and r29_both[0] != 0
-            and len(opts_reqs) == 2
-            and opts_reqs[0].get("previous_interaction_id") == "prev-123"
-            and opts_reqs[0].get("store") is True
-            and opts_reqs[0].get("background") is True
-            and opts_reqs[1].get("store") is False
-            and opts_reqs[1].get("background") is False
-            and "previous_interaction_id" not in opts_reqs[1]
-            and "--continue cannot be combined with --no-store" in r29_both[2],
-            f"rcs=({r29_cont[0]},{r29_nostore[0]},{r29_both[0]}) reqs={opts_reqs!r}\n{r29_both[2]}",
         )
 
     return 1 if tap.failed else 0

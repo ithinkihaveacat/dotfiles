@@ -360,10 +360,10 @@ Google Search (or Google Maps) and optional sandboxed Python code execution.
 The Oracle is purely analytical; it processes massive context payloads to
 synthesize authoritative answers and reports without mutating files on disk.
 
-Stateless by default: every invocation is an independent consultation unless
---continue ID is passed to resume a stored interaction. Never write "as you
-suggested earlier" unless you pass --continue ID or attach the earlier answer
-from the state directory (see --serialize).
+Stateless: every invocation is an independent, one-shot consultation. The
+Oracle retains nothing between calls — including your own earlier oracle calls
+in the same session. Never write "as you suggested earlier"; attach the earlier
+answer instead (answers are saved to the state directory, see --serialize).
 
 Best Practices for Context:
   To get the most out of the Oracle, you must provide comprehensive context.
@@ -383,9 +383,9 @@ Best Practices for Context:
   - Session Brief: Much of what the Oracle needs is not in any file —
     requirements, decisions, and history from your conversation. Write them
     into a notes file and pass it as context; do not rely on the prompt alone.
-  - Follow-ups: To continue a previous consultation, pass --continue ID using
-    the interaction ID printed after the prior run (avoids resending context),
-    or attach the saved answer from the state directory as a context file.
+  - Follow-ups: To continue a previous consultation, attach the saved answer
+    (and, if useful, the saved payload) from the state directory as context files
+    alongside your new question.
   - Persona & Audience: Who are you, and who is this answer for?
   - Goals & Intent: What is the ultimate objective of this request?
   - Success Criteria: How will you know the answer is correct or useful?
@@ -425,18 +425,11 @@ Options:
                         1k input tokens).
   --max-output-tokens N
                         Ceiling on thinking plus answer tokens for the response
-                        (default: 131072). With background execution enabled
-                        (default), the server continues past 64k automatically;
-                        with --no-store, continuation hops are issued in-stream.
+                        (default: 131072). Above 65536 the server continues
+                        long-running generation automatically in the background.
   --serialize           Save the request payload and the answer to files in the state
                         directory (~/.local/state/oracle/). (Default: on).
   --no-serialize        Disable saving the payload and answer to the state directory.
-  --continue ID         Continue a previous stored interaction by ID
-                        (previous_interaction_id) without resending prior context.
-                        Cannot be combined with --no-store.
-  --no-store            Disable server-side interaction storage (store=false,
-                        background=false). Disables resumable background streaming
-                        and --continue follow-ups.
   -h, --help            Display this help message and exit.
 
 Environment:
