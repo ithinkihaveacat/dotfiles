@@ -132,6 +132,7 @@ def clean_env(tmp: Path, **overrides: str) -> dict[str, str]:
             "DAYBRIEF_PRIVATE_SKILLS": "",
             "DAYBRIEF_CHALK_DB": "",
             "DAYBRIEF_CALENDAR_ICS": "",
+            "DAYBRIEF_TRIPIT_ICS": "",
             "DAYBRIEF_OWNER_EMAILS": "",
             "DAYBRIEF_TIMEZONE": "Europe/London",
             "GEMINI_API_KEY": "",
@@ -966,6 +967,11 @@ def setup_populated_store_via_mock_gemini(tmp: Path) -> tuple[Path, str, str, st
             "item_dossiers": [
                 {
                     "item_id": item1_id,
+                    "why_generated_and_provenance": (
+                        "Crossed due-in-3-days TASK-00001 in taskgo "
+                        "(atlas/tasks/TASK-00001-winter-wheelset.md) with unread "
+                        "Pinboard bookmark bm0000000001."
+                    ),
                     "backing_facts_and_figures": "Due in 3 days; tension guide saved in Pinboard.",
                     "urls_and_paths": [
                         "atlas/tasks/TASK-00001-winter-wheelset.md",
@@ -976,6 +982,11 @@ def setup_populated_store_via_mock_gemini(tmp: Path) -> tuple[Path, str, str, st
                 },
                 {
                     "item_id": item2_id,
+                    "why_generated_and_provenance": (
+                        "Matched verified 30% Chalk drop p-nw-1 against preferred "
+                        "brand Northwave Craft in personal-profile/references/"
+                        "brands-and-preferences.md."
+                    ),
                     "backing_facts_and_figures": "Prev £200.00, now £140.00 (-30.0%) in Navy/M.",
                     "urls_and_paths": ["https://shop.example.test/nw-merino"],
                     "tradeoffs_and_rejected_options": "Omitted Generic Brand socks (non-preferred).",
@@ -1263,6 +1274,22 @@ def setup_populated_store_via_mock_gemini(tmp: Path) -> tuple[Path, str, str, st
         assert "Backstage Producer's Packet" in show_bg
         assert "Non-preferred brand Generic Brand" in show_bg
 
+        show_json = json.loads(
+            run_cli(["--dir", str(store), "show", "--json"], env=env).stdout
+        )
+        dossiers_by_id = {
+            d["item_id"]: d
+            for d in show_json["backstage_context_for_followups_only"]["item_dossiers"]
+        }
+        assert (
+            "Crossed due-in-3-days TASK-00001"
+            in dossiers_by_id[item1_id]["why_generated_and_provenance"]
+        )
+        assert (
+            "Northwave Craft"
+            in dossiers_by_id[item2_id]["why_generated_and_provenance"]
+        )
+
         show_item = json.loads(
             run_cli(
                 ["--dir", str(store), "show", brief_id, "--item", item1_id, "--json"],
@@ -1271,6 +1298,10 @@ def setup_populated_store_via_mock_gemini(tmp: Path) -> tuple[Path, str, str, st
         )
         assert show_item["item"]["id"] == item1_id
         assert "Due in 3 days" in show_item["dossier"]["backing_facts_and_figures"]
+        assert (
+            "Crossed due-in-3-days TASK-00001"
+            in show_item["dossier"]["why_generated_and_provenance"]
+        )
 
         listed = json.loads(
             run_cli(["--dir", str(store), "list", "--json"], env=env).stdout
@@ -1585,7 +1616,14 @@ def test_mcp_stdio(
         sc = today_res["structuredContent"]
         assert sc["brief_id"] == brief_id
         assert "Atlas winter wheelset" in sc["deliver_verbatim_to_user"]
+        assert "why_generated_and_provenance" in sc["presenter_rules"]
         assert "item_dossiers" in sc["backstage_context_for_followups_only"]
+        assert (
+            "Crossed due-in-3-days TASK-00001"
+            in sc["backstage_context_for_followups_only"]["item_dossiers"][0][
+                "why_generated_and_provenance"
+            ]
+        )
 
         # get_brief valid item dossier + not found isError
         dossier_res = client.request(
@@ -1596,6 +1634,12 @@ def test_mcp_stdio(
             },
         )["result"]
         assert dossier_res["structuredContent"]["item"]["id"] == item1_id
+        assert (
+            "Crossed due-in-3-days TASK-00001"
+            in dossier_res["structuredContent"]["dossier"][
+                "why_generated_and_provenance"
+            ]
+        )
 
         missing_res = client.request(
             "tools/call",
@@ -1838,6 +1882,12 @@ def test_mcp_http_access_and_logs(tmp: Path, store: Path, brief_id: str) -> str:
         http_sc = json.loads(brief_raw)["result"]["structuredContent"]
         assert http_sc["brief_id"] == brief_id
         assert "backstage_context_for_followups_only" in http_sc
+        assert (
+            "Crossed due-in-3-days TASK-00001"
+            in http_sc["backstage_context_for_followups_only"]["item_dossiers"][0][
+                "why_generated_and_provenance"
+            ]
+        )
 
         fb_req = json.dumps(
             {
@@ -1913,6 +1963,875 @@ def test_mcp_http_access_and_logs(tmp: Path, store: Path, brief_id: str) -> str:
     return f"HTTP Access RS256, 421/401/405 refusals, and mcp.jsonl verified ({len(records)} records)"
 
 
+def test_tripit_ics_horizons_and_sanitization(tmp: Path) -> str:
+    store = tmp / "tripit-store"
+    ref_date = datetime.date(2026, 11, 28)
+    upcoming_day = ref_date + datetime.timedelta(days=150)  # +150d (> +45d cal cap)
+    upcoming_end = upcoming_day + datetime.timedelta(days=3)
+    past_day = ref_date - datetime.timedelta(days=200)  # -200d (within -548d floor)
+    past_end = past_day + datetime.timedelta(days=3)
+    ancient_day = ref_date - datetime.timedelta(days=800)  # -800d (excluded)
+    ancient_end = ancient_day + datetime.timedelta(days=2)
+    cancelled_day = ref_date + datetime.timedelta(days=30)
+
+    def ymd(d: datetime.date) -> str:
+        return d.strftime("%Y%m%d")
+
+    tripit_lines = (
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "PRODID:-//Synthetic//TripIt Test//EN",
+        # 1. Upcoming flight (+150d) with inline & multiline sensitive tokens
+        "BEGIN:VEVENT",
+        "UID:tripit-flight-150@example.test",
+        f"DTSTART;TZID=Europe/London:{ymd(upcoming_day)}T072500",
+        f"DTEND;TZID=Europe/London:{ymd(upcoming_day)}T113500",
+        "SUMMARY:BA 2594 LGW to CTA (Confirmation #: XK92LP)",
+        "LOCATION:Gatwick Terminal S - Catania (PIN: 4412)",
+        (
+            "DESCRIPTION:Carrier BA 2594 departing Gatwick Terminal S for Catania\\n"
+            "Confirmation #: XK92LP\\n"
+            "Booking Reference: Q77M1P\\n"
+            "Record Locator: Z88Q1M\\n"
+            "Ticket #: 125-2345678901\\n"
+            "Frequent Flyer #: BA99887766\\n"
+            "KTN: 987654321\\n"
+            "PIN: 4412\\n"
+            "https://www.tripit.com/trip/show/id/999"
+        ),
+        "END:VEVENT",
+        # 2. Upcoming hotel (+150d) with inline tokens to exercise inline regex too
+        "BEGIN:VEVENT",
+        "UID:tripit-hotel-150@example.test",
+        f"DTSTART;VALUE=DATE:{ymd(upcoming_day)}",
+        f"DTEND;VALUE=DATE:{ymd(upcoming_end)}",
+        "SUMMARY:Palazzo Sangiorgio Catania (Booking Reference: Q77M1P)",
+        "LOCATION:Catania, Sicily",
+        (
+            "DESCRIPTION:Check-in 15:00 at Palazzo Sangiorgio Catania; "
+            "Record Locator: Z88Q1M; Ticket #: 125-2345678901; "
+            "Frequent Flyer #: BA99887766; KTN: 987654321; PIN: 4412; "
+            "https://www.tripit.com/trip/show/id/999"
+        ),
+        "END:VEVENT",
+        # 3. Past trip (-200d): included in compact past_trips and sanitized
+        "BEGIN:VEVENT",
+        "UID:tripit-past-200@example.test",
+        f"DTSTART;VALUE=DATE:{ymd(past_day)}",
+        f"DTEND;VALUE=DATE:{ymd(past_end)}",
+        "SUMMARY:Hotel Gutkowski Ortigia (Record Locator: Z88Q1M)",
+        "LOCATION:Syracuse (PIN: 4412)",
+        "DESCRIPTION:Confirmation #: XK92LP\\nhttps://www.tripit.com/trip/show/id/999",
+        "END:VEVENT",
+        # 4. Ancient trip (-800d): excluded past 18-month floor
+        "BEGIN:VEVENT",
+        "UID:tripit-ancient-800@example.test",
+        f"DTSTART;VALUE=DATE:{ymd(ancient_day)}",
+        f"DTEND;VALUE=DATE:{ymd(ancient_end)}",
+        "SUMMARY:Ancient Porto Stay 2024",
+        "END:VEVENT",
+        # 5. Cancelled trip (+30d): excluded
+        "BEGIN:VEVENT",
+        "UID:tripit-cancelled-30@example.test",
+        "STATUS:CANCELLED",
+        f"DTSTART;TZID=Europe/London:{ymd(cancelled_day)}T090000",
+        "SUMMARY:Cancelled Alpine Express",
+        "END:VEVENT",
+        "END:VCALENDAR",
+        "",
+    )
+    tripit_ics = tmp / "synthetic-tripit.ics"
+    tripit_ics.write_text("\r\n".join(tripit_lines), encoding="utf-8")
+
+    # Also pass the same +150d feed as generic calendar to prove +150d is outside
+    # the generic +45d calendar horizon while TripIt's +365d horizon captures it.
+    env = clean_env(
+        tmp,
+        DAYBRIEF_DIR=str(store),
+        DAYBRIEF_TRIPIT_ICS=str(tripit_ics),
+        DAYBRIEF_CALENDAR_ICS=str(tripit_ics),
+    )
+    run_cli(["--dir", str(store), "init"], env=env)
+    doc = run_cli(["--dir", str(store), "doctor"], env=env)
+    assert "TripIt travel feeds configured: 1" in doc.stdout, doc.stdout
+
+    snap = json.loads(
+        run_cli(
+            ["--dir", str(store), "collect", "--date", ref_date.isoformat(), "--json"],
+            env=env,
+        ).stdout
+    )
+    summary_txt = run_cli(
+        ["--dir", str(store), "collect", "--date", ref_date.isoformat()],
+        env=env,
+    ).stdout
+    assert "tripit:    2 upcoming, 1 past" in summary_txt, summary_txt
+
+    assert snap["sources"]["calendar"]["events"] == [], snap["sources"]["calendar"]
+    tr = snap["sources"]["tripit"]
+    assert tr["available"] is True
+    assert tr["stats"]["parsed_vevents"] == 5, tr["stats"]
+    assert tr["stats"]["dropped_cancelled"] == 1, tr["stats"]
+    assert tr["stats"]["scrubbed_sensitive_fields"] >= 1, tr["stats"]
+    assert tr["stats"]["upcoming"] == 2, tr["stats"]
+    assert tr["stats"]["past"] == 1, tr["stats"]
+
+    upcoming = tr["upcoming_trips"]
+    past = tr["past_trips"]
+    assert len(upcoming) == 2, upcoming
+    assert all(u["date"] == upcoming_day.isoformat() for u in upcoming), upcoming
+    assert len(past) == 1, past
+    assert past[0]["date"] == past_day.isoformat(), past
+
+    dumped = json.dumps(snap)
+    for forbidden in (
+        "Confirmation #: XK92LP",
+        "XK92LP",
+        "Booking Reference: Q77M1P",
+        "Q77M1P",
+        "Record Locator: Z88Q1M",
+        "Z88Q1M",
+        "Ticket #: 125-2345678901",
+        "125-2345678901",
+        "Frequent Flyer #: BA99887766",
+        "BA99887766",
+        "KTN: 987654321",
+        "987654321",
+        "PIN: 4412",
+        "4412",
+        "https://www.tripit.com/trip/show/id/999",
+        "tripit.com",
+        "Ancient Porto Stay",
+        "Cancelled Alpine Express",
+    ):
+        assert forbidden not in dumped, (
+            f"forbidden token survived in snapshot: {forbidden!r}"
+        )
+
+    for expected in (
+        "BA 2594",
+        "Gatwick Terminal S",
+        "Catania",
+        "Palazzo Sangiorgio Catania",
+        "Hotel Gutkowski Ortigia",
+    ):
+        assert expected in dumped, f"expected travel context missing: {expected!r}"
+
+    return "+150d/-200d horizons, -800d/CANCELLED exclusion, and PNR/ticket/FF/KTN/PIN/URL scrubbing verified"
+
+
+def test_stage2_local_exploration_tools(tmp: Path) -> str:
+    cli = load_cli()
+    ref_date = datetime.date(2026, 11, 28)
+    paths = build_synthetic_sources(tmp / "explore", ref_date)
+    roots = {"taskgo": paths["taskgo"], "private_skills": paths["private_skills"]}
+
+    # Plant secret/credential files and symlinks carrying a canary needle
+    needle = "CANARY_EXPLORE_SECRET_8821"
+    outside_file = tmp / "outside-explore.md"
+    outside_file.write_text(f"Outside secret {needle}\n", encoding="utf-8")
+    outside_dir = tmp / "outside-dir"
+    outside_dir.mkdir(parents=True, exist_ok=True)
+    (outside_dir / "leak.md").write_text(f"Dir secret {needle}\n", encoding="utf-8")
+
+    (paths["taskgo"] / ".env").write_text(f"TOKEN={needle}\n", encoding="utf-8")
+    (paths["taskgo"] / "secrets").mkdir(exist_ok=True)
+    (paths["taskgo"] / "secrets" / "creds.md").write_text(
+        f"Creds {needle}\n", encoding="utf-8"
+    )
+    (paths["taskgo"] / "atlas" / "deploy.key").write_text(
+        f"Key {needle}\n", encoding="utf-8"
+    )
+    (paths["taskgo"] / "atlas" / "sym-file.md").symlink_to(outside_file)
+    (paths["taskgo"] / "atlas" / "sym-dir").symlink_to(outside_dir)
+
+    listed_tg = cli.safe_list_source_files(roots, "taskgo")
+    assert "atlas/STATUS.md" in listed_tg, listed_tg
+    assert "atlas/tasks/TASK-00001-winter-wheelset.md" in listed_tg, listed_tg
+    for excluded in (
+        ".env",
+        "secrets/creds.md",
+        "atlas/deploy.key",
+        "atlas/sym-file.md",
+        "atlas/sym-dir/leak.md",
+    ):
+        assert excluded not in listed_tg, f"protected file listed: {excluded}"
+    assert not any(p.startswith(".git") for p in listed_tg), listed_tg
+
+    listed_sub = cli.safe_list_source_files(roots, "taskgo", "atlas/tasks")
+    assert len(listed_sub) == 3, listed_sub
+
+    listed_ps = cli.safe_list_source_files(roots, "private_skills")
+    assert "home-manual/references/heating.md" in listed_ps, listed_ps
+    assert "personal-profile/references/brands-and-preferences.md" in listed_ps, (
+        listed_ps
+    )
+
+    hits_ps = cli.safe_search_source_text(roots, "private_skills", "Boiler 1.2 bar")
+    assert len(hits_ps) == 1, hits_ps
+    assert hits_ps[0]["path"] == "home-manual/references/heating.md"
+    assert "1.2 bar" in hits_ps[0]["snippet"]
+
+    hits_tg = cli.safe_search_source_text(
+        roots, "taskgo", "hydraulic caliper", "atlas/tasks"
+    )
+    assert len(hits_tg) == 1, hits_tg
+    assert hits_tg[0]["path"] == "atlas/tasks/TASK-00002-bleed-brakes.md"
+
+    # Canary inside .env, secrets/, *.key, and symlinks must never be matched
+    assert cli.safe_search_source_text(roots, "taskgo", needle) == []
+
+    for bad_subdir in (
+        "../outside-dir",
+        "atlas/../../outside-dir",
+        ".env",
+        "secrets",
+        "atlas/deploy.key",
+        "atlas/sym-dir",
+    ):
+        for fn in (
+            lambda s=bad_subdir: cli.safe_list_source_files(roots, "taskgo", s),
+            lambda s=bad_subdir: cli.safe_search_source_text(
+                roots, "taskgo", "atlas", s
+            ),
+        ):
+            try:
+                fn()
+            except cli.BoundaryError:
+                pass
+            else:
+                raise AssertionError(f"failed to raise BoundaryError on {bad_subdir!r}")
+
+    for fn_unknown in (
+        lambda: cli.safe_list_source_files(roots, "unknown_root"),
+        lambda: cli.safe_search_source_text(roots, "unknown_root", "boiler"),
+    ):
+        try:
+            fn_unknown()
+        except cli.BoundaryError:
+            pass
+        else:
+            raise AssertionError("failed to raise BoundaryError on unknown source")
+
+    return "safe_list_source_files & safe_search_source_text exclusions and BoundaryError verified"
+
+
+def test_scout_validation_audit_and_single_wave(tmp: Path) -> str:
+    cli = load_cli()
+
+    # 1. Direct validate_scout_query checks
+    ok_q = "Bosch WGG254Z1GB/52 replacement door seal UK"
+    valid, cleaned, reason = cli.validate_scout_query(f"  {ok_q}  ")
+    assert (valid, cleaned, reason) == (True, ok_q, ""), (valid, cleaned, reason)
+
+    for bad_query, expected_reason in (
+        ("Bosch replacement seal check UK " * 5, "exceeds 120 chars"),
+        ("check https://evil.example/leak seal", "URLs are not permitted"),
+        ("https://evil.example/leak", "URLs are not permitted"),
+        ("order for alice@example.test", "email addresses are not permitted"),
+        ("alice@example.test", "email addresses are not permitted"),
+        (
+            "decode aGVsbG93b3JsZHRoaXNpc2Fsb25nYmFzZTY0c3RyaW5n uk",
+            "long unbroken token strings (>24 chars)",
+        ),
+        (
+            "aGVsbG93b3JsZHRoaXNpc2Fsb25nYmFzZTY0c3RyaW5n",
+            "long unbroken token strings (>24 chars)",
+        ),
+    ):
+        v, _, why = cli.validate_scout_query(bad_query)
+        assert v is False, f"expected rejection for {bad_query!r}"
+        assert expected_reason in why, (bad_query, why)
+
+    # 2. Multi-turn generate verifying local tools + URL rejection + single-wave chaining block
+    ref_date = datetime.date(2026, 11, 28)
+    ref_iso = ref_date.isoformat()
+    item_id = "DB-20261128-1"
+    paths = build_synthetic_sources(tmp / "wave-src", ref_date)
+    (paths["taskgo"] / ".env").write_text("HIDDEN=1\n", encoding="utf-8")
+    store = tmp / "wave-store"
+
+    scout_log = tmp / "wave-scout-calls.jsonl"
+    fake_scout = tmp / "wave-fake-scout"
+    fake_scout.write_text(
+        f"#!{DAYBRIEF_PY}\n"
+        "import json, pathlib, sys\n"
+        f"log = pathlib.Path({str(scout_log)!r})\n"
+        "with log.open('a', encoding='utf-8') as fh:\n"
+        "    fh.write(json.dumps({'argv': sys.argv[1:]}) + '\\n')\n"
+        "print(json.dumps({'answer': 'Bosch seal part 11032918 in stock UK', "
+        "'sources': ['https://example.test/bosch-part']}))\n",
+        encoding="utf-8",
+    )
+    fake_scout.chmod(0o755)
+
+    recorded_requests: list[dict[str, Any]] = []
+    synthesized_packet = {
+        "status": "ready",
+        "deliver_verbatim_to_user": (
+            "Morning note: boiler target pressure is 1.2 bar cold, and the Bosch "
+            "replacement door seal (part 11032918) is available in the UK."
+        ),
+        "items": [
+            {
+                "id": item_id,
+                "title": "Check heating pressure and Bosch seal part",
+                "kind": "maintenance",
+                "summary": "Home manual lists 1.2 bar cold; Bosch seal part verified.",
+                "why_now": "Weekend maintenance window.",
+                "cooldown_key": "home:boiler-bosch",
+                "source_hash": "hash-boiler-1",
+                "provenance_refs": [
+                    "private_skills:home-manual/references/heating.md",
+                    "web_scout:Bosch WGG254Z1GB/52 replacement door seal UK",
+                ],
+            }
+        ],
+        "backstage_context_for_followups_only": {
+            "item_dossiers": [
+                {
+                    "item_id": item_id,
+                    "why_generated_and_provenance": (
+                        "Combined home-manual/references/heating.md (1.2 bar cold) "
+                        "with single-wave web_scout part check."
+                    ),
+                    "backing_facts_and_figures": "1.2 bar cold; Bosch part 11032918.",
+                    "urls_and_paths": [
+                        "home-manual/references/heating.md",
+                        "https://example.test/bosch-part",
+                    ],
+                }
+            ],
+            "checked_and_omitted": [],
+            "assumptions_and_unknowns": [],
+        },
+    }
+
+    class WaveGeminiHandler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            length = int(self.headers.get("Content-Length", "0"))
+            body = json.loads(self.rfile.read(length).decode("utf-8"))
+            recorded_requests.append(body)
+            gen_cfg = body.get("generationConfig") or {}
+            contents = body.get("contents") or []
+
+            if gen_cfg.get("responseMimeType") == "application/json":
+                parts: list[dict[str, Any]] = [{"text": json.dumps(synthesized_packet)}]
+            elif len(contents) == 1:
+                # Turn 1: list_source_files, search_source_text, boundary test,
+                # rejected URL web_scout, and one valid web_scout.
+                parts = [
+                    {
+                        "functionCall": {
+                            "name": "list_source_files",
+                            "args": {"source": "private_skills"},
+                        }
+                    },
+                    {
+                        "functionCall": {
+                            "name": "search_source_text",
+                            "args": {
+                                "source": "private_skills",
+                                "query": "Boiler pressure",
+                            },
+                        }
+                    },
+                    {
+                        "functionCall": {
+                            "name": "list_source_files",
+                            "args": {"source": "taskgo", "subdir": "../escape"},
+                        }
+                    },
+                    {
+                        "functionCall": {
+                            "name": "web_scout",
+                            "args": {"question": "https://evil.example/leak"},
+                        }
+                    },
+                    {
+                        "functionCall": {
+                            "name": "web_scout",
+                            "args": {"question": ok_q},
+                        }
+                    },
+                ]
+            elif len(contents) == 3:
+                # Turn 2: web_scout is stripped from functionDeclarations, yet model
+                # attempts a Hallucinated/Injected chained web_scout call anyway.
+                parts = [
+                    {
+                        "functionCall": {
+                            "name": "web_scout",
+                            "args": {"question": "Chained second turn query"},
+                        }
+                    },
+                    {
+                        "functionCall": {
+                            "name": "list_source_files",
+                            "args": {"source": "taskgo"},
+                        }
+                    },
+                ]
+            else:
+                parts = [{"text": "Investigation complete."}]
+
+            encoded = json.dumps(
+                {"candidates": [{"content": {"role": "model", "parts": parts}}]}
+            ).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(encoded)))
+            self.end_headers()
+            self.wfile.write(encoded)
+
+        def log_message(self, *args: Any) -> None:
+            pass
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), WaveGeminiHandler)
+    port = srv.server_address[1]
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+
+    env = clean_env(
+        tmp,
+        DAYBRIEF_DIR=str(store),
+        DAYBRIEF_TASKGO_ROOT=str(paths["taskgo"]),
+        DAYBRIEF_PRIVATE_SKILLS=str(paths["private_skills"]),
+        DAYBRIEF_PINBOARD_REPO=str(paths["pinboard"]),
+        DAYBRIEF_CHALK_DB=str(paths["chalk_db"]),
+        DAYBRIEF_GEMINI_BASE_URL=f"http://127.0.0.1:{port}/v1beta",
+        DAYBRIEF_SCOUT_CMD=str(fake_scout),
+        AGENT_OFFLINE="0",
+    )
+    try:
+        gen = json.loads(
+            run_cli(
+                ["--dir", str(store), "generate", "--date", ref_iso, "--json"],
+                env=env,
+            ).stdout
+        )
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        thread.join(timeout=5)
+
+    # Turn 1 had web_scout declared; Turn 2 had web_scout stripped from declarations
+    turn1_decls = [
+        d["name"] for d in recorded_requests[0]["tools"][0]["functionDeclarations"]
+    ]
+    turn2_decls = [
+        d["name"] for d in recorded_requests[1]["tools"][0]["functionDeclarations"]
+    ]
+    assert "web_scout" in turn1_decls, turn1_decls
+    assert "list_source_files" in turn1_decls, turn1_decls
+    assert "search_source_text" in turn1_decls, turn1_decls
+    assert "web_scout" not in turn2_decls, turn2_decls
+    assert "list_source_files" in turn2_decls, turn2_decls
+    assert "search_source_text" in turn2_decls, turn2_decls
+
+    # Inspect Turn 1 functionResponses delivered on Turn 2
+    t1_resps = [
+        p["functionResponse"] for p in recorded_requests[1]["contents"][2]["parts"]
+    ]
+    assert "home-manual/references/heating.md" in t1_resps[0]["response"]["files"]
+    assert t1_resps[1]["response"]["matches"][0]["path"] == (
+        "home-manual/references/heating.md"
+    )
+    assert "refused relative path" in t1_resps[2]["response"]["error"]
+    assert "URLs are not permitted" in t1_resps[3]["response"]["error"]
+    assert "11032918" in t1_resps[4]["response"]["answer"]
+
+    # Inspect Turn 2 functionResponses delivered on Turn 3
+    t2_resps = [
+        p["functionResponse"] for p in recorded_requests[2]["contents"][4]["parts"]
+    ]
+    assert (
+        "chained web_scout across turns is disabled" in t2_resps[0]["response"]["error"]
+    ), t2_resps[0]
+    assert ".env" not in t2_resps[1]["response"]["files"]
+    assert "atlas/STATUS.md" in t2_resps[1]["response"]["files"]
+
+    # fake-scout executed strictly once (only for the valid query)
+    invocations = [
+        json.loads(ln)
+        for ln in scout_log.read_text(encoding="utf-8").splitlines()
+        if ln.strip()
+    ]
+    assert len(invocations) == 1, invocations
+    assert invocations[0]["argv"] == ["--quiet", "--json", ok_q], invocations
+
+    expected_audit = [
+        {"accepted": False, "reason": "URLs are not permitted in web_scout queries"},
+        {"accepted": True, "query": ok_q, "ok": True},
+        {"accepted": False, "reason": "chained web_scout across turns disabled"},
+    ]
+    assert (
+        gen["backstage_context_for_followups_only"]["scout_audit"] == expected_audit
+    ), gen["backstage_context_for_followups_only"]
+
+    persisted = json.loads(
+        run_cli(["--dir", str(store), "show", "--json"], env=env).stdout
+    )
+    assert (
+        persisted["backstage_context_for_followups_only"]["scout_audit"]
+        == expected_audit
+    )
+    return "validate_scout_query, Turn 2 declaration removal, execute_tool block, and scout_audit verified"
+
+
+def test_stage1_deltas_and_twice_daily_briefs(tmp: Path) -> str:
+    ref_date = datetime.date(2026, 11, 28)
+    ref_iso = ref_date.isoformat()
+    paths = build_synthetic_sources(tmp / "delta-src", ref_date)
+    store = tmp / "delta-store"
+
+    cal_ics = tmp / "delta-cal.ics"
+    cal_lines = (
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "BEGIN:VEVENT",
+        "UID:cal-base-1@example.test",
+        "DTSTART;TZID=Europe/London:20261130T100000",
+        "SUMMARY:Team planning review",
+        "END:VEVENT",
+        "END:VCALENDAR",
+        "",
+    )
+    cal_ics.write_text("\r\n".join(cal_lines), encoding="utf-8")
+    tripit_ics = tmp / "delta-tripit.ics"
+    base_trip_vevent = (
+        "BEGIN:VEVENT",
+        "UID:trip-base-1@example.test",
+        "DTSTART;TZID=Europe/London:20261210T083000",
+        "SUMMARY:BA 2594 Gatwick to Catania",
+        "END:VEVENT",
+    )
+    tripit_ics.write_text(
+        "\r\n".join(
+            ("BEGIN:VCALENDAR", "VERSION:2.0", *base_trip_vevent, "END:VCALENDAR", "")
+        ),
+        encoding="utf-8",
+    )
+
+    editor_snapshots: list[dict[str, Any]] = []
+    run_counter = {"n": 0}
+
+    class TwiceDailyGeminiHandler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            length = int(self.headers.get("Content-Length", "0"))
+            body = json.loads(self.rfile.read(length).decode("utf-8"))
+            gen_cfg = body.get("generationConfig") or {}
+            contents = body.get("contents") or []
+
+            if gen_cfg.get("responseMimeType") == "application/json":
+                run_counter["n"] += 1
+                idx = run_counter["n"]
+                item_id = f"DB-20261128-{idx}"
+                pkt = {
+                    "status": "ready",
+                    "deliver_verbatim_to_user": (
+                        f"Edition #{idx} on {ref_iso}: concise orientation update."
+                    ),
+                    "items": [
+                        {
+                            "id": item_id,
+                            "title": f"Edition #{idx} highlight",
+                            "kind": "momentum",
+                            "summary": f"Summary for edition #{idx}.",
+                            "why_now": f"Timely for edition #{idx}.",
+                            "cooldown_key": f"edition:key-{idx}",
+                            "source_hash": f"hash-{idx}",
+                            "provenance_refs": [f"taskgo:edition-{idx}"],
+                        }
+                    ],
+                    "backstage_context_for_followups_only": {
+                        "item_dossiers": [
+                            {
+                                "item_id": item_id,
+                                "why_generated_and_provenance": (
+                                    f"Provenance for edition #{idx}: synthesized from "
+                                    "delta_since_last_brief and local sources."
+                                ),
+                                "backing_facts_and_figures": f"Facts for edition #{idx}.",
+                                "urls_and_paths": ["atlas/STATUS.md"],
+                            }
+                        ],
+                        "checked_and_omitted": [],
+                        "assumptions_and_unknowns": [],
+                    },
+                }
+                parts = [{"text": json.dumps(pkt)}]
+            else:
+                user_text = contents[0]["parts"][0]["text"]
+                json_start = user_text.index("{")
+                editor_snapshots.append(json.loads(user_text[json_start:]))
+                parts = [{"text": "Ready to synthesize."}]
+
+            encoded = json.dumps(
+                {"candidates": [{"content": {"role": "model", "parts": parts}}]}
+            ).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(encoded)))
+            self.end_headers()
+            self.wfile.write(encoded)
+
+        def log_message(self, *args: Any) -> None:
+            pass
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), TwiceDailyGeminiHandler)
+    port = srv.server_address[1]
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+
+    env = clean_env(
+        tmp,
+        DAYBRIEF_DIR=str(store),
+        DAYBRIEF_TASKGO_ROOT=str(paths["taskgo"]),
+        DAYBRIEF_PRIVATE_SKILLS=str(paths["private_skills"]),
+        DAYBRIEF_PINBOARD_REPO=str(paths["pinboard"]),
+        DAYBRIEF_CHALK_DB=str(paths["chalk_db"]),
+        DAYBRIEF_CALENDAR_ICS=str(cal_ics),
+        DAYBRIEF_TRIPIT_ICS=str(tripit_ics),
+        DAYBRIEF_GEMINI_BASE_URL=f"http://127.0.0.1:{port}/v1beta",
+        AGENT_OFFLINE="0",
+    )
+    try:
+        # 1. Pre-Run-1 collect: no baseline yet, recent_activity_7d populated
+        snap0 = json.loads(
+            run_cli(
+                ["--dir", str(store), "collect", "--date", ref_iso, "--json"],
+                env=env,
+            ).stdout
+        )
+        assert snap0["changes"]["delta_since_last_brief"] == {"has_baseline": False}
+        act0 = snap0["changes"]["recent_activity_7d"]
+        assert len(act0["recent_taskgo_commits"]) >= 1, act0
+        assert len(act0["recent_bookmarks_saved"]) == 1, act0
+        assert act0["upcoming_7d_events_count"] == 1, act0
+        assert act0["upcoming_30d_trips_count"] == 1, act0
+
+        # 2. Morning Run 1 records baseline
+        run1 = json.loads(
+            run_cli(
+                ["--dir", str(store), "generate", "--date", ref_iso, "--json"],
+                env=env,
+            ).stdout
+        )
+        assert editor_snapshots[-1]["changes"]["delta_since_last_brief"] == {
+            "has_baseline": False
+        }
+
+        # 3. Mutate a task and run generate --dry-run -> baseline MUST remain Run 1
+        (paths["taskgo"] / "atlas" / "tasks" / "TASK-00004-order-seal.md").write_text(
+            "---\nid: TASK-00004\nstatus: todo\n---\n\n"
+            "# Order Bosch door seal\n\n**Goal:** Fit new gasket.\n",
+            encoding="utf-8",
+        )
+        dry = json.loads(
+            run_cli(
+                [
+                    "--dir",
+                    str(store),
+                    "generate",
+                    "--date",
+                    ref_iso,
+                    "--dry-run",
+                    "--json",
+                ],
+                env=env,
+            ).stdout
+        )
+        assert dry["dry_run"] is True
+
+        db = sqlite3.connect(str(store / "memory.db"))
+        try:
+            snap_ids = [
+                r[0]
+                for r in db.execute(
+                    "SELECT brief_id FROM snapshots ORDER BY created_at DESC"
+                ).fetchall()
+            ]
+        finally:
+            db.close()
+        assert snap_ids == [run1["brief_id"]], snap_ids
+
+        # 4. Complete same-day mutations across taskgo, tripit, pinboard, and chalk
+        (paths["taskgo"] / "atlas" / "tasks" / "TASK-00002-bleed-brakes.md").write_text(
+            "---\nid: TASK-00002\nstatus: done\n---\n\n"
+            "# Bleed front hydraulic caliper\n",
+            encoding="utf-8",
+        )
+        tripit_ics.write_text(
+            "\r\n".join(
+                (
+                    "BEGIN:VCALENDAR",
+                    "VERSION:2.0",
+                    *base_trip_vevent,
+                    "BEGIN:VEVENT",
+                    "UID:trip-added-2@example.test",
+                    "DTSTART;TZID=Europe/London:20261218T091500",
+                    "SUMMARY:Eurostar ES 9014 St Pancras to Paris Nord",
+                    "END:VEVENT",
+                    "END:VCALENDAR",
+                    "",
+                )
+            ),
+            encoding="utf-8",
+        )
+        bm_file = paths["pinboard"] / "bookmarks" / "2026.jsonl"
+        with bm_file.open("a", encoding="utf-8") as fh:
+            fh.write(
+                json.dumps(
+                    {
+                        "hash": "bm0000000099",
+                        "url": "https://example.test/catania-trattorie",
+                        "title": "Sicily winter trattoria notes",
+                        "notes": "Saved lunch spots near piazza.",
+                        "tags": ["sicily", "food"],
+                        "time": f"{ref_iso}T13:15:00Z",
+                        "toread": "yes",
+                    }
+                )
+                + "\n"
+            )
+        chalk_conn = sqlite3.connect(str(paths["chalk_db"]))
+        try:
+            chalk_conn.execute(
+                "UPDATE recent_price_drops SET cur_price_cents = 11000 WHERE variant_id = 'v-nw-1'"
+            )
+            chalk_conn.commit()
+        finally:
+            chalk_conn.close()
+
+        snap_after = json.loads(
+            run_cli(
+                ["--dir", str(store), "collect", "--date", ref_iso, "--json"],
+                env=env,
+            ).stdout
+        )
+        delta = snap_after["changes"]["delta_since_last_brief"]
+        assert delta["has_baseline"] is True
+        assert delta["baseline_brief_id"] == run1["brief_id"], delta
+        assert delta["baseline_date"] == ref_iso
+        assert [t["id"] for t in delta["new_or_updated_tasks"]] == ["TASK-00004"], delta
+        assert delta["new_or_updated_tasks"][0]["change"] == "added"
+        assert [t["id"] for t in delta["closed_or_removed_tasks"]] == ["TASK-00002"], (
+            delta
+        )
+        assert len(delta["new_or_updated_trips"]) == 1, delta
+        assert "Eurostar ES 9014" in delta["new_or_updated_trips"][0]["summary"]
+        assert delta["new_or_updated_trips"][0]["change"] == "added"
+        assert [b["title"] for b in delta["new_bookmarks"]] == [
+            "Sicily winter trattoria notes"
+        ], delta
+        assert len(delta["new_or_deeper_chalk_drops"]) == 1, delta
+        assert delta["new_or_deeper_chalk_drops"][0]["vendor"] == "Northwave Craft"
+        assert delta["new_or_deeper_chalk_drops"][0]["cur_price"] == 110.0
+        assert delta["new_or_deeper_chalk_drops"][0]["discount_pct"] == 45.0
+
+        # 5. Afternoon / ad-hoc Run 2 on the same date (2026-11-28)
+        time.sleep(0.01)
+        run2 = json.loads(
+            run_cli(
+                ["--dir", str(store), "generate", "--date", ref_iso, "--json"],
+                env=env,
+            ).stdout
+        )
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        thread.join(timeout=5)
+
+    assert run2["brief_id"] != run1["brief_id"]
+    assert run2["created_at"] > run1["created_at"]
+    assert (
+        editor_snapshots[-1]["changes"]["delta_since_last_brief"]["baseline_brief_id"]
+        == run1["brief_id"]
+    )
+    expected_prov = "Provenance for edition #3: synthesized from delta_since_last_brief and local sources."
+    assert (
+        run2["backstage_context_for_followups_only"]["item_dossiers"][0][
+            "why_generated_and_provenance"
+        ]
+        == expected_prov
+    )
+
+    # Verify `daybrief show` (latest & by YYYY-MM-DD) returns Run 2, and provenance survives
+    show_latest = json.loads(
+        run_cli(["--dir", str(store), "show", "--json"], env=env).stdout
+    )
+    show_by_date = json.loads(
+        run_cli(["--dir", str(store), "show", ref_iso, "--json"], env=env).stdout
+    )
+    show_run1 = json.loads(
+        run_cli(
+            ["--dir", str(store), "show", run1["brief_id"], "--json"], env=env
+        ).stdout
+    )
+    assert show_latest["brief_id"] == run2["brief_id"]
+    assert show_by_date["brief_id"] == run2["brief_id"]
+    assert show_run1["brief_id"] == run1["brief_id"]
+    assert (
+        show_latest["backstage_context_for_followups_only"]["item_dossiers"][0][
+            "why_generated_and_provenance"
+        ]
+        == expected_prov
+    )
+
+    listed_ids = [
+        b["brief_id"]
+        for b in json.loads(
+            run_cli(["--dir", str(store), "list", "--json"], env=env).stdout
+        )["briefs"]
+    ]
+    assert listed_ids == [run2["brief_id"], run1["brief_id"]], listed_ids
+
+    # Verify daybrief-mcp get_today_brief returns Run 2 and carries why_generated_and_provenance
+    mcp_log = tmp / "delta-mcp.jsonl"
+    mcp_env = clean_env(tmp, DAYBRIEF_DIR=str(store), DAYBRIEF_MCP_LOG=str(mcp_log))
+    client = StdioClient(
+        [
+            DAYBRIEF_MCP_PY,
+            str(DAYBRIEF_MCP),
+            "--dir",
+            str(store),
+            "--log",
+            str(mcp_log),
+        ],
+        env=mcp_env,
+    )
+    try:
+        client.request(
+            "initialize",
+            {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "delta-mcp-test", "version": "1"},
+            },
+        )
+        client.send("notifications/initialized", notify=True)
+        for call_args in ({}, {"date": ref_iso}):
+            res = client.request(
+                "tools/call", {"name": "get_today_brief", "arguments": call_args}
+            )["result"]["structuredContent"]
+            assert res["brief_id"] == run2["brief_id"], res
+            assert (
+                res["backstage_context_for_followups_only"]["item_dossiers"][0][
+                    "why_generated_and_provenance"
+                ]
+                == expected_prov
+            )
+        rc = client.terminate_cleanly()
+        assert rc == 0, rc
+    finally:
+        if client.proc.poll() is None:
+            client.proc.kill()
+            client.proc.wait()
+
+    return "Stage 1 baseline/dry-run/deltas, same-day Run 2 ordering, and end-to-end provenance verified"
+
+
 def main() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="daybrief-test."))
     populated: tuple[Path, str, str, str] | None = None
@@ -1962,6 +2881,22 @@ def main() -> int:
             lambda: test_mcp_http_access_and_logs(
                 tmp, require_populated()[0], require_populated()[2]
             ),
+        )
+        case(
+            "TripIt .ics horizons (+150d/-200d/-800d/CANCELLED) and PNR/ticket/FF/KTN/PIN/URL scrubbing",
+            lambda: test_tripit_ics_horizons_and_sanitization(tmp),
+        )
+        case(
+            "Stage 2 list_source_files and search_source_text exclusions and BoundaryError guards",
+            lambda: test_stage2_local_exploration_tools(tmp),
+        )
+        case(
+            "web_scout query validation, scout_audit, and single-wave Turn 2 chaining block",
+            lambda: test_scout_validation_audit_and_single_wave(tmp),
+        )
+        case(
+            "Stage 1 delta_since_last_brief, dry-run baseline preservation, twice-daily briefs, and provenance",
+            lambda: test_stage1_deltas_and_twice_daily_briefs(tmp),
         )
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

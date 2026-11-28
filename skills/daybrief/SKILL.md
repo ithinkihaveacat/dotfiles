@@ -31,10 +31,11 @@ When presenting a morning briefing or assisting in a Daybrief conversation:
    `quiet`, deliver the short quiet-day note as-is (or stay brief).
 1. **Keep backstage context silent until asked.** Never dump
    `backstage_context_for_followups_only` into the initial message. Hold its
-   item dossiers, figures, URLs, rejected alternatives, assumptions, and
-   `checked_and_omitted` notes in working memory so follow-ups ("how much was
-   that?", "why Option A over B?", "anything good on Chalk today?") can be
-   answered immediately in natural prose.
+   paraphrased item dossiers, `why_generated_and_provenance`, figures, URLs,
+   rejected alternatives, assumptions, and `checked_and_omitted` notes in
+   working memory so follow-ups ("how much was that?", "why Option A over B?",
+   "how did you know that?", "anything good on Chalk today?") can be answered
+   immediately in natural prose.
 1. **Separate briefing from execution.** `daybrief` is strictly read-only over
    authoritative sources. When the user asks to act on an item ("let's start on
    the third one"), combine the Producer's Packet context with your separately
@@ -81,6 +82,14 @@ configured sources without calling a model:
   `ORGANIZER` matches `DAYBRIEF_OWNER_EMAILS` (or has no external organizer),
   drops unaccepted `PARTSTAT=NEEDS-ACTION` invites from unknown senders, and
   strips `DESCRIPTION` and URLs from third-party events.
+- **TripIt (`DAYBRIEF_TRIPIT_ICS`):** private TripIt `.ics` travel feeds
+  spanning upcoming trips (`+365d`) and compact past trips (`-18m`), stripping
+  PNRs/confirmation codes, 13-digit e-ticket numbers, loyalty/KTN numbers, PINs,
+  and URLs while preserving carriers, routes, terminals, times, and hotels.
+- **Snapshot diffs (`changes`):** deterministically diffs each run against the
+  most recent stored briefing (`delta_since_last_brief`) alongside a 7-day
+  activity window (`recent_activity_7d`), supporting morning, twice-daily, and
+  ad-hoc runs cleanly while `--dry-run` leaves baselines untouched.
 - **Bookmarks (`DAYBRIEF_PINBOARD_REPO`):** reads `bookmarks/YYYY.jsonl` from
   the Pinboard Git mirror without `PINBOARD_API_TOKEN`.
 - **Personal & household skills (`DAYBRIEF_PRIVATE_SKILLS`):** read-only
@@ -93,9 +102,11 @@ configured sources without calling a model:
   `AGENT_OFFLINE=1`).
 
 `daybrief generate` runs Stage 1 collection followed by the multi-turn read-only
-Stage 2 Morning Editor (`read_source_file`, `search_bookmarks`,
-`query_price_drops`, and call-capped `web_scout`—zero shell or write tools),
-validates constitutional integrity, and records the briefing and cooldowns:
+Stage 2 Morning Editor (`list_source_files`, `search_source_text`,
+`read_source_file`, `search_bookmarks`, `query_price_drops`, and single-wave
+`≤ 120`-character scrubbed `web_scout`—zero shell or write tools), validates
+constitutional integrity, and records the briefing, snapshot hashes, and
+cooldowns:
 
 ```bash
 daybrief collect --json

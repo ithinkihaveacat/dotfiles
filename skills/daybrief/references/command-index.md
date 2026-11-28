@@ -53,6 +53,7 @@ Environment:
   DAYBRIEF_PRIVATE_SKILLS    Private skills directory path
   DAYBRIEF_CHALK_DB          Read-only Chalk SQLite database path
   DAYBRIEF_CALENDAR_ICS      Space- or comma-separated .ics paths or URLs
+  DAYBRIEF_TRIPIT_ICS        Space- or comma-separated TripIt .ics paths/URLs
   DAYBRIEF_OWNER_EMAILS      Trusted calendar organizer emails (comma-separated)
   DAYBRIEF_TIMEZONE          IANA timezone (default: Europe/London)
   GEMINI_API_KEY             API key used by generate and retro
